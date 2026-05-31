@@ -94,6 +94,44 @@ def test_execute_preview_returns_one_preview_per_node(tmp_path: Path) -> None:
     assert preview[1].image_data_url.startswith("data:image/png;base64,")
 
 
+def test_load_image_size_lock_accepts_matching_size(tmp_path: Path) -> None:
+    image_path = tmp_path / "sample.tif"
+    Image.new("RGB", (20, 10), color=(128, 64, 32)).save(image_path)
+
+    image = LoadImageStep().apply(
+        None,
+        {"lock_size": True, "lock_width": 20, "lock_height": 10},
+        {"source_image_path": str(image_path)},
+    )
+
+    assert image.shape == (10, 20, 3)
+
+
+def test_load_image_converts_dtype(tmp_path: Path) -> None:
+    image_path = tmp_path / "sample.tif"
+    Image.new("RGB", (20, 10), color=(128, 64, 32)).save(image_path)
+
+    image = LoadImageStep().apply(
+        None,
+        {"dtype": "float32"},
+        {"source_image_path": str(image_path)},
+    )
+
+    assert image.dtype == np.float32
+
+
+def test_load_image_size_lock_rejects_mismatched_size(tmp_path: Path) -> None:
+    image_path = tmp_path / "sample.tif"
+    Image.new("RGB", (20, 10), color=(128, 64, 32)).save(image_path)
+
+    with pytest.raises(ValueError, match="Input size is locked to 21x10"):
+        LoadImageStep().apply(
+            None,
+            {"lock_size": True, "lock_width": 21, "lock_height": 10},
+            {"source_image_path": str(image_path)},
+        )
+
+
 def test_grayscale_propagates_single_channel(tmp_path: Path) -> None:
     image_path = tmp_path / "sample.tif"
     Image.new("RGB", (8, 6), color=(10, 20, 30)).save(image_path)

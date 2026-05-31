@@ -362,6 +362,11 @@ def create_preprocessing_pipeline(db: Session, payload: PreprocessingPipelineCre
         name=payload.name,
         description=payload.description,
         graph=payload.graph.model_dump(mode="json"),
+        preview_folder_id=payload.preview_folder_id,
+        input_width=payload.input_width,
+        input_height=payload.input_height,
+        output_width=payload.output_width,
+        output_height=payload.output_height,
     )
     db.add(pipeline)
     db.commit()
@@ -380,6 +385,17 @@ def update_preprocessing_pipeline(
     pipeline.name = payload.name
     pipeline.description = payload.description
     pipeline.graph = payload.graph.model_dump(mode="json")
+    pipeline.preview_folder_id = payload.preview_folder_id
+    # Only overwrite the stored resolution when the client provides one (a save without a
+    # preview should not wipe the previously recorded sizes).
+    if payload.input_width is not None:
+        pipeline.input_width = payload.input_width
+    if payload.input_height is not None:
+        pipeline.input_height = payload.input_height
+    if payload.output_width is not None:
+        pipeline.output_width = payload.output_width
+    if payload.output_height is not None:
+        pipeline.output_height = payload.output_height
     db.commit()
     db.refresh(pipeline)
     return PreprocessingPipelineRead.model_validate(pipeline)

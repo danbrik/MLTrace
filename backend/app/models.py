@@ -124,6 +124,12 @@ class PreprocessingPipeline(Base):
     name: Mapped[str] = mapped_column(String(255), nullable=False, unique=True)
     description: Mapped[str | None] = mapped_column(Text)
     graph: Mapped[dict] = mapped_column(json_type(), nullable=False)
+    preview_folder_id: Mapped[int | None] = mapped_column(ForeignKey("dataset_folders.id", ondelete="SET NULL"))
+    # Design resolution the pipeline was built/optimised on (captured from a preview).
+    input_width: Mapped[int | None] = mapped_column(Integer)
+    input_height: Mapped[int | None] = mapped_column(Integer)
+    output_width: Mapped[int | None] = mapped_column(Integer)
+    output_height: Mapped[int | None] = mapped_column(Integer)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=False), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=False), server_default=func.now(), onupdate=func.now()

@@ -180,19 +180,38 @@ def test_preprocessing_pipeline_crud_and_preview(tmp_path: Path) -> None:
 
         created = client.post(
             "/api/preprocessing/pipelines",
-            json={"name": "Resize preview", "description": "test", "graph": graph},
+            json={
+                "name": "Resize preview",
+                "description": "test",
+                "graph": graph,
+                "preview_folder_id": folder_id,
+                "input_width": 20,
+                "input_height": 10,
+                "output_width": 8,
+                "output_height": 4,
+            },
         )
         assert created.status_code == 200
         pipeline = created.json()
         assert pipeline["name"] == "Resize preview"
+        assert pipeline["preview_folder_id"] == folder_id
+        assert pipeline["input_width"] == 20
+        assert pipeline["input_height"] == 10
+        assert pipeline["output_width"] == 8
+        assert pipeline["output_height"] == 4
 
         listed = client.get("/api/preprocessing/pipelines")
         assert listed.status_code == 200
         assert len(listed.json()) == 1
+        assert listed.json()[0]["input_width"] == 20
+        assert listed.json()[0]["output_height"] == 4
 
         loaded = client.get(f"/api/preprocessing/pipelines/{pipeline['id']}")
         assert loaded.status_code == 200
         assert loaded.json()["graph"]["nodes"][0]["type"] == "load_image"
+        assert loaded.json()["preview_folder_id"] == folder_id
+        assert loaded.json()["input_width"] == 20
+        assert loaded.json()["output_height"] == 4
 
         preview = client.post(
             "/api/preprocessing/pipelines/preview",
@@ -237,7 +256,17 @@ def test_preprocessing_pipeline_update_and_unique_name() -> None:
             "edges": [{"id": "load-resize", "source": "load", "target": "resize"}],
         }
 
-        created = client.post("/api/preprocessing/pipelines", json={"name": "Pipe one", "graph": graph})
+        created = client.post(
+            "/api/preprocessing/pipelines",
+            json={
+                "name": "Pipe one",
+                "graph": graph,
+                "input_width": 20,
+                "input_height": 10,
+                "output_width": 8,
+                "output_height": 4,
+            },
+        )
         assert created.status_code == 200
         pid = created.json()["id"]
 
@@ -249,9 +278,23 @@ def test_preprocessing_pipeline_update_and_unique_name() -> None:
         assert second.status_code == 200
 
         # Update name + graph of the first pipeline.
-        updated = client.put(f"/api/preprocessing/pipelines/{pid}", json={"name": "Pipe renamed", "graph": graph})
+        updated = client.put(
+            f"/api/preprocessing/pipelines/{pid}",
+            json={
+                "name": "Pipe renamed",
+                "graph": graph,
+                "input_width": 40,
+                "input_height": 30,
+                "output_width": 8,
+                "output_height": 4,
+            },
+        )
         assert updated.status_code == 200
         assert updated.json()["name"] == "Pipe renamed"
+        assert updated.json()["input_width"] == 40
+        assert updated.json()["input_height"] == 30
+        assert updated.json()["output_width"] == 8
+        assert updated.json()["output_height"] == 4
 
         # Renaming onto an existing name is rejected.
         clash = client.put(f"/api/preprocessing/pipelines/{pid}", json={"name": "Pipe two", "graph": graph})

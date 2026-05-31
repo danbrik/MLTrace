@@ -13,6 +13,7 @@ import {
   Select,
   SimpleGrid,
   Stack,
+  Switch,
   Table,
   Text,
   TextInput,
@@ -22,7 +23,7 @@ import {
 } from '@mantine/core';
 import { useDebouncedValue } from '@mantine/hooks';
 import { notifications } from '@mantine/notifications';
-import { ArrowDown, ArrowUp, Eye, Plus, Save, Settings2, Trash2, Upload } from 'lucide-react';
+import { ArrowDown, ArrowUp, Eye, Info, Plus, Save, Settings2, Trash2, Upload } from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
 import type { ReactNode } from 'react';
 
@@ -66,6 +67,20 @@ type FolderOption = {
   folder: DatasetFolder;
 };
 
+type PipelineDesignResolution = {
+  input_width: number | null;
+  input_height: number | null;
+  output_width: number | null;
+  output_height: number | null;
+};
+
+const EMPTY_DESIGN_RESOLUTION: PipelineDesignResolution = {
+  input_width: null,
+  input_height: null,
+  output_width: null,
+  output_height: null,
+};
+
 function nodeId(stepType: string): string {
   return `${stepType}-${crypto.randomUUID().slice(0, 8)}`;
 }
@@ -86,20 +101,47 @@ function ioLabel(kind: string | undefined, item?: PreprocessingPreviewImage): st
   return `${kind ?? 'image ndarray'}: ${metadataLabel(item)}`;
 }
 
+function sizeLabel(width: number | null | undefined, height: number | null | undefined): string {
+  return width && height ? `${width}x${height}` : 'n/a';
+}
+
+function folderResolutionCompactLabel(folder: DatasetFolder): string {
+  const resolutions = Object.keys(folder.resolution_summary ?? {}).sort();
+  return resolutions.length > 0 ? resolutions.join(', ') : 'resolution unknown';
+}
+
+function folderFileTypeLabel(folder: DatasetFolder): string {
+  const extensions = Object.keys(folder.extension_summary ?? {}).sort();
+  return extensions.length > 0 ? extensions.join(', ') : 'filetype unknown';
+}
+
+function nextAvailablePipelineName(pipelines: PreprocessingPipeline[]): string {
+  const used = new Set(pipelines.map((pipeline) => pipeline.name.trim().toLowerCase()));
+  const base = 'Untitled pipeline';
+  if (!used.has(base.toLowerCase())) return base;
+  for (let index = 2; index < 10000; index += 1) {
+    const candidate = `${base} ${index}`;
+    if (!used.has(candidate.toLowerCase())) return candidate;
+  }
+  return `${base} ${Date.now()}`;
+}
+
 export function PreprocessingPipelinesPage() {
   const [steps, setSteps] = useState<PreprocessingStepDefinition[]>([]);
   const [datasets, setDatasets] = useState<Dataset[]>([]);
   const [pipelines, setPipelines] = useState<PreprocessingPipeline[]>([]);
-  const [name, setName] = useState('load_image to resize');
+  const [name, setName] = useState('');
+  const [nameTouched, setNameTouched] = useState(false);
   const [description, setDescription] = useState('');
   const [selectedFolderId, setSelectedFolderId] = useState<string | null>(null);
-  const [selectedNodeId, setSelectedNodeId] = useState<string | null>('load');
+  const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
   const [preview, setPreview] = useState<PreprocessingPreview | null>(null);
   const [previewStale, setPreviewStale] = useState(false);
   const [loading, setLoading] = useState(false);
   const [sourceImage, setSourceImage] = useState<PreprocessingPreviewImage | null>(null);
   const [sourceLoading, setSourceLoading] = useState(false);
   const [loadedPipelineId, setLoadedPipelineId] = useState<number | null>(null);
+  const [designResolution, setDesignResolution] = useState<PipelineDesignResolution>(EMPTY_DESIGN_RESOLUTION);
   const [previewError, setPreviewError] = useState<string | null>(null);
   const [nodes, setNodes] = useState<PipelineNode[]>([
     {
@@ -130,6 +172,12 @@ export function PreprocessingPipelinesPage() {
     });
   }, []);
 
+  useEffect(() => {
+    if (loadedPipelineId == null && !nameTouched) {
+      setName(nextAvailablePipelineName(pipelines));
+    }
+  }, [pipelines, loadedPipelineId, nameTouched]);
+
   const stepByType = useMemo(() => new Map(steps.map((step) => [step.type, step])), [steps]);
 
   const folderOptions = useMemo<FolderOption[]>(
@@ -137,12 +185,17 @@ export function PreprocessingPipelinesPage() {
       datasets.flatMap((dataset) =>
         dataset.folders.map((folder) => ({
           value: String(folder.id),
-          label: `${dataset.name} / ${folder.relative_path} (${folder.image_count})`,
+          label: `${dataset.name} / ${folder.relative_path} (${folderResolutionCompactLabel(folder)}, ${folderFileTypeLabel(folder)})`,
           dataset,
           folder,
         })),
       ),
     [datasets],
+  );
+
+  const selectedFolderOption = useMemo(
+    () => folderOptions.find((option) => option.value === selectedFolderId) ?? null,
+    [folderOptions, selectedFolderId],
   );
 
   // A pipeline name must be unique (case-insensitive), ignoring the pipeline currently loaded.
@@ -153,6 +206,12 @@ export function PreprocessingPipelinesPage() {
       (pipeline) => pipeline.name.trim().toLowerCase() === trimmed && pipeline.id !== loadedPipelineId,
     );
   }, [name, pipelines, loadedPipelineId]);
+
+  const createNameClash = useMemo(() => {
+    const trimmed = name.trim().toLowerCase();
+    if (!trimmed) return false;
+    return pipelines.some((pipeline) => pipeline.name.trim().toLowerCase() === trimmed);
+  }, [name, pipelines]);
 
   // The image that flows INTO a step is the output of the preceding step. For the
   // first real step (index 1) the loaded source image is that output and is always
@@ -259,6 +318,51 @@ export function PreprocessingPipelinesPage() {
     };
   }
 
+  function designResolutionFromPreview(): PipelineDesignResolution | null {
+    const first = preview?.previews[0];
+    const last = preview?.previews[preview.previews.length - 1];
+    if (!first || !last) return null;
+    return {
+      input_width: first.width,
+      input_height: first.height,
+      output_width: last.width,
+      output_height: last.height,
+    };
+  }
+
+  function buildPipelinePayload() {
+    const nextDesignResolution = designResolutionFromPreview();
+    if (!nextDesignResolution) {
+      notifications.show({
+        color: 'yellow',
+        title: 'Preview required',
+        message: 'Run a preview before saving so MLTrace can store the design resolution.',
+      });
+      return null;
+    }
+    return {
+      name,
+      description,
+      graph: backendGraph(),
+      preview_folder_id: Number(selectedFolderId),
+      ...nextDesignResolution,
+    };
+  }
+
+  const designMismatchMessage = useMemo(() => {
+    if (
+      !sourceImage ||
+      !designResolution.input_width ||
+      !designResolution.input_height ||
+      (sourceImage.width === designResolution.input_width && sourceImage.height === designResolution.input_height)
+    ) {
+      return null;
+    }
+    return `Pipeline tuned for ${designResolution.input_width}x${designResolution.input_height}, current preview image is ${sourceImage.width}x${sourceImage.height}.`;
+  }, [sourceImage, designResolution]);
+
+  const canStoreDesignResolution = Boolean(preview && !previewStale && !previewError);
+
   function loadGraph(pipeline: PreprocessingPipeline) {
     const nextNodes: PipelineNode[] = pipeline.graph.nodes.map((node, index) => ({
       id: node.id,
@@ -270,6 +374,7 @@ export function PreprocessingPipelinesPage() {
       },
     }));
     setName(pipeline.name);
+    setNameTouched(true);
     setDescription(pipeline.description ?? '');
     setNodes(nextNodes);
     setSelectedNodeId(nextNodes[0]?.id ?? null);
@@ -277,6 +382,13 @@ export function PreprocessingPipelinesPage() {
     setPreviewStale(false);
     setPreviewError(null);
     setLoadedPipelineId(pipeline.id);
+    setSelectedFolderId(pipeline.preview_folder_id ? String(pipeline.preview_folder_id) : null);
+    setDesignResolution({
+      input_width: pipeline.input_width,
+      input_height: pipeline.input_height,
+      output_width: pipeline.output_width,
+      output_height: pipeline.output_height,
+    });
   }
 
   async function handleLoadPipeline(pipelineId: number) {
@@ -292,11 +404,20 @@ export function PreprocessingPipelinesPage() {
   }
 
   async function handleCreate() {
+    const payload = buildPipelinePayload();
+    if (!payload) return;
     setLoading(true);
     try {
-      const created = await createPreprocessingPipeline({ name, description, graph: backendGraph() });
+      const created = await createPreprocessingPipeline(payload);
       await refresh();
       setLoadedPipelineId(created.id);
+      setNameTouched(true);
+      setDesignResolution({
+        input_width: created.input_width,
+        input_height: created.input_height,
+        output_width: created.output_width,
+        output_height: created.output_height,
+      });
       notifications.show({ color: 'green', title: 'Pipeline saved', message: created.name });
     } catch (error) {
       notifications.show({
@@ -311,10 +432,18 @@ export function PreprocessingPipelinesPage() {
 
   async function handleUpdate() {
     if (loadedPipelineId == null) return;
+    const payload = buildPipelinePayload();
+    if (!payload) return;
     setLoading(true);
     try {
-      const updated = await updatePreprocessingPipeline(loadedPipelineId, { name, description, graph: backendGraph() });
+      const updated = await updatePreprocessingPipeline(loadedPipelineId, payload);
       await refresh();
+      setDesignResolution({
+        input_width: updated.input_width,
+        input_height: updated.input_height,
+        output_width: updated.output_width,
+        output_height: updated.output_height,
+      });
       notifications.show({ color: 'green', title: 'Pipeline updated', message: updated.name });
     } catch (error) {
       notifications.show({
@@ -337,7 +466,7 @@ export function PreprocessingPipelinesPage() {
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Unknown error';
       setPreviewError(message);
-      if (!silent) {
+      if (!silent || message.includes('Input size is locked')) {
         notifications.show({ color: 'red', title: 'Preview failed', message });
       }
     } finally {
@@ -351,6 +480,7 @@ export function PreprocessingPipelinesPage() {
 
   async function loadSourceImage(folderId: string) {
     setSourceLoading(true);
+    setSourceImage(null);
     try {
       const result = await previewPreprocessingPipeline({
         folder_id: Number(folderId),
@@ -397,6 +527,22 @@ export function PreprocessingPipelinesPage() {
     loadSourceImage(selectedFolderId);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedFolderId]);
+
+  useEffect(() => {
+    if (!sourceImage) return;
+    const loadNode = nodes.find((node) => node.data.stepType === 'load_image');
+    if (!loadNode || loadNode.data.config.lock_size !== undefined) return;
+    updateNodeConfigMany(
+      loadNode.id,
+      {
+        lock_size: true,
+        lock_width: sourceImage.width,
+        lock_height: sourceImage.height,
+      },
+      true,
+    );
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sourceImage]);
 
   // Keep the full-pipeline preview in sync automatically (debounced) so every block's
   // input image (the previous step's output) always reflects the current configuration.
@@ -521,6 +667,47 @@ export function PreprocessingPipelinesPage() {
     );
   }
 
+  function renderLoadImageSizeLock(node: PipelineNode) {
+    const lockEnabled = node.data.config.lock_size === true;
+    const lockWidth = typeof node.data.config.lock_width === 'number' ? node.data.config.lock_width : null;
+    const lockHeight = typeof node.data.config.lock_height === 'number' ? node.data.config.lock_height : null;
+
+    return (
+      <Paper withBorder p="sm" radius="sm">
+        <Group justify="space-between" align="flex-start">
+          <div>
+            <Text size="sm" fw={500}>
+              Lock size
+            </Text>
+            <Text size="xs" c="dimmed">
+              {lockEnabled
+                ? `Locked to ${sizeLabel(lockWidth, lockHeight)}. Loading another image size will fail.`
+                : sourceImage
+                  ? `Current preview image is ${sourceImage.width}x${sourceImage.height}.`
+                  : 'Select a preview folder before locking the input size.'}
+            </Text>
+          </div>
+          <Switch
+            checked={lockEnabled}
+            disabled={!sourceImage}
+            onChange={(event) => {
+              const checked = event.currentTarget.checked;
+              if (checked && sourceImage) {
+                updateNodeConfigMany(node.id, {
+                  lock_size: true,
+                  lock_width: sourceImage.width,
+                  lock_height: sourceImage.height,
+                });
+              } else {
+                updateNodeConfig(node.id, 'lock_size', false);
+              }
+            }}
+          />
+        </Group>
+      </Paper>
+    );
+  }
+
   function renderNodeConfig(node: PipelineNode, index: number) {
     const step = stepByType.get(node.data.stepType);
     if (!step) return <Text c="dimmed">Unknown step.</Text>;
@@ -534,17 +721,23 @@ export function PreprocessingPipelinesPage() {
     return (
       <Stack gap="sm">
         {renderStepPreview(node, index)}
+        {node.data.stepType === 'load_image' && renderLoadImageSizeLock(node)}
         {fields.length > 0 && <SimpleGrid cols={{ base: 2, sm: 4 }}>{fields}</SimpleGrid>}
       </Stack>
     );
   }
 
   function renderSaveButtons() {
-    const createDisabled = !name.trim() || nameClash;
+    const createDisabled = !name.trim() || createNameClash || !canStoreDesignResolution;
     if (loadedPipelineId != null) {
       return (
         <>
-          <Button leftSection={<Save size={18} />} onClick={handleUpdate} loading={loading} disabled={!name.trim() || nameClash}>
+          <Button
+            leftSection={<Save size={18} />}
+            onClick={handleUpdate}
+            loading={loading}
+            disabled={!name.trim() || nameClash || !canStoreDesignResolution}
+          >
             Update pipeline
           </Button>
           <Button variant="light" leftSection={<Save size={18} />} onClick={handleCreate} loading={loading} disabled={createDisabled}>
@@ -576,31 +769,67 @@ export function PreprocessingPipelinesPage() {
               label="Pipeline name"
               description={loadedPipelineId != null ? 'Editing a saved pipeline.' : undefined}
               value={name}
-              onChange={(event) => setName(event.currentTarget.value)}
+              onChange={(event) => {
+                setNameTouched(true);
+                setName(event.currentTarget.value);
+              }}
               error={nameClash ? 'A pipeline with this name already exists.' : undefined}
             />
             <Select
-              label="Preview folder"
+              label={
+                <Group gap={6}>
+                  <Text component="span" size="sm" fw={500}>
+                    Preview folder
+                  </Text>
+                  <Tooltip
+                    multiline
+                    w={320}
+                    label="Choose a preview folder before editing the pipeline. MLTrace uses its first image to determine input size, seed size-dependent steps, and run previews."
+                  >
+                    <ActionIcon size="xs" variant="subtle" aria-label="Preview folder info">
+                      <Info size={14} />
+                    </ActionIcon>
+                  </Tooltip>
+                </Group>
+              }
               description="Loaded once and reused by every preprocessing block."
               placeholder="Select a dataset folder"
               data={folderOptions.map((option) => ({ value: option.value, label: option.label }))}
               value={selectedFolderId}
               onChange={(value) => {
                 setSelectedFolderId(value);
+                setSourceImage(null);
                 setPreview(null);
                 setPreviewStale(false);
+                setPreviewError(null);
               }}
               searchable
             />
           </Group>
           {selectedFolderId && (
-            <Text size="xs" c={sourceImage ? 'green' : 'dimmed'}>
-              {sourceLoading
-                ? 'Loading preview image…'
-                : sourceImage
-                  ? `Preview image loaded (${sourceImage.width}x${sourceImage.height}).`
-                  : 'No preview image loaded yet.'}
+            <Stack gap={2}>
+              <Text size="xs" c="dimmed">
+                Folder: {selectedFolderOption ? `${folderResolutionCompactLabel(selectedFolderOption.folder)}, ${folderFileTypeLabel(selectedFolderOption.folder)}` : 'resolution unknown'}.
+              </Text>
+              <Text size="xs" c={sourceImage ? 'green' : 'dimmed'}>
+                {sourceLoading
+                  ? 'Loading preview image…'
+                  : sourceImage
+                    ? `Preview image loaded (${sourceImage.width}x${sourceImage.height}).`
+                    : 'No preview image loaded yet.'}
+              </Text>
+            </Stack>
+          )}
+          {(designResolution.input_width || designResolution.output_width) && (
+            <Text size="xs" c="dimmed">
+              Stored design input {sizeLabel(designResolution.input_width, designResolution.input_height)}, output{' '}
+              {sizeLabel(designResolution.output_width, designResolution.output_height)}.
             </Text>
+          )}
+          {designMismatchMessage && (
+            <Alert color="yellow" title="Design resolution mismatch">
+              {designMismatchMessage}
+            </Alert>
           )}
           <Textarea label="Description" value={description} onChange={(event) => setDescription(event.currentTarget.value)} />
           <Group justify="flex-end">
@@ -631,7 +860,12 @@ export function PreprocessingPipelinesPage() {
                         {step.category}
                       </Badge>
                     </div>
-                    <ActionIcon variant="light" onClick={() => addStep(step)} aria-label={`Add ${step.label}`}>
+                    <ActionIcon
+                      variant="light"
+                      onClick={() => addStep(step)}
+                      aria-label={`Add ${step.label}`}
+                      disabled={!selectedFolderId}
+                    >
                       <Plus size={16} />
                     </ActionIcon>
                   </Group>
@@ -657,7 +891,7 @@ export function PreprocessingPipelinesPage() {
                 const step = stepByType.get(node.data.stepType);
                 const output = preview?.previews.find((item) => item.node_id === node.id);
                 const input = index === 0 ? undefined : preview?.previews.find((item) => item.node_id === nodes[index - 1].id);
-                const open = node.id === selectedNodeId;
+                const open = Boolean(selectedFolderId) && node.id === selectedNodeId;
                 return (
                   <Paper key={node.id} withBorder p="sm" radius="sm" className={open ? 'pipeline-step selected' : 'pipeline-step'}>
                     <Stack gap="xs">
@@ -672,13 +906,22 @@ export function PreprocessingPipelinesPage() {
                           </div>
                         </Group>
                         <Group gap={4}>
-                          <ActionIcon variant="subtle" disabled={index <= 1} onClick={() => moveNode(node.id, -1)}>
+                          <ActionIcon variant="subtle" disabled={!selectedFolderId || index <= 1} onClick={() => moveNode(node.id, -1)}>
                             <ArrowUp size={16} />
                           </ActionIcon>
-                          <ActionIcon variant="subtle" disabled={index === 0 || index === nodes.length - 1} onClick={() => moveNode(node.id, 1)}>
+                          <ActionIcon
+                            variant="subtle"
+                            disabled={!selectedFolderId || index === 0 || index === nodes.length - 1}
+                            onClick={() => moveNode(node.id, 1)}
+                          >
                             <ArrowDown size={16} />
                           </ActionIcon>
-                          <ActionIcon variant="subtle" color="red" disabled={node.data.stepType === 'load_image'} onClick={() => removeNode(node.id)}>
+                          <ActionIcon
+                            variant="subtle"
+                            color="red"
+                            disabled={!selectedFolderId || node.data.stepType === 'load_image'}
+                            onClick={() => removeNode(node.id)}
+                          >
                             <Trash2 size={16} />
                           </ActionIcon>
                         </Group>
@@ -697,6 +940,7 @@ export function PreprocessingPipelinesPage() {
                         size="compact-sm"
                         variant={open ? 'filled' : 'light'}
                         leftSection={<Settings2 size={14} />}
+                        disabled={!selectedFolderId}
                         onClick={() => setSelectedNodeId(open ? null : node.id)}
                       >
                         {open ? 'Close configuration' : 'Configure'}
@@ -769,7 +1013,8 @@ export function PreprocessingPipelinesPage() {
                 <Table.Tr>
                   <Table.Th>Name</Table.Th>
                   <Table.Th>Steps</Table.Th>
-                  <Table.Th>Updated</Table.Th>
+                  <Table.Th>Design input</Table.Th>
+                  <Table.Th>Design output</Table.Th>
                   <Table.Th>Description</Table.Th>
                   <Table.Th />
                 </Table.Tr>
@@ -779,7 +1024,8 @@ export function PreprocessingPipelinesPage() {
                   <Table.Tr key={pipeline.id}>
                     <Table.Td>{pipeline.name}</Table.Td>
                     <Table.Td>{pipeline.graph.nodes.length}</Table.Td>
-                    <Table.Td>{previewText(pipeline.updated_at)}</Table.Td>
+                    <Table.Td>{sizeLabel(pipeline.input_width, pipeline.input_height)}</Table.Td>
+                    <Table.Td>{sizeLabel(pipeline.output_width, pipeline.output_height)}</Table.Td>
                     <Table.Td>{pipeline.description ?? ''}</Table.Td>
                     <Table.Td>
                       <Group gap="xs" justify="flex-end">

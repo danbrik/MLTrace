@@ -122,6 +122,11 @@ export type PreprocessingPipeline = {
   name: string;
   description: string | null;
   graph: PreprocessingGraph;
+  preview_folder_id: number | null;
+  input_width: number | null;
+  input_height: number | null;
+  output_width: number | null;
+  output_height: number | null;
   created_at: string;
   updated_at: string;
 };

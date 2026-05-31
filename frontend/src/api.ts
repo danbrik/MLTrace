@@ -114,6 +114,11 @@ export function createPreprocessingPipeline(payload: {
   name: string;
   description?: string;
   graph: PreprocessingGraph;
+  preview_folder_id?: number | null;
+  input_width?: number | null;
+  input_height?: number | null;
+  output_width?: number | null;
+  output_height?: number | null;
 }): Promise<PreprocessingPipeline> {
   return request<PreprocessingPipeline>('/api/preprocessing/pipelines', {
     method: 'POST',
@@ -123,7 +128,16 @@ export function createPreprocessingPipeline(payload: {
 
 export function updatePreprocessingPipeline(
   pipelineId: number,
-  payload: { name: string; description?: string; graph: PreprocessingGraph },
+  payload: {
+    name: string;
+    description?: string;
+    graph: PreprocessingGraph;
+    preview_folder_id?: number | null;
+    input_width?: number | null;
+    input_height?: number | null;
+    output_width?: number | null;
+    output_height?: number | null;
+  },
 ): Promise<PreprocessingPipeline> {
   return request<PreprocessingPipeline>(`/api/preprocessing/pipelines/${pipelineId}`, {
     method: 'PUT',

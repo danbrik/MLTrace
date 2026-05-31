@@ -142,6 +142,11 @@ class PreprocessingPipelineCreate(BaseModel):
     name: str = Field(min_length=1, max_length=255)
     description: str | None = None
     graph: PreprocessingGraph
+    preview_folder_id: int | None = None
+    input_width: int | None = None
+    input_height: int | None = None
+    output_width: int | None = None
+    output_height: int | None = None
 
 
 class PreprocessingPipelineRead(BaseModel):
@@ -151,6 +156,11 @@ class PreprocessingPipelineRead(BaseModel):
     name: str
     description: str | None
     graph: dict
+    preview_folder_id: int | None
+    input_width: int | None
+    input_height: int | None
+    output_width: int | None
+    output_height: int | None
     created_at: datetime
     updated_at: datetime
 
