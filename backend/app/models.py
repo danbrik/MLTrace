@@ -115,3 +115,16 @@ class TrainingDatasetRule(Base):
 
     training_dataset: Mapped[TrainingDataset] = relationship(back_populates="rules")
     folder: Mapped[DatasetFolder] = relationship(back_populates="training_rules")
+
+
+class PreprocessingPipeline(Base):
+    __tablename__ = "preprocessing_pipelines"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    description: Mapped[str | None] = mapped_column(Text)
+    graph: Mapped[dict] = mapped_column(json_type(), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=False), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=False), server_default=func.now(), onupdate=func.now()
+    )

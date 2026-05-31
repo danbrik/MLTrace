@@ -1,5 +1,9 @@
 import type {
   Dataset,
+  PreprocessingGraph,
+  PreprocessingPipeline,
+  PreprocessingPreview,
+  PreprocessingStepDefinition,
   TrainingDataset,
   TrainingDatasetPreview,
   TrainingDatasetRuleInput,
@@ -91,5 +95,44 @@ export function getTrainingDataset(trainingDatasetId: number): Promise<TrainingD
 export async function deleteTrainingDataset(trainingDatasetId: number): Promise<void> {
   await request<void>(`/api/training-datasets/${trainingDatasetId}`, {
     method: 'DELETE',
+  });
+}
+
+export function listPreprocessingSteps(): Promise<PreprocessingStepDefinition[]> {
+  return request<PreprocessingStepDefinition[]>('/api/preprocessing/steps');
+}
+
+export function listPreprocessingPipelines(): Promise<PreprocessingPipeline[]> {
+  return request<PreprocessingPipeline[]>('/api/preprocessing/pipelines');
+}
+
+export function getPreprocessingPipeline(pipelineId: number): Promise<PreprocessingPipeline> {
+  return request<PreprocessingPipeline>(`/api/preprocessing/pipelines/${pipelineId}`);
+}
+
+export function createPreprocessingPipeline(payload: {
+  name: string;
+  description?: string;
+  graph: PreprocessingGraph;
+}): Promise<PreprocessingPipeline> {
+  return request<PreprocessingPipeline>('/api/preprocessing/pipelines', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function deletePreprocessingPipeline(pipelineId: number): Promise<void> {
+  await request<void>(`/api/preprocessing/pipelines/${pipelineId}`, {
+    method: 'DELETE',
+  });
+}
+
+export function previewPreprocessingPipeline(payload: {
+  folder_id: number;
+  graph: PreprocessingGraph;
+}): Promise<PreprocessingPreview> {
+  return request<PreprocessingPreview>('/api/preprocessing/pipelines/preview', {
+    method: 'POST',
+    body: JSON.stringify(payload),
   });
 }

@@ -72,3 +72,74 @@ export type TrainingDataset = {
     selected_images: number;
   }>;
 };
+
+export type PreprocessingGraphNode = {
+  id: string;
+  type: string;
+  config: Record<string, unknown>;
+  position?: { x: number; y: number } | null;
+};
+
+export type PreprocessingGraphEdge = {
+  id?: string | null;
+  source: string;
+  target: string;
+};
+
+export type PreprocessingGraph = {
+  nodes: PreprocessingGraphNode[];
+  edges: PreprocessingGraphEdge[];
+};
+
+export type PreprocessingStepDefinition = {
+  type: string;
+  label: string;
+  category: string;
+  input_kind: string;
+  output_kind: string;
+  config_schema: {
+    type: string;
+    ui_control?: string;
+    properties: Record<
+      string,
+      {
+        type: string;
+        label?: string;
+        enum?: string[];
+        default?: unknown;
+        minimum?: number;
+        ui_control?: string;
+      }
+    >;
+  };
+  default_config: Record<string, unknown>;
+};
+
+export type PreprocessingPipeline = {
+  id: number;
+  name: string;
+  description: string | null;
+  graph: PreprocessingGraph;
+  created_at: string;
+  updated_at: string;
+};
+
+export type PreprocessingPreviewImage = {
+  node_id: string;
+  step_type: string;
+  label: string;
+  width: number;
+  height: number;
+  channels: number;
+  dtype: string;
+  value_min: number;
+  value_max: number;
+  image_data_url: string;
+};
+
+export type PreprocessingPreview = {
+  source_image_id: number;
+  source_image_path: string;
+  source_timestamp: string;
+  previews: PreprocessingPreviewImage[];
+};

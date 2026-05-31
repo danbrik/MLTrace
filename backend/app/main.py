@@ -8,6 +8,11 @@ from app.database import get_db
 from app.schemas import (
     DatasetCreate,
     DatasetRead,
+    PreprocessingPipelineCreate,
+    PreprocessingPipelineRead,
+    PreprocessingPreviewRequest,
+    PreprocessingPreviewResponse,
+    PreprocessingStepRead,
     TimestampFormatConfirm,
     TrainingDatasetCreate,
     TrainingDatasetPreviewRequest,
@@ -16,12 +21,18 @@ from app.schemas import (
 )
 from app.services import (
     create_dataset,
+    create_preprocessing_pipeline,
     create_training_dataset,
+    delete_preprocessing_pipeline,
     delete_training_dataset,
     get_dataset_or_404,
+    get_preprocessing_pipeline,
     get_training_dataset,
     list_datasets,
+    list_preprocessing_pipelines,
+    list_preprocessing_steps,
     list_training_datasets,
+    preview_preprocessing_pipeline,
     preview_training_dataset,
     scan_dataset,
 )
@@ -112,6 +123,42 @@ def create_app() -> FastAPI:
         if not deleted:
             raise HTTPException(status_code=404, detail="Training dataset not found.")
         return None
+
+    @app.get("/api/preprocessing/steps", response_model=list[PreprocessingStepRead])
+    def api_list_preprocessing_steps():
+        return list_preprocessing_steps()
+
+    @app.get("/api/preprocessing/pipelines", response_model=list[PreprocessingPipelineRead])
+    def api_list_preprocessing_pipelines(db: Session = Depends(get_db)):
+        return list_preprocessing_pipelines(db)
+
+    @app.post("/api/preprocessing/pipelines", response_model=PreprocessingPipelineRead)
+    def api_create_preprocessing_pipeline(payload: PreprocessingPipelineCreate, db: Session = Depends(get_db)):
+        try:
+            return create_preprocessing_pipeline(db, payload)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.get("/api/preprocessing/pipelines/{pipeline_id}", response_model=PreprocessingPipelineRead)
+    def api_get_preprocessing_pipeline(pipeline_id: int, db: Session = Depends(get_db)):
+        pipeline = get_preprocessing_pipeline(db, pipeline_id)
+        if pipeline is None:
+            raise HTTPException(status_code=404, detail="Preprocessing pipeline not found.")
+        return pipeline
+
+    @app.delete("/api/preprocessing/pipelines/{pipeline_id}", status_code=204)
+    def api_delete_preprocessing_pipeline(pipeline_id: int, db: Session = Depends(get_db)):
+        deleted = delete_preprocessing_pipeline(db, pipeline_id)
+        if not deleted:
+            raise HTTPException(status_code=404, detail="Preprocessing pipeline not found.")
+        return None
+
+    @app.post("/api/preprocessing/pipelines/preview", response_model=PreprocessingPreviewResponse)
+    def api_preview_preprocessing_pipeline(payload: PreprocessingPreviewRequest, db: Session = Depends(get_db)):
+        try:
+            return preview_preprocessing_pipeline(db, payload)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     return app
 

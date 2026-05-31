@@ -7,8 +7,16 @@ from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session, selectinload
 
 from app import models
+from app.preprocessing.pipeline import execute_preview, validate_linear_graph
+from app.preprocessing.registry import registry
 from app.scanner import detect_timestamp_pattern, scan_dataset_files, summarize_folders
 from app.schemas import (
+    PreprocessingGraph,
+    PreprocessingPipelineCreate,
+    PreprocessingPipelineRead,
+    PreprocessingPreviewRequest,
+    PreprocessingPreviewResponse,
+    PreprocessingStepRead,
     TrainingDatasetCreate,
     TrainingDatasetPreviewRequest,
     TrainingDatasetPreviewResponse,
@@ -319,4 +327,70 @@ def serialize_training_dataset(db: Session, training_dataset: models.TrainingDat
         total_matching_images=total_matching,
         total_selected_images=total_selected,
         rules=rule_reads,
+    )
+
+
+def list_preprocessing_steps() -> list[PreprocessingStepRead]:
+    return [
+        PreprocessingStepRead(
+            type=definition.type,
+            label=definition.label,
+            category=definition.category,
+            input_kind=definition.input_kind,
+            output_kind=definition.output_kind,
+            config_schema=definition.config_schema,
+            default_config=definition.default_config,
+        )
+        for definition in registry.list_definitions()
+    ]
+
+
+def create_preprocessing_pipeline(db: Session, payload: PreprocessingPipelineCreate) -> PreprocessingPipelineRead:
+    validate_linear_graph(payload.graph)
+    pipeline = models.PreprocessingPipeline(
+        name=payload.name,
+        description=payload.description,
+        graph=payload.graph.model_dump(mode="json"),
+    )
+    db.add(pipeline)
+    db.commit()
+    db.refresh(pipeline)
+    return PreprocessingPipelineRead.model_validate(pipeline)
+
+
+def list_preprocessing_pipelines(db: Session) -> list[models.PreprocessingPipeline]:
+    return list(db.scalars(select(models.PreprocessingPipeline).order_by(models.PreprocessingPipeline.created_at.desc())))
+
+
+def get_preprocessing_pipeline(db: Session, pipeline_id: int) -> models.PreprocessingPipeline | None:
+    return db.get(models.PreprocessingPipeline, pipeline_id)
+
+
+def delete_preprocessing_pipeline(db: Session, pipeline_id: int) -> bool:
+    pipeline = db.get(models.PreprocessingPipeline, pipeline_id)
+    if pipeline is None:
+        return False
+    db.delete(pipeline)
+    db.commit()
+    return True
+
+
+def preview_preprocessing_pipeline(
+    db: Session, payload: PreprocessingPreviewRequest
+) -> PreprocessingPreviewResponse:
+    validate_linear_graph(payload.graph)
+    source_image = db.scalar(
+        select(models.DatasetImage)
+        .where(models.DatasetImage.folder_id == payload.folder_id)
+        .order_by(models.DatasetImage.timestamp_parsed.asc(), models.DatasetImage.id.asc())
+        .limit(1)
+    )
+    if source_image is None:
+        raise ValueError("Selected folder does not contain indexed images.")
+    previews = execute_preview(payload.graph, source_image.file_path)
+    return PreprocessingPreviewResponse(
+        source_image_id=source_image.id,
+        source_image_path=source_image.file_path,
+        source_timestamp=source_image.timestamp_parsed,
+        previews=previews,
     )

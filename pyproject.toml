@@ -8,6 +8,8 @@ dependencies = [
     "uvicorn[standard]>=0.32.0",
     "sqlalchemy>=2.0.35",
     "alembic>=1.14.0",
+    "numpy>=2.1.0",
+    "opencv-python-headless>=4.10.0",
     "pydantic-settings>=2.6.1",
     "pillow>=11.0.0",
 ]

@@ -153,3 +153,73 @@ def test_training_dataset_can_span_datasets_and_be_deleted(tmp_path: Path) -> No
             next(client_iter)
         except StopIteration:
             pass
+
+
+def test_preprocessing_pipeline_crud_and_preview(tmp_path: Path) -> None:
+    client_iter = make_client()
+    client = next(client_iter)
+    try:
+        dataset = add_scanned_dataset(client, tmp_path / "dataset_a", "A", "0226", 3)
+        folder_id = dataset["folders"][0]["id"]
+        graph = {
+            "nodes": [
+                {"id": "load", "type": "load_image", "config": {}, "position": {"x": 0, "y": 0}},
+                {
+                    "id": "resize",
+                    "type": "resize",
+                    "config": {"width": 8, "height": 4},
+                    "position": {"x": 220, "y": 0},
+                },
+            ],
+            "edges": [{"id": "load-resize", "source": "load", "target": "resize"}],
+        }
+
+        steps = client.get("/api/preprocessing/steps")
+        assert steps.status_code == 200
+        assert "warp_perspective" in {step["type"] for step in steps.json()}
+
+        created = client.post(
+            "/api/preprocessing/pipelines",
+            json={"name": "Resize preview", "description": "test", "graph": graph},
+        )
+        assert created.status_code == 200
+        pipeline = created.json()
+        assert pipeline["name"] == "Resize preview"
+
+        listed = client.get("/api/preprocessing/pipelines")
+        assert listed.status_code == 200
+        assert len(listed.json()) == 1
+
+        loaded = client.get(f"/api/preprocessing/pipelines/{pipeline['id']}")
+        assert loaded.status_code == 200
+        assert loaded.json()["graph"]["nodes"][0]["type"] == "load_image"
+
+        preview = client.post(
+            "/api/preprocessing/pipelines/preview",
+            json={"folder_id": folder_id, "graph": graph},
+        )
+        assert preview.status_code == 200
+        body = preview.json()
+        assert len(body["previews"]) == 2
+        assert body["previews"][1]["width"] == 8
+        assert body["previews"][1]["height"] == 4
+
+        invalid = client.post(
+            "/api/preprocessing/pipelines",
+            json={
+                "name": "Invalid",
+                "graph": {
+                    "nodes": [{"id": "resize", "type": "resize", "config": {}}],
+                    "edges": [],
+                },
+            },
+        )
+        assert invalid.status_code == 400
+
+        deleted = client.delete(f"/api/preprocessing/pipelines/{pipeline['id']}")
+        assert deleted.status_code == 204
+    finally:
+        try:
+            next(client_iter)
+        except StopIteration:
+            pass

@@ -108,3 +108,73 @@ class TrainingDatasetRead(BaseModel):
     total_matching_images: int
     total_selected_images: int
     rules: list[TrainingDatasetRuleRead] = []
+
+
+class PreprocessingGraphNode(BaseModel):
+    id: str = Field(min_length=1)
+    type: str = Field(min_length=1)
+    config: dict = Field(default_factory=dict)
+    position: dict | None = None
+
+
+class PreprocessingGraphEdge(BaseModel):
+    id: str | None = None
+    source: str = Field(min_length=1)
+    target: str = Field(min_length=1)
+
+
+class PreprocessingGraph(BaseModel):
+    nodes: list[PreprocessingGraphNode] = Field(min_length=1)
+    edges: list[PreprocessingGraphEdge] = []
+
+
+class PreprocessingStepRead(BaseModel):
+    type: str
+    label: str
+    category: str
+    input_kind: str
+    output_kind: str
+    config_schema: dict
+    default_config: dict
+
+
+class PreprocessingPipelineCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=255)
+    description: str | None = None
+    graph: PreprocessingGraph
+
+
+class PreprocessingPipelineRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    name: str
+    description: str | None
+    graph: dict
+    created_at: datetime
+    updated_at: datetime
+
+
+class PreprocessingPreviewRequest(BaseModel):
+    folder_id: int
+    graph: PreprocessingGraph
+
+
+class PreprocessingPreviewImage(BaseModel):
+    node_id: str
+    step_type: str
+    label: str
+    width: int
+    height: int
+    channels: int
+    dtype: str
+    value_min: float
+    value_max: float
+    image_data_url: str
+
+
+class PreprocessingPreviewResponse(BaseModel):
+    source_image_id: int
+    source_image_path: str
+    source_timestamp: datetime
+    previews: list[PreprocessingPreviewImage]
