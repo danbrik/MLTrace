@@ -345,14 +345,41 @@ def list_preprocessing_steps() -> list[PreprocessingStepRead]:
     ]
 
 
+def _assert_unique_pipeline_name(db: Session, name: str, exclude_id: int | None = None) -> None:
+    query = select(models.PreprocessingPipeline).where(
+        func.lower(models.PreprocessingPipeline.name) == name.lower()
+    )
+    if exclude_id is not None:
+        query = query.where(models.PreprocessingPipeline.id != exclude_id)
+    if db.scalar(query) is not None:
+        raise ValueError(f"A preprocessing pipeline named '{name}' already exists.")
+
+
 def create_preprocessing_pipeline(db: Session, payload: PreprocessingPipelineCreate) -> PreprocessingPipelineRead:
     validate_linear_graph(payload.graph)
+    _assert_unique_pipeline_name(db, payload.name)
     pipeline = models.PreprocessingPipeline(
         name=payload.name,
         description=payload.description,
         graph=payload.graph.model_dump(mode="json"),
     )
     db.add(pipeline)
+    db.commit()
+    db.refresh(pipeline)
+    return PreprocessingPipelineRead.model_validate(pipeline)
+
+
+def update_preprocessing_pipeline(
+    db: Session, pipeline_id: int, payload: PreprocessingPipelineCreate
+) -> PreprocessingPipelineRead | None:
+    pipeline = db.get(models.PreprocessingPipeline, pipeline_id)
+    if pipeline is None:
+        return None
+    validate_linear_graph(payload.graph)
+    _assert_unique_pipeline_name(db, payload.name, exclude_id=pipeline_id)
+    pipeline.name = payload.name
+    pipeline.description = payload.description
+    pipeline.graph = payload.graph.model_dump(mode="json")
     db.commit()
     db.refresh(pipeline)
     return PreprocessingPipelineRead.model_validate(pipeline)

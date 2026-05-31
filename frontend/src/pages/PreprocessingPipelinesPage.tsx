@@ -34,6 +34,7 @@ import {
   listPreprocessingPipelines,
   listPreprocessingSteps,
   previewPreprocessingPipeline,
+  updatePreprocessingPipeline,
 } from '../api';
 import { CONTROL_REGISTRY } from '../preprocessing/controls';
 import type {
@@ -98,6 +99,8 @@ export function PreprocessingPipelinesPage() {
   const [loading, setLoading] = useState(false);
   const [sourceImage, setSourceImage] = useState<PreprocessingPreviewImage | null>(null);
   const [sourceLoading, setSourceLoading] = useState(false);
+  const [loadedPipelineId, setLoadedPipelineId] = useState<number | null>(null);
+  const [previewError, setPreviewError] = useState<string | null>(null);
   const [nodes, setNodes] = useState<PipelineNode[]>([
     {
       id: 'load',
@@ -141,6 +144,15 @@ export function PreprocessingPipelinesPage() {
       ),
     [datasets],
   );
+
+  // A pipeline name must be unique (case-insensitive), ignoring the pipeline currently loaded.
+  const nameClash = useMemo(() => {
+    const trimmed = name.trim().toLowerCase();
+    if (!trimmed) return false;
+    return pipelines.some(
+      (pipeline) => pipeline.name.trim().toLowerCase() === trimmed && pipeline.id !== loadedPipelineId,
+    );
+  }, [name, pipelines, loadedPipelineId]);
 
   // The image that flows INTO a step is the output of the preceding step. For the
   // first real step (index 1) the loaded source image is that output and is always
@@ -186,13 +198,24 @@ export function PreprocessingPipelinesPage() {
       return;
     }
 
+    // Seed size-like fields from the previous step's actual output, so a new crop/resize/warp
+    // adopts the current pixel count instead of a fixed 128x128.
+    const inputImage = inputImageFor(nodes.length);
+    const config: Record<string, unknown> = { ...step.default_config };
+    if (inputImage) {
+      for (const [key, property] of Object.entries(step.config_schema.properties)) {
+        if (property.default_from === 'input_width') config[key] = inputImage.width;
+        if (property.default_from === 'input_height') config[key] = inputImage.height;
+      }
+    }
+
     const nextNode: PipelineNode = {
       id: nodeId(step.type),
       position: { x: nodes.length * 220, y: 0 },
       data: {
         label: step.label,
         stepType: step.type,
-        config: { ...step.default_config },
+        config,
       },
     };
     setNodes((current) => [...current, nextNode]);
@@ -252,6 +275,8 @@ export function PreprocessingPipelinesPage() {
     setSelectedNodeId(nextNodes[0]?.id ?? null);
     setPreview(null);
     setPreviewStale(false);
+    setPreviewError(null);
+    setLoadedPipelineId(pipeline.id);
   }
 
   async function handleLoadPipeline(pipelineId: number) {
@@ -266,16 +291,35 @@ export function PreprocessingPipelinesPage() {
     }
   }
 
-  async function handleSave() {
+  async function handleCreate() {
     setLoading(true);
     try {
-      await createPreprocessingPipeline({ name, description, graph: backendGraph() });
+      const created = await createPreprocessingPipeline({ name, description, graph: backendGraph() });
       await refresh();
-      notifications.show({ color: 'green', title: 'Pipeline saved', message: name });
+      setLoadedPipelineId(created.id);
+      notifications.show({ color: 'green', title: 'Pipeline saved', message: created.name });
     } catch (error) {
       notifications.show({
         color: 'red',
         title: 'Save failed',
+        message: error instanceof Error ? error.message : 'Unknown error',
+      });
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function handleUpdate() {
+    if (loadedPipelineId == null) return;
+    setLoading(true);
+    try {
+      const updated = await updatePreprocessingPipeline(loadedPipelineId, { name, description, graph: backendGraph() });
+      await refresh();
+      notifications.show({ color: 'green', title: 'Pipeline updated', message: updated.name });
+    } catch (error) {
+      notifications.show({
+        color: 'red',
+        title: 'Update failed',
         message: error instanceof Error ? error.message : 'Unknown error',
       });
     } finally {
@@ -289,13 +333,12 @@ export function PreprocessingPipelinesPage() {
     try {
       setPreview(await previewPreprocessingPipeline({ folder_id: Number(selectedFolderId), graph: backendGraph() }));
       setPreviewStale(false);
+      setPreviewError(null);
     } catch (error) {
+      const message = error instanceof Error ? error.message : 'Unknown error';
+      setPreviewError(message);
       if (!silent) {
-        notifications.show({
-          color: 'red',
-          title: 'Preview failed',
-          message: error instanceof Error ? error.message : 'Unknown error',
-        });
+        notifications.show({ color: 'red', title: 'Preview failed', message });
       }
     } finally {
       setLoading(false);
@@ -461,6 +504,7 @@ export function PreprocessingPipelinesPage() {
           key={key}
           label={property.label ?? key}
           min={property.minimum}
+          max={property.maximum}
           value={typeof value === 'number' ? value : Number(value)}
           onChange={(next) => updateNodeConfig(node.id, key, typeof next === 'number' ? next : property.default)}
         />
@@ -495,6 +539,27 @@ export function PreprocessingPipelinesPage() {
     );
   }
 
+  function renderSaveButtons() {
+    const createDisabled = !name.trim() || nameClash;
+    if (loadedPipelineId != null) {
+      return (
+        <>
+          <Button leftSection={<Save size={18} />} onClick={handleUpdate} loading={loading} disabled={!name.trim() || nameClash}>
+            Update pipeline
+          </Button>
+          <Button variant="light" leftSection={<Save size={18} />} onClick={handleCreate} loading={loading} disabled={createDisabled}>
+            Save as new
+          </Button>
+        </>
+      );
+    }
+    return (
+      <Button leftSection={<Save size={18} />} onClick={handleCreate} loading={loading} disabled={createDisabled}>
+        Save pipeline
+      </Button>
+    );
+  }
+
   return (
     <Stack gap="lg">
       <div>
@@ -507,7 +572,13 @@ export function PreprocessingPipelinesPage() {
       <Paper withBorder p="md" radius="sm">
         <Stack gap="md">
           <Group grow align="flex-end">
-            <TextInput label="Pipeline name" value={name} onChange={(event) => setName(event.currentTarget.value)} />
+            <TextInput
+              label="Pipeline name"
+              description={loadedPipelineId != null ? 'Editing a saved pipeline.' : undefined}
+              value={name}
+              onChange={(event) => setName(event.currentTarget.value)}
+              error={nameClash ? 'A pipeline with this name already exists.' : undefined}
+            />
             <Select
               label="Preview folder"
               description="Loaded once and reused by every preprocessing block."
@@ -536,9 +607,7 @@ export function PreprocessingPipelinesPage() {
             <Button leftSection={<Eye size={18} />} variant="light" onClick={handlePreview} loading={loading} disabled={!selectedFolderId}>
               Preview
             </Button>
-            <Button leftSection={<Save size={18} />} onClick={handleSave} loading={loading} disabled={!name.trim()}>
-              Save pipeline
-            </Button>
+            {renderSaveButtons()}
           </Group>
         </Stack>
       </Paper>
@@ -579,6 +648,11 @@ export function PreprocessingPipelinesPage() {
                 <Title order={3}>Pipeline order</Title>
                 {previewStale && <Badge color="yellow">preview stale</Badge>}
               </Group>
+              {previewError && (
+                <Alert color="red" title="Pipeline invalid">
+                  {previewError}
+                </Alert>
+              )}
               {nodes.map((node, index) => {
                 const step = stepByType.get(node.data.stepType);
                 const output = preview?.previews.find((item) => item.node_id === node.id);
@@ -681,9 +755,7 @@ export function PreprocessingPipelinesPage() {
             <Button leftSection={<Eye size={18} />} variant="light" onClick={handlePreview} loading={loading} disabled={!selectedFolderId}>
               Preview
             </Button>
-            <Button leftSection={<Save size={18} />} onClick={handleSave} loading={loading} disabled={!name.trim()}>
-              Save pipeline
-            </Button>
+            {renderSaveButtons()}
           </Group>
         </Stack>
       </Paper>

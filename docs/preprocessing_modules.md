@@ -37,8 +37,31 @@ def apply(self, image: np.ndarray | None, config: dict, context: dict) -> np.nda
   alle anderen Steps sollen bei `None` eine `ValueError` werfen.
 - `config`: die Parameter dieses Steps. Über `self.merged_config(config)` werden fehlende Werte
   mit `default_config` aufgefüllt.
-- `context`: enthält u.a. `source_image_path` (vom `load_image`-Step genutzt).
+- `context`: enthält u.a. `source_image_path` (vom `load_image`-Step genutzt) und `source_shape`
+  (Form des ursprünglich geladenen Bildes, gesetzt nach dem ersten Step).
 - Rückgabe: ein `np.ndarray` (das nächste Bild in der Pipeline).
+
+## Typ-Kette (`output_spec`)
+
+Vor dem Ausführen prüft `validate_linear_graph` die Pipeline **symbolisch**: ein `ImageSpec`
+(`channels`, `width`, `height`, `dtype`; Größen dürfen `None` sein, bis ein echtes Bild geladen ist)
+wird von `load_image` durch alle Steps gefädelt. Jeder Step deklariert das über
+`output_spec(spec_in, config) -> ImageSpec` ([base.py](../backend/app/preprocessing/base.py)):
+
+```python
+def output_spec(self, spec_in: ImageSpec | None, config: dict) -> ImageSpec:
+    if spec_in is None:
+        raise ValueError(f"{self.type} requires an input image.")
+    return spec_in   # Default: Bild erforderlich, Kanäle/Größe unverändert
+```
+
+So macht man Anforderungen prüfbar: ein Step, der Farbe braucht, wirft bei `spec_in.channels != 3`;
+ein größenändernder Step (resize/crop/warp) setzt `width`/`height` im zurückgegebenen Spec.
+Inkompatible Ketten werden **hart blockiert** (beim Speichern und in der Vorschau). Den Default
+muss man nur überschreiben, wenn der Step Kanäle/Größe ändert oder Eingaben einschränkt.
+
+Zusätzlich prüft `validate_step_config` jeden Wert gegen das `config_schema`
+(`type`, `minimum`/`maximum`, `enum`) und wirft bei Verstößen einen klaren Fehler.
 
 ## Rezept A – Einfacher Step (nur Parameter)
 
@@ -95,8 +118,15 @@ Das Frontend baut die Eingabefelder aus `config_schema.properties`:
 | Schema-Property | gerendertes Control |
 | --- | --- |
 | `"enum": [...]` | `Select` (Dropdown) |
-| `"type": "integer"` / `"number"` (`minimum` optional) | `NumberInput` |
+| `"type": "integer"` / `"number"` (`minimum`/`maximum` optional) | `NumberInput` (mit Grenzen) |
 | sonst | `TextInput` |
+
+Optionale Property-Hints:
+- `"maximum": N` — Obergrenze (zusätzlich zu `"minimum"`), server- und clientseitig geprüft.
+- `"default_from": "input_width" | "input_height"` — beim Hinzufügen des Steps wird der Wert aus
+  der tatsächlichen Pixelgröße des Vorgängerschritts vorbelegt (statt aus `default`). So „übernimmt"
+  ein neuer crop/resize/warp die aktuelle Bildgröße. Beispiel:
+  `"width": {"type": "integer", "minimum": 1, "default": 128, "default_from": "input_width"}`.
 
 Beispiel für wählbare Stärke-Presets statt Zahlen:
 
@@ -144,14 +174,20 @@ config_schema = {
     "properties": {
         "x": {"type": "integer", "label": "X", "minimum": 0, "default": 0},
         "y": {"type": "integer", "label": "Y", "minimum": 0, "default": 0},
-        "width": {"type": "integer", "label": "Width", "minimum": 1, "default": 128},
-        "height": {"type": "integer", "label": "Height", "minimum": 1, "default": 128},
+        "width": {"type": "integer", "label": "Width", "minimum": 1, "default": 128, "default_from": "input_width"},
+        "height": {"type": "integer", "label": "Height", "minimum": 1, "default": 128, "default_from": "input_height"},
+        # Crop kann zusätzlich die Ausgabegröße wählen (s. crop.py):
+        "output_size": {"type": "string", "enum": ["cropped", "input", "source"], "default": "cropped"},
+        "interpolation": {"type": "string", "enum": ["nearest", "linear", "area", "cubic"], "default": "area"},
     },
 }
 ```
 
-Die vom Control verwalteten Keys (`ownedKeys`) blendet das Frontend als rohe Eingabefelder
-automatisch aus – sie werden interaktiv über das Bild gesetzt. **Kein Frontend-Edit nötig.**
+Die vom Control verwalteten Keys (`ownedKeys`, hier `x/y/width/height`) blendet das Frontend als
+rohe Eingabefelder automatisch aus – sie werden interaktiv über das Bild gesetzt; restliche Felder
+(`output_size`, `interpolation`) erscheinen als normale Controls. **Kein Frontend-Edit nötig.**
+Crop-Modi: `cropped` (nur croppen), `input` (zurück auf Eingangsgröße interpolieren), `source`
+(zurück auf die Ursprungsgröße via `context["source_shape"]`).
 
 ### B2 – Neues Control-Typ hinzufügen (eine Komponente + ein Registry-Eintrag)
 

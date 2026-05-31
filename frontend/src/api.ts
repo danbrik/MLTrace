@@ -121,6 +121,16 @@ export function createPreprocessingPipeline(payload: {
   });
 }
 
+export function updatePreprocessingPipeline(
+  pipelineId: number,
+  payload: { name: string; description?: string; graph: PreprocessingGraph },
+): Promise<PreprocessingPipeline> {
+  return request<PreprocessingPipeline>(`/api/preprocessing/pipelines/${pipelineId}`, {
+    method: 'PUT',
+    body: JSON.stringify(payload),
+  });
+}
+
 export async function deletePreprocessingPipeline(pipelineId: number): Promise<void> {
   await request<void>(`/api/preprocessing/pipelines/${pipelineId}`, {
     method: 'DELETE',

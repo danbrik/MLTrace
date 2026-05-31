@@ -35,6 +35,7 @@ from app.services import (
     preview_preprocessing_pipeline,
     preview_training_dataset,
     scan_dataset,
+    update_preprocessing_pipeline,
 )
 
 
@@ -145,6 +146,18 @@ def create_app() -> FastAPI:
         if pipeline is None:
             raise HTTPException(status_code=404, detail="Preprocessing pipeline not found.")
         return pipeline
+
+    @app.put("/api/preprocessing/pipelines/{pipeline_id}", response_model=PreprocessingPipelineRead)
+    def api_update_preprocessing_pipeline(
+        pipeline_id: int, payload: PreprocessingPipelineCreate, db: Session = Depends(get_db)
+    ):
+        try:
+            updated = update_preprocessing_pipeline(db, pipeline_id, payload)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        if updated is None:
+            raise HTTPException(status_code=404, detail="Preprocessing pipeline not found.")
+        return updated
 
     @app.delete("/api/preprocessing/pipelines/{pipeline_id}", status_code=204)
     def api_delete_preprocessing_pipeline(pipeline_id: int, db: Session = Depends(get_db)):

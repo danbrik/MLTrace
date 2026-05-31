@@ -108,7 +108,9 @@ export type PreprocessingStepDefinition = {
         enum?: string[];
         default?: unknown;
         minimum?: number;
+        maximum?: number;
         ui_control?: string;
+        default_from?: 'input_width' | 'input_height';
       }
     >;
   };

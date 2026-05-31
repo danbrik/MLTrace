@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from app.preprocessing.base import BasePreprocessingStep
+from app.preprocessing.base import BasePreprocessingStep, ImageSpec
 from app.preprocessing.utils import normalize_to_uint8
 
 
@@ -19,6 +19,11 @@ class NormalizeForPreviewStep(BasePreprocessingStep):
             "mode": {"type": "string", "label": "Mode", "enum": ["minmax", "clip_0_255"], "default": "minmax"}
         },
     }
+
+    def output_spec(self, spec_in: ImageSpec | None, config: dict) -> ImageSpec:
+        if spec_in is None:
+            raise ValueError("normalize_for_preview requires an input image.")
+        return ImageSpec(channels=spec_in.channels, width=spec_in.width, height=spec_in.height, dtype="uint8")
 
     def apply(self, image: np.ndarray | None, config: dict, context: dict) -> np.ndarray:
         if image is None:

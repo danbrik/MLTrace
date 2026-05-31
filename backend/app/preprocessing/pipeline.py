@@ -7,9 +7,34 @@ from dataclasses import dataclass
 import numpy as np
 from PIL import Image
 
+from app.preprocessing.base import ImageSpec
 from app.preprocessing.registry import PreprocessingRegistry, registry
 import app.preprocessing.steps  # noqa: F401 ensures core steps are registered
 from app.schemas import PreprocessingGraph, PreprocessingPreviewImage
+
+
+def validate_step_config(step, config: dict) -> None:
+    """Validate a step's config against its config_schema (type, min/max, enum)."""
+    properties = step.config_schema.get("properties", {})
+    merged = step.merged_config(config)
+    for key, prop in properties.items():
+        if key not in merged:
+            continue
+        value = merged[key]
+        enum = prop.get("enum")
+        if enum is not None:
+            if value not in enum:
+                raise ValueError(f"{step.type}.{key} must be one of {enum}, got {value!r}.")
+            continue
+        if prop.get("type") in ("integer", "number"):
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                raise ValueError(f"{step.type}.{key} must be a number, got {value!r}.")
+            minimum = prop.get("minimum")
+            maximum = prop.get("maximum")
+            if minimum is not None and value < minimum:
+                raise ValueError(f"{step.type}.{key} must be >= {minimum}, got {value}.")
+            if maximum is not None and value > maximum:
+                raise ValueError(f"{step.type}.{key} must be <= {maximum}, got {value}.")
 
 
 @dataclass(frozen=True)
@@ -58,20 +83,19 @@ def validate_linear_graph(graph: PreprocessingGraph, active_registry: Preprocess
     ordered: list[OrderedNode] = []
     visited: set[str] = set()
     current = start_id
+    spec: ImageSpec | None = None
     while current:
         if current in visited:
             raise ValueError("Pipeline contains a cycle.")
         visited.add(current)
         node = node_by_id[current]
         step = active_registry.get(node.type)
-        ordered.append(
-            OrderedNode(
-                id=node.id,
-                type=node.type,
-                config={**step.default_config, **(node.config or {})},
-                position=node.position,
-            )
-        )
+        merged = {**step.default_config, **(node.config or {})}
+        validate_step_config(step, merged)
+        # Thread the symbolic image spec through the chain; raises if a step cannot
+        # consume the previous step's output (the type chain).
+        spec = step.output_spec(spec, merged)
+        ordered.append(OrderedNode(id=node.id, type=node.type, config=merged, position=node.position))
         current = outgoing.get(current, "")
 
     if len(visited) != len(nodes):
@@ -110,9 +134,12 @@ def execute_preview(graph: PreprocessingGraph, source_image_path: str) -> list[P
     image: np.ndarray | None = None
     previews: list[PreprocessingPreviewImage] = []
 
-    for node in ordered_nodes:
+    for index, node in enumerate(ordered_nodes):
         step = registry.get(node.type)
         image = step.apply(image, node.config, context)
+        if index == 0:
+            # Remember the original image size for steps that interpolate back to it (crop "source").
+            context["source_shape"] = image.shape
         width, height, channels, dtype, value_min, value_max = image_metadata(image)
         previews.append(
             PreprocessingPreviewImage(

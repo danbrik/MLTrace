@@ -88,7 +88,8 @@ Aktuell implementierte Seiten:
   - Bausteine aus automatisch entdeckten Python-Step-Klassen laden
   - neue Bausteine als eigene Datei unter `backend/app/preprocessing/steps/` ergänzen
   - ein Standardformat über `BasePreprocessingStep` verwenden
-  - initiale Bausteine: `load_image`, `warp_perspective`, `resize`, `crop`, `grayscale`, `normalize_for_preview`
+  - mitgelieferte Bausteine: `load_image`, `warp_perspective`, `resize`, `crop`, `grayscale`, `normalize_for_preview`, `gaussian_blur`
+  - Schritt-für-Schritt-Anleitung zum Erstellen neuer Module siehe [preprocessing_modules.md](preprocessing_modules.md)
   - lineare Bausteinansicht statt freier Graph-Canvas nutzen
   - Bausteine per UI hinzufügen, umsortieren und entfernen
   - Input-/Output-Informationen pro Baustein anzeigen, inklusive Formattyp, Größe, Kanalzahl und dtype nach Preview
@@ -96,8 +97,16 @@ Aktuell implementierte Seiten:
   - erstes Bild des Folders sofort bei Auswahl laden und persistent für alle Bausteine bereithalten
   - Zwischenbild nach jedem Pipeline-Schritt anzeigen
   - Bausteine inline im Baustein selbst konfigurieren (Configure klappt im Block auf, keine separate Panel-Spalte)
-  - bei `warp_perspective` vier Quellpunkte automatisch initialisieren, im geladenen Bild verschieben, die vier Punkte als Polygon verbinden und die transformierte Fläche halbtransparent orange einfärben sowie das transformierte Bild daneben prüfen
-  - bei `crop` den Crop-Bereich interaktiv über ein verschieb- und skalierbares, halbtransparent orange eingefärbtes Rechteck im geladenen Bild bestimmen und das beschnittene Bild daneben prüfen
+  - pro Baustein generisch ein Input-/Output-Vorschaufenster anzeigen; das Eingangsbild ist die Ausgabe des Vorgängerschritts
+  - Vorschau automatisch (debounced) aktualisieren, sobald Parameter geändert werden
+  - interaktive Bild-Werkzeuge schema-getrieben über `config_schema.ui_control` und eine Frontend-Control-Registry einbinden
+  - bei `warp_perspective` (`ui_control: point_picker`) vier Quellpunkte automatisch initialisieren, auf dem Eingangsbild verschieben, als Polygon verbinden und die transformierte Fläche halbtransparent orange einfärben sowie das transformierte Bild daneben prüfen
+  - bei `crop` (`ui_control: crop_box`) den Crop-Bereich interaktiv über ein verschieb- und skalierbares, halbtransparent orange eingefärbtes Rechteck auf dem Eingangsbild bestimmen und das beschnittene Bild daneben prüfen
+  - bei `crop` die Ausgabegröße wählen: nur croppen, auf die Eingangsgröße oder auf die Pipeline-Ursprungsgröße interpolieren
+  - Größen-Parameter neuer Bausteine aus der tatsächlichen Pixelgröße des Vorgängerschritts vorbelegen (`default_from`)
+  - die Typ-Kette prüfen: jeder Baustein deklariert per `output_spec` einen I/O-Vertrag (Kanäle/Größe); inkompatible Ketten werden beim Speichern und in der Vorschau hart blockiert
+  - Konfigurationswerte gegen `config_schema` validieren (Typ, min/max, enum) und Fehler im UI anzeigen
+  - gespeicherte Pipelines laden, bearbeiten (Update) oder als neue Pipeline speichern; Pipeline-Namen sind eindeutig (case-insensitive)
   - gespeicherte Pipelines laden und löschen
 
 Aktuelle Datenbankobjekte:

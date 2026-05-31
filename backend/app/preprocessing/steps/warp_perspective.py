@@ -3,7 +3,7 @@ from __future__ import annotations
 import cv2
 import numpy as np
 
-from app.preprocessing.base import BasePreprocessingStep
+from app.preprocessing.base import BasePreprocessingStep, ImageSpec
 from app.preprocessing.utils import default_quad, interpolation_flag
 
 
@@ -31,8 +31,8 @@ class WarpPerspectiveStep(BasePreprocessingStep):
                 "maxItems": 4,
                 "default": [],
             },
-            "output_width": {"type": "integer", "label": "Output width", "minimum": 1, "default": 128},
-            "output_height": {"type": "integer", "label": "Output height", "minimum": 1, "default": 128},
+            "output_width": {"type": "integer", "label": "Output width", "minimum": 1, "default": 128, "default_from": "input_width"},
+            "output_height": {"type": "integer", "label": "Output height", "minimum": 1, "default": 128, "default_from": "input_height"},
             "interpolation": {
                 "type": "string",
                 "label": "Interpolation",
@@ -41,6 +41,17 @@ class WarpPerspectiveStep(BasePreprocessingStep):
             },
         },
     }
+
+    def output_spec(self, spec_in: ImageSpec | None, config: dict) -> ImageSpec:
+        if spec_in is None:
+            raise ValueError("warp_perspective requires an input image.")
+        cfg = self.merged_config(config)
+        return ImageSpec(
+            channels=spec_in.channels,
+            width=int(cfg["output_width"]),
+            height=int(cfg["output_height"]),
+            dtype=spec_in.dtype,
+        )
 
     def apply(self, image: np.ndarray | None, config: dict, context: dict) -> np.ndarray:
         if image is None:

@@ -223,3 +223,45 @@ def test_preprocessing_pipeline_crud_and_preview(tmp_path: Path) -> None:
             next(client_iter)
         except StopIteration:
             pass
+
+
+def test_preprocessing_pipeline_update_and_unique_name() -> None:
+    client_iter = make_client()
+    client = next(client_iter)
+    try:
+        graph = {
+            "nodes": [
+                {"id": "load", "type": "load_image", "config": {}, "position": {"x": 0, "y": 0}},
+                {"id": "resize", "type": "resize", "config": {"width": 8, "height": 4}, "position": {"x": 220, "y": 0}},
+            ],
+            "edges": [{"id": "load-resize", "source": "load", "target": "resize"}],
+        }
+
+        created = client.post("/api/preprocessing/pipelines", json={"name": "Pipe one", "graph": graph})
+        assert created.status_code == 200
+        pid = created.json()["id"]
+
+        # Duplicate name (case-insensitive) is rejected.
+        duplicate = client.post("/api/preprocessing/pipelines", json={"name": "pipe ONE", "graph": graph})
+        assert duplicate.status_code == 400
+
+        second = client.post("/api/preprocessing/pipelines", json={"name": "Pipe two", "graph": graph})
+        assert second.status_code == 200
+
+        # Update name + graph of the first pipeline.
+        updated = client.put(f"/api/preprocessing/pipelines/{pid}", json={"name": "Pipe renamed", "graph": graph})
+        assert updated.status_code == 200
+        assert updated.json()["name"] == "Pipe renamed"
+
+        # Renaming onto an existing name is rejected.
+        clash = client.put(f"/api/preprocessing/pipelines/{pid}", json={"name": "Pipe two", "graph": graph})
+        assert clash.status_code == 400
+
+        # Updating a missing pipeline returns 404.
+        missing = client.put("/api/preprocessing/pipelines/99999", json={"name": "X", "graph": graph})
+        assert missing.status_code == 404
+    finally:
+        try:
+            next(client_iter)
+        except StopIteration:
+            pass

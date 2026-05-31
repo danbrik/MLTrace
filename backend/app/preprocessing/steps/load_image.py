@@ -5,7 +5,7 @@ from pathlib import Path
 import numpy as np
 from PIL import Image
 
-from app.preprocessing.base import BasePreprocessingStep
+from app.preprocessing.base import BasePreprocessingStep, ImageSpec
 
 
 class LoadImageStep(BasePreprocessingStep):
@@ -26,6 +26,10 @@ class LoadImageStep(BasePreprocessingStep):
             }
         },
     }
+
+    def output_spec(self, spec_in: ImageSpec | None, config: dict) -> ImageSpec:
+        mode = self.merged_config(config)["mode"]
+        return ImageSpec(channels=1 if mode == "grayscale" else 3, dtype="uint8")
 
     def apply(self, image: np.ndarray | None, config: dict, context: dict) -> np.ndarray:
         path = Path(context["source_image_path"])
