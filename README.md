@@ -1,0 +1,87 @@
+# MLTrace
+
+MLTrace V1 is a local single-user platform for indexing TIFF image datasets and saving reusable training dataset rules.
+
+## Stack
+
+- Backend: FastAPI, SQLAlchemy, SQLite by default, Pillow
+- Frontend: React, Vite, TypeScript, Mantine
+- Data policy: image files stay at their original paths and are never copied
+
+## Features in V1
+
+- Add a dataset root path.
+- Detect filename timestamp patterns for `.tif` and `.tiff` files.
+- Confirm or edit the timestamp regex and Python datetime format before scanning.
+- Store image, folder, timestamp, resolution, and cadence metadata in a local database.
+- Create training datasets from folders across one or more dataset roots, arbitrary time ranges, and per-range stride.
+- Save training dataset rules only, not immutable image manifests.
+- Inspect saved training datasets, including source paths, ranges, stride, and current image counts.
+- Delete saved training datasets.
+
+## Local Setup
+
+Create a Python environment and install backend dependencies:
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -e ".[dev]"
+```
+
+Run database migrations:
+
+```bash
+alembic upgrade head
+```
+
+By default this creates a local SQLite database at `.mltrace/mltrace.db`. No Docker service is required.
+
+Run the backend:
+
+```bash
+PYTHONPATH=backend uvicorn app.main:app --reload --port 8000
+```
+
+Install and run the frontend:
+
+```bash
+cd frontend
+npm install
+npm run dev
+```
+
+Open `http://localhost:5173`.
+
+## Database Configuration
+
+The default `.env.example` uses SQLite:
+
+```text
+DATABASE_URL=sqlite:///./.mltrace/mltrace.db
+```
+
+For a native Postgres installation later, install the optional driver and set `DATABASE_URL`:
+
+```bash
+pip install -e ".[postgres]"
+```
+
+```text
+DATABASE_URL=postgresql+psycopg://user:password@localhost:5432/mltrace
+```
+
+## Timestamp Parser
+
+MLTrace proposes a parser from common filename patterns. The regex should contain either a named group called `timestamp` or a first capture group. The datetime format is a Python `strptime` format, for example:
+
+```text
+(?P<timestamp>\d{8}_\d{6})
+%Y%m%d_%H%M%S
+```
+
+## Tests
+
+```bash
+pytest -q
+```

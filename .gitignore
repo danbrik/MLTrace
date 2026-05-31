@@ -1,0 +1,95 @@
+# macOS
+.DS_Store
+
+# Editor / IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Environment variables and local config
+.env
+.env.*
+!.env.example
+!.env.template
+
+# Dependencies and package manager caches
+node_modules/
+vendor/
+.pnpm-store/
+.npm/
+.yarn/
+
+# Build output
+dist/
+build/
+out/
+coverage/
+tmp/
+temp/
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyd
+.python-version
+.venv/
+venv/
+env/
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+.tox/
+.nox/
+*.egg-info/
+.mltrace/
+*.egg
+.eggs/
+pip-wheel-metadata/
+.ropeproject/
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb
+
+# Project data / samples (kept out of VCS)
+sample_datasets/
+
+# Java / Kotlin / Gradle
+.gradle/
+*.class
+
+# Rust
+target/
+
+# Go
+bin/
+*.test
+
+# .NET
+obj/
+*.user
+*.suo
+
+# Archives and packaged artifacts
+*.7z
+*.gz
+*.zip
+*.tar
+*.tgz
+*.bz2
+*.rar
+
+# Misc generated files
+*.pid
+*.seed
+*.cache
+*.tmp
+## end of file

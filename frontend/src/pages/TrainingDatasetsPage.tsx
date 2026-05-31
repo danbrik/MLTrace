@@ -1,0 +1,564 @@
+import {
+  ActionIcon,
+  Alert,
+  Badge,
+  Button,
+  Group,
+  Modal,
+  NumberInput,
+  Paper,
+  ScrollArea,
+  Select,
+  Stack,
+  Table,
+  Text,
+  TextInput,
+  Textarea,
+  Title,
+  Tooltip,
+} from '@mantine/core';
+import { notifications } from '@mantine/notifications';
+import { Info, Plus, Save, Trash2 } from 'lucide-react';
+import { useEffect, useMemo, useState } from 'react';
+
+import {
+  createTrainingDataset,
+  deleteTrainingDataset,
+  getTrainingDataset,
+  listDatasets,
+  listTrainingDatasets,
+  previewTrainingDataset,
+} from '../api';
+import type { Dataset, DatasetFolder, TrainingDataset, TrainingDatasetPreview, TrainingDatasetRuleInput } from '../types';
+
+type RuleRow = TrainingDatasetRuleInput & {
+  localId: string;
+};
+
+type FolderChoice = {
+  dataset: Dataset;
+  folder: DatasetFolder;
+  value: string;
+  label: string;
+  min: string;
+  max: string;
+};
+
+function toInputDateTime(value: string | null): string {
+  if (!value) return '';
+  return value.slice(0, 19);
+}
+
+function formatTimestamp(value: string | null): string {
+  if (!value) return 'n/a';
+  return value.replace('T', ' ');
+}
+
+function formatNameTimestamp(value: string): string {
+  return value.replace('T', ' ');
+}
+
+function generatedTrainingDatasetName(rules: RuleRow[]): string {
+  const starts = rules.map((rule) => rule.start_timestamp).filter(Boolean).sort();
+  const ends = rules.map((rule) => rule.end_timestamp).filter(Boolean).sort();
+  if (starts.length === 0 || ends.length === 0) return '';
+  return `${formatNameTimestamp(starts[0])} to ${formatNameTimestamp(ends[ends.length - 1])}`;
+}
+
+function newRule(folderChoices: FolderChoice[]): RuleRow | null {
+  const choice = folderChoices[0];
+  if (!choice) return null;
+  return {
+    localId: crypto.randomUUID(),
+    folder_id: choice.folder.id,
+    start_timestamp: choice.min,
+    end_timestamp: choice.max,
+    stride: 1,
+  };
+}
+
+function selectedText(trainingDataset: TrainingDataset): string {
+  return `${trainingDataset.total_selected_images} images`;
+}
+
+export function TrainingDatasetsPage() {
+  const [datasets, setDatasets] = useState<Dataset[]>([]);
+  const [trainingDatasets, setTrainingDatasets] = useState<TrainingDataset[]>([]);
+  const [inspectedDataset, setInspectedDataset] = useState<TrainingDataset | null>(null);
+  const [name, setName] = useState('');
+  const [nameEdited, setNameEdited] = useState(false);
+  const [notes, setNotes] = useState('');
+  const [rules, setRules] = useState<RuleRow[]>([]);
+  const [preview, setPreview] = useState<TrainingDatasetPreview | null>(null);
+  const [loading, setLoading] = useState(false);
+
+  async function refresh() {
+    const [nextDatasets, nextTrainingDatasets] = await Promise.all([
+      listDatasets(),
+      listTrainingDatasets(),
+    ]);
+    setDatasets(nextDatasets.filter((dataset) => dataset.status === 'ready'));
+    setTrainingDatasets(nextTrainingDatasets);
+  }
+
+  useEffect(() => {
+    refresh().catch((error) => {
+      notifications.show({ color: 'red', title: 'Could not load training datasets', message: error.message });
+    });
+  }, []);
+
+  const folderChoices = useMemo<FolderChoice[]>(
+    () =>
+      datasets.flatMap((dataset) =>
+        dataset.folders
+          .filter((folder) => folder.first_timestamp && folder.last_timestamp)
+          .map((folder) => ({
+            dataset,
+            folder,
+            value: String(folder.id),
+            label: `${dataset.name} / ${folder.relative_path} (${folder.image_count})`,
+            min: toInputDateTime(folder.first_timestamp),
+            max: toInputDateTime(folder.last_timestamp),
+          })),
+      ),
+    [datasets],
+  );
+
+  const folderChoiceById = useMemo(
+    () => new Map(folderChoices.map((choice) => [choice.folder.id, choice])),
+    [folderChoices],
+  );
+
+  const folderOptions = useMemo(
+    () => folderChoices.map((choice) => ({ value: choice.value, label: choice.label })),
+    [folderChoices],
+  );
+
+  useEffect(() => {
+    if (rules.length === 0 && folderChoices.length > 0) {
+      const rule = newRule(folderChoices);
+      if (rule) setRules([rule]);
+    }
+  }, [folderChoices, rules.length]);
+
+  const invalidRules = useMemo(
+    () =>
+      rules.filter((rule) => {
+        const choice = folderChoiceById.get(rule.folder_id);
+        if (!choice) return true;
+        return (
+          !rule.start_timestamp ||
+          !rule.end_timestamp ||
+          rule.start_timestamp < choice.min ||
+          rule.end_timestamp > choice.max ||
+          rule.end_timestamp < rule.start_timestamp
+        );
+      }),
+    [folderChoiceById, rules],
+  );
+
+  const generatedName = useMemo(() => generatedTrainingDatasetName(rules), [rules]);
+
+  useEffect(() => {
+    if (!nameEdited && generatedName) {
+      setName(generatedName);
+    }
+  }, [generatedName, nameEdited]);
+
+  function updateRule(localId: string, patch: Partial<RuleRow>) {
+    setPreview(null);
+    setRules((current) =>
+      current.map((rule) => (rule.localId === localId ? { ...rule, ...patch } : rule)),
+    );
+  }
+
+  function handleFolderChange(localId: string, folderId: string | null) {
+    if (!folderId) return;
+    const choice = folderChoiceById.get(Number(folderId));
+    if (!choice) return;
+    updateRule(localId, {
+      folder_id: choice.folder.id,
+      start_timestamp: choice.min,
+      end_timestamp: choice.max,
+    });
+  }
+
+  function handleAddRule() {
+    const rule = newRule(folderChoices);
+    if (!rule) return;
+    setRules((current) => [...current, rule]);
+    setPreview(null);
+  }
+
+  function handleRemoveRule(localId: string) {
+    setRules((current) => current.filter((rule) => rule.localId !== localId));
+    setPreview(null);
+  }
+
+  function rulesPayload(): TrainingDatasetRuleInput[] {
+    return rules.map(({ localId: _localId, ...rule }) => rule);
+  }
+
+  async function handlePreview() {
+    setLoading(true);
+    try {
+      const nextPreview = await previewTrainingDataset({ rules: rulesPayload() });
+      setPreview(nextPreview);
+    } catch (error) {
+      notifications.show({
+        color: 'red',
+        title: 'Preview failed',
+        message: error instanceof Error ? error.message : 'Unknown error',
+      });
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function handleSave() {
+    setLoading(true);
+    try {
+      await createTrainingDataset({
+        name,
+        notes,
+        rules: rulesPayload(),
+      });
+      setName('');
+      setNameEdited(false);
+      setNotes('');
+      setPreview(null);
+      await refresh();
+      notifications.show({ color: 'green', title: 'Training dataset saved', message: name });
+    } catch (error) {
+      notifications.show({
+        color: 'red',
+        title: 'Save failed',
+        message: error instanceof Error ? error.message : 'Unknown error',
+      });
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function handleDelete(trainingDataset: TrainingDataset) {
+    const confirmed = window.confirm(`Delete training dataset "${trainingDataset.name}"?`);
+    if (!confirmed) return;
+
+    try {
+      await deleteTrainingDataset(trainingDataset.id);
+      if (inspectedDataset?.id === trainingDataset.id) {
+        setInspectedDataset(null);
+      }
+      await refresh();
+      notifications.show({ color: 'green', title: 'Training dataset deleted', message: trainingDataset.name });
+    } catch (error) {
+      notifications.show({
+        color: 'red',
+        title: 'Delete failed',
+        message: error instanceof Error ? error.message : 'Unknown error',
+      });
+    }
+  }
+
+  async function handleInspect(trainingDataset: TrainingDataset) {
+    try {
+      const details = await getTrainingDataset(trainingDataset.id);
+      setInspectedDataset(details);
+    } catch (error) {
+      notifications.show({
+        color: 'red',
+        title: 'Inspect failed',
+        message: error instanceof Error ? error.message : 'Unknown error',
+      });
+    }
+  }
+
+  const canSubmit = name.trim() && rules.length > 0 && invalidRules.length === 0;
+
+  return (
+    <Stack gap="lg">
+      <div>
+        <Title order={2}>Training Datasets</Title>
+        <Text c="dimmed" size="sm">
+          Save reusable training-data rules from indexed folders, time ranges, and sampling stride.
+        </Text>
+      </div>
+
+      <Paper withBorder p="md" radius="sm">
+        <Stack gap="md">
+          <Title order={3}>Create training dataset</Title>
+          <Group align="flex-end" grow>
+            <TextInput
+              label="Name"
+              placeholder="AE normal training set v1"
+              value={name}
+              description="Generated from the earliest selected start and latest selected end."
+              onChange={(event) => {
+                setNameEdited(true);
+                setName(event.currentTarget.value);
+              }}
+            />
+          </Group>
+          <Textarea
+            label="Notes"
+            placeholder="Normal state, selected February ranges"
+            value={notes}
+            onChange={(event) => setNotes(event.currentTarget.value)}
+          />
+
+          {folderChoices.length === 0 && (
+            <Alert color="blue" title="No scanned folders">
+              Add and scan at least one dataset before creating a training dataset.
+            </Alert>
+          )}
+
+          {folderChoices.length > 0 && (
+            <>
+              <Group justify="space-between">
+                <Title order={4}>Selection ranges</Title>
+                <Button leftSection={<Plus size={18} />} variant="light" onClick={handleAddRule}>
+                  Add range
+                </Button>
+              </Group>
+
+              <ScrollArea>
+                <Table verticalSpacing="sm">
+                  <Table.Thead>
+                    <Table.Tr>
+                      <Table.Th>Dataset / folder</Table.Th>
+                      <Table.Th>Start</Table.Th>
+                      <Table.Th>End</Table.Th>
+                      <Table.Th>Allowed range</Table.Th>
+                      <Table.Th>Stride</Table.Th>
+                      <Table.Th>Preview</Table.Th>
+                      <Table.Th />
+                    </Table.Tr>
+                  </Table.Thead>
+                  <Table.Tbody>
+                    {rules.map((rule, index) => {
+                      const choice = folderChoiceById.get(rule.folder_id);
+                      const invalid = invalidRules.some((invalidRule) => invalidRule.localId === rule.localId);
+                      return (
+                        <Table.Tr key={rule.localId}>
+                          <Table.Td>
+                            <Select
+                              data={folderOptions}
+                              value={String(rule.folder_id)}
+                              onChange={(folderId) => handleFolderChange(rule.localId, folderId)}
+                              searchable
+                            />
+                          </Table.Td>
+                          <Table.Td>
+                            <TextInput
+                              type="datetime-local"
+                              step={1}
+                              min={choice?.min}
+                              max={choice?.max}
+                              error={invalid ? 'Out of range' : undefined}
+                              value={rule.start_timestamp}
+                              onChange={(event) =>
+                                updateRule(rule.localId, { start_timestamp: event.currentTarget.value })
+                              }
+                            />
+                          </Table.Td>
+                          <Table.Td>
+                            <TextInput
+                              type="datetime-local"
+                              step={1}
+                              min={choice?.min}
+                              max={choice?.max}
+                              error={invalid ? 'Out of range' : undefined}
+                              value={rule.end_timestamp}
+                              onChange={(event) =>
+                                updateRule(rule.localId, { end_timestamp: event.currentTarget.value })
+                              }
+                            />
+                          </Table.Td>
+                          <Table.Td>
+                            <Text size="xs" c="dimmed">
+                              {choice ? `${formatTimestamp(choice.min)} to ${formatTimestamp(choice.max)}` : 'n/a'}
+                            </Text>
+                          </Table.Td>
+                          <Table.Td>
+                            <NumberInput
+                              min={1}
+                              value={rule.stride}
+                              onChange={(value) =>
+                                updateRule(rule.localId, { stride: typeof value === 'number' ? value : 1 })
+                              }
+                            />
+                          </Table.Td>
+                          <Table.Td>
+                            {preview?.rules[index]
+                              ? `${preview.rules[index].selected_images} / ${preview.rules[index].matching_images}`
+                              : 'n/a'}
+                          </Table.Td>
+                          <Table.Td>
+                            <ActionIcon
+                              color="red"
+                              variant="subtle"
+                              aria-label="Remove rule"
+                              onClick={() => handleRemoveRule(rule.localId)}
+                            >
+                              <Trash2 size={18} />
+                            </ActionIcon>
+                          </Table.Td>
+                        </Table.Tr>
+                      );
+                    })}
+                  </Table.Tbody>
+                </Table>
+              </ScrollArea>
+
+              {invalidRules.length > 0 && (
+                <Alert color="red" title="Invalid time range">
+                  Start and end must stay inside the selected folder bounds.
+                </Alert>
+              )}
+
+              {preview && (
+                <Alert color="green" title="Preview">
+                  {preview.total_selected_images} selected images from {preview.total_matching_images} matching images.
+                </Alert>
+              )}
+
+              <Group justify="flex-end">
+                <Button
+                  variant="light"
+                  onClick={handlePreview}
+                  loading={loading}
+                  disabled={rules.length === 0 || invalidRules.length > 0}
+                >
+                  Preview counts
+                </Button>
+                <Button
+                  leftSection={<Save size={18} />}
+                  onClick={handleSave}
+                  loading={loading}
+                  disabled={!canSubmit}
+                >
+                  Save training dataset
+                </Button>
+              </Group>
+            </>
+          )}
+        </Stack>
+      </Paper>
+
+      <Paper withBorder p="md" radius="sm">
+        <Stack gap="md">
+          <Title order={3}>Saved training datasets</Title>
+          <ScrollArea>
+            <Table verticalSpacing="sm" striped>
+              <Table.Thead>
+                <Table.Tr>
+                  <Table.Th>Name</Table.Th>
+                  <Table.Th>Source paths</Table.Th>
+                  <Table.Th>Images</Table.Th>
+                  <Table.Th>Created</Table.Th>
+                  <Table.Th>Notes</Table.Th>
+                  <Table.Th />
+                </Table.Tr>
+              </Table.Thead>
+              <Table.Tbody>
+                {trainingDatasets.map((trainingDataset) => (
+                  <Table.Tr key={trainingDataset.id}>
+                    <Table.Td>{trainingDataset.name}</Table.Td>
+                    <Table.Td>
+                      <Group gap="xs">
+                        {trainingDataset.dataset_names.map((datasetName) => (
+                          <Badge key={datasetName} variant="light">
+                            {datasetName}
+                          </Badge>
+                        ))}
+                      </Group>
+                    </Table.Td>
+                    <Table.Td>{selectedText(trainingDataset)}</Table.Td>
+                    <Table.Td>{formatTimestamp(trainingDataset.created_at)}</Table.Td>
+                    <Table.Td>{trainingDataset.notes ?? ''}</Table.Td>
+                    <Table.Td>
+                      <Group gap="xs" justify="flex-end">
+                        <Tooltip label="Inspect ranges">
+                          <ActionIcon
+                            variant="subtle"
+                            aria-label="Inspect training dataset"
+                            onClick={() => handleInspect(trainingDataset)}
+                          >
+                            <Info size={18} />
+                          </ActionIcon>
+                        </Tooltip>
+                        <Tooltip label="Delete">
+                          <ActionIcon
+                            color="red"
+                            variant="subtle"
+                            aria-label="Delete training dataset"
+                            onClick={() => handleDelete(trainingDataset)}
+                          >
+                            <Trash2 size={18} />
+                          </ActionIcon>
+                        </Tooltip>
+                      </Group>
+                    </Table.Td>
+                  </Table.Tr>
+                ))}
+              </Table.Tbody>
+            </Table>
+          </ScrollArea>
+        </Stack>
+      </Paper>
+
+      <Modal
+        opened={inspectedDataset !== null}
+        onClose={() => setInspectedDataset(null)}
+        title={inspectedDataset ? `Training dataset: ${inspectedDataset.name}` : 'Training dataset'}
+        size="xl"
+      >
+        {inspectedDataset && (
+          <Stack gap="md">
+            <Alert color="blue" title="Image count">
+              {inspectedDataset.total_selected_images} selected images from {inspectedDataset.total_matching_images}{' '}
+              matching images.
+            </Alert>
+            <ScrollArea h={420}>
+              <Table verticalSpacing="sm">
+                <Table.Thead>
+                  <Table.Tr>
+                    <Table.Th>#</Table.Th>
+                    <Table.Th>Dataset</Table.Th>
+                    <Table.Th>Folder</Table.Th>
+                    <Table.Th>Start</Table.Th>
+                    <Table.Th>End</Table.Th>
+                    <Table.Th>Stride</Table.Th>
+                    <Table.Th>Images</Table.Th>
+                  </Table.Tr>
+                </Table.Thead>
+                <Table.Tbody>
+                  {inspectedDataset.rules.map((rule, index) => (
+                    <Table.Tr key={rule.id}>
+                      <Table.Td>{index + 1}</Table.Td>
+                      <Table.Td>
+                        <Stack gap={2}>
+                          <Text size="sm">{rule.dataset_name}</Text>
+                          <Text size="xs" c="dimmed" className="mono">
+                            {rule.dataset_root_path}
+                          </Text>
+                        </Stack>
+                      </Table.Td>
+                      <Table.Td className="mono">{rule.folder_relative_path}</Table.Td>
+                      <Table.Td>{formatTimestamp(rule.start_timestamp)}</Table.Td>
+                      <Table.Td>{formatTimestamp(rule.end_timestamp)}</Table.Td>
+                      <Table.Td>{rule.stride}</Table.Td>
+                      <Table.Td>
+                        {rule.selected_images} / {rule.matching_images}
+                      </Table.Td>
+                    </Table.Tr>
+                  ))}
+                </Table.Tbody>
+              </Table>
+            </ScrollArea>
+          </Stack>
+        )}
+      </Modal>
+    </Stack>
+  );
+}

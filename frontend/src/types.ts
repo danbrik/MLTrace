@@ -1,0 +1,74 @@
+export type DatasetFolder = {
+  id: number;
+  relative_path: string;
+  image_count: number;
+  first_timestamp: string | null;
+  last_timestamp: string | null;
+  extension_summary: Record<string, number> | null;
+  resolution_summary: Record<string, number> | null;
+  cadence_summary: {
+    min_seconds: number | null;
+    median_seconds: number | null;
+    max_seconds: number | null;
+  } | null;
+};
+
+export type Dataset = {
+  id: number;
+  name: string;
+  root_path: string;
+  status: string;
+  timestamp_regex: string | null;
+  timestamp_format: string | null;
+  timestamp_example: string | null;
+  scan_error: string | null;
+  scan_summary: Record<string, unknown> | null;
+  created_at: string;
+  updated_at: string;
+  folders: DatasetFolder[];
+};
+
+export type TrainingDatasetRuleInput = {
+  folder_id: number;
+  start_timestamp: string;
+  end_timestamp: string;
+  stride: number;
+};
+
+export type TrainingDatasetPreview = {
+  total_matching_images: number;
+  total_selected_images: number;
+  rules: Array<{
+    folder_id: number;
+    start_timestamp: string;
+    end_timestamp: string;
+    stride: number;
+    matching_images: number;
+    selected_images: number;
+  }>;
+};
+
+export type TrainingDataset = {
+  id: number;
+  name: string;
+  notes: string | null;
+  created_at: string;
+  dataset_names: string[];
+  total_matching_images: number;
+  total_selected_images: number;
+  rules: Array<{
+    id: number;
+    folder_id: number;
+    dataset_id: number;
+    dataset_name: string;
+    dataset_root_path: string;
+    folder_relative_path: string;
+    folder_first_timestamp: string | null;
+    folder_last_timestamp: string | null;
+    start_timestamp: string;
+    end_timestamp: string;
+    stride: number;
+    matching_images: number;
+    selected_images: number;
+  }>;
+};
