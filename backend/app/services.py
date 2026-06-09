@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session, selectinload
 from app import models
 from app.preprocessing.pipeline import execute_preview, validate_linear_graph
 from app.preprocessing.registry import registry
-from app.scanner import detect_timestamp_pattern, iter_tiff_files, scan_dataset_files
+from app.scanner import detect_timestamp_pattern, find_first_direct_tiff, scan_dataset_files
 from app.schemas import (
     DatasetConnectionTestResponse,
     PreprocessingGraph,
@@ -70,9 +70,8 @@ def test_dataset_connection(root_path: str) -> DatasetConnectionTestResponse:
             message=f"Dataset path is not a directory: {root}",
         )
 
-    files = iter_tiff_files(root)
-    if files:
-        sample_file = files[0]
+    sample_file = find_first_direct_tiff(root)
+    if sample_file is not None:
         return DatasetConnectionTestResponse(
             root_path=str(root),
             exists=True,

@@ -33,6 +33,17 @@ def test_detect_timestamp_pattern_for_prefixed_two_digit_year(tmp_path: Path) ->
     assert pattern.example == "26-01-21_16-46-25"
 
 
+def test_detect_timestamp_pattern_stops_at_first_direct_tiff(tmp_path: Path) -> None:
+    write_tiff(tmp_path / "line_00" / "first_20260204_153000.tif")
+    for index in range(200):
+        (tmp_path / f"line_{index + 1:03d}").mkdir(parents=True)
+
+    pattern = detect_timestamp_pattern(tmp_path)
+
+    assert pattern is not None
+    assert pattern.example == "20260204_153000"
+
+
 def test_scan_dataset_files_and_folder_summary(tmp_path: Path) -> None:
     write_tiff(tmp_path / "0226" / "frame_20260204_153000.tif", (20, 10))
     write_tiff(tmp_path / "0226" / "frame_20260204_153010.tif", (20, 10))

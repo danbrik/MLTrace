@@ -71,6 +71,23 @@ def direct_tiff_files(folder_path: str | Path) -> list[Path]:
     )
 
 
+def find_first_direct_tiff(root_path: str | Path) -> Path | None:
+    root = Path(root_path).expanduser()
+
+    for path in root.iterdir():
+        if path.is_file() and path.suffix.lower() in TIFF_EXTENSIONS:
+            return path
+
+    for child in root.iterdir():
+        if not child.is_dir():
+            continue
+        for path in child.iterdir():
+            if path.is_file() and path.suffix.lower() in TIFF_EXTENSIONS:
+                return path
+
+    return None
+
+
 def iter_tiff_files(root_path: str | Path) -> list[Path]:
     return list(chain.from_iterable(files for _, files in iter_tiff_file_groups(root_path)))
 
@@ -105,11 +122,11 @@ def extract_timestamp(file_name: str, regex: str, timestamp_format: str) -> tupl
 
 
 def detect_timestamp_pattern(root_path: str | Path) -> TimestampPattern | None:
-    files = iter_tiff_files(root_path)
-    if not files:
+    first_file = find_first_direct_tiff(root_path)
+    if first_file is None:
         return None
 
-    file_name = files[0].name
+    file_name = first_file.name
 
     for regex, timestamp_format in COMMON_TIMESTAMP_PATTERNS:
         try:

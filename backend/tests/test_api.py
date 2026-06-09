@@ -131,6 +131,25 @@ def test_dataset_connection_probe_and_delete(tmp_path: Path) -> None:
             pass
 
 
+def test_dataset_connection_probe_stops_at_first_supported_file(tmp_path: Path) -> None:
+    probe_root = tmp_path / "probe_fast"
+    write_tiff(probe_root / "line_00" / "first.tif")
+    for index in range(200):
+        (probe_root / f"line_{index + 1:03d}").mkdir(parents=True)
+
+    client_iter = make_client()
+    client = next(client_iter)
+    try:
+        probe = client.post("/api/datasets/test-connection", json={"root_path": str(probe_root)})
+        assert probe.status_code == 200
+        assert probe.json()["sample_file_path"].endswith("line_00/first.tif")
+    finally:
+        try:
+            next(client_iter)
+        except StopIteration:
+            pass
+
+
 def test_training_dataset_can_span_datasets_and_be_deleted(tmp_path: Path) -> None:
     client_iter = make_client()
     client = next(client_iter)
