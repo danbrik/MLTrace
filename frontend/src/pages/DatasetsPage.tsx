@@ -30,6 +30,13 @@ import {
 } from '../api';
 import type { Dataset, DatasetConnectionTest } from '../types';
 
+type ActivityLogEntry = {
+  id: number;
+  level: 'info' | 'success' | 'error';
+  time: string;
+  message: string;
+};
+
 function formatTimestamp(value: string | null): string {
   if (!value) return 'n/a';
   return value.replace('T', ' ');
@@ -73,6 +80,21 @@ export function DatasetsPage() {
   const [testingConnection, setTestingConnection] = useState(false);
   const [deletingDatasetId, setDeletingDatasetId] = useState<number | null>(null);
   const [scanning, setScanning] = useState(false);
+  const [activityLog, setActivityLog] = useState<ActivityLogEntry[]>([]);
+  const [runningOperation, setRunningOperation] = useState<{ label: string; startedAt: number } | null>(null);
+  const [, setElapsedTick] = useState(0);
+
+  function addActivity(level: ActivityLogEntry['level'], message: string) {
+    setActivityLog((current) => [
+      {
+        id: Date.now() + Math.random(),
+        level,
+        time: new Date().toLocaleTimeString(),
+        message,
+      },
+      ...current,
+    ].slice(0, 30));
+  }
 
   async function refreshDatasets(selectId?: number) {
     const nextDatasets = await listDatasets();
@@ -90,15 +112,33 @@ export function DatasetsPage() {
     });
   }, []);
 
+  useEffect(() => {
+    if (!runningOperation) return undefined;
+    const timer = window.setInterval(() => setElapsedTick((current) => current + 1), 1000);
+    return () => window.clearInterval(timer);
+  }, [runningOperation]);
+
   const selectedDataset = useMemo(
     () => datasets.find((dataset) => dataset.id === selectedDatasetId) ?? null,
     [datasets, selectedDatasetId],
   );
+  const runningElapsedSeconds = runningOperation
+    ? Math.floor((Date.now() - runningOperation.startedAt) / 1000)
+    : 0;
 
   async function handleCreateDataset() {
     setLoading(true);
+    setElapsedTick(0);
+    setRunningOperation({ label: `Detect timestamps: ${rootPath}`, startedAt: Date.now() });
+    addActivity('info', `Detect timestamps started for ${rootPath}`);
     try {
       const dataset = await createDataset({ name: datasetName, root_path: rootPath });
+      addActivity(
+        dataset.timestamp_regex ? 'success' : 'error',
+        dataset.timestamp_regex
+          ? `Timestamp parser detected from example ${dataset.timestamp_example ?? 'n/a'}`
+          : `No timestamp parser detected for ${dataset.root_path}`,
+      );
       setDatasetName('');
       setRootPath('');
       setConnectionTest(null);
@@ -112,16 +152,25 @@ export function DatasetsPage() {
         title: 'Dataset could not be created',
         message: error instanceof Error ? error.message : 'Unknown error',
       });
+      addActivity('error', `Detect timestamps failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
     } finally {
       setLoading(false);
+      setRunningOperation(null);
     }
   }
 
   async function handleTestConnection() {
     setTestingConnection(true);
+    setElapsedTick(0);
+    setRunningOperation({ label: `Test path: ${rootPath}`, startedAt: Date.now() });
+    addActivity('info', `Test path started for ${rootPath}`);
     try {
       const result = await testDatasetConnection({ root_path: rootPath });
       setConnectionTest(result);
+      addActivity(
+        result.supported_file_found ? 'success' : 'error',
+        result.sample_file_path ? `Supported file found: ${result.sample_file_path}` : result.message,
+      );
       notifications.show({
         color: result.supported_file_found ? 'green' : result.exists && result.is_directory ? 'yellow' : 'red',
         title: result.supported_file_found ? 'Dataset path reachable' : 'No supported image found',
@@ -133,19 +182,30 @@ export function DatasetsPage() {
         title: 'Connection test failed',
         message: error instanceof Error ? error.message : 'Unknown error',
       });
+      addActivity('error', `Test path failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
     } finally {
       setTestingConnection(false);
+      setRunningOperation(null);
     }
   }
 
   async function handleConfirmTimestamp() {
     if (!confirmationDataset) return;
     setScanning(true);
+    setElapsedTick(0);
+    setRunningOperation({ label: `Scan dataset: ${confirmationDataset.root_path}`, startedAt: Date.now() });
+    addActivity('info', `Confirm timestamp parser started for ${confirmationDataset.root_path}`);
     try {
       const scanned = await confirmTimestampFormat(confirmationDataset.id, {
         timestamp_regex: timestampRegex,
         timestamp_format: timestampFormat,
       });
+      addActivity(
+        scanned.status === 'ready' ? 'success' : 'error',
+        scanned.status === 'ready'
+          ? `Scan finished: ${scanned.folders.length} folder summaries indexed`
+          : `Scan failed: ${scanned.scan_error ?? 'unknown error'}`,
+      );
       setConfirmationDataset(null);
       await refreshDatasets(scanned.id);
       notifications.show({
@@ -162,8 +222,10 @@ export function DatasetsPage() {
         title: 'Scan failed',
         message: error instanceof Error ? error.message : 'Unknown error',
       });
+      addActivity('error', `Scan failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
     } finally {
       setScanning(false);
+      setRunningOperation(null);
     }
   }
 
@@ -175,8 +237,13 @@ export function DatasetsPage() {
 
   async function handleRescan(datasetId: number) {
     setScanning(true);
+    const datasetForLog = datasets.find((dataset) => dataset.id === datasetId);
+    setElapsedTick(0);
+    setRunningOperation({ label: `Rescan: ${datasetForLog?.root_path ?? datasetId}`, startedAt: Date.now() });
+    addActivity('info', `Rescan started for ${datasetForLog?.root_path ?? datasetId}`);
     try {
       const dataset = await rescanDataset(datasetId);
+      addActivity('success', `Rescan finished: ${dataset.folders.length} folder summaries indexed`);
       await refreshDatasets(dataset.id);
       notifications.show({ color: 'green', title: 'Dataset rescanned', message: dataset.root_path });
     } catch (error) {
@@ -185,8 +252,10 @@ export function DatasetsPage() {
         title: 'Rescan failed',
         message: error instanceof Error ? error.message : 'Unknown error',
       });
+      addActivity('error', `Rescan failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
     } finally {
       setScanning(false);
+      setRunningOperation(null);
     }
   }
 
@@ -304,6 +373,47 @@ export function DatasetsPage() {
               </Stack>
             </Alert>
           )}
+          <Divider />
+          <Stack gap="xs">
+            <Group justify="space-between" align="center">
+              <Text fw={600} size="sm">
+                Activity log
+              </Text>
+              {runningOperation ? (
+                <Badge color="blue" variant="light">
+                  {runningOperation.label} · {runningElapsedSeconds}s
+                </Badge>
+              ) : (
+                <Badge color="gray" variant="light">
+                  idle
+                </Badge>
+              )}
+            </Group>
+            <ScrollArea h={120} mt="xs">
+              <Stack gap={4}>
+                {runningOperation && (
+                  <Text size="xs" c="blue">
+                    Waiting for response since {runningElapsedSeconds}s.
+                  </Text>
+                )}
+                {activityLog.length === 0 ? (
+                  <Text size="xs" c="dimmed">
+                    No dataset actions yet.
+                  </Text>
+                ) : (
+                  activityLog.map((entry) => (
+                    <Text
+                      key={entry.id}
+                      size="xs"
+                      c={entry.level === 'error' ? 'red' : entry.level === 'success' ? 'green' : 'dimmed'}
+                    >
+                      <span className="mono">{entry.time}</span> {entry.message}
+                    </Text>
+                  ))
+                )}
+              </Stack>
+            </ScrollArea>
+          </Stack>
         </Stack>
       </Paper>
 

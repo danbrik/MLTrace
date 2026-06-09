@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import logging
 import math
+import time
 from pathlib import Path
 
 from sqlalchemy import delete, func, select
@@ -26,14 +28,27 @@ from app.schemas import (
     TrainingDatasetRuleRead,
 )
 
+logger = logging.getLogger("mltrace.services")
+
 
 def create_dataset(db: Session, name: str, root_path: str) -> models.Dataset:
+    started_at = time.perf_counter()
+    logger.warning("create_dataset started name=%s root_path=%s", name, root_path)
     root = Path(root_path).expanduser().resolve()
+    logger.warning("create_dataset resolved root=%s elapsed=%.3fs", root, time.perf_counter() - started_at)
     if not root.exists() or not root.is_dir():
+        logger.warning("create_dataset path invalid root=%s elapsed=%.3fs", root, time.perf_counter() - started_at)
         raise FileNotFoundError(f"Dataset path does not exist or is not a directory: {root}")
 
     resolved_root = str(root)
     pattern = detect_timestamp_pattern(resolved_root)
+    logger.warning(
+        "create_dataset detect_timestamp_pattern finished root=%s detected=%s example=%s elapsed=%.3fs",
+        resolved_root,
+        pattern.regex if pattern else None,
+        pattern.example if pattern else None,
+        time.perf_counter() - started_at,
+    )
     dataset = models.Dataset(
         name=name,
         root_path=resolved_root,
@@ -46,12 +61,17 @@ def create_dataset(db: Session, name: str, root_path: str) -> models.Dataset:
     db.add(dataset)
     db.commit()
     db.refresh(dataset)
+    logger.warning("create_dataset saved dataset_id=%s elapsed=%.3fs", dataset.id, time.perf_counter() - started_at)
     return dataset
 
 
 def test_dataset_connection(root_path: str) -> DatasetConnectionTestResponse:
+    started_at = time.perf_counter()
+    logger.warning("test_dataset_connection started root_path=%s", root_path)
     root = Path(root_path).expanduser().resolve(strict=False)
+    logger.warning("test_dataset_connection resolved root=%s elapsed=%.3fs", root, time.perf_counter() - started_at)
     if not root.exists():
+        logger.warning("test_dataset_connection missing root=%s elapsed=%.3fs", root, time.perf_counter() - started_at)
         return DatasetConnectionTestResponse(
             root_path=str(root),
             exists=False,
@@ -61,6 +81,7 @@ def test_dataset_connection(root_path: str) -> DatasetConnectionTestResponse:
             message=f"Dataset path does not exist: {root}",
         )
     if not root.is_dir():
+        logger.warning("test_dataset_connection not directory root=%s elapsed=%.3fs", root, time.perf_counter() - started_at)
         return DatasetConnectionTestResponse(
             root_path=str(root),
             exists=True,
@@ -72,6 +93,11 @@ def test_dataset_connection(root_path: str) -> DatasetConnectionTestResponse:
 
     sample_file = find_first_direct_tiff(root)
     if sample_file is not None:
+        logger.warning(
+            "test_dataset_connection found sample_file=%s elapsed=%.3fs",
+            sample_file,
+            time.perf_counter() - started_at,
+        )
         return DatasetConnectionTestResponse(
             root_path=str(root),
             exists=True,
@@ -82,6 +108,7 @@ def test_dataset_connection(root_path: str) -> DatasetConnectionTestResponse:
         )
 
     message = f"Path is reachable, but no supported TIFF files were found directly under the root or its first-level folders: {root}"
+    logger.warning("test_dataset_connection no supported file root=%s elapsed=%.3fs", root, time.perf_counter() - started_at)
     return DatasetConnectionTestResponse(
         root_path=str(root),
         exists=True,
@@ -101,6 +128,8 @@ def get_dataset_or_404(db: Session, dataset_id: int) -> models.Dataset | None:
 
 
 def scan_dataset(db: Session, dataset: models.Dataset, timestamp_regex: str, timestamp_format: str) -> models.Dataset:
+    started_at = time.perf_counter()
+    logger.warning("scan_dataset started dataset_id=%s root=%s", dataset.id, dataset.root_path)
     dataset.timestamp_regex = timestamp_regex
     dataset.timestamp_format = timestamp_format
     dataset.status = "scanning"
@@ -110,6 +139,13 @@ def scan_dataset(db: Session, dataset: models.Dataset, timestamp_regex: str, tim
     try:
         scanned_images, folder_summaries, scan_summary = scan_dataset_files(
             dataset.root_path, timestamp_regex, timestamp_format
+        )
+        logger.warning(
+            "scan_dataset scan_dataset_files finished dataset_id=%s folders=%s representative_images=%s elapsed=%.3fs",
+            dataset.id,
+            len(folder_summaries),
+            len(scanned_images),
+            time.perf_counter() - started_at,
         )
 
         db.execute(delete(models.DatasetImage).where(models.DatasetImage.dataset_id == dataset.id))
@@ -158,9 +194,16 @@ def scan_dataset(db: Session, dataset: models.Dataset, timestamp_regex: str, tim
     except Exception as exc:
         dataset.status = "failed"
         dataset.scan_error = str(exc)
+        logger.exception("scan_dataset failed dataset_id=%s elapsed=%.3fs", dataset.id, time.perf_counter() - started_at)
 
     db.commit()
     db.refresh(dataset)
+    logger.warning(
+        "scan_dataset saved dataset_id=%s status=%s elapsed=%.3fs",
+        dataset.id,
+        dataset.status,
+        time.perf_counter() - started_at,
+    )
     return get_dataset_or_404(db, dataset.id) or dataset
 
 

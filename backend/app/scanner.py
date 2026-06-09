@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import logging
 import re
+import time
 from collections import Counter, defaultdict
 from dataclasses import dataclass
 from datetime import datetime
@@ -12,6 +14,7 @@ from PIL import Image
 
 
 TIFF_EXTENSIONS = {".tif", ".tiff"}
+logger = logging.getLogger("mltrace.scanner")
 
 
 @dataclass(frozen=True)
@@ -72,19 +75,48 @@ def direct_tiff_files(folder_path: str | Path) -> list[Path]:
 
 
 def find_first_direct_tiff(root_path: str | Path) -> Path | None:
+    started_at = time.perf_counter()
     root = Path(root_path).expanduser()
+    logger.warning("find_first_direct_tiff started root=%s", root)
 
+    checked_root_entries = 0
     for path in root.iterdir():
+        checked_root_entries += 1
         if path.is_file() and path.suffix.lower() in TIFF_EXTENSIONS:
+            logger.warning(
+                "find_first_direct_tiff found root file path=%s checked_root_entries=%s elapsed=%.3fs",
+                path,
+                checked_root_entries,
+                time.perf_counter() - started_at,
+            )
             return path
 
+    checked_child_dirs = 0
+    checked_child_entries = 0
     for child in root.iterdir():
         if not child.is_dir():
             continue
+        checked_child_dirs += 1
         for path in child.iterdir():
+            checked_child_entries += 1
             if path.is_file() and path.suffix.lower() in TIFF_EXTENSIONS:
+                logger.warning(
+                    "find_first_direct_tiff found child file path=%s checked_child_dirs=%s checked_child_entries=%s elapsed=%.3fs",
+                    path,
+                    checked_child_dirs,
+                    checked_child_entries,
+                    time.perf_counter() - started_at,
+                )
                 return path
 
+    logger.warning(
+        "find_first_direct_tiff found no file root=%s checked_root_entries=%s checked_child_dirs=%s checked_child_entries=%s elapsed=%.3fs",
+        root,
+        checked_root_entries,
+        checked_child_dirs,
+        checked_child_entries,
+        time.perf_counter() - started_at,
+    )
     return None
 
 
