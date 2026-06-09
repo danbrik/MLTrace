@@ -19,7 +19,18 @@ def test_detect_timestamp_pattern_for_yyyymmdd_hhmmss(tmp_path: Path) -> None:
     assert pattern is not None
     assert pattern.regex == r"(?P<timestamp>\d{8}_\d{6})"
     assert pattern.timestamp_format == "%Y%m%d_%H%M%S"
-    assert pattern.matches == 2
+    assert pattern.matches == 1
+
+
+def test_detect_timestamp_pattern_for_prefixed_two_digit_year(tmp_path: Path) -> None:
+    write_tiff(tmp_path / "line_01" / "W14_HF_26-01-21_16-46-25.tiff")
+
+    pattern = detect_timestamp_pattern(tmp_path)
+
+    assert pattern is not None
+    assert pattern.regex == r"(?P<timestamp>\d{2}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2})"
+    assert pattern.timestamp_format == "%y-%m-%d_%H-%M-%S"
+    assert pattern.example == "26-01-21_16-46-25"
 
 
 def test_scan_dataset_files_and_folder_summary(tmp_path: Path) -> None:
@@ -40,4 +51,3 @@ def test_scan_dataset_files_and_folder_summary(tmp_path: Path) -> None:
     assert folder_summary["0226"]["image_count"] == 2
     assert folder_summary["0226"]["resolution_summary"] == {"20x10": 2}
     assert folder_summary["0226"]["cadence_summary"]["median_seconds"] == 10
-

@@ -44,6 +44,7 @@ COMMON_TIMESTAMP_PATTERNS: tuple[tuple[str, str], ...] = (
     (r"(?P<timestamp>\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2})", "%Y-%m-%d_%H-%M-%S"),
     (r"(?P<timestamp>\d{4}-\d{2}-\d{2}_\d{2}:\d{2}:\d{2})", "%Y-%m-%d_%H:%M:%S"),
     (r"(?P<timestamp>\d{4}\.\d{2}\.\d{2}_\d{2}-\d{2}-\d{2})", "%Y.%m.%d_%H-%M-%S"),
+    (r"(?P<timestamp>\d{2}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2})", "%y-%m-%d_%H-%M-%S"),
     (r"(?P<timestamp>\d{6}_\d{6})", "%d%m%y_%H%M%S"),
     (r"(?P<timestamp>\d{6}-\d{6})", "%d%m%y-%H%M%S"),
     (r"(?P<timestamp>\d{12})", "%d%m%y%H%M%S"),
@@ -71,26 +72,21 @@ def extract_timestamp(file_name: str, regex: str, timestamp_format: str) -> tupl
     return raw_timestamp, datetime.strptime(raw_timestamp, timestamp_format)
 
 
-def detect_timestamp_pattern(root_path: str | Path, sample_size: int = 500) -> TimestampPattern | None:
-    files = iter_tiff_files(root_path)[:sample_size]
-    best: TimestampPattern | None = None
+def detect_timestamp_pattern(root_path: str | Path) -> TimestampPattern | None:
+    files = iter_tiff_files(root_path)
+    if not files:
+        return None
+
+    file_name = files[0].name
 
     for regex, timestamp_format in COMMON_TIMESTAMP_PATTERNS:
-        matches = 0
-        example = ""
-        for path in files:
-            try:
-                raw, _ = extract_timestamp(path.name, regex, timestamp_format)
-            except ValueError:
-                continue
-            matches += 1
-            if not example:
-                example = raw
+        try:
+            raw, _ = extract_timestamp(file_name, regex, timestamp_format)
+        except ValueError:
+            continue
+        return TimestampPattern(regex=regex, timestamp_format=timestamp_format, example=raw, matches=1)
 
-        if matches and (best is None or matches > best.matches):
-            best = TimestampPattern(regex=regex, timestamp_format=timestamp_format, example=example, matches=matches)
-
-    return best
+    return None
 
 
 def read_tiff_size(path: Path) -> tuple[int | None, int | None]:
@@ -181,4 +177,3 @@ def summarize_folders(images: list[ScannedImage]) -> dict[str, dict]:
         }
 
     return summaries
-
