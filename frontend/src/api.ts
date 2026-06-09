@@ -1,5 +1,6 @@
 import type {
   Dataset,
+  DatasetConnectionTest,
   PreprocessingGraph,
   PreprocessingPipeline,
   PreprocessingPreview,
@@ -44,6 +45,19 @@ export function createDataset(payload: { name: string; root_path: string }): Pro
   return request<Dataset>('/api/datasets', {
     method: 'POST',
     body: JSON.stringify(payload),
+  });
+}
+
+export function testDatasetConnection(payload: { root_path: string }): Promise<DatasetConnectionTest> {
+  return request<DatasetConnectionTest>('/api/datasets/test-connection', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function deleteDataset(datasetId: number): Promise<void> {
+  await request<void>(`/api/datasets/${datasetId}`, {
+    method: 'DELETE',
   });
 }
 

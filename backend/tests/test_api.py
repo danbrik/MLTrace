@@ -97,6 +97,40 @@ def test_dataset_create_confirm_and_training_dataset_preview(tmp_path: Path) -> 
             pass
 
 
+def test_dataset_connection_probe_and_delete(tmp_path: Path) -> None:
+    probe_root = tmp_path / "probe_dataset"
+    write_tiff(probe_root / "line_01" / "frame_without_timestamp.tif")
+
+    client_iter = make_client()
+    client = next(client_iter)
+    try:
+        probe = client.post("/api/datasets/test-connection", json={"root_path": str(probe_root)})
+        assert probe.status_code == 200
+        probe_body = probe.json()
+        assert probe_body["exists"] is True
+        assert probe_body["is_directory"] is True
+        assert probe_body["supported_file_found"] is True
+        assert probe_body["sample_file_path"].endswith("frame_without_timestamp.tif")
+
+        missing = client.post("/api/datasets/test-connection", json={"root_path": str(tmp_path / "missing")})
+        assert missing.status_code == 200
+        assert missing.json()["supported_file_found"] is False
+        assert missing.json()["exists"] is False
+
+        dataset = add_scanned_dataset(client, tmp_path / "dataset_to_delete", "Delete me", "line_01", 2)
+        deleted = client.delete(f"/api/datasets/{dataset['id']}")
+        assert deleted.status_code == 204
+
+        listed = client.get("/api/datasets")
+        assert listed.status_code == 200
+        assert listed.json() == []
+    finally:
+        try:
+            next(client_iter)
+        except StopIteration:
+            pass
+
+
 def test_training_dataset_can_span_datasets_and_be_deleted(tmp_path: Path) -> None:
     client_iter = make_client()
     client = next(client_iter)
@@ -142,6 +176,10 @@ def test_training_dataset_can_span_datasets_and_be_deleted(tmp_path: Path) -> No
             ("A", "0226", "2026-02-04T15:30:00", "2026-02-04T15:30:40", 2),
             ("B", "line_01", "2026-02-04T15:30:00", "2026-02-04T15:30:30", 1),
         }
+
+        blocked_dataset_delete = client.delete(f"/api/datasets/{dataset_a['id']}")
+        assert blocked_dataset_delete.status_code == 409
+        assert "saved training datasets" in blocked_dataset_delete.json()["detail"]
 
         deleted = client.delete(f"/api/training-datasets/{training_dataset['id']}")
         assert deleted.status_code == 204

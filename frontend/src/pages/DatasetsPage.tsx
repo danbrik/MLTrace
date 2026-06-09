@@ -16,17 +16,19 @@ import {
   Title,
 } from '@mantine/core';
 import { notifications } from '@mantine/notifications';
-import { Check, RefreshCw, ScanLine } from 'lucide-react';
+import { Check, FileSearch, RefreshCw, ScanLine, Trash2 } from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
 
 import {
   confirmTimestampFormat,
   createDataset,
+  deleteDataset,
   getDataset,
   listDatasets,
   rescanDataset,
+  testDatasetConnection,
 } from '../api';
-import type { Dataset } from '../types';
+import type { Dataset, DatasetConnectionTest } from '../types';
 
 function formatTimestamp(value: string | null): string {
   if (!value) return 'n/a';
@@ -55,7 +57,10 @@ export function DatasetsPage() {
   const [timestampRegex, setTimestampRegex] = useState('');
   const [timestampFormat, setTimestampFormat] = useState('');
   const [confirmationDataset, setConfirmationDataset] = useState<Dataset | null>(null);
+  const [connectionTest, setConnectionTest] = useState<DatasetConnectionTest | null>(null);
   const [loading, setLoading] = useState(false);
+  const [testingConnection, setTestingConnection] = useState(false);
+  const [deletingDatasetId, setDeletingDatasetId] = useState<number | null>(null);
   const [scanning, setScanning] = useState(false);
 
   async function refreshDatasets(selectId?: number) {
@@ -85,6 +90,7 @@ export function DatasetsPage() {
       const dataset = await createDataset({ name: datasetName, root_path: rootPath });
       setDatasetName('');
       setRootPath('');
+      setConnectionTest(null);
       setTimestampRegex(dataset.timestamp_regex ?? '');
       setTimestampFormat(dataset.timestamp_format ?? '');
       setConfirmationDataset(dataset);
@@ -97,6 +103,27 @@ export function DatasetsPage() {
       });
     } finally {
       setLoading(false);
+    }
+  }
+
+  async function handleTestConnection() {
+    setTestingConnection(true);
+    try {
+      const result = await testDatasetConnection({ root_path: rootPath });
+      setConnectionTest(result);
+      notifications.show({
+        color: result.supported_file_found ? 'green' : result.exists && result.is_directory ? 'yellow' : 'red',
+        title: result.supported_file_found ? 'Dataset path reachable' : 'No supported image found',
+        message: result.sample_file_path ?? result.message,
+      });
+    } catch (error) {
+      notifications.show({
+        color: 'red',
+        title: 'Connection test failed',
+        message: error instanceof Error ? error.message : 'Unknown error',
+      });
+    } finally {
+      setTestingConnection(false);
     }
   }
 
@@ -152,6 +179,30 @@ export function DatasetsPage() {
     }
   }
 
+  async function handleDeleteDataset(dataset: Dataset) {
+    const confirmed = window.confirm(`Delete dataset "${dataset.name}"? Indexed metadata will be removed.`);
+    if (!confirmed) return;
+    setDeletingDatasetId(dataset.id);
+    try {
+      await deleteDataset(dataset.id);
+      const nextDatasets = await listDatasets();
+      setDatasets(nextDatasets);
+      setSelectedDatasetId((current) => {
+        if (current !== dataset.id) return current;
+        return nextDatasets[0]?.id ?? null;
+      });
+      notifications.show({ color: 'green', title: 'Dataset deleted', message: dataset.name });
+    } catch (error) {
+      notifications.show({
+        color: 'red',
+        title: 'Dataset could not be deleted',
+        message: error instanceof Error ? error.message : 'Unknown error',
+      });
+    } finally {
+      setDeletingDatasetId(null);
+    }
+  }
+
   async function handleSelectDataset(datasetId: number) {
     setSelectedDatasetId(datasetId);
     try {
@@ -201,8 +252,20 @@ export function DatasetsPage() {
               label="Root path"
               placeholder="/data/images"
               value={rootPath}
-              onChange={(event) => setRootPath(event.currentTarget.value)}
+              onChange={(event) => {
+                setRootPath(event.currentTarget.value);
+                setConnectionTest(null);
+              }}
             />
+            <Button
+              variant="light"
+              leftSection={<FileSearch size={18} />}
+              onClick={handleTestConnection}
+              loading={testingConnection}
+              disabled={!rootPath.trim()}
+            >
+              Test path
+            </Button>
             <Button
               leftSection={<ScanLine size={18} />}
               onClick={handleCreateDataset}
@@ -212,6 +275,24 @@ export function DatasetsPage() {
               Detect timestamps
             </Button>
           </Group>
+          {connectionTest && (
+            <Alert
+              color={connectionTest.supported_file_found ? 'green' : connectionTest.exists && connectionTest.is_directory ? 'yellow' : 'red'}
+              title={connectionTest.supported_file_found ? 'Supported image found' : 'Path check result'}
+            >
+              <Stack gap={4}>
+                <Text size="sm">{connectionTest.message}</Text>
+                <Text size="sm" className="mono">
+                  Root: {connectionTest.root_path}
+                </Text>
+                {connectionTest.sample_file_path && (
+                  <Text size="sm" className="mono">
+                    Sample: {connectionTest.sample_file_path}
+                  </Text>
+                )}
+              </Stack>
+            </Alert>
+          )}
         </Stack>
       </Paper>
 
@@ -266,6 +347,16 @@ export function DatasetsPage() {
                           onClick={() => handleRescan(dataset.id)}
                         >
                           Rescan
+                        </Button>
+                        <Button
+                          size="compact-sm"
+                          variant="light"
+                          color="red"
+                          leftSection={<Trash2 size={14} />}
+                          loading={deletingDatasetId === dataset.id}
+                          onClick={() => handleDeleteDataset(dataset)}
+                        >
+                          Delete
                         </Button>
                       </Group>
                     </Table.Td>
@@ -376,4 +467,3 @@ export function DatasetsPage() {
     </Stack>
   );
 }
-

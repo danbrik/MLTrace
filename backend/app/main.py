@@ -6,6 +6,8 @@ from sqlalchemy.orm import Session
 from app.config import get_settings
 from app.database import get_db
 from app.schemas import (
+    DatasetConnectionTestRequest,
+    DatasetConnectionTestResponse,
     DatasetCreate,
     DatasetRead,
     PreprocessingPipelineCreate,
@@ -23,6 +25,7 @@ from app.services import (
     create_dataset,
     create_preprocessing_pipeline,
     create_training_dataset,
+    delete_dataset,
     delete_preprocessing_pipeline,
     delete_training_dataset,
     get_dataset_or_404,
@@ -35,6 +38,7 @@ from app.services import (
     preview_preprocessing_pipeline,
     preview_training_dataset,
     scan_dataset,
+    test_dataset_connection,
     update_preprocessing_pipeline,
 )
 
@@ -64,6 +68,10 @@ def create_app() -> FastAPI:
             db.rollback()
             raise HTTPException(status_code=409, detail="A dataset with this root path already exists.") from exc
 
+    @app.post("/api/datasets/test-connection", response_model=DatasetConnectionTestResponse)
+    def api_test_dataset_connection(payload: DatasetConnectionTestRequest):
+        return test_dataset_connection(payload.root_path)
+
     @app.get("/api/datasets", response_model=list[DatasetRead])
     def api_list_datasets(db: Session = Depends(get_db)):
         return list_datasets(db)
@@ -92,6 +100,16 @@ def create_app() -> FastAPI:
         if not dataset.timestamp_regex or not dataset.timestamp_format:
             raise HTTPException(status_code=400, detail="Timestamp format has not been confirmed yet.")
         return scan_dataset(db, dataset, dataset.timestamp_regex, dataset.timestamp_format)
+
+    @app.delete("/api/datasets/{dataset_id}", status_code=204)
+    def api_delete_dataset(dataset_id: int, db: Session = Depends(get_db)):
+        try:
+            deleted = delete_dataset(db, dataset_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        if not deleted:
+            raise HTTPException(status_code=404, detail="Dataset not found.")
+        return None
 
     @app.post("/api/training-datasets/preview", response_model=TrainingDatasetPreviewResponse)
     def api_preview_training_dataset(payload: TrainingDatasetPreviewRequest, db: Session = Depends(get_db)):

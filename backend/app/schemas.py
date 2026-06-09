@@ -8,6 +8,19 @@ class DatasetCreate(BaseModel):
     root_path: str = Field(min_length=1)
 
 
+class DatasetConnectionTestRequest(BaseModel):
+    root_path: str = Field(min_length=1)
+
+
+class DatasetConnectionTestResponse(BaseModel):
+    root_path: str
+    exists: bool
+    is_directory: bool
+    supported_file_found: bool
+    sample_file_path: str | None
+    message: str
+
+
 class TimestampFormatConfirm(BaseModel):
     timestamp_regex: str = Field(min_length=1)
     timestamp_format: str = Field(min_length=1)

@@ -28,6 +28,15 @@ export type Dataset = {
   folders: DatasetFolder[];
 };
 
+export type DatasetConnectionTest = {
+  root_path: string;
+  exists: boolean;
+  is_directory: boolean;
+  supported_file_found: boolean;
+  sample_file_path: string | null;
+  message: string;
+};
+
 export type TrainingDatasetRuleInput = {
   folder_id: number;
   start_timestamp: string;

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import os
 from pathlib import Path
 
 from sqlalchemy import delete, func, select
@@ -9,8 +10,9 @@ from sqlalchemy.orm import Session, selectinload
 from app import models
 from app.preprocessing.pipeline import execute_preview, validate_linear_graph
 from app.preprocessing.registry import registry
-from app.scanner import detect_timestamp_pattern, scan_dataset_files, summarize_folders
+from app.scanner import TIFF_EXTENSIONS, detect_timestamp_pattern, scan_dataset_files, summarize_folders
 from app.schemas import (
+    DatasetConnectionTestResponse,
     PreprocessingGraph,
     PreprocessingPipelineCreate,
     PreprocessingPipelineRead,
@@ -46,6 +48,58 @@ def create_dataset(db: Session, name: str, root_path: str) -> models.Dataset:
     db.commit()
     db.refresh(dataset)
     return dataset
+
+
+def test_dataset_connection(root_path: str) -> DatasetConnectionTestResponse:
+    root = Path(root_path).expanduser().resolve(strict=False)
+    if not root.exists():
+        return DatasetConnectionTestResponse(
+            root_path=str(root),
+            exists=False,
+            is_directory=False,
+            supported_file_found=False,
+            sample_file_path=None,
+            message=f"Dataset path does not exist: {root}",
+        )
+    if not root.is_dir():
+        return DatasetConnectionTestResponse(
+            root_path=str(root),
+            exists=True,
+            is_directory=False,
+            supported_file_found=False,
+            sample_file_path=None,
+            message=f"Dataset path is not a directory: {root}",
+        )
+
+    walk_errors: list[str] = []
+
+    def collect_walk_error(error: OSError) -> None:
+        walk_errors.append(f"{error.filename}: {error.strerror}")
+
+    for current_dir, _, file_names in os.walk(root, onerror=collect_walk_error):
+        for file_name in file_names:
+            if Path(file_name).suffix.lower() in TIFF_EXTENSIONS:
+                sample_file = Path(current_dir) / file_name
+                return DatasetConnectionTestResponse(
+                    root_path=str(root),
+                    exists=True,
+                    is_directory=True,
+                    supported_file_found=True,
+                    sample_file_path=str(sample_file),
+                    message=f"Path is reachable. Found supported image: {sample_file}",
+                )
+
+    message = f"Path is reachable, but no supported TIFF files were found under: {root}"
+    if walk_errors:
+        message = f"{message} Some folders could not be read: {'; '.join(walk_errors[:3])}"
+    return DatasetConnectionTestResponse(
+        root_path=str(root),
+        exists=True,
+        is_directory=True,
+        supported_file_found=False,
+        sample_file_path=None,
+        message=message,
+    )
 
 
 def get_dataset_or_404(db: Session, dataset_id: int) -> models.Dataset | None:
@@ -126,6 +180,34 @@ def list_datasets(db: Session) -> list[models.Dataset]:
             .options(selectinload(models.Dataset.folders))
         )
     )
+
+
+def delete_dataset(db: Session, dataset_id: int) -> bool:
+    dataset = db.get(models.Dataset, dataset_id)
+    if dataset is None:
+        return False
+
+    referenced_training_rules = db.scalar(
+        select(func.count(models.TrainingDatasetRule.id))
+        .join(models.DatasetFolder, models.TrainingDatasetRule.folder_id == models.DatasetFolder.id)
+        .where(models.DatasetFolder.dataset_id == dataset_id)
+    ) or 0
+    if referenced_training_rules:
+        raise ValueError(
+            "Dataset is used by saved training datasets. Delete those training datasets before deleting the dataset."
+        )
+
+    folder_ids = list(
+        db.scalars(select(models.DatasetFolder.id).where(models.DatasetFolder.dataset_id == dataset_id))
+    )
+    if folder_ids:
+        db.query(models.PreprocessingPipeline).filter(
+            models.PreprocessingPipeline.preview_folder_id.in_(folder_ids)
+        ).update({models.PreprocessingPipeline.preview_folder_id: None}, synchronize_session=False)
+
+    db.delete(dataset)
+    db.commit()
+    return True
 
 
 def preview_training_dataset(
