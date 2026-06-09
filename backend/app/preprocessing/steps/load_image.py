@@ -17,8 +17,8 @@ class LoadImageStep(BasePreprocessingStep):
     # lock_size / lock_width / lock_height are managed by the UI (not rendered as raw fields);
     # when lock_size is on, loading an image of a different size fails.
     default_config = {
-        "mode": "rgb",
-        "dtype": "uint8",
+        "mode": "unchanged",
+        "dtype": "source",
         "lock_size": False,
         "lock_width": None,
         "lock_height": None,
@@ -29,14 +29,14 @@ class LoadImageStep(BasePreprocessingStep):
             "mode": {
                 "type": "string",
                 "label": "Mode",
-                "enum": ["rgb", "grayscale"],
-                "default": "rgb",
+                "enum": ["unchanged", "rgb", "grayscale"],
+                "default": "unchanged",
             },
             "dtype": {
                 "type": "string",
                 "label": "Dtype",
-                "enum": ["uint8", "uint16", "int16", "float32", "float64"],
-                "default": "uint8",
+                "enum": ["source", "uint8", "uint16", "int16", "float32", "float64"],
+                "default": "source",
             },
         },
     }
@@ -54,11 +54,16 @@ class LoadImageStep(BasePreprocessingStep):
         cfg = self.merged_config(config)
         mode = cfg["mode"]
         lock = self._lock_dims(config)
+        if mode == "unchanged":
+            channels = int(cfg["source_channels"]) if cfg.get("source_channels") else None
+        else:
+            channels = 1 if mode == "grayscale" else 3
+        dtype = cfg.get("source_dtype") if cfg["dtype"] == "source" else cfg["dtype"]
         return ImageSpec(
-            channels=1 if mode == "grayscale" else 3,
+            channels=channels,
             width=lock[0] if lock else None,
             height=lock[1] if lock else None,
-            dtype=cfg["dtype"],
+            dtype=dtype,
         )
 
     def apply(self, image: np.ndarray | None, config: dict, context: dict) -> np.ndarray:
@@ -73,8 +78,12 @@ class LoadImageStep(BasePreprocessingStep):
                     f"Input size is locked to {lock[0]}x{lock[1]}, but the selected image is "
                     f"{loaded.width}x{loaded.height}."
                 )
-            if mode == "grayscale":
+            if mode == "unchanged":
+                array = np.asarray(loaded)
+            elif mode == "grayscale":
                 array = np.asarray(loaded.convert("L"))
             else:
                 array = np.asarray(loaded.convert("RGB"))
+            if dtype == "source":
+                return array
             return array.astype(dtype)

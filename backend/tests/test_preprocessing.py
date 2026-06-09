@@ -107,6 +107,16 @@ def test_load_image_size_lock_accepts_matching_size(tmp_path: Path) -> None:
     assert image.shape == (10, 20, 3)
 
 
+def test_load_image_default_preserves_source_mode(tmp_path: Path) -> None:
+    image_path = tmp_path / "sample.tif"
+    Image.new("L", (20, 10), color=128).save(image_path)
+
+    image = LoadImageStep().apply(None, {}, {"source_image_path": str(image_path)})
+
+    assert image.shape == (10, 20)
+    assert image.dtype == np.uint8
+
+
 def test_load_image_converts_dtype(tmp_path: Path) -> None:
     image_path = tmp_path / "sample.tif"
     Image.new("RGB", (20, 10), color=(128, 64, 32)).save(image_path)

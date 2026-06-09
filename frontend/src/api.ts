@@ -63,14 +63,14 @@ export function createDataset(payload: { name: string; root_path: string }): Pro
   return request<Dataset>('/api/datasets', {
     method: 'POST',
     body: JSON.stringify(payload),
-  }, 12_000);
+  }, 60_000);
 }
 
 export function testDatasetConnection(payload: { root_path: string }): Promise<DatasetConnectionTest> {
   return request<DatasetConnectionTest>('/api/datasets/test-connection', {
     method: 'POST',
     body: JSON.stringify(payload),
-  }, 8_000);
+  }, 60_000);
 }
 
 export async function deleteDataset(datasetId: number): Promise<void> {

@@ -115,6 +115,31 @@ function folderFileTypeLabel(folder: DatasetFolder): string {
   return extensions.length > 0 ? extensions.join(', ') : 'filetype unknown';
 }
 
+function firstResolution(folder: DatasetFolder): { width: number; height: number } | null {
+  const [resolution] = Object.keys(folder.resolution_summary ?? {}).sort();
+  const match = resolution?.match(/^(\d+)x(\d+)$/);
+  if (!match) return null;
+  return { width: Number(match[1]), height: Number(match[2]) };
+}
+
+function folderImageMetadataValue(folder: DatasetFolder, key: string): string | number | null {
+  const value = folder.image_metadata?.[key];
+  if (typeof value === 'string' || typeof value === 'number') return value;
+  return null;
+}
+
+function folderMetadataLabel(folder: DatasetFolder): string {
+  const metadata = folder.image_metadata;
+  if (!metadata) return 'metadata unknown';
+  const parts = [
+    folderImageMetadataValue(folder, 'format') ? `format ${folderImageMetadataValue(folder, 'format')}` : null,
+    folderImageMetadataValue(folder, 'mode') ? `mode ${folderImageMetadataValue(folder, 'mode')}` : null,
+    folderImageMetadataValue(folder, 'dtype') ? `dtype ${folderImageMetadataValue(folder, 'dtype')}` : null,
+    folderImageMetadataValue(folder, 'channels') ? `${folderImageMetadataValue(folder, 'channels')} ch` : null,
+  ].filter(Boolean);
+  return parts.length > 0 ? parts.join(', ') : 'metadata unknown';
+}
+
 function nextAvailablePipelineName(pipelines: PreprocessingPipeline[]): string {
   const used = new Set(pipelines.map((pipeline) => pipeline.name.trim().toLowerCase()));
   const base = 'Untitled pipeline';
@@ -249,6 +274,27 @@ export function PreprocessingPipelinesPage() {
       ),
     );
     if (markStale) setPreviewStale(true);
+  }
+
+  function seedLoadImageFromFolder(folder: DatasetFolder, markStale = true) {
+    const loadNode = nodes.find((node) => node.data.stepType === 'load_image');
+    const resolution = firstResolution(folder);
+    if (!loadNode || !resolution) return;
+    updateNodeConfigMany(
+      loadNode.id,
+      {
+        mode: 'unchanged',
+        dtype: 'source',
+        lock_size: true,
+        lock_width: resolution.width,
+        lock_height: resolution.height,
+        source_format: folderImageMetadataValue(folder, 'format'),
+        source_mode: folderImageMetadataValue(folder, 'mode'),
+        source_dtype: folderImageMetadataValue(folder, 'dtype'),
+        source_channels: folderImageMetadataValue(folder, 'channels'),
+      },
+      markStale,
+    );
   }
 
   function addStep(step: PreprocessingStepDefinition) {
@@ -544,6 +590,12 @@ export function PreprocessingPipelinesPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sourceImage]);
 
+  useEffect(() => {
+    if (!selectedFolderOption) return;
+    seedLoadImageFromFolder(selectedFolderOption.folder);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedFolderOption?.value]);
+
   // Keep the full-pipeline preview in sync automatically (debounced) so every block's
   // input image (the previous step's output) always reflects the current configuration.
   const [debouncedNodes] = useDebouncedValue(nodes, 400);
@@ -811,6 +863,11 @@ export function PreprocessingPipelinesPage() {
               <Text size="xs" c="dimmed">
                 Folder: {selectedFolderOption ? `${folderResolutionCompactLabel(selectedFolderOption.folder)}, ${folderFileTypeLabel(selectedFolderOption.folder)}` : 'resolution unknown'}.
               </Text>
+              {selectedFolderOption && (
+                <Text size="xs" c="dimmed">
+                  Dataset metadata: {folderMetadataLabel(selectedFolderOption.folder)}.
+                </Text>
+              )}
               <Text size="xs" c={sourceImage ? 'green' : 'dimmed'}>
                 {sourceLoading
                   ? 'Loading preview image…'
