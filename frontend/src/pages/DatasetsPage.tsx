@@ -49,6 +49,17 @@ function statusColor(status: string): string {
   return 'yellow';
 }
 
+function formatImageMetadata(value: Record<string, unknown> | null | undefined): string {
+  if (!value) return 'n/a';
+  const parts = [
+    value.format ? `format ${value.format}` : null,
+    value.mode ? `mode ${value.mode}` : null,
+    value.dtype ? `dtype ${value.dtype}` : null,
+    value.channels ? `${value.channels} ch` : null,
+  ].filter(Boolean);
+  return parts.length ? parts.join(', ') : 'n/a';
+}
+
 export function DatasetsPage() {
   const [datasets, setDatasets] = useState<Dataset[]>([]);
   const [selectedDatasetId, setSelectedDatasetId] = useState<number | null>(null);
@@ -398,6 +409,7 @@ export function DatasetsPage() {
                     <Table.Th>Start</Table.Th>
                     <Table.Th>End</Table.Th>
                     <Table.Th>Resolution</Table.Th>
+                    <Table.Th>Image metadata</Table.Th>
                     <Table.Th>Median spacing</Table.Th>
                   </Table.Tr>
                 </Table.Thead>
@@ -409,6 +421,7 @@ export function DatasetsPage() {
                       <Table.Td>{formatTimestamp(folder.first_timestamp)}</Table.Td>
                       <Table.Td>{formatTimestamp(folder.last_timestamp)}</Table.Td>
                       <Table.Td>{formatJsonSummary(folder.resolution_summary)}</Table.Td>
+                      <Table.Td>{formatImageMetadata(folder.image_metadata)}</Table.Td>
                       <Table.Td>
                         {folder.cadence_summary?.median_seconds == null
                           ? 'n/a'

@@ -2,7 +2,7 @@ from pathlib import Path
 
 from PIL import Image
 
-from app.scanner import detect_timestamp_pattern, scan_dataset_files, summarize_folders
+from app.scanner import detect_timestamp_pattern, scan_dataset_files
 
 
 def write_tiff(path: Path, size: tuple[int, int] = (12, 8)) -> None:
@@ -36,18 +36,24 @@ def test_detect_timestamp_pattern_for_prefixed_two_digit_year(tmp_path: Path) ->
 def test_scan_dataset_files_and_folder_summary(tmp_path: Path) -> None:
     write_tiff(tmp_path / "0226" / "frame_20260204_153000.tif", (20, 10))
     write_tiff(tmp_path / "0226" / "frame_20260204_153010.tif", (20, 10))
+    write_tiff(tmp_path / "0226" / "frame_20260204_153020.tif", (20, 10))
     write_tiff(tmp_path / "bad_timestamp.tif", (20, 10))
+    write_tiff(tmp_path / "0226" / "nested" / "frame_20260204_153030.tif", (30, 15))
 
-    images, scan_summary = scan_dataset_files(
+    images, folder_summary, scan_summary = scan_dataset_files(
         tmp_path,
         r"(?P<timestamp>\d{8}_\d{6})",
         "%Y%m%d_%H%M%S",
     )
-    folder_summary = summarize_folders(images)
 
-    assert scan_summary["total_tiff_files"] == 3
-    assert scan_summary["indexed_images"] == 2
+    assert scan_summary["total_tiff_files"] == 4
+    assert scan_summary["indexed_images"] == 3
+    assert scan_summary["indexed_representative_images"] == 3
     assert scan_summary["skipped_unparseable_timestamp"] == 1
-    assert folder_summary["0226"]["image_count"] == 2
-    assert folder_summary["0226"]["resolution_summary"] == {"20x10": 2}
+    assert len(images) == 3
+    assert "0226/nested" not in folder_summary
+    assert folder_summary["0226"]["image_count"] == 3
+    assert folder_summary["0226"]["resolution_summary"] == {"20x10": 3}
+    assert folder_summary["0226"]["image_metadata"]["mode"] == "L"
+    assert folder_summary["0226"]["image_metadata"]["dtype"] == "uint8"
     assert folder_summary["0226"]["cadence_summary"]["median_seconds"] == 10

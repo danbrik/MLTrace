@@ -50,6 +50,7 @@ class DatasetFolder(Base):
     last_timestamp: Mapped[datetime | None] = mapped_column(DateTime(timezone=False))
     extension_summary: Mapped[dict | None] = mapped_column(json_type())
     resolution_summary: Mapped[dict | None] = mapped_column(json_type())
+    image_metadata: Mapped[dict | None] = mapped_column(json_type())
     cadence_summary: Mapped[dict | None] = mapped_column(json_type())
 
     dataset: Mapped[Dataset] = relationship(back_populates="folders")

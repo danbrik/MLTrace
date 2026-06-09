@@ -36,6 +36,7 @@ class DatasetFolderRead(BaseModel):
     last_timestamp: datetime | None
     extension_summary: dict | None
     resolution_summary: dict | None
+    image_metadata: dict | None
     cadence_summary: dict | None
 
 

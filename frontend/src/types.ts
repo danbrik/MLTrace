@@ -6,6 +6,7 @@ export type DatasetFolder = {
   last_timestamp: string | null;
   extension_summary: Record<string, number> | null;
   resolution_summary: Record<string, number> | null;
+  image_metadata: Record<string, unknown> | null;
   cadence_summary: {
     min_seconds: number | null;
     median_seconds: number | null;

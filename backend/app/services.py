@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import math
-import os
 from pathlib import Path
 
 from sqlalchemy import delete, func, select
@@ -10,7 +9,7 @@ from sqlalchemy.orm import Session, selectinload
 from app import models
 from app.preprocessing.pipeline import execute_preview, validate_linear_graph
 from app.preprocessing.registry import registry
-from app.scanner import TIFF_EXTENSIONS, detect_timestamp_pattern, scan_dataset_files, summarize_folders
+from app.scanner import detect_timestamp_pattern, iter_tiff_files, scan_dataset_files
 from app.schemas import (
     DatasetConnectionTestResponse,
     PreprocessingGraph,
@@ -71,27 +70,19 @@ def test_dataset_connection(root_path: str) -> DatasetConnectionTestResponse:
             message=f"Dataset path is not a directory: {root}",
         )
 
-    walk_errors: list[str] = []
+    files = iter_tiff_files(root)
+    if files:
+        sample_file = files[0]
+        return DatasetConnectionTestResponse(
+            root_path=str(root),
+            exists=True,
+            is_directory=True,
+            supported_file_found=True,
+            sample_file_path=str(sample_file),
+            message=f"Path is reachable. Found supported image: {sample_file}",
+        )
 
-    def collect_walk_error(error: OSError) -> None:
-        walk_errors.append(f"{error.filename}: {error.strerror}")
-
-    for current_dir, _, file_names in os.walk(root, onerror=collect_walk_error):
-        for file_name in file_names:
-            if Path(file_name).suffix.lower() in TIFF_EXTENSIONS:
-                sample_file = Path(current_dir) / file_name
-                return DatasetConnectionTestResponse(
-                    root_path=str(root),
-                    exists=True,
-                    is_directory=True,
-                    supported_file_found=True,
-                    sample_file_path=str(sample_file),
-                    message=f"Path is reachable. Found supported image: {sample_file}",
-                )
-
-    message = f"Path is reachable, but no supported TIFF files were found under: {root}"
-    if walk_errors:
-        message = f"{message} Some folders could not be read: {'; '.join(walk_errors[:3])}"
+    message = f"Path is reachable, but no supported TIFF files were found directly under the root or its first-level folders: {root}"
     return DatasetConnectionTestResponse(
         root_path=str(root),
         exists=True,
@@ -118,8 +109,9 @@ def scan_dataset(db: Session, dataset: models.Dataset, timestamp_regex: str, tim
     db.commit()
 
     try:
-        scanned_images, scan_summary = scan_dataset_files(dataset.root_path, timestamp_regex, timestamp_format)
-        folder_summaries = summarize_folders(scanned_images)
+        scanned_images, folder_summaries, scan_summary = scan_dataset_files(
+            dataset.root_path, timestamp_regex, timestamp_format
+        )
 
         db.execute(delete(models.DatasetImage).where(models.DatasetImage.dataset_id == dataset.id))
         db.execute(delete(models.DatasetFolder).where(models.DatasetFolder.dataset_id == dataset.id))
@@ -135,6 +127,7 @@ def scan_dataset(db: Session, dataset: models.Dataset, timestamp_regex: str, tim
                 last_timestamp=summary["last_timestamp"],
                 extension_summary=summary["extension_summary"],
                 resolution_summary=summary["resolution_summary"],
+                image_metadata=summary["image_metadata"],
                 cadence_summary=summary["cadence_summary"],
             )
             db.add(folder)
@@ -220,14 +213,10 @@ def preview_training_dataset(
     total_selected = 0
 
     for rule in request.rules:
-        matching = db.scalar(
-            select(func.count(models.DatasetImage.id))
-            .where(
-                models.DatasetImage.folder_id == rule.folder_id,
-                models.DatasetImage.timestamp_parsed >= rule.start_timestamp,
-                models.DatasetImage.timestamp_parsed <= rule.end_timestamp,
-            )
-        ) or 0
+        folder = db.get(models.DatasetFolder, rule.folder_id)
+        if folder is None:
+            raise ValueError(f"Folder does not exist: {rule.folder_id}")
+        matching = count_images_in_folder_range(folder, rule.start_timestamp, rule.end_timestamp)
         selected = math.ceil(matching / rule.stride) if matching else 0
         previews.append(
             TrainingDatasetRulePreview(
@@ -349,15 +338,40 @@ def validate_rules(db: Session, rules) -> None:
 
 
 def count_rule_images(db: Session, rule: models.TrainingDatasetRule) -> tuple[int, int]:
-    matching = db.scalar(
-        select(func.count(models.DatasetImage.id)).where(
-            models.DatasetImage.folder_id == rule.folder_id,
-            models.DatasetImage.timestamp_parsed >= rule.start_timestamp,
-            models.DatasetImage.timestamp_parsed <= rule.end_timestamp,
-        )
-    ) or 0
+    matching = count_images_in_folder_range(rule.folder, rule.start_timestamp, rule.end_timestamp)
     selected = math.ceil(matching / rule.stride) if matching else 0
     return matching, selected
+
+
+def count_images_in_folder_range(folder: models.DatasetFolder, start_timestamp, end_timestamp) -> int:
+    if folder.first_timestamp is None or folder.last_timestamp is None:
+        return 0
+
+    range_start = max(start_timestamp, folder.first_timestamp)
+    range_end = min(end_timestamp, folder.last_timestamp)
+    if range_end < range_start:
+        return 0
+
+    image_count = folder.image_count
+    if image_count <= 1:
+        return image_count if folder.first_timestamp >= range_start and folder.first_timestamp <= range_end else 0
+
+    cadence_seconds = None
+    if folder.cadence_summary:
+        cadence_seconds = folder.cadence_summary.get("median_seconds")
+    if not cadence_seconds or cadence_seconds <= 0:
+        if range_start <= folder.first_timestamp and range_end >= folder.last_timestamp:
+            return image_count
+        return 0
+
+    start_offset = max(0, math.ceil((range_start - folder.first_timestamp).total_seconds() / cadence_seconds))
+    end_offset = min(
+        image_count - 1,
+        math.floor((range_end - folder.first_timestamp).total_seconds() / cadence_seconds),
+    )
+    if end_offset < start_offset:
+        return 0
+    return end_offset - start_offset + 1
 
 
 def serialize_training_dataset(db: Session, training_dataset: models.TrainingDataset) -> TrainingDatasetRead:
