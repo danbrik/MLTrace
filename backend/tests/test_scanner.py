@@ -11,8 +11,8 @@ def write_tiff(path: Path, size: tuple[int, int] = (12, 8)) -> None:
 
 
 def test_detect_timestamp_pattern_for_yyyymmdd_hhmmss(tmp_path: Path) -> None:
-    write_tiff(tmp_path / "0226" / "frame_20260204_153000.tif")
-    write_tiff(tmp_path / "0226" / "frame_20260204_153010.tiff")
+    write_tiff(tmp_path / "frame_20260204_153000.tif")
+    write_tiff(tmp_path / "frame_20260204_153010.tiff")
 
     pattern = detect_timestamp_pattern(tmp_path)
 
@@ -23,7 +23,7 @@ def test_detect_timestamp_pattern_for_yyyymmdd_hhmmss(tmp_path: Path) -> None:
 
 
 def test_detect_timestamp_pattern_for_prefixed_two_digit_year(tmp_path: Path) -> None:
-    write_tiff(tmp_path / "line_01" / "W14_HF_26-01-21_16-46-25.tiff")
+    write_tiff(tmp_path / "W14_HF_26-01-21_16-46-25.tiff")
 
     pattern = detect_timestamp_pattern(tmp_path)
 
@@ -34,7 +34,7 @@ def test_detect_timestamp_pattern_for_prefixed_two_digit_year(tmp_path: Path) ->
 
 
 def test_detect_timestamp_pattern_stops_at_first_direct_tiff(tmp_path: Path) -> None:
-    write_tiff(tmp_path / "line_00" / "first_20260204_153000.tif")
+    write_tiff(tmp_path / "first_20260204_153000.tif")
     for index in range(200):
         (tmp_path / f"line_{index + 1:03d}").mkdir(parents=True)
 
@@ -45,10 +45,9 @@ def test_detect_timestamp_pattern_stops_at_first_direct_tiff(tmp_path: Path) -> 
 
 
 def test_scan_dataset_files_and_folder_summary(tmp_path: Path) -> None:
-    write_tiff(tmp_path / "0226" / "frame_20260204_153000.tif", (20, 10))
-    write_tiff(tmp_path / "0226" / "frame_20260204_153010.tif", (20, 10))
-    write_tiff(tmp_path / "0226" / "frame_20260204_153020.tif", (20, 10))
-    write_tiff(tmp_path / "bad_timestamp.tif", (20, 10))
+    write_tiff(tmp_path / "frame_20260204_153000.tif", (20, 10))
+    write_tiff(tmp_path / "frame_20260204_153010.tif", (20, 10))
+    write_tiff(tmp_path / "frame_20260204_153020.tif", (20, 10))
     write_tiff(tmp_path / "0226" / "nested" / "frame_20260204_153030.tif", (30, 15))
 
     images, folder_summary, scan_summary = scan_dataset_files(
@@ -57,14 +56,14 @@ def test_scan_dataset_files_and_folder_summary(tmp_path: Path) -> None:
         "%Y%m%d_%H%M%S",
     )
 
-    assert scan_summary["total_tiff_files"] == 4
+    assert scan_summary["total_tiff_files"] == 3
     assert scan_summary["indexed_images"] == 3
     assert scan_summary["indexed_representative_images"] == 3
-    assert scan_summary["skipped_unparseable_timestamp"] == 1
+    assert scan_summary["skipped_unparseable_timestamp"] == 0
     assert len(images) == 3
-    assert "0226/nested" not in folder_summary
-    assert folder_summary["0226"]["image_count"] == 3
-    assert folder_summary["0226"]["resolution_summary"] == {"20x10": 3}
-    assert folder_summary["0226"]["image_metadata"]["mode"] == "L"
-    assert folder_summary["0226"]["image_metadata"]["dtype"] == "uint8"
-    assert folder_summary["0226"]["cadence_summary"]["median_seconds"] == 10
+    assert "0226" not in folder_summary
+    assert folder_summary["."]["image_count"] == 3
+    assert folder_summary["."]["resolution_summary"] == {"20x10": 3}
+    assert folder_summary["."]["image_metadata"]["mode"] == "L"
+    assert folder_summary["."]["image_metadata"]["dtype"] == "uint8"
+    assert folder_summary["."]["cadence_summary"]["median_seconds"] == 10

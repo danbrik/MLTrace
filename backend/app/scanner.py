@@ -6,7 +6,6 @@ import time
 from collections import Counter, defaultdict
 from dataclasses import dataclass
 from datetime import datetime
-from itertools import chain
 from pathlib import Path
 from statistics import median
 
@@ -50,6 +49,13 @@ class TiffMetadata:
     channels: int
 
 
+@dataclass(frozen=True)
+class FirstTiffProbe:
+    path: Path | None
+    checked_root_entries: int
+    reached_limit: bool
+
+
 COMMON_TIMESTAMP_PATTERNS: tuple[tuple[str, str], ...] = (
     (r"(?P<timestamp>\d{8}_\d{6})", "%Y%m%d_%H%M%S"),
     (r"(?P<timestamp>\d{8}-\d{6})", "%Y%m%d-%H%M%S"),
@@ -74,7 +80,10 @@ def direct_tiff_files(folder_path: str | Path) -> list[Path]:
     )
 
 
-def find_first_direct_tiff(root_path: str | Path) -> Path | None:
+def probe_first_direct_tiff(
+    root_path: str | Path,
+    max_root_entries: int = 500,
+) -> FirstTiffProbe:
     started_at = time.perf_counter()
     root = Path(root_path).expanduser()
     logger.warning("find_first_direct_tiff started root=%s", root)
@@ -89,39 +98,27 @@ def find_first_direct_tiff(root_path: str | Path) -> Path | None:
                 checked_root_entries,
                 time.perf_counter() - started_at,
             )
-            return path
+            return FirstTiffProbe(path, checked_root_entries, False)
+        if checked_root_entries >= max_root_entries:
+            break
 
-    checked_child_dirs = 0
-    checked_child_entries = 0
-    for child in root.iterdir():
-        if not child.is_dir():
-            continue
-        checked_child_dirs += 1
-        for path in child.iterdir():
-            checked_child_entries += 1
-            if path.is_file() and path.suffix.lower() in TIFF_EXTENSIONS:
-                logger.warning(
-                    "find_first_direct_tiff found child file path=%s checked_child_dirs=%s checked_child_entries=%s elapsed=%.3fs",
-                    path,
-                    checked_child_dirs,
-                    checked_child_entries,
-                    time.perf_counter() - started_at,
-                )
-                return path
-
+    reached_limit = checked_root_entries >= max_root_entries
     logger.warning(
-        "find_first_direct_tiff found no file root=%s checked_root_entries=%s checked_child_dirs=%s checked_child_entries=%s elapsed=%.3fs",
+        "find_first_direct_tiff found no file root=%s checked_root_entries=%s reached_limit=%s elapsed=%.3fs",
         root,
         checked_root_entries,
-        checked_child_dirs,
-        checked_child_entries,
+        reached_limit,
         time.perf_counter() - started_at,
     )
-    return None
+    return FirstTiffProbe(None, checked_root_entries, reached_limit)
+
+
+def find_first_direct_tiff(root_path: str | Path) -> Path | None:
+    return probe_first_direct_tiff(root_path).path
 
 
 def iter_tiff_files(root_path: str | Path) -> list[Path]:
-    return list(chain.from_iterable(files for _, files in iter_tiff_file_groups(root_path)))
+    return direct_tiff_files(root_path)
 
 
 def iter_tiff_file_groups(root_path: str | Path) -> list[tuple[str, list[Path]]]:
@@ -131,12 +128,6 @@ def iter_tiff_file_groups(root_path: str | Path) -> list[tuple[str, list[Path]]]
     root_files = direct_tiff_files(root)
     if root_files:
         groups.append((".", root_files))
-
-    child_dirs = sorted(path for path in root.iterdir() if path.is_dir())
-    for child in child_dirs:
-        files = direct_tiff_files(child)
-        if files:
-            groups.append((child.relative_to(root).as_posix(), files))
 
     return groups
 

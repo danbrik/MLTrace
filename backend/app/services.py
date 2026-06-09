@@ -11,7 +11,7 @@ from sqlalchemy.orm import Session, selectinload
 from app import models
 from app.preprocessing.pipeline import execute_preview, validate_linear_graph
 from app.preprocessing.registry import registry
-from app.scanner import detect_timestamp_pattern, find_first_direct_tiff, scan_dataset_files
+from app.scanner import detect_timestamp_pattern, probe_first_direct_tiff, scan_dataset_files
 from app.schemas import (
     DatasetConnectionTestResponse,
     PreprocessingGraph,
@@ -91,11 +91,11 @@ def test_dataset_connection(root_path: str) -> DatasetConnectionTestResponse:
             message=f"Dataset path is not a directory: {root}",
         )
 
-    sample_file = find_first_direct_tiff(root)
-    if sample_file is not None:
+    probe = probe_first_direct_tiff(root)
+    if probe.path is not None:
         logger.warning(
             "test_dataset_connection found sample_file=%s elapsed=%.3fs",
-            sample_file,
+            probe.path,
             time.perf_counter() - started_at,
         )
         return DatasetConnectionTestResponse(
@@ -103,11 +103,18 @@ def test_dataset_connection(root_path: str) -> DatasetConnectionTestResponse:
             exists=True,
             is_directory=True,
             supported_file_found=True,
-            sample_file_path=str(sample_file),
-            message=f"Path is reachable. Found supported image: {sample_file}",
+            sample_file_path=str(probe.path),
+            message=f"Path is reachable. Found supported image: {probe.path}",
         )
 
-    message = f"Path is reachable, but no supported TIFF files were found directly under the root or its first-level folders: {root}"
+    if probe.reached_limit:
+        message = (
+            "Path is reachable, but no supported TIFF file was found within the fast probe limit "
+            f"({probe.checked_root_entries} direct entries). Point MLTrace directly at the folder "
+            "that contains the TIFF files."
+        )
+    else:
+        message = f"Path is reachable, but no supported TIFF files were found directly in this folder: {root}"
     logger.warning("test_dataset_connection no supported file root=%s elapsed=%.3fs", root, time.perf_counter() - started_at)
     return DatasetConnectionTestResponse(
         root_path=str(root),

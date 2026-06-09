@@ -42,7 +42,7 @@ def make_client():
 def add_scanned_dataset(client: TestClient, root: Path, name: str, folder: str, count: int) -> dict:
     for index in range(count):
         timestamp = datetime(2026, 2, 4, 15, 30, 0) + timedelta(seconds=index * 10)
-        write_tiff(root / folder / f"frame_{timestamp:%Y%m%d_%H%M%S}.tif")
+        write_tiff(root / f"{folder}_frame_{timestamp:%Y%m%d_%H%M%S}.tif")
 
     created = client.post(
         "/api/datasets",
@@ -99,7 +99,7 @@ def test_dataset_create_confirm_and_training_dataset_preview(tmp_path: Path) -> 
 
 def test_dataset_connection_probe_and_delete(tmp_path: Path) -> None:
     probe_root = tmp_path / "probe_dataset"
-    write_tiff(probe_root / "line_01" / "frame_without_timestamp.tif")
+    write_tiff(probe_root / "frame_without_timestamp.tif")
 
     client_iter = make_client()
     client = next(client_iter)
@@ -133,7 +133,7 @@ def test_dataset_connection_probe_and_delete(tmp_path: Path) -> None:
 
 def test_dataset_connection_probe_stops_at_first_supported_file(tmp_path: Path) -> None:
     probe_root = tmp_path / "probe_fast"
-    write_tiff(probe_root / "line_00" / "first.tif")
+    write_tiff(probe_root / "first.tif")
     for index in range(200):
         (probe_root / f"line_{index + 1:03d}").mkdir(parents=True)
 
@@ -142,7 +142,28 @@ def test_dataset_connection_probe_stops_at_first_supported_file(tmp_path: Path) 
     try:
         probe = client.post("/api/datasets/test-connection", json={"root_path": str(probe_root)})
         assert probe.status_code == 200
-        assert probe.json()["sample_file_path"].endswith("line_00/first.tif")
+        assert probe.json()["sample_file_path"].endswith("first.tif")
+    finally:
+        try:
+            next(client_iter)
+        except StopIteration:
+            pass
+
+
+def test_dataset_connection_probe_reports_limit(tmp_path: Path) -> None:
+    probe_root = tmp_path / "probe_limited"
+    for index in range(550):
+        (probe_root / f"note_{index:03d}.txt").parent.mkdir(parents=True, exist_ok=True)
+        (probe_root / f"note_{index:03d}.txt").write_text("not an image")
+
+    client_iter = make_client()
+    client = next(client_iter)
+    try:
+        probe = client.post("/api/datasets/test-connection", json={"root_path": str(probe_root)})
+        assert probe.status_code == 200
+        body = probe.json()
+        assert body["supported_file_found"] is False
+        assert "fast probe limit" in body["message"]
     finally:
         try:
             next(client_iter)
@@ -192,8 +213,8 @@ def test_training_dataset_can_span_datasets_and_be_deleted(tmp_path: Path) -> No
             (rule["dataset_name"], rule["folder_relative_path"], rule["start_timestamp"], rule["end_timestamp"], rule["stride"])
             for rule in details.json()["rules"]
         } == {
-            ("A", "0226", "2026-02-04T15:30:00", "2026-02-04T15:30:40", 2),
-            ("B", "line_01", "2026-02-04T15:30:00", "2026-02-04T15:30:30", 1),
+            ("A", ".", "2026-02-04T15:30:00", "2026-02-04T15:30:40", 2),
+            ("B", ".", "2026-02-04T15:30:00", "2026-02-04T15:30:30", 1),
         }
 
         blocked_dataset_delete = client.delete(f"/api/datasets/{dataset_a['id']}")

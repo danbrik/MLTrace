@@ -31,7 +31,6 @@ def write_tiff(path: Path, timestamp: datetime, size: tuple[int, int], seed: int
 
 def generate_range(
     root: Path,
-    folder: str,
     start: datetime,
     count: int,
     step: timedelta,
@@ -43,7 +42,7 @@ def generate_range(
         timestamp = start + index * step
         filename = filename_format.format(ts=timestamp)
         extension = ".tiff" if index % 5 == 0 else ".tif"
-        write_tiff(root / folder / f"{filename}{extension}", timestamp, size, seed_offset + index)
+        write_tiff(root / f"{filename}{extension}", timestamp, size, seed_offset + index)
 
 
 def main() -> None:
@@ -54,7 +53,6 @@ def main() -> None:
     dataset_a = ROOT / "dataset_alpha_yyyymmdd_underscore"
     generate_range(
         dataset_a,
-        "0226",
         datetime(2026, 2, 3, 16, 0, 0),
         28,
         timedelta(minutes=30),
@@ -62,21 +60,10 @@ def main() -> None:
         (128, 96),
         0,
     )
-    generate_range(
-        dataset_a,
-        "0227",
-        datetime(2026, 2, 19, 18, 30, 0),
-        24,
-        timedelta(minutes=45),
-        "camA_{ts:%Y%m%d_%H%M%S}",
-        (128, 96),
-        100,
-    )
 
     dataset_b = ROOT / "dataset_beta_compact"
     generate_range(
         dataset_b,
-        "line_01",
         datetime(2026, 3, 10, 8, 0, 0),
         36,
         timedelta(minutes=10),
@@ -84,47 +71,16 @@ def main() -> None:
         (160, 120),
         200,
     )
-    generate_range(
-        dataset_b,
-        "line_02",
-        datetime(2026, 3, 11, 21, 15, 0),
-        18,
-        timedelta(minutes=20),
-        "line02_{ts:%Y%m%d%H%M%S}",
-        (160, 120),
-        300,
-    )
 
-    dataset_c = ROOT / "dataset_gamma_iso_like"
+    dataset_c = ROOT / "dataset_gamma_two_digit_year"
     generate_range(
         dataset_c,
-        "cell_A/day_shift",
-        datetime(2026, 4, 5, 6, 0, 0),
-        20,
-        timedelta(minutes=15),
-        "cellA_{ts:%Y-%m-%d_%H-%M-%S}",
+        datetime(2026, 1, 21, 16, 46, 25),
+        24,
+        timedelta(seconds=20),
+        "W14_HF_{ts:%y-%m-%d_%H-%M-%S}",
         (96, 96),
         400,
-    )
-    generate_range(
-        dataset_c,
-        "cell_A/night_shift",
-        datetime(2026, 4, 5, 22, 0, 0),
-        16,
-        timedelta(minutes=30),
-        "cellA_{ts:%Y-%m-%d_%H-%M-%S}",
-        (96, 96),
-        500,
-    )
-    generate_range(
-        dataset_c,
-        "cell_B/day_shift",
-        datetime(2026, 4, 6, 7, 30, 0),
-        12,
-        timedelta(minutes=25),
-        "cellB_{ts:%Y-%m-%d_%H-%M-%S}",
-        (104, 96),
-        600,
     )
 
     print(f"Generated sample datasets in {ROOT}")
@@ -132,4 +88,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

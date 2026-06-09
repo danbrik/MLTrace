@@ -12,14 +12,32 @@ import type {
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? 'http://localhost:8000';
 
-async function request<T>(path: string, options?: RequestInit): Promise<T> {
-  const response = await fetch(`${API_BASE_URL}${path}`, {
-    headers: {
-      'Content-Type': 'application/json',
-      ...options?.headers,
-    },
-    ...options,
-  });
+async function request<T>(path: string, options?: RequestInit, timeoutMs?: number): Promise<T> {
+  const controller = timeoutMs ? new AbortController() : null;
+  const timeout = controller
+    ? window.setTimeout(() => controller.abort(), timeoutMs)
+    : null;
+
+  let response: Response;
+  try {
+    response = await fetch(`${API_BASE_URL}${path}`, {
+      headers: {
+        'Content-Type': 'application/json',
+        ...options?.headers,
+      },
+      ...options,
+      signal: controller?.signal ?? options?.signal,
+    });
+  } catch (error) {
+    if (error instanceof DOMException && error.name === 'AbortError') {
+      throw new Error(`Request timed out after ${Math.round((timeoutMs ?? 0) / 1000)} seconds.`);
+    }
+    throw error;
+  } finally {
+    if (timeout !== null) {
+      window.clearTimeout(timeout);
+    }
+  }
 
   if (!response.ok) {
     const body = await response.json().catch(() => undefined);
@@ -45,14 +63,14 @@ export function createDataset(payload: { name: string; root_path: string }): Pro
   return request<Dataset>('/api/datasets', {
     method: 'POST',
     body: JSON.stringify(payload),
-  });
+  }, 12_000);
 }
 
 export function testDatasetConnection(payload: { root_path: string }): Promise<DatasetConnectionTest> {
   return request<DatasetConnectionTest>('/api/datasets/test-connection', {
     method: 'POST',
     body: JSON.stringify(payload),
-  });
+  }, 8_000);
 }
 
 export async function deleteDataset(datasetId: number): Promise<void> {
