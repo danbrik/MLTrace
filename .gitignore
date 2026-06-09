@@ -27,6 +27,7 @@ vendor/
 .pnpm-store/
 .npm/
 .yarn/
+.nodejs-env/
 
 # Build output
 dist/
