@@ -30,6 +30,10 @@ dev = [
 postgres = [
     "psycopg[binary]>=3.2.3",
 ]
+ml = [
+    "torch==2.9.0",
+    "torchvision==0.24.0",
+]
 
 [tool.pytest.ini_options]
 pythonpath = ["backend"]

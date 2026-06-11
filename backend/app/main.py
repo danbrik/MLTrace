@@ -10,6 +10,13 @@ from app.schemas import (
     DatasetConnectionTestResponse,
     DatasetCreate,
     DatasetRead,
+    MethodConfigurationCreate,
+    MethodConfigurationPayload,
+    MethodConfigurationRead,
+    MethodTorchCheckResponse,
+    MethodConfigurationValidationResponse,
+    MethodDefinitionRead,
+    ModelLayerRead,
     PreprocessingPipelineCreate,
     PreprocessingPipelineRead,
     PreprocessingPreviewRequest,
@@ -23,23 +30,33 @@ from app.schemas import (
 )
 from app.services import (
     create_dataset,
+    create_method_configuration,
     create_preprocessing_pipeline,
     create_training_dataset,
     delete_dataset,
+    delete_method_configuration,
     delete_preprocessing_pipeline,
     delete_training_dataset,
     get_dataset_or_404,
+    get_method_configuration,
+    get_method_definition,
     get_preprocessing_pipeline,
     get_training_dataset,
     list_datasets,
+    list_method_configurations,
+    list_method_definitions,
+    list_method_layers,
     list_preprocessing_pipelines,
     list_preprocessing_steps,
     list_training_datasets,
     preview_preprocessing_pipeline,
     preview_training_dataset,
+    run_method_torch_check,
     scan_dataset,
     test_dataset_connection,
+    update_method_configuration,
     update_preprocessing_pipeline,
+    validate_method_configuration,
 )
 
 
@@ -158,6 +175,13 @@ def create_app() -> FastAPI:
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
+    @app.post("/api/preprocessing/pipelines/preview", response_model=PreprocessingPreviewResponse)
+    def api_preview_preprocessing_pipeline(payload: PreprocessingPreviewRequest, db: Session = Depends(get_db)):
+        try:
+            return preview_preprocessing_pipeline(db, payload)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
     @app.get("/api/preprocessing/pipelines/{pipeline_id}", response_model=PreprocessingPipelineRead)
     def api_get_preprocessing_pipeline(pipeline_id: int, db: Session = Depends(get_db)):
         pipeline = get_preprocessing_pipeline(db, pipeline_id)
@@ -184,12 +208,133 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=404, detail="Preprocessing pipeline not found.")
         return None
 
-    @app.post("/api/preprocessing/pipelines/preview", response_model=PreprocessingPreviewResponse)
-    def api_preview_preprocessing_pipeline(payload: PreprocessingPreviewRequest, db: Session = Depends(get_db)):
+    @app.get("/api/methods/definitions", response_model=list[MethodDefinitionRead])
+    def api_list_method_definitions():
+        return list_method_definitions()
+
+    @app.get("/api/methods/definitions/{method_type}", response_model=MethodDefinitionRead)
+    def api_get_method_definition(method_type: str):
         try:
-            return preview_preprocessing_pipeline(db, payload)
+            return get_method_definition(method_type)
+        except ValueError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.get("/api/methods/layers", response_model=list[ModelLayerRead])
+    def api_list_method_layers():
+        return list_method_layers()
+
+    @app.get("/api/methods/configurations", response_model=list[MethodConfigurationRead])
+    def api_list_method_configurations(db: Session = Depends(get_db)):
+        return list_method_configurations(db)
+
+    @app.post("/api/methods/configurations", response_model=MethodConfigurationRead)
+    def api_create_method_configuration(payload: MethodConfigurationCreate, db: Session = Depends(get_db)):
+        try:
+            return create_method_configuration(db, payload)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except IntegrityError as exc:
+            db.rollback()
+            raise HTTPException(status_code=409, detail="A method with this name already exists.") from exc
+
+    @app.post("/api/methods/configurations/validate", response_model=MethodConfigurationValidationResponse)
+    def api_validate_method_configuration(payload: MethodConfigurationPayload):
+        return validate_method_configuration(payload)
+
+    @app.post("/api/methods/configurations/diagram", response_model=MethodConfigurationValidationResponse)
+    def api_method_configuration_diagram(payload: MethodConfigurationPayload):
+        return validate_method_configuration(payload)
+
+    @app.post("/api/methods/configurations/torch-check", response_model=MethodTorchCheckResponse)
+    def api_method_configuration_torch_check(payload: MethodConfigurationPayload):
+        return run_method_torch_check(payload)
+
+    @app.get("/api/methods/configurations/{configuration_id}", response_model=MethodConfigurationRead)
+    def api_get_method_configuration(configuration_id: int, db: Session = Depends(get_db)):
+        configuration = get_method_configuration(db, configuration_id)
+        if configuration is None:
+            raise HTTPException(status_code=404, detail="Method configuration not found.")
+        return configuration
+
+    @app.put("/api/methods/configurations/{configuration_id}", response_model=MethodConfigurationRead)
+    def api_update_method_configuration(
+        configuration_id: int, payload: MethodConfigurationCreate, db: Session = Depends(get_db)
+    ):
+        try:
+            updated = update_method_configuration(db, configuration_id, payload)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except IntegrityError as exc:
+            db.rollback()
+            raise HTTPException(status_code=409, detail="A method with this name already exists.") from exc
+        if updated is None:
+            raise HTTPException(status_code=404, detail="Method configuration not found.")
+        return updated
+
+    @app.delete("/api/methods/configurations/{configuration_id}", status_code=204)
+    def api_delete_method_configuration(configuration_id: int, db: Session = Depends(get_db)):
+        deleted = delete_method_configuration(db, configuration_id)
+        if not deleted:
+            raise HTTPException(status_code=404, detail="Method configuration not found.")
+        return None
+
+    # Temporary compatibility aliases for clients still calling the Phase 3 Models API.
+    app.add_api_route("/api/models/architectures", api_list_method_definitions, methods=["GET"], response_model=list[MethodDefinitionRead])
+    app.add_api_route(
+        "/api/models/architectures/{method_type}",
+        api_get_method_definition,
+        methods=["GET"],
+        response_model=MethodDefinitionRead,
+    )
+    app.add_api_route("/api/models/layers", api_list_method_layers, methods=["GET"], response_model=list[ModelLayerRead])
+    app.add_api_route(
+        "/api/models/configurations",
+        api_list_method_configurations,
+        methods=["GET"],
+        response_model=list[MethodConfigurationRead],
+    )
+    app.add_api_route(
+        "/api/models/configurations",
+        api_create_method_configuration,
+        methods=["POST"],
+        response_model=MethodConfigurationRead,
+    )
+    app.add_api_route(
+        "/api/models/configurations/validate",
+        api_validate_method_configuration,
+        methods=["POST"],
+        response_model=MethodConfigurationValidationResponse,
+    )
+    app.add_api_route(
+        "/api/models/configurations/diagram",
+        api_method_configuration_diagram,
+        methods=["POST"],
+        response_model=MethodConfigurationValidationResponse,
+    )
+    app.add_api_route(
+        "/api/models/configurations/torch-check",
+        api_method_configuration_torch_check,
+        methods=["POST"],
+        response_model=MethodTorchCheckResponse,
+    )
+    app.add_api_route(
+        "/api/models/configurations/{configuration_id}",
+        api_get_method_configuration,
+        methods=["GET"],
+        response_model=MethodConfigurationRead,
+    )
+    app.add_api_route(
+        "/api/models/configurations/{configuration_id}",
+        api_update_method_configuration,
+        methods=["PUT"],
+        response_model=MethodConfigurationRead,
+    )
+    app.add_api_route(
+        "/api/models/configurations/{configuration_id}",
+        api_delete_method_configuration,
+        methods=["DELETE"],
+        status_code=204,
+    )
 
     return app
 

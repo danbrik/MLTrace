@@ -202,3 +202,120 @@ class PreprocessingPreviewResponse(BaseModel):
     source_image_path: str
     source_timestamp: datetime
     previews: list[PreprocessingPreviewImage]
+
+
+class MethodDefinitionRead(BaseModel):
+    type: str
+    label: str
+    category: str
+    description: str
+    framework: str
+    method_family: str
+    method_version: str
+    training_mode: str
+    architecture_version: str
+    requires_training: bool
+    supports_training_pipeline: bool
+    artifact_kind: str
+    builder_kind: str
+    capabilities: dict
+    method_schema: dict
+    model_schema: dict
+    training_schema: dict
+    inference_schema: dict
+    default_method_config: dict
+    default_model_config: dict
+    default_training_config: dict
+    default_inference_config: dict
+
+
+class ModelLayerRead(BaseModel):
+    type: str
+    label: str
+    category: str
+    config_schema: dict
+    default_config: dict
+    input_rank: int | None
+    output_rank: int | None
+    shape_notes: str | None = None
+
+
+class MethodConfigurationParameterRead(BaseModel):
+    path: str
+    value_type: str
+    value_text: str | None = None
+    value_number: float | None = None
+    value_bool: bool | None = None
+
+
+class MethodConfigurationPayload(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    method_type: str | None = Field(default=None, min_length=1, max_length=128)
+    architecture_type: str | None = Field(default=None, min_length=1, max_length=128)
+    method_graph: dict = Field(default_factory=dict)
+    model_graph: dict = Field(default_factory=dict)
+    method_config: dict = Field(default_factory=dict)
+    model_params: dict = Field(default_factory=dict, alias="model_config")
+    training_config: dict = Field(default_factory=dict)
+    inference_config: dict = Field(default_factory=dict)
+
+
+class MethodConfigurationCreate(MethodConfigurationPayload):
+    name: str = Field(min_length=1, max_length=255)
+    description: str | None = None
+
+
+class MethodConfigurationRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True, populate_by_name=True)
+
+    id: int
+    name: str
+    description: str | None
+    method_type: str
+    method_family: str
+    method_version: str
+    training_mode: str
+    architecture_type: str
+    architecture_version: str
+    requires_training: bool
+    supports_training_pipeline: bool
+    artifact_kind: str
+    builder_kind: str
+    method_graph: dict
+    model_graph: dict
+    method_config: dict
+    model_params: dict = Field(alias="model_config")
+    training_config: dict
+    inference_config: dict
+    diagram: dict
+    created_at: datetime
+    updated_at: datetime
+    validation: dict | None = None
+    parameters: list[MethodConfigurationParameterRead] = []
+
+
+class MethodConfigurationValidationResponse(BaseModel):
+    valid: bool
+    errors: list[str] = []
+    warnings: list[str] = []
+    layer_specs: list[dict] = []
+    torch_check: dict | None = None
+    diagram: dict
+
+
+class MethodTorchCheckResponse(BaseModel):
+    valid: bool
+    status: str
+    errors: list[str] = []
+    warnings: list[str] = []
+    logs: list[str] = []
+    torch_check: dict | None = None
+
+
+ModelArchitectureRead = MethodDefinitionRead
+ModelConfigurationParameterRead = MethodConfigurationParameterRead
+ModelConfigurationPayload = MethodConfigurationPayload
+ModelConfigurationCreate = MethodConfigurationCreate
+ModelConfigurationRead = MethodConfigurationRead
+ModelConfigurationValidationResponse = MethodConfigurationValidationResponse

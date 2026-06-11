@@ -135,3 +135,58 @@ class PreprocessingPipeline(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=False), server_default=func.now(), onupdate=func.now()
     )
+
+
+class MethodConfiguration(Base):
+    __tablename__ = "method_configurations"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    name: Mapped[str] = mapped_column(String(255), nullable=False, unique=True)
+    description: Mapped[str | None] = mapped_column(Text)
+    method_type: Mapped[str] = mapped_column(String(128), nullable=False)
+    method_family: Mapped[str] = mapped_column(String(128), nullable=False)
+    method_version: Mapped[str] = mapped_column(String(64), nullable=False, default="1")
+    training_mode: Mapped[str] = mapped_column(String(64), nullable=False)
+    requires_training: Mapped[bool] = mapped_column(nullable=False, default=True)
+    supports_training_pipeline: Mapped[bool] = mapped_column(nullable=False, default=True)
+    artifact_kind: Mapped[str] = mapped_column(String(128), nullable=False)
+    builder_kind: Mapped[str] = mapped_column(String(128), nullable=False)
+    method_graph: Mapped[dict] = mapped_column(json_type(), nullable=False)
+    method_config: Mapped[dict] = mapped_column(json_type(), nullable=False)
+    training_config: Mapped[dict] = mapped_column(json_type(), nullable=False)
+    inference_config: Mapped[dict] = mapped_column(json_type(), nullable=False)
+    diagram: Mapped[dict] = mapped_column(json_type(), nullable=False)
+    validation: Mapped[dict | None] = mapped_column(json_type())
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=False), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=False), server_default=func.now(), onupdate=func.now()
+    )
+
+    parameters: Mapped[list["MethodConfigurationParameter"]] = relationship(
+        back_populates="method_configuration", cascade="all, delete-orphan"
+    )
+
+
+class MethodConfigurationParameter(Base):
+    __tablename__ = "method_configuration_parameters"
+    __table_args__ = (
+        Index("ix_method_config_parameters_path_text", "path", "value_text"),
+        Index("ix_method_config_parameters_path_number", "path", "value_number"),
+        Index("ix_method_config_parameters_path_bool", "path", "value_bool"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    method_configuration_id: Mapped[int] = mapped_column(
+        ForeignKey("method_configurations.id", ondelete="CASCADE"), nullable=False
+    )
+    path: Mapped[str] = mapped_column(Text, nullable=False)
+    value_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    value_text: Mapped[str | None] = mapped_column(Text)
+    value_number: Mapped[float | None] = mapped_column()
+    value_bool: Mapped[bool | None] = mapped_column()
+
+    method_configuration: Mapped[MethodConfiguration] = relationship(back_populates="parameters")
+
+
+ModelConfiguration = MethodConfiguration
+ModelConfigurationParameter = MethodConfigurationParameter

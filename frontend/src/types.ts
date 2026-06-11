@@ -160,3 +160,180 @@ export type PreprocessingPreview = {
   source_timestamp: string;
   previews: PreprocessingPreviewImage[];
 };
+
+export type SchemaProperty = {
+  type: 'string' | 'integer' | 'number' | 'boolean';
+  label?: string;
+  enum?: string[];
+  default?: unknown;
+  minimum?: number;
+  maximum?: number;
+  description?: string;
+  help_text?: string;
+};
+
+export type ConfigSchema = {
+  type: string;
+  required?: string[];
+  properties: Record<string, SchemaProperty>;
+};
+
+export type MethodDefinition = {
+  type: string;
+  label: string;
+  category: string;
+  description: string;
+  framework: string;
+  method_family: string;
+  method_version: string;
+  training_mode: 'gradient' | 'fit' | 'none' | string;
+  architecture_version: string;
+  requires_training: boolean;
+  supports_training_pipeline: boolean;
+  artifact_kind: string;
+  builder_kind: 'sequential_autoencoder' | 'sequential_variational_autoencoder' | 'form' | string;
+  capabilities: Record<string, unknown>;
+  method_schema: ConfigSchema;
+  model_schema: ConfigSchema;
+  training_schema: ConfigSchema;
+  inference_schema: ConfigSchema;
+  default_method_config: Record<string, unknown>;
+  default_model_config: Record<string, unknown>;
+  default_training_config: Record<string, unknown>;
+  default_inference_config: Record<string, unknown>;
+};
+
+export type ModelLayerDefinition = {
+  type: string;
+  label: string;
+  category: string;
+  config_schema: ConfigSchema;
+  default_config: Record<string, unknown>;
+  input_rank: number | null;
+  output_rank: number | null;
+  shape_notes: string | null;
+};
+
+export type ModelLayerInstance = {
+  id: string;
+  type: string;
+  config: Record<string, unknown>;
+};
+
+export type ModelGraph = {
+  builder_kind?: string;
+  encoder?: ModelLayerInstance[];
+  latent?: Record<string, unknown>;
+  decoder?: ModelLayerInstance[];
+  [key: string]: unknown;
+};
+
+export type ModelDiagram = {
+  method_type?: string;
+  architecture_type: string;
+  builder_kind: string;
+  nodes: Array<{
+    id: string;
+    label: string;
+    section: string;
+    detail: string;
+  }>;
+  edges: Array<{
+    source: string;
+    target: string;
+  }>;
+};
+
+export type MethodConfigurationParameter = {
+  path: string;
+  value_type: string;
+  value_text: string | null;
+  value_number: number | null;
+  value_bool: boolean | null;
+};
+
+export type MethodValidation = {
+  valid: boolean;
+  errors: string[];
+  warnings: string[];
+  layer_specs: Array<{
+    section: string;
+    index: number;
+    layer_id: string | null;
+    layer_type: string;
+    input_label: string;
+    output_label: string;
+  }>;
+  torch_check: {
+    status: 'available' | 'missing' | 'failed' | string;
+    message: string;
+    input_shape?: unknown;
+    output_shape?: unknown;
+    elapsed_ms?: number;
+  } | null;
+  diagram: ModelDiagram;
+};
+
+export type MethodTorchCheckResponse = {
+  valid: boolean;
+  status: 'available' | 'missing' | 'failed' | 'not_applicable' | string;
+  errors: string[];
+  warnings: string[];
+  logs: string[];
+  torch_check: {
+    status: 'available' | 'missing' | 'failed' | 'not_applicable' | string;
+    message: string;
+    input_shape?: unknown;
+    output_shape?: unknown;
+    elapsed_ms?: number;
+  } | null;
+};
+
+export type MethodConfiguration = {
+  id: number;
+  name: string;
+  description: string | null;
+  method_type: string;
+  method_family: string;
+  method_version: string;
+  training_mode: string;
+  architecture_type: string;
+  architecture_version: string;
+  requires_training: boolean;
+  supports_training_pipeline: boolean;
+  artifact_kind: string;
+  builder_kind: string;
+  method_graph: ModelGraph;
+  model_graph: ModelGraph;
+  method_config: Record<string, unknown>;
+  model_config: Record<string, unknown>;
+  training_config: Record<string, unknown>;
+  inference_config: Record<string, unknown>;
+  diagram: ModelDiagram;
+  created_at: string;
+  updated_at: string;
+  validation: MethodValidation | null;
+  parameters: MethodConfigurationParameter[];
+};
+
+export type MethodConfigurationPayload = {
+  method_type: string;
+  method_graph: ModelGraph;
+  method_config: Record<string, unknown>;
+  training_config: Record<string, unknown>;
+  inference_config: Record<string, unknown>;
+};
+
+export type MethodConfigurationSavePayload = MethodConfigurationPayload & {
+  name: string;
+  description?: string | null;
+};
+
+export type MethodValidationResponse = MethodValidation;
+
+export type ModelArchitecture = MethodDefinition;
+export type ModelConfigurationParameter = MethodConfigurationParameter;
+export type ModelConfiguration = MethodConfiguration;
+export type ModelConfigurationPayload = MethodConfigurationPayload;
+export type ModelConfigurationSavePayload = MethodConfigurationSavePayload;
+export type ModelValidationResponse = MethodValidationResponse;

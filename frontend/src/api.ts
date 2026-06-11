@@ -1,6 +1,13 @@
 import type {
   Dataset,
   DatasetConnectionTest,
+  MethodConfiguration,
+  MethodConfigurationPayload,
+  MethodConfigurationSavePayload,
+  MethodTorchCheckResponse,
+  MethodDefinition,
+  MethodValidationResponse,
+  ModelLayerDefinition,
   PreprocessingGraph,
   PreprocessingPipeline,
   PreprocessingPreview,
@@ -192,3 +199,78 @@ export function previewPreprocessingPipeline(payload: {
     body: JSON.stringify(payload),
   });
 }
+
+export function listMethodDefinitions(): Promise<MethodDefinition[]> {
+  return request<MethodDefinition[]>('/api/methods/definitions');
+}
+
+export function getMethodDefinition(methodType: string): Promise<MethodDefinition> {
+  return request<MethodDefinition>(`/api/methods/definitions/${methodType}`);
+}
+
+export function listModelLayers(): Promise<ModelLayerDefinition[]> {
+  return request<ModelLayerDefinition[]>('/api/methods/layers');
+}
+
+export function listMethodConfigurations(): Promise<MethodConfiguration[]> {
+  return request<MethodConfiguration[]>('/api/methods/configurations');
+}
+
+export function getMethodConfiguration(configurationId: number): Promise<MethodConfiguration> {
+  return request<MethodConfiguration>(`/api/methods/configurations/${configurationId}`);
+}
+
+export function createMethodConfiguration(payload: MethodConfigurationSavePayload): Promise<MethodConfiguration> {
+  return request<MethodConfiguration>('/api/methods/configurations', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
+}
+
+export function updateMethodConfiguration(
+  configurationId: number,
+  payload: MethodConfigurationSavePayload,
+): Promise<MethodConfiguration> {
+  return request<MethodConfiguration>(`/api/methods/configurations/${configurationId}`, {
+    method: 'PUT',
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function deleteMethodConfiguration(configurationId: number): Promise<void> {
+  await request<void>(`/api/methods/configurations/${configurationId}`, {
+    method: 'DELETE',
+  });
+}
+
+export function validateMethodConfiguration(payload: MethodConfigurationPayload): Promise<MethodValidationResponse> {
+  return request<MethodValidationResponse>('/api/methods/configurations/validate', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
+}
+
+export function buildMethodDiagram(payload: MethodConfigurationPayload): Promise<MethodValidationResponse> {
+  return request<MethodValidationResponse>('/api/methods/configurations/diagram', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
+}
+
+export function runMethodTorchCheck(payload: MethodConfigurationPayload): Promise<MethodTorchCheckResponse> {
+  return request<MethodTorchCheckResponse>('/api/methods/configurations/torch-check', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  }, 120_000);
+}
+
+export const listModelArchitectures = listMethodDefinitions;
+export const getModelArchitecture = getMethodDefinition;
+export const listModelConfigurations = listMethodConfigurations;
+export const getModelConfiguration = getMethodConfiguration;
+export const createModelConfiguration = createMethodConfiguration;
+export const updateModelConfiguration = updateMethodConfiguration;
+export const deleteModelConfiguration = deleteMethodConfiguration;
+export const validateModelConfiguration = validateMethodConfiguration;
+export const buildModelDiagram = buildMethodDiagram;
+export const runModelTorchCheck = runMethodTorchCheck;

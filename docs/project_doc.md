@@ -1,6 +1,6 @@
 # MLTrace Project Documentation
 
-Stand: 2026-05-31
+Stand: 2026-06-10
 
 ## Ziel
 
@@ -53,11 +53,11 @@ Aus den bisherigen Anforderungen ergeben sich diese Kernpunkte:
 
 ## Aktuelle Umsetzung
 
-Die aktuelle V1-Umsetzung enthält den Datenkatalog und den Trainingsdatensatz-Builder.
+Die aktuelle Umsetzung enthält Datenkatalog, Trainingsdatensatz-Builder, Preprocessing-Pipelines und eine Methods-Registry.
 
 Technischer Stack:
 
-- Backend: FastAPI, SQLAlchemy, Alembic, Pillow
+- Backend: FastAPI, SQLAlchemy, Alembic, Pillow, OpenCV, NumPy
 - Datenbank: SQLite lokal unter `.mltrace/mltrace.db`
 - Frontend: React, Vite, TypeScript, Mantine
 - Betrieb: ohne Docker
@@ -109,6 +109,25 @@ Aktuell implementierte Seiten:
   - gespeicherte Pipelines laden, bearbeiten (Update) oder als neue Pipeline speichern; Pipeline-Namen sind eindeutig (case-insensitive)
   - gespeicherte Pipelines laden und löschen
 
+- `Methods`
+  - globale, benannte Method-Konfigurationen anlegen
+  - Method-Definitionen automatisch aus Python-Klassen unter `backend/app/modeling/architectures/` laden
+  - ein Standardformat über `BaseMethodDefinition` verwenden
+  - initiale Methods: `cnn_autoencoder`, `cnn_vae`, `mean_image`
+  - PatchCore, Optical Flow und ähnliche Verfahren sind noch nicht implementiert, können aber später als weitere Method-Klassen ergänzt werden
+  - CNN-AE und CNN-VAE über einen sequenziellen Builder definieren: Input, Encoder, Latent, Decoder, Output
+  - V1-Layer aus einem kuratierten Layer-Katalog wählen: `Conv2d`, `ConvTranspose2d`, `BatchNorm2d`, `MaxPool2d`, `Upsample`, `Dropout2d`, `Flatten`, `Unflatten`, `Linear`, `ReLU`, `LeakyReLU`, `GELU`, `Sigmoid`, `Tanh`
+  - Layer konfigurieren, umsortieren und entfernen
+  - Mean Image als schema-getriebenes Formular speichern, ohne Layer-Builder
+  - pro Method ein strukturelles Diagramm als JSON erzeugen und im UI anzeigen
+  - Method-Konfigurationen laden, aktualisieren, als neue Konfiguration speichern und löschen
+  - Method-Namen sind eindeutig (case-insensitive)
+  - Verfahren werden über `method_family`, `training_mode`, `artifact_kind` und `supports_training_pipeline` unterschieden
+  - CNN-AE und CNN-VAE haben `training_mode=gradient` und erzeugen später Gewichts-Artefakte
+  - Mean Image hat `training_mode=fit`, ist ebenfalls ein späterer Training-/Fit-Schritt und erzeugt ein Mean-Image-Artefakt
+  - CNN-Methoden werden statisch über Tensor-Shape-Propagation validiert; harte Architekturfehler blockieren Speichern
+  - falls Torch/Torchvision installiert sind, kann zusätzlich ein CPU-Dummy-Forward-Check laufen; ohne Torch bleibt die App nutzbar
+
 Aktuelle Datenbankobjekte:
 
 - `datasets`
@@ -123,6 +142,10 @@ Aktuelle Datenbankobjekte:
   - Folder, Start, Ende, Stride
 - `preprocessing_pipelines`
   - Name, Beschreibung, Pipeline-Graph, Erstell- und Änderungszeit
+- `method_configurations`
+  - Name, Beschreibung, Method-Typ, Method-Family, Training Mode, Artifact-Kind, Builder-Typ, Method-Graph, Method-, Trainings- und Inferenzconfig, Diagramm, Validierung
+- `method_configuration_parameters`
+  - flach indexierte skalare Parameterpfade für spätere Filterung
 
 Wichtige bewusste Einschränkungen:
 
@@ -131,49 +154,51 @@ Wichtige bewusste Einschränkungen:
 - Training, Inferenz, ROI-Auswertung und Modellvergleich sind noch nicht implementiert.
 - Preprocessing-Pipelines werden noch nicht batchweise auf Trainingsdatensätze angewendet.
 - Preprocessing-Pipelines erzeugen noch keine persistenten Bildartefakte.
+- Gespeicherte Method-Konfigurationen erzeugen noch keine persistenten Torch-Module, Artefakte oder Trainingsläufe.
+- Mean Image wird aktuell nur als Baseline-Konfiguration gespeichert; das eigentliche Mean-Image-Artefakt wird später berechnet.
 - Es gibt noch keine Benutzerverwaltung, weil Einzelbetrieb gewünscht ist.
 - Es gibt noch keine freie visuelle DAG-Oberfläche; die V1-UI nutzt bewusst eine klare lineare Bausteinansicht, speichert intern aber weiterhin Nodes und Edges.
 
 ## Nächster Empfohlener Schritt
 
-Der nächste sinnvolle Schritt ist aus meiner Sicht eine **Experiment- und Training-Run-Registry**, noch bevor echte Trainingslogik tief integriert wird.
+Der nächste sinnvolle Schritt ist aus meiner Sicht eine **Training Pipeline / Training Run Definition**, noch bevor echte Trainingslogik tief integriert wird.
 
 Begründung:
 
-Die zentrale Schwierigkeit deines Projekts ist nicht nur, ein Modell zu trainieren, sondern später eindeutig zu wissen:
+Die zentrale Schwierigkeit deines Projekts ist nicht nur, eine Method auszuführen oder ein neuronales Modell zu trainieren, sondern später eindeutig zu wissen:
 
 - welcher Trainingsdatensatz verwendet wurde
 - welches Preprocessing verwendet wurde
-- welche Modellarchitektur verwendet wurde
+- welche gespeicherte Method-Konfiguration verwendet wurde
 - welche Trainingsparameter verwendet wurden
 - wo die Artefakte liegen
 - welcher Run erfolgreich war
-- welches Modell später für Inferenz und Vergleich ausgewählt werden soll
+- welche trainierte Method beziehungsweise welches erzeugte Artefakt später für Inferenz und Vergleich ausgewählt werden soll
 
-Wenn diese Registry zuerst sauber steht, können Training, Inferenz und Vergleich darauf aufbauen, ohne dass später chaotische Sonderfälle entstehen.
+Nachdem Training Datasets, Preprocessing Pipelines und Methods jetzt als wiederverwendbare Bausteine existieren, sollte der nächste Schritt diese Bausteine zu einer speicherbaren Training Pipeline verbinden. Dabei sollen nur Methods auswählbar sein, deren gespeicherte Konfiguration `supports_training_pipeline=true` hat.
 
 ## Vorgeschlagener Nächster Implementationsschnitt
 
-Phase 2 sollte folgende Funktionen enthalten:
+Der nächste Implementationsschnitt sollte folgende Funktionen enthalten:
 
-- Seite `Experiments` oder `Training Runs`
-  - neuen Training Run anlegen
+- Seite `Training Pipelines`
+  - neue Training Pipeline anlegen
   - gespeicherten Trainingsdatensatz auswählen
-  - Modelltyp auswählen
-  - Preprocessing-Konfiguration erfassen
-  - Trainingsparameter erfassen
-  - Run speichern
-  - Runs tabellarisch anzeigen
-  - nach Dataset, Zeitbereich, Preprocessing, Modelltyp und Status filtern
+  - gespeicherte Preprocessing Pipeline auswählen
+  - gespeicherte Method-Konfiguration auswählen
+  - Trainingsparameter aus der Method-Konfiguration übernehmen und überschreibbar machen
+  - Pipeline speichern
+  - Pipelines tabellarisch anzeigen
+  - nach Dataset, Zeitbereich, Preprocessing, Method-Typ, Method-Family und Parametern filtern
 
 - Backend-Modelle:
-  - `model_definitions`
-  - `preprocessing_definitions`
+  - `training_pipelines`
+  - `training_pipeline_datasets`
   - `training_runs`
   - `training_run_artifacts`
 
 - V1-kompatible einfache Plugin-Struktur:
-  - Python-Module registrieren Modell- und Preprocessing-Optionen
+  - Python-Module registrieren Method- und Preprocessing-Optionen
   - Konfigurationen werden als JSON gespeichert
   - noch kein visueller DAG
 
@@ -185,26 +210,28 @@ Phase 2 sollte folgende Funktionen enthalten:
   - `failed`
 
 - Artefakt-Tracking:
-  - Modellpfad
+  - Artefaktpfad
   - Config-Snapshot
   - Log-Pfad
   - Trainingsmetriken
 
-Wichtig: In diesem Schritt kann Training zunächst noch manuell oder als Dummy-Runner ausgeführt werden. Entscheidend ist, dass die Plattform die Runs und ihre Konfigurationen korrekt abbildet. Danach kann ein echter PyTorch-Runner angeschlossen werden.
+Wichtig: In diesem Schritt kann Training zunächst noch manuell oder als Dummy-Runner ausgeführt werden. Entscheidend ist, dass die Plattform die Pipeline und ihre Konfiguration korrekt abbildet. Danach kann ein echter PyTorch-Runner angeschlossen werden.
 
 ## Roadmap
 
 Empfohlene Reihenfolge:
 
 1. Dataset Catalog und Training Dataset Builder stabilisieren.
-2. Training-Run-Registry mit Modell-, Preprocessing- und Trainingsconfig bauen.
-3. Lokalen PyTorch-Runner integrieren.
-4. Modellartefakte und Metriken speichern.
-5. Inferenz-Run-Registry hinzufügen.
-6. ROI-Konfigurationen und Rekonstruktionsfehler-Auswertung hinzufügen.
-7. Interaktive Ergebnisplots und Modellvergleich bauen.
-8. Plugin-System erweitern.
-9. Später optional visuellen Pipeline-/DAG-Builder auf denselben Plugins aufsetzen.
+2. Preprocessing-Pipeline-Builder stabilisieren.
+3. Method Registry und Method Builder stabilisieren.
+4. Training Pipeline / Training Run Definition mit Method-, Preprocessing- und Trainingsconfig bauen.
+5. Lokalen PyTorch-Runner integrieren.
+6. Method-Artefakte und Metriken speichern.
+7. Inferenz-Run-Registry hinzufügen.
+8. ROI-Konfigurationen und Rekonstruktionsfehler-Auswertung hinzufügen.
+9. Interaktive Ergebnisplots und Modellvergleich bauen.
+10. Plugin-System erweitern.
+11. Später optional visuellen Pipeline-/DAG-Builder auf denselben Plugins aufsetzen.
 
 ## Akzeptanzkriterien Für Den Nächsten Schritt
 
@@ -212,7 +239,7 @@ Ein nächster Schritt gilt als erfolgreich, wenn:
 
 - ein Training Run ohne Training-Ausführung gespeichert werden kann
 - der Run eindeutig auf einen gespeicherten Trainingsdatensatz verweist
-- Modell-, Preprocessing- und Trainingsparameter strukturiert gespeichert werden
+- Method-, Preprocessing- und Trainingsparameter strukturiert gespeichert werden
 - mehrere Runs mit unterschiedlichen Konfigurationen angelegt werden können
 - Runs in einer Tabelle sichtbar und filterbar sind
 - die gespeicherte Konfiguration später für echte Training-Ausführung verwendet werden kann

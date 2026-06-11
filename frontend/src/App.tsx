@@ -1,12 +1,13 @@
 import { AppShell, Box, Button, Group, Stack, Text, Title } from '@mantine/core';
-import { Database, ListChecks, Workflow } from 'lucide-react';
+import { BrainCircuit, Database, ListChecks, Workflow } from 'lucide-react';
 import { useState } from 'react';
 
 import { DatasetsPage } from './pages/DatasetsPage';
+import { MethodsPage } from './pages/ModelsPage';
 import { PreprocessingPipelinesPage } from './pages/PreprocessingPipelinesPage';
 import { TrainingDatasetsPage } from './pages/TrainingDatasetsPage';
 
-type Page = 'datasets' | 'training-datasets' | 'preprocessing';
+type Page = 'datasets' | 'training-datasets' | 'preprocessing' | 'methods';
 
 export function App() {
   const [page, setPage] = useState<Page>('datasets');
@@ -14,7 +15,7 @@ export function App() {
   return (
     <AppShell
       header={{ height: 64 }}
-      navbar={{ width: 260, breakpoint: 'sm' }}
+      navbar={{ width: 260, breakpoint: 0 }}
       padding="md"
     >
       <AppShell.Header>
@@ -22,7 +23,7 @@ export function App() {
           <Box>
             <Title order={2}>MLTrace</Title>
             <Text size="xs" c="dimmed">
-              Dataset catalog and training dataset builder
+              Dataset catalog, preprocessing, and method registry
             </Text>
           </Box>
         </Group>
@@ -54,13 +55,30 @@ export function App() {
           >
             Preprocessing
           </Button>
+          <Button
+            leftSection={<BrainCircuit size={18} />}
+            variant={page === 'methods' ? 'filled' : 'subtle'}
+            justify="flex-start"
+            onClick={() => setPage('methods')}
+          >
+            Methods
+          </Button>
         </Stack>
       </AppShell.Navbar>
 
       <AppShell.Main>
-        {page === 'datasets' && <DatasetsPage />}
-        {page === 'training-datasets' && <TrainingDatasetsPage />}
-        {page === 'preprocessing' && <PreprocessingPipelinesPage />}
+        <Box display={page === 'datasets' ? 'block' : 'none'}>
+          <DatasetsPage />
+        </Box>
+        <Box display={page === 'training-datasets' ? 'block' : 'none'}>
+          <TrainingDatasetsPage />
+        </Box>
+        <Box display={page === 'preprocessing' ? 'block' : 'none'}>
+          <PreprocessingPipelinesPage />
+        </Box>
+        <Box display={page === 'methods' ? 'block' : 'none'}>
+          <MethodsPage />
+        </Box>
       </AppShell.Main>
     </AppShell>
   );

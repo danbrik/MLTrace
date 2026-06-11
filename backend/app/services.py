@@ -9,11 +9,24 @@ from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session, selectinload
 
 from app import models
+import app.modeling  # noqa: F401 ensures core model architectures are registered
+from app.modeling.architectures.common import validate_sequential_model_graph
+from app.modeling.layers import list_layer_definitions
+from app.modeling.registry import registry as model_registry
+from app.modeling.validation import run_cnn_torch_dummy_forward, validate_cnn_tensor_contract
 from app.preprocessing.pipeline import execute_preview, validate_linear_graph
 from app.preprocessing.registry import registry
 from app.scanner import detect_timestamp_pattern, probe_first_direct_tiff, scan_dataset_files
 from app.schemas import (
     DatasetConnectionTestResponse,
+    MethodConfigurationCreate,
+    MethodConfigurationParameterRead,
+    MethodConfigurationPayload,
+    MethodConfigurationRead,
+    MethodTorchCheckResponse,
+    MethodConfigurationValidationResponse,
+    MethodDefinitionRead,
+    ModelLayerRead,
     PreprocessingGraph,
     PreprocessingPipelineCreate,
     PreprocessingPipelineRead,
@@ -582,3 +595,501 @@ def preview_preprocessing_pipeline(
         source_timestamp=source_image.timestamp_parsed,
         previews=previews,
     )
+
+
+def list_method_definitions() -> list[MethodDefinitionRead]:
+    return [
+        MethodDefinitionRead(
+            type=definition.type,
+            label=definition.label,
+            category=definition.category,
+            description=definition.description,
+            framework=definition.framework,
+            method_family=definition.method_family,
+            method_version=definition.method_version,
+            training_mode=definition.training_mode,
+            architecture_version=definition.architecture_version,
+            requires_training=definition.requires_training,
+            supports_training_pipeline=definition.supports_training_pipeline,
+            artifact_kind=definition.artifact_kind,
+            builder_kind=definition.builder_kind,
+            capabilities=definition.capabilities,
+            method_schema=definition.method_schema,
+            model_schema=definition.model_schema,
+            training_schema=definition.training_schema,
+            inference_schema=definition.inference_schema,
+            default_method_config=definition.default_method_config,
+            default_model_config=definition.default_model_config,
+            default_training_config=definition.default_training_config,
+            default_inference_config=definition.default_inference_config,
+        )
+        for definition in model_registry.list_definitions()
+    ]
+
+
+def get_method_definition(method_type: str) -> MethodDefinitionRead:
+    method = model_registry.get(method_type)
+    return MethodDefinitionRead(
+        type=method.type,
+        label=method.label,
+        category=method.category,
+        description=method.description,
+        framework=method.framework,
+        method_family=method.method_family,
+        method_version=method.method_version,
+        training_mode=method.training_mode,
+        architecture_version=method.architecture_version,
+        requires_training=method.requires_training,
+        supports_training_pipeline=method.supports_training_pipeline,
+        artifact_kind=method.artifact_kind,
+        builder_kind=method.builder_kind,
+        capabilities=method.capabilities,
+        method_schema=method.method_schema,
+        model_schema=method.model_schema,
+        training_schema=method.training_schema,
+        inference_schema=method.inference_schema,
+        default_method_config=method.default_method_config,
+        default_model_config=method.default_model_config,
+        default_training_config=method.default_training_config,
+        default_inference_config=method.default_inference_config,
+    )
+
+
+def list_method_layers() -> list[ModelLayerRead]:
+    return [
+        ModelLayerRead(
+            type=definition.type,
+            label=definition.label,
+            category=definition.category,
+            config_schema=definition.config_schema,
+            default_config=definition.default_config,
+            input_rank=definition.input_rank,
+            output_rank=definition.output_rank,
+            shape_notes=definition.shape_notes,
+        )
+        for definition in list_layer_definitions()
+    ]
+
+
+def _assert_unique_method_name(db: Session, name: str, exclude_id: int | None = None) -> None:
+    query = select(models.MethodConfiguration).where(func.lower(models.MethodConfiguration.name) == name.lower())
+    if exclude_id is not None:
+        query = query.where(models.MethodConfiguration.id != exclude_id)
+    if db.scalar(query) is not None:
+        raise ValueError(f"A method named '{name}' already exists.")
+
+
+def _payload_method_type(payload: MethodConfigurationPayload) -> str:
+    method_type = payload.method_type or payload.architecture_type
+    if not method_type:
+        raise ValueError("method_type is required.")
+    return method_type
+
+
+def _payload_method_graph(payload: MethodConfigurationPayload) -> dict:
+    return payload.method_graph or payload.model_graph or {}
+
+
+def _payload_method_config(payload: MethodConfigurationPayload) -> dict:
+    return {**(payload.model_params or {}), **(payload.method_config or {})}
+
+
+def _normalize_method_payload(payload: MethodConfigurationPayload, reject_invalid: bool = True) -> tuple:
+    method = model_registry.get(_payload_method_type(payload))
+    method_config = method.merged_method_config(_payload_method_config(payload))
+    training_config = method.merged_training_config(payload.training_config)
+    inference_config = method.merged_inference_config(payload.inference_config)
+    method_graph = _payload_method_graph(payload)
+    method.validate_config(method_graph, method_config, training_config, inference_config)
+
+    validation = {"valid": True, "errors": [], "warnings": [], "layer_specs": [], "torch_check": None}
+    if method.builder_kind != "form":
+        method_graph = validate_sequential_model_graph(method_graph, method.builder_kind)
+        validation = validate_cnn_tensor_contract(method_graph, method_config)
+        if validation["errors"] and reject_invalid:
+            raise ValueError("; ".join(validation["errors"]))
+    else:
+        method_graph = {}
+
+    diagram = build_method_diagram(
+        method_type=method.type,
+        builder_kind=method.builder_kind,
+        method_graph=method_graph,
+        method_config=method_config,
+        validation=validation,
+    )
+    return method, method_graph, method_config, training_config, inference_config, diagram, validation
+
+
+def build_method_diagram(
+    method_type: str,
+    builder_kind: str,
+    method_graph: dict,
+    method_config: dict,
+    validation: dict | None = None,
+) -> dict:
+    if builder_kind == "form":
+        nodes = [
+            {"id": "input", "label": "Input images", "section": "input", "detail": "Training dataset images"},
+            {
+                "id": "aggregate",
+                "label": "Aggregate mean image",
+                "section": "method",
+                "detail": f"{method_config.get('aggregation', 'mean')} / {method_config.get('accumulator_dtype', 'float32')}",
+            },
+            {
+                "id": "reference",
+                "label": "Reconstruction/error reference",
+                "section": "output",
+                "detail": f"output {method_config.get('output_dtype_policy', 'source')}",
+            },
+        ]
+        return {
+            "method_type": method_type,
+            "architecture_type": method_type,
+            "builder_kind": builder_kind,
+            "nodes": nodes,
+            "edges": [{"source": "input", "target": "aggregate"}, {"source": "aggregate", "target": "reference"}],
+        }
+
+    shape_by_node = {
+        item["layer_id"]: item["output_label"]
+        for item in (validation or {}).get("layer_specs", [])
+        if item.get("layer_id")
+    }
+    nodes: list[dict] = [
+        {
+            "id": "input",
+            "label": "Input",
+            "section": "input",
+            "detail": (
+                f"{method_config.get('input_channels', '?')}x"
+                f"{method_config.get('input_height', '?')}x{method_config.get('input_width', '?')}"
+            ),
+        }
+    ]
+    edges: list[dict] = []
+    previous_id = "input"
+
+    def add_node(node_id: str, label: str, section: str, detail: str) -> None:
+        nonlocal previous_id
+        nodes.append({"id": node_id, "label": label, "section": section, "detail": detail})
+        edges.append({"source": previous_id, "target": node_id})
+        previous_id = node_id
+
+    for index, layer in enumerate(method_graph.get("encoder", []), start=1):
+        detail = _layer_summary(layer)
+        if shape_by_node.get(layer.get("id")):
+            detail = f"{detail} -> {shape_by_node[layer.get('id')]}"
+        add_node(f"encoder-{index}", layer["type"], "encoder", detail)
+
+    if builder_kind == "sequential_variational_autoencoder":
+        latent_dim = method_config.get("latent_dim", "?")
+        add_node(
+            "vae-mu-logvar",
+            "Mu/logvar projection",
+            "latent",
+            f"encoder output -> mu/logvar dim {latent_dim}",
+        )
+        add_node(
+            "latent",
+            "Sample z",
+            "latent",
+            f"dim {latent_dim}, KL {method_config.get('kl_weight', '?')}, reparameterization",
+        )
+        add_node("vae-seed", "Decoder seed projection", "latent", "z -> encoder output shape")
+    else:
+        add_node("latent", "Latent", "latent", f"dim {method_config.get('latent_dim', '?')}")
+
+    for index, layer in enumerate(method_graph.get("decoder", []), start=1):
+        detail = _layer_summary(layer)
+        if shape_by_node.get(layer.get("id")):
+            detail = f"{detail} -> {shape_by_node[layer.get('id')]}"
+        add_node(f"decoder-{index}", layer["type"], "decoder", detail)
+
+    add_node(
+        "output",
+        "Output reconstruction",
+        "output",
+        f"activation {method_config.get('output_activation', 'none')}",
+    )
+
+    return {
+        "method_type": method_type,
+        "architecture_type": method_type,
+        "builder_kind": builder_kind,
+        "nodes": nodes,
+        "edges": edges,
+    }
+
+
+def _layer_summary(layer: dict) -> str:
+    config = layer.get("config") or {}
+    interesting_keys = [
+        "out_channels",
+        "out_features",
+        "kernel_size",
+        "stride",
+        "padding",
+        "scale_factor",
+        "mode",
+        "p",
+        "channels",
+        "height",
+        "width",
+    ]
+    parts = [f"{key}={config[key]}" for key in interesting_keys if key in config]
+    return ", ".join(parts) if parts else "default config"
+
+
+def validate_method_configuration(payload: MethodConfigurationPayload) -> MethodConfigurationValidationResponse:
+    try:
+        _, _, _, _, _, diagram, validation = _normalize_method_payload(payload, reject_invalid=False)
+    except ValueError as exc:
+        return MethodConfigurationValidationResponse(valid=False, errors=[str(exc)], diagram={})
+    return MethodConfigurationValidationResponse(
+        valid=validation["valid"],
+        errors=validation["errors"],
+        warnings=validation["warnings"],
+        layer_specs=validation["layer_specs"],
+        torch_check=validation["torch_check"],
+        diagram=diagram,
+    )
+
+
+def run_method_torch_check(payload: MethodConfigurationPayload) -> MethodTorchCheckResponse:
+    try:
+        method, method_graph, method_config, _, _, _, validation = _normalize_method_payload(payload, reject_invalid=False)
+    except ValueError as exc:
+        return MethodTorchCheckResponse(
+            valid=False,
+            status="failed",
+            errors=[str(exc)],
+            logs=[str(exc), "Failed"],
+            torch_check={"status": "failed", "message": str(exc)},
+        )
+
+    if method.builder_kind == "form":
+        message = "Torch dummy-forward check is only available for neural sequential methods."
+        return MethodTorchCheckResponse(
+            valid=False,
+            status="not_applicable",
+            warnings=[message],
+            logs=[message],
+            torch_check={"status": "not_applicable", "message": message},
+        )
+
+    if validation["errors"]:
+        message = "Static shape validation failed; fix hard errors before running the Torch check."
+        return MethodTorchCheckResponse(
+            valid=False,
+            status="failed",
+            errors=[message, *validation["errors"]],
+            warnings=validation["warnings"],
+            logs=[message, "Failed"],
+            torch_check={"status": "failed", "message": message},
+        )
+
+    result = run_cnn_torch_dummy_forward(method_graph, method_config)
+    return MethodTorchCheckResponse(**result)
+
+
+def create_method_configuration(db: Session, payload: MethodConfigurationCreate) -> MethodConfigurationRead:
+    _assert_unique_method_name(db, payload.name)
+    method, method_graph, method_config, training_config, inference_config, diagram, validation = _normalize_method_payload(payload)
+    method_configuration = models.MethodConfiguration(
+        name=payload.name,
+        description=payload.description,
+        method_type=method.type,
+        method_family=method.method_family,
+        method_version=method.method_version,
+        training_mode=method.training_mode,
+        requires_training=method.requires_training,
+        supports_training_pipeline=method.supports_training_pipeline,
+        artifact_kind=method.artifact_kind,
+        builder_kind=method.builder_kind,
+        method_graph=method_graph,
+        method_config=method_config,
+        training_config=training_config,
+        inference_config=inference_config,
+        diagram=diagram,
+        validation=validation,
+    )
+    db.add(method_configuration)
+    db.flush()
+    _replace_method_parameter_index(db, method_configuration)
+    db.commit()
+    return get_method_configuration(db, method_configuration.id)  # type: ignore[return-value]
+
+
+def list_method_configurations(db: Session) -> list[MethodConfigurationRead]:
+    configurations = list(
+        db.scalars(
+            select(models.MethodConfiguration)
+            .order_by(models.MethodConfiguration.created_at.desc())
+            .options(selectinload(models.MethodConfiguration.parameters))
+        )
+    )
+    return [serialize_method_configuration(configuration) for configuration in configurations]
+
+
+def get_method_configuration(db: Session, configuration_id: int) -> MethodConfigurationRead | None:
+    configuration = db.scalar(
+        select(models.MethodConfiguration)
+        .where(models.MethodConfiguration.id == configuration_id)
+        .options(selectinload(models.MethodConfiguration.parameters))
+    )
+    if configuration is None:
+        return None
+    return serialize_method_configuration(configuration)
+
+
+def update_method_configuration(
+    db: Session, configuration_id: int, payload: MethodConfigurationCreate
+) -> MethodConfigurationRead | None:
+    configuration = db.get(models.MethodConfiguration, configuration_id)
+    if configuration is None:
+        return None
+    _assert_unique_method_name(db, payload.name, exclude_id=configuration_id)
+    method, method_graph, method_config, training_config, inference_config, diagram, validation = _normalize_method_payload(payload)
+    configuration.name = payload.name
+    configuration.description = payload.description
+    configuration.method_type = method.type
+    configuration.method_family = method.method_family
+    configuration.method_version = method.method_version
+    configuration.training_mode = method.training_mode
+    configuration.requires_training = method.requires_training
+    configuration.supports_training_pipeline = method.supports_training_pipeline
+    configuration.artifact_kind = method.artifact_kind
+    configuration.builder_kind = method.builder_kind
+    configuration.method_graph = method_graph
+    configuration.method_config = method_config
+    configuration.training_config = training_config
+    configuration.inference_config = inference_config
+    configuration.diagram = diagram
+    configuration.validation = validation
+    _replace_method_parameter_index(db, configuration)
+    db.commit()
+    return get_method_configuration(db, configuration_id)
+
+
+def delete_method_configuration(db: Session, configuration_id: int) -> bool:
+    configuration = db.get(models.MethodConfiguration, configuration_id)
+    if configuration is None:
+        return False
+    db.delete(configuration)
+    db.commit()
+    return True
+
+
+def serialize_method_configuration(configuration: models.MethodConfiguration) -> MethodConfigurationRead:
+    parameters = [
+        MethodConfigurationParameterRead(
+            path=parameter.path,
+            value_type=parameter.value_type,
+            value_text=parameter.value_text,
+            value_number=parameter.value_number,
+            value_bool=parameter.value_bool,
+        )
+        for parameter in sorted(configuration.parameters, key=lambda item: item.path)
+    ]
+    return MethodConfigurationRead(
+        id=configuration.id,
+        name=configuration.name,
+        description=configuration.description,
+        method_type=configuration.method_type,
+        method_family=configuration.method_family,
+        method_version=configuration.method_version,
+        training_mode=configuration.training_mode,
+        architecture_type=configuration.method_type,
+        architecture_version=configuration.method_version,
+        requires_training=configuration.requires_training,
+        supports_training_pipeline=configuration.supports_training_pipeline,
+        artifact_kind=configuration.artifact_kind,
+        builder_kind=configuration.builder_kind,
+        method_graph=configuration.method_graph,
+        model_graph=configuration.method_graph,
+        method_config=configuration.method_config,
+        model_params=configuration.method_config,
+        training_config=configuration.training_config,
+        inference_config=configuration.inference_config,
+        diagram=configuration.diagram,
+        created_at=configuration.created_at,
+        updated_at=configuration.updated_at,
+        validation=configuration.validation,
+        parameters=parameters,
+    )
+
+
+def _replace_method_parameter_index(db: Session, configuration: models.MethodConfiguration) -> None:
+    db.execute(
+        delete(models.MethodConfigurationParameter).where(
+            models.MethodConfigurationParameter.method_configuration_id == configuration.id
+        )
+    )
+    for path, value in _flatten_scalar_values(
+        {
+            "method_type": configuration.method_type,
+            "method_family": configuration.method_family,
+            "method_version": configuration.method_version,
+            "training_mode": configuration.training_mode,
+            "requires_training": configuration.requires_training,
+            "supports_training_pipeline": configuration.supports_training_pipeline,
+            "artifact_kind": configuration.artifact_kind,
+            "builder_kind": configuration.builder_kind,
+            "method_graph": configuration.method_graph,
+            "method_config": configuration.method_config,
+            "training_config": configuration.training_config,
+            "inference_config": configuration.inference_config,
+        }
+    ):
+        parameter = models.MethodConfigurationParameter(
+            method_configuration_id=configuration.id,
+            path=path,
+            value_type=_scalar_value_type(value),
+            value_text=str(value) if isinstance(value, str) else None,
+            value_number=float(value) if isinstance(value, (int, float)) and not isinstance(value, bool) else None,
+            value_bool=value if isinstance(value, bool) else None,
+        )
+        db.add(parameter)
+
+
+list_model_architectures = list_method_definitions
+get_model_architecture = get_method_definition
+list_model_layers = list_method_layers
+validate_model_configuration = validate_method_configuration
+create_model_configuration = create_method_configuration
+list_model_configurations = list_method_configurations
+get_model_configuration = get_method_configuration
+update_model_configuration = update_method_configuration
+delete_model_configuration = delete_method_configuration
+
+
+def _flatten_scalar_values(value, prefix: str = "") -> list[tuple[str, object]]:
+    if value is None:
+        return []
+    if isinstance(value, (str, int, float, bool)):
+        return [(prefix, value)] if prefix else []
+    if isinstance(value, dict):
+        items: list[tuple[str, object]] = []
+        for key, child in value.items():
+            next_prefix = f"{prefix}.{key}" if prefix else str(key)
+            items.extend(_flatten_scalar_values(child, next_prefix))
+        return items
+    if isinstance(value, list):
+        items = []
+        for index, child in enumerate(value):
+            next_prefix = f"{prefix}[{index}]"
+            items.extend(_flatten_scalar_values(child, next_prefix))
+        return items
+    return []
+
+
+def _scalar_value_type(value: object) -> str:
+    if isinstance(value, bool):
+        return "bool"
+    if isinstance(value, int) and not isinstance(value, bool):
+        return "number"
+    if isinstance(value, float):
+        return "number"
+    return "text"

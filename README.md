@@ -24,6 +24,9 @@ documented in [docs/preprocessing_modules.md](docs/preprocessing_modules.md).
 - Delete saved training datasets.
 - Define global preprocessing pipelines from modular Python-registered steps.
 - Preview each preprocessing step on the first image of a selected dataset folder.
+- Define reusable Methods for CNN Autoencoder, CNN VAE, and Mean Image baseline configurations.
+- Validate CNN layer stacks with static tensor-shape propagation before saving.
+- Keep Torch optional: saved definitions and static validation work without installing Torch.
 
 ## Local Setup
 
@@ -89,6 +92,14 @@ pip install -e ".[postgres]"
 
 ```text
 DATABASE_URL=postgresql+psycopg://user:password@localhost:5432/mltrace
+```
+
+## Optional ML Dependencies
+
+MLTrace can save and validate Method definitions without Torch. To enable the optional Torch dummy-forward architecture check later:
+
+```bash
+pip install -e ".[ml]"
 ```
 
 ## Timestamp Parser

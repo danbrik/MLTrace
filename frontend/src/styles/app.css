@@ -30,6 +30,30 @@ body {
   word-break: break-word;
 }
 
+.schema-field-label {
+  display: inline-flex;
+  align-items: center;
+  vertical-align: middle;
+}
+
+.schema-info-button {
+  display: inline-flex;
+  width: 17px;
+  height: 17px;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid #cbd5e1;
+  border-radius: 999px;
+  background: #ffffff;
+  color: #475569;
+  cursor: help;
+}
+
+.schema-info-button:hover {
+  border-color: #228be6;
+  color: #228be6;
+}
+
 .pipeline-step {
   cursor: default;
   transition:
@@ -117,4 +141,75 @@ body {
   right: 0;
   transform: translate(50%, 50%);
   cursor: nwse-resize;
+}
+
+.model-layer-card {
+  background: #fbfcfe;
+}
+
+.method-builder-section,
+.model-layer-card {
+  transition:
+    border-color 120ms ease,
+    background 120ms ease;
+}
+
+.method-builder-section {
+  border-left-width: 4px;
+}
+
+.model-diagram-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: max-content;
+  padding-bottom: 4px;
+}
+
+.model-diagram-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.model-diagram-node {
+  width: 180px;
+  min-height: 92px;
+  overflow-wrap: anywhere;
+}
+
+.model-section-input {
+  background: #f8fafc;
+  border-left-color: #64748b;
+}
+
+.model-section-encoder {
+  background: #f1f8ff;
+  border-left-color: #228be6;
+}
+
+.model-section-latent {
+  background: #fff7ed;
+  border-left-color: #f08c00;
+}
+
+.model-section-decoder {
+  background: #f3fbf6;
+  border-left-color: #2f9e44;
+}
+
+.model-section-output {
+  background: #faf5ff;
+  border-left-color: #9c36b5;
+}
+
+.model-section-model,
+.model-section-method {
+  background: #f1f8ff;
+  border-left-color: #228be6;
+}
+
+.model-diagram-arrow {
+  color: #667085;
+  flex: 0 0 auto;
 }
