@@ -27,21 +27,29 @@ from app.schemas import (
     TrainingDatasetPreviewRequest,
     TrainingDatasetPreviewResponse,
     TrainingDatasetRead,
+    TrainingPipelineCreate,
+    TrainingPipelineDryRunRequest,
+    TrainingPipelineDryRunResponse,
+    TrainingPipelineRead,
 )
 from app.services import (
     create_dataset,
     create_method_configuration,
     create_preprocessing_pipeline,
     create_training_dataset,
+    create_training_pipeline,
     delete_dataset,
     delete_method_configuration,
     delete_preprocessing_pipeline,
     delete_training_dataset,
+    delete_training_pipeline,
+    dry_run_training_pipeline,
     get_dataset_or_404,
     get_method_configuration,
     get_method_definition,
     get_preprocessing_pipeline,
     get_training_dataset,
+    get_training_pipeline,
     list_datasets,
     list_method_configurations,
     list_method_definitions,
@@ -49,6 +57,7 @@ from app.services import (
     list_preprocessing_pipelines,
     list_preprocessing_steps,
     list_training_datasets,
+    list_training_pipelines,
     preview_preprocessing_pipeline,
     preview_training_dataset,
     run_method_torch_check,
@@ -56,6 +65,7 @@ from app.services import (
     test_dataset_connection,
     update_method_configuration,
     update_preprocessing_pipeline,
+    update_training_pipeline,
     validate_method_configuration,
 )
 
@@ -155,7 +165,10 @@ def create_app() -> FastAPI:
 
     @app.delete("/api/training-datasets/{training_dataset_id}", status_code=204)
     def api_delete_training_dataset(training_dataset_id: int, db: Session = Depends(get_db)):
-        deleted = delete_training_dataset(db, training_dataset_id)
+        try:
+            deleted = delete_training_dataset(db, training_dataset_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
         if not deleted:
             raise HTTPException(status_code=404, detail="Training dataset not found.")
         return None
@@ -203,7 +216,10 @@ def create_app() -> FastAPI:
 
     @app.delete("/api/preprocessing/pipelines/{pipeline_id}", status_code=204)
     def api_delete_preprocessing_pipeline(pipeline_id: int, db: Session = Depends(get_db)):
-        deleted = delete_preprocessing_pipeline(db, pipeline_id)
+        try:
+            deleted = delete_preprocessing_pipeline(db, pipeline_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
         if not deleted:
             raise HTTPException(status_code=404, detail="Preprocessing pipeline not found.")
         return None
@@ -273,9 +289,59 @@ def create_app() -> FastAPI:
 
     @app.delete("/api/methods/configurations/{configuration_id}", status_code=204)
     def api_delete_method_configuration(configuration_id: int, db: Session = Depends(get_db)):
-        deleted = delete_method_configuration(db, configuration_id)
+        try:
+            deleted = delete_method_configuration(db, configuration_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
         if not deleted:
             raise HTTPException(status_code=404, detail="Method configuration not found.")
+        return None
+
+    @app.get("/api/training-pipelines", response_model=list[TrainingPipelineRead])
+    def api_list_training_pipelines(db: Session = Depends(get_db)):
+        return list_training_pipelines(db)
+
+    @app.post("/api/training-pipelines", response_model=TrainingPipelineRead)
+    def api_create_training_pipeline(payload: TrainingPipelineCreate, db: Session = Depends(get_db)):
+        try:
+            return create_training_pipeline(db, payload)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except IntegrityError as exc:
+            db.rollback()
+            raise HTTPException(status_code=409, detail="A training pipeline with this name already exists.") from exc
+
+    @app.post("/api/training-pipelines/dry-run", response_model=TrainingPipelineDryRunResponse)
+    def api_dry_run_training_pipeline(payload: TrainingPipelineDryRunRequest, db: Session = Depends(get_db)):
+        return dry_run_training_pipeline(db, payload)
+
+    @app.get("/api/training-pipelines/{pipeline_id}", response_model=TrainingPipelineRead)
+    def api_get_training_pipeline(pipeline_id: int, db: Session = Depends(get_db)):
+        pipeline = get_training_pipeline(db, pipeline_id)
+        if pipeline is None:
+            raise HTTPException(status_code=404, detail="Training pipeline not found.")
+        return pipeline
+
+    @app.put("/api/training-pipelines/{pipeline_id}", response_model=TrainingPipelineRead)
+    def api_update_training_pipeline(
+        pipeline_id: int, payload: TrainingPipelineCreate, db: Session = Depends(get_db)
+    ):
+        try:
+            updated = update_training_pipeline(db, pipeline_id, payload)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except IntegrityError as exc:
+            db.rollback()
+            raise HTTPException(status_code=409, detail="A training pipeline with this name already exists.") from exc
+        if updated is None:
+            raise HTTPException(status_code=404, detail="Training pipeline not found.")
+        return updated
+
+    @app.delete("/api/training-pipelines/{pipeline_id}", status_code=204)
+    def api_delete_training_pipeline(pipeline_id: int, db: Session = Depends(get_db)):
+        deleted = delete_training_pipeline(db, pipeline_id)
+        if not deleted:
+            raise HTTPException(status_code=404, detail="Training pipeline not found.")
         return None
 
     # Temporary compatibility aliases for clients still calling the Phase 3 Models API.

@@ -313,6 +313,97 @@ class MethodTorchCheckResponse(BaseModel):
     torch_check: dict | None = None
 
 
+class TrainingPipelinePayload(BaseModel):
+    """The composition of a training pipeline, shared by save and dry-run requests."""
+
+    training_dataset_ids: list[int] = Field(min_length=1)
+    preprocessing_pipeline_id: int
+    method_configuration_id: int
+    shuffle: bool = True
+    training_parameters: dict = Field(default_factory=dict)
+
+    @field_validator("training_dataset_ids")
+    @classmethod
+    def validate_unique_ids(cls, value: list[int]) -> list[int]:
+        if len(value) != len(set(value)):
+            raise ValueError("training_dataset_ids must not contain duplicates")
+        return value
+
+
+class TrainingPipelineCreate(TrainingPipelinePayload):
+    name: str = Field(min_length=1, max_length=255)
+    description: str | None = None
+
+
+class TrainingPipelineDatasetRead(BaseModel):
+    training_dataset_id: int
+    position: int
+    name: str
+    total_selected_images: int
+    dataset_names: list[str]
+
+
+class TrainingPipelineRead(BaseModel):
+    id: int
+    name: str
+    description: str | None
+    shuffle: bool
+    training_parameters: dict
+    preprocessing_pipeline_id: int
+    preprocessing_pipeline_name: str
+    preprocessing_output_width: int | None
+    preprocessing_output_height: int | None
+    method_configuration_id: int
+    method_configuration_name: str
+    method_type: str
+    training_mode: str
+    builder_kind: str
+    total_selected_images: int
+    training_datasets: list[TrainingPipelineDatasetRead] = []
+    created_at: datetime
+    updated_at: datetime
+
+
+class TrainingPipelineDryRunRequest(TrainingPipelinePayload):
+    """Dry-run works on saved and unsaved compositions; the client always sends the full composition."""
+
+
+class TrainingPipelineModelOutput(BaseModel):
+    input_shape: list[int]
+    output_shape: list[int]
+    width: int
+    height: int
+    channels: int
+    dtype: str
+    value_min: float
+    value_max: float
+    image_data_url: str
+    elapsed_ms: float
+
+
+class TrainingPipelineDryRunResponse(BaseModel):
+    """Result of pushing the first training image through preprocessing and the model.
+
+    Composition-level findings (shape mismatch, missing images) are reported
+    in-band via valid/errors instead of HTTP errors so the UI can still render
+    the stages that did succeed.
+    """
+
+    valid: bool
+    mode: str  # "forward_pass" | "fit_contribution" | "failed"
+    errors: list[str] = []
+    warnings: list[str] = []
+    logs: list[str] = []
+    training_dataset_name: str | None = None
+    source_image_path: str | None = None
+    source_timestamp: datetime | None = None
+    # Step previews in chain order: index 0 is the loaded image before any
+    # processing, the last entry is the final preprocessing output.
+    preprocessing_previews: list[PreprocessingPreviewImage] = []
+    model_output: TrainingPipelineModelOutput | None = None
+    note: str | None = None
+
+
 ModelArchitectureRead = MethodDefinitionRead
 ModelConfigurationParameterRead = MethodConfigurationParameterRead
 ModelConfigurationPayload = MethodConfigurationPayload

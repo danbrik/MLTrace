@@ -1,13 +1,14 @@
 import { AppShell, Box, Button, Group, Stack, Text, Title } from '@mantine/core';
-import { BrainCircuit, Database, ListChecks, Workflow } from 'lucide-react';
+import { BrainCircuit, Database, ListChecks, Route, Workflow } from 'lucide-react';
 import { useState } from 'react';
 
 import { DatasetsPage } from './pages/DatasetsPage';
 import { MethodsPage } from './pages/ModelsPage';
 import { PreprocessingPipelinesPage } from './pages/PreprocessingPipelinesPage';
 import { TrainingDatasetsPage } from './pages/TrainingDatasetsPage';
+import { TrainingPipelinesPage } from './pages/TrainingPipelinesPage';
 
-type Page = 'datasets' | 'training-datasets' | 'preprocessing' | 'methods';
+type Page = 'datasets' | 'training-datasets' | 'preprocessing' | 'methods' | 'training-pipelines';
 
 export function App() {
   const [page, setPage] = useState<Page>('datasets');
@@ -63,6 +64,14 @@ export function App() {
           >
             Methods
           </Button>
+          <Button
+            leftSection={<Route size={18} />}
+            variant={page === 'training-pipelines' ? 'filled' : 'subtle'}
+            justify="flex-start"
+            onClick={() => setPage('training-pipelines')}
+          >
+            Training Pipelines
+          </Button>
         </Stack>
       </AppShell.Navbar>
 
@@ -78,6 +87,9 @@ export function App() {
         </Box>
         <Box display={page === 'methods' ? 'block' : 'none'}>
           <MethodsPage />
+        </Box>
+        <Box display={page === 'training-pipelines' ? 'block' : 'none'}>
+          <TrainingPipelinesPage active={page === 'training-pipelines'} />
         </Box>
       </AppShell.Main>
     </AppShell>

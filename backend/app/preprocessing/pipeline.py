@@ -128,7 +128,14 @@ def encode_png_data_url(image: np.ndarray) -> str:
     return f"data:image/png;base64,{encoded}"
 
 
-def execute_preview(graph: PreprocessingGraph, source_image_path: str) -> list[PreprocessingPreviewImage]:
+def execute_with_previews(
+    graph: PreprocessingGraph, source_image_path: str
+) -> tuple[list[PreprocessingPreviewImage], np.ndarray]:
+    """Run the pipeline on one image, returning per-step previews and the final array.
+
+    The final numpy array is what downstream consumers (e.g. a model forward
+    pass) operate on; the previews are display-normalized PNG snapshots.
+    """
     ordered_nodes = validate_linear_graph(graph)
     context = {"source_image_path": source_image_path}
     image: np.ndarray | None = None
@@ -156,4 +163,10 @@ def execute_preview(graph: PreprocessingGraph, source_image_path: str) -> list[P
             )
         )
 
+    assert image is not None  # validate_linear_graph guarantees at least the load_image node
+    return previews, image
+
+
+def execute_preview(graph: PreprocessingGraph, source_image_path: str) -> list[PreprocessingPreviewImage]:
+    previews, _ = execute_with_previews(graph, source_image_path)
     return previews

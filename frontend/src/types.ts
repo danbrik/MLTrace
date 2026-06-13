@@ -331,6 +331,75 @@ export type MethodConfigurationSavePayload = MethodConfigurationPayload & {
 
 export type MethodValidationResponse = MethodValidation;
 
+export type TrainingPipelineDatasetSummary = {
+  training_dataset_id: number;
+  position: number;
+  name: string;
+  total_selected_images: number;
+  dataset_names: string[];
+};
+
+export type TrainingPipeline = {
+  id: number;
+  name: string;
+  description: string | null;
+  shuffle: boolean;
+  training_parameters: Record<string, unknown>;
+  preprocessing_pipeline_id: number;
+  preprocessing_pipeline_name: string;
+  preprocessing_output_width: number | null;
+  preprocessing_output_height: number | null;
+  method_configuration_id: number;
+  method_configuration_name: string;
+  method_type: string;
+  training_mode: string;
+  builder_kind: string;
+  total_selected_images: number;
+  training_datasets: TrainingPipelineDatasetSummary[];
+  created_at: string;
+  updated_at: string;
+};
+
+export type TrainingPipelinePayload = {
+  training_dataset_ids: number[];
+  preprocessing_pipeline_id: number;
+  method_configuration_id: number;
+  shuffle: boolean;
+  training_parameters: Record<string, unknown>;
+};
+
+export type TrainingPipelineSavePayload = TrainingPipelinePayload & {
+  name: string;
+  description?: string | null;
+};
+
+export type TrainingPipelineModelOutput = {
+  input_shape: number[];
+  output_shape: number[];
+  width: number;
+  height: number;
+  channels: number;
+  dtype: string;
+  value_min: number;
+  value_max: number;
+  image_data_url: string;
+  elapsed_ms: number;
+};
+
+export type TrainingPipelineDryRun = {
+  valid: boolean;
+  mode: 'forward_pass' | 'fit_contribution' | 'failed' | string;
+  errors: string[];
+  warnings: string[];
+  logs: string[];
+  training_dataset_name: string | null;
+  source_image_path: string | null;
+  source_timestamp: string | null;
+  preprocessing_previews: PreprocessingPreviewImage[];
+  model_output: TrainingPipelineModelOutput | null;
+  note: string | null;
+};
+
 export type ModelArchitecture = MethodDefinition;
 export type ModelConfigurationParameter = MethodConfigurationParameter;
 export type ModelConfiguration = MethodConfiguration;

@@ -188,5 +188,67 @@ class MethodConfigurationParameter(Base):
     method_configuration: Mapped[MethodConfiguration] = relationship(back_populates="parameters")
 
 
+class TrainingPipeline(Base):
+    """A saved training composition: N training datasets -> one preprocessing
+    pipeline -> one method configuration, plus a frozen copy of the training
+    parameters.
+
+    This is a declarative definition only; executing the training run happens
+    elsewhere. Building blocks are referenced by FK (not snapshotted), so the
+    delete services guard against removing blocks that are still in use.
+    """
+
+    __tablename__ = "training_pipelines"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    name: Mapped[str] = mapped_column(String(255), nullable=False, unique=True)
+    description: Mapped[str | None] = mapped_column(Text)
+    preprocessing_pipeline_id: Mapped[int] = mapped_column(
+        ForeignKey("preprocessing_pipelines.id", ondelete="RESTRICT"), nullable=False
+    )
+    method_configuration_id: Mapped[int] = mapped_column(
+        ForeignKey("method_configurations.id", ondelete="RESTRICT"), nullable=False
+    )
+    # Whether the combined training sets get shuffled when the run is executed.
+    shuffle: Mapped[bool] = mapped_column(nullable=False, default=True)
+    # Final merged training parameters (method training_config + user overrides),
+    # validated against the method definition's training_schema at save time.
+    training_parameters: Mapped[dict] = mapped_column(json_type(), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=False), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=False), server_default=func.now(), onupdate=func.now()
+    )
+
+    entries: Mapped[list["TrainingPipelineDataset"]] = relationship(
+        back_populates="training_pipeline",
+        cascade="all, delete-orphan",
+        order_by="TrainingPipelineDataset.position",
+    )
+    preprocessing_pipeline: Mapped[PreprocessingPipeline] = relationship()
+    method_configuration: Mapped[MethodConfiguration] = relationship()
+
+
+class TrainingPipelineDataset(Base):
+    """Ordered association between a training pipeline and its training datasets."""
+
+    __tablename__ = "training_pipeline_datasets"
+    __table_args__ = (
+        UniqueConstraint("training_pipeline_id", "training_dataset_id", name="uq_training_pipeline_dataset"),
+        UniqueConstraint("training_pipeline_id", "position", name="uq_training_pipeline_position"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    training_pipeline_id: Mapped[int] = mapped_column(
+        ForeignKey("training_pipelines.id", ondelete="CASCADE"), nullable=False
+    )
+    training_dataset_id: Mapped[int] = mapped_column(
+        ForeignKey("training_datasets.id", ondelete="RESTRICT"), nullable=False
+    )
+    position: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+
+    training_pipeline: Mapped[TrainingPipeline] = relationship(back_populates="entries")
+    training_dataset: Mapped[TrainingDataset] = relationship()
+
+
 ModelConfiguration = MethodConfiguration
 ModelConfigurationParameter = MethodConfigurationParameter

@@ -15,6 +15,10 @@ import type {
   TrainingDataset,
   TrainingDatasetPreview,
   TrainingDatasetRuleInput,
+  TrainingPipeline,
+  TrainingPipelineDryRun,
+  TrainingPipelinePayload,
+  TrainingPipelineSavePayload,
 } from './types';
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? 'http://localhost:8000';
@@ -259,6 +263,44 @@ export function buildMethodDiagram(payload: MethodConfigurationPayload): Promise
 
 export function runMethodTorchCheck(payload: MethodConfigurationPayload): Promise<MethodTorchCheckResponse> {
   return request<MethodTorchCheckResponse>('/api/methods/configurations/torch-check', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  }, 120_000);
+}
+
+export function listTrainingPipelines(): Promise<TrainingPipeline[]> {
+  return request<TrainingPipeline[]>('/api/training-pipelines');
+}
+
+export function getTrainingPipeline(pipelineId: number): Promise<TrainingPipeline> {
+  return request<TrainingPipeline>(`/api/training-pipelines/${pipelineId}`);
+}
+
+export function createTrainingPipeline(payload: TrainingPipelineSavePayload): Promise<TrainingPipeline> {
+  return request<TrainingPipeline>('/api/training-pipelines', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
+}
+
+export function updateTrainingPipeline(
+  pipelineId: number,
+  payload: TrainingPipelineSavePayload,
+): Promise<TrainingPipeline> {
+  return request<TrainingPipeline>(`/api/training-pipelines/${pipelineId}`, {
+    method: 'PUT',
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function deleteTrainingPipeline(pipelineId: number): Promise<void> {
+  await request<void>(`/api/training-pipelines/${pipelineId}`, {
+    method: 'DELETE',
+  });
+}
+
+export function dryRunTrainingPipeline(payload: TrainingPipelinePayload): Promise<TrainingPipelineDryRun> {
+  return request<TrainingPipelineDryRun>('/api/training-pipelines/dry-run', {
     method: 'POST',
     body: JSON.stringify(payload),
   }, 120_000);

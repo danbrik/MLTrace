@@ -11,10 +11,18 @@ from sqlalchemy.orm import Session, selectinload
 from app import models
 import app.modeling  # noqa: F401 ensures core model architectures are registered
 from app.modeling.architectures.common import validate_sequential_model_graph
+from app.modeling.base import validate_schema_values
+from app.modeling.forward import run_image_forward_pass
 from app.modeling.layers import list_layer_definitions
 from app.modeling.registry import registry as model_registry
 from app.modeling.validation import run_cnn_torch_dummy_forward, validate_cnn_tensor_contract
-from app.preprocessing.pipeline import execute_preview, validate_linear_graph
+from app.preprocessing.pipeline import (
+    encode_png_data_url,
+    execute_preview,
+    execute_with_previews,
+    image_metadata,
+    validate_linear_graph,
+)
 from app.preprocessing.registry import registry
 from app.scanner import detect_timestamp_pattern, probe_first_direct_tiff, scan_dataset_files
 from app.schemas import (
@@ -39,6 +47,13 @@ from app.schemas import (
     TrainingDatasetRead,
     TrainingDatasetRulePreview,
     TrainingDatasetRuleRead,
+    TrainingPipelineCreate,
+    TrainingPipelineDatasetRead,
+    TrainingPipelineDryRunRequest,
+    TrainingPipelineDryRunResponse,
+    TrainingPipelineModelOutput,
+    TrainingPipelinePayload,
+    TrainingPipelineRead,
 )
 
 logger = logging.getLogger("mltrace.services")
@@ -368,6 +383,15 @@ def delete_training_dataset(db: Session, training_dataset_id: int) -> bool:
     training_dataset = db.get(models.TrainingDataset, training_dataset_id)
     if training_dataset is None:
         return False
+    referencing_pipelines = db.scalar(
+        select(func.count(models.TrainingPipelineDataset.id)).where(
+            models.TrainingPipelineDataset.training_dataset_id == training_dataset_id
+        )
+    ) or 0
+    if referencing_pipelines:
+        raise ValueError(
+            "Training dataset is used by saved training pipelines. Delete those training pipelines first."
+        )
     db.delete(training_dataset)
     db.commit()
     return True
@@ -571,6 +595,15 @@ def delete_preprocessing_pipeline(db: Session, pipeline_id: int) -> bool:
     pipeline = db.get(models.PreprocessingPipeline, pipeline_id)
     if pipeline is None:
         return False
+    referencing_pipelines = db.scalar(
+        select(func.count(models.TrainingPipeline.id)).where(
+            models.TrainingPipeline.preprocessing_pipeline_id == pipeline_id
+        )
+    ) or 0
+    if referencing_pipelines:
+        raise ValueError(
+            "Preprocessing pipeline is used by saved training pipelines. Delete those training pipelines first."
+        )
     db.delete(pipeline)
     db.commit()
     return True
@@ -977,6 +1010,15 @@ def delete_method_configuration(db: Session, configuration_id: int) -> bool:
     configuration = db.get(models.MethodConfiguration, configuration_id)
     if configuration is None:
         return False
+    referencing_pipelines = db.scalar(
+        select(func.count(models.TrainingPipeline.id)).where(
+            models.TrainingPipeline.method_configuration_id == configuration_id
+        )
+    ) or 0
+    if referencing_pipelines:
+        raise ValueError(
+            "Method configuration is used by saved training pipelines. Delete those training pipelines first."
+        )
     db.delete(configuration)
     db.commit()
     return True
@@ -1093,3 +1135,372 @@ def _scalar_value_type(value: object) -> str:
     if isinstance(value, float):
         return "number"
     return "text"
+
+
+# --- Training pipelines -----------------------------------------------------
+
+
+def _assert_unique_training_pipeline_name(db: Session, name: str, exclude_id: int | None = None) -> None:
+    query = select(models.TrainingPipeline).where(func.lower(models.TrainingPipeline.name) == name.lower())
+    if exclude_id is not None:
+        query = query.where(models.TrainingPipeline.id != exclude_id)
+    if db.scalar(query) is not None:
+        raise ValueError(f"A training pipeline named '{name}' already exists.")
+
+
+def _resolve_training_pipeline_refs(
+    db: Session, payload: TrainingPipelinePayload
+) -> tuple[list[models.TrainingDataset], models.PreprocessingPipeline, models.MethodConfiguration]:
+    """Load and validate all building blocks referenced by a pipeline payload.
+
+    Training datasets are returned in payload order (which becomes the stored
+    position). Save, update and dry-run all funnel through this guard.
+    """
+    training_datasets_by_id = {
+        training_dataset.id: training_dataset
+        for training_dataset in db.scalars(
+            select(models.TrainingDataset)
+            .where(models.TrainingDataset.id.in_(payload.training_dataset_ids))
+            .options(
+                selectinload(models.TrainingDataset.rules)
+                .selectinload(models.TrainingDatasetRule.folder)
+                .selectinload(models.DatasetFolder.dataset)
+            )
+        )
+    }
+    missing = sorted(set(payload.training_dataset_ids) - set(training_datasets_by_id))
+    if missing:
+        raise ValueError(f"Training datasets do not exist: {missing}")
+    training_datasets = [training_datasets_by_id[item] for item in payload.training_dataset_ids]
+
+    preprocessing_pipeline = db.get(models.PreprocessingPipeline, payload.preprocessing_pipeline_id)
+    if preprocessing_pipeline is None:
+        raise ValueError(f"Preprocessing pipeline does not exist: {payload.preprocessing_pipeline_id}")
+
+    configuration = db.get(models.MethodConfiguration, payload.method_configuration_id)
+    if configuration is None:
+        raise ValueError(f"Method configuration does not exist: {payload.method_configuration_id}")
+    if not configuration.supports_training_pipeline:
+        raise ValueError(
+            f"Method '{configuration.name}' ({configuration.method_type}) does not support training pipelines."
+        )
+
+    return training_datasets, preprocessing_pipeline, configuration
+
+
+def _merged_training_parameters(configuration: models.MethodConfiguration, overrides: dict | None) -> dict:
+    """Merge user overrides onto the saved method's training config and validate.
+
+    The saved configuration's training_config (already merged from the method
+    definition's defaults at method save time) acts as the baseline.
+    """
+    definition = model_registry.get(configuration.method_type)
+    merged = {**(configuration.training_config or {}), **(overrides or {})}
+    validate_schema_values(definition.training_schema, merged, f"{definition.type}.training_parameters")
+    return merged
+
+
+def create_training_pipeline(db: Session, payload: TrainingPipelineCreate) -> TrainingPipelineRead:
+    _assert_unique_training_pipeline_name(db, payload.name)
+    training_datasets, _, configuration = _resolve_training_pipeline_refs(db, payload)
+    training_parameters = _merged_training_parameters(configuration, payload.training_parameters)
+
+    pipeline = models.TrainingPipeline(
+        name=payload.name,
+        description=payload.description,
+        preprocessing_pipeline_id=payload.preprocessing_pipeline_id,
+        method_configuration_id=payload.method_configuration_id,
+        shuffle=payload.shuffle,
+        training_parameters=training_parameters,
+    )
+    db.add(pipeline)
+    db.flush()
+    for position, training_dataset in enumerate(training_datasets):
+        db.add(
+            models.TrainingPipelineDataset(
+                training_pipeline_id=pipeline.id,
+                training_dataset_id=training_dataset.id,
+                position=position,
+            )
+        )
+    db.commit()
+    return get_training_pipeline(db, pipeline.id)  # type: ignore[return-value]
+
+
+def update_training_pipeline(
+    db: Session, pipeline_id: int, payload: TrainingPipelineCreate
+) -> TrainingPipelineRead | None:
+    pipeline = db.get(models.TrainingPipeline, pipeline_id)
+    if pipeline is None:
+        return None
+    _assert_unique_training_pipeline_name(db, payload.name, exclude_id=pipeline_id)
+    training_datasets, _, configuration = _resolve_training_pipeline_refs(db, payload)
+    training_parameters = _merged_training_parameters(configuration, payload.training_parameters)
+
+    pipeline.name = payload.name
+    pipeline.description = payload.description
+    pipeline.preprocessing_pipeline_id = payload.preprocessing_pipeline_id
+    pipeline.method_configuration_id = payload.method_configuration_id
+    pipeline.shuffle = payload.shuffle
+    pipeline.training_parameters = training_parameters
+    # Replace entries wholesale; position always reflects the payload order.
+    db.execute(
+        delete(models.TrainingPipelineDataset).where(
+            models.TrainingPipelineDataset.training_pipeline_id == pipeline_id
+        )
+    )
+    db.flush()
+    for position, training_dataset in enumerate(training_datasets):
+        db.add(
+            models.TrainingPipelineDataset(
+                training_pipeline_id=pipeline_id,
+                training_dataset_id=training_dataset.id,
+                position=position,
+            )
+        )
+    db.commit()
+    return get_training_pipeline(db, pipeline_id)
+
+
+def _training_pipeline_query():
+    return select(models.TrainingPipeline).options(
+        selectinload(models.TrainingPipeline.entries)
+        .selectinload(models.TrainingPipelineDataset.training_dataset)
+        .selectinload(models.TrainingDataset.rules)
+        .selectinload(models.TrainingDatasetRule.folder)
+        .selectinload(models.DatasetFolder.dataset),
+        selectinload(models.TrainingPipeline.preprocessing_pipeline),
+        selectinload(models.TrainingPipeline.method_configuration),
+    )
+
+
+def list_training_pipelines(db: Session) -> list[TrainingPipelineRead]:
+    pipelines = list(
+        db.scalars(_training_pipeline_query().order_by(models.TrainingPipeline.created_at.desc()))
+    )
+    return [serialize_training_pipeline(db, pipeline) for pipeline in pipelines]
+
+
+def get_training_pipeline(db: Session, pipeline_id: int) -> TrainingPipelineRead | None:
+    pipeline = db.scalar(_training_pipeline_query().where(models.TrainingPipeline.id == pipeline_id))
+    if pipeline is None:
+        return None
+    return serialize_training_pipeline(db, pipeline)
+
+
+def delete_training_pipeline(db: Session, pipeline_id: int) -> bool:
+    pipeline = db.get(models.TrainingPipeline, pipeline_id)
+    if pipeline is None:
+        return False
+    db.delete(pipeline)
+    db.commit()
+    return True
+
+
+def serialize_training_pipeline(db: Session, pipeline: models.TrainingPipeline) -> TrainingPipelineRead:
+    entries: list[TrainingPipelineDatasetRead] = []
+    total_selected = 0
+    for entry in pipeline.entries:
+        summary = serialize_training_dataset(db, entry.training_dataset)
+        total_selected += summary.total_selected_images
+        entries.append(
+            TrainingPipelineDatasetRead(
+                training_dataset_id=entry.training_dataset_id,
+                position=entry.position,
+                name=summary.name,
+                total_selected_images=summary.total_selected_images,
+                dataset_names=summary.dataset_names,
+            )
+        )
+
+    return TrainingPipelineRead(
+        id=pipeline.id,
+        name=pipeline.name,
+        description=pipeline.description,
+        shuffle=pipeline.shuffle,
+        training_parameters=pipeline.training_parameters,
+        preprocessing_pipeline_id=pipeline.preprocessing_pipeline_id,
+        preprocessing_pipeline_name=pipeline.preprocessing_pipeline.name,
+        preprocessing_output_width=pipeline.preprocessing_pipeline.output_width,
+        preprocessing_output_height=pipeline.preprocessing_pipeline.output_height,
+        method_configuration_id=pipeline.method_configuration_id,
+        method_configuration_name=pipeline.method_configuration.name,
+        method_type=pipeline.method_configuration.method_type,
+        training_mode=pipeline.method_configuration.training_mode,
+        builder_kind=pipeline.method_configuration.builder_kind,
+        total_selected_images=total_selected,
+        training_datasets=entries,
+        created_at=pipeline.created_at,
+        updated_at=pipeline.updated_at,
+    )
+
+
+def resolve_first_training_image(
+    db: Session, training_dataset: models.TrainingDataset
+) -> tuple[models.DatasetImage, list[str]]:
+    """Return the first indexed image of a training dataset for the dummy test.
+
+    Rules are visited in the same deterministic order used by
+    serialize_training_dataset; per rule the chronologically first indexed
+    image inside the rule's time range wins. The scanner only indexes
+    representative images, so when no indexed image falls inside any rule
+    range we fall back to the first indexed image of a rule's folder and warn.
+    """
+    warnings: list[str] = []
+    ordered_rules = sorted(
+        training_dataset.rules,
+        key=lambda item: (
+            item.start_timestamp,
+            item.end_timestamp,
+            item.folder.dataset.name,
+            item.folder.relative_path,
+            item.id,
+        ),
+    )
+    if not ordered_rules:
+        raise ValueError(f"Training dataset '{training_dataset.name}' has no rules.")
+
+    for rule in ordered_rules:
+        image = db.scalar(
+            select(models.DatasetImage)
+            .where(
+                models.DatasetImage.folder_id == rule.folder_id,
+                models.DatasetImage.timestamp_parsed >= rule.start_timestamp,
+                models.DatasetImage.timestamp_parsed <= rule.end_timestamp,
+            )
+            .order_by(models.DatasetImage.timestamp_parsed.asc(), models.DatasetImage.id.asc())
+            .limit(1)
+        )
+        if image is not None:
+            return image, warnings
+
+    # Fallback: only representative images are indexed, so the rule ranges may
+    # contain no indexed row even though the folder has matching files on disk.
+    for rule in ordered_rules:
+        image = db.scalar(
+            select(models.DatasetImage)
+            .where(models.DatasetImage.folder_id == rule.folder_id)
+            .order_by(models.DatasetImage.timestamp_parsed.asc(), models.DatasetImage.id.asc())
+            .limit(1)
+        )
+        if image is not None:
+            warnings.append(
+                "No indexed image falls inside the rule time ranges; using the folder's first indexed "
+                "image for the dummy test."
+            )
+            return image, warnings
+
+    raise ValueError(f"Training dataset '{training_dataset.name}' contains no indexed images.")
+
+
+def dry_run_training_pipeline(db: Session, payload: TrainingPipelineDryRunRequest) -> TrainingPipelineDryRunResponse:
+    """Push the first training image through preprocessing and the model architecture.
+
+    The forward pass uses randomly initialized weights: it validates the
+    composition (shapes, configs) end-to-end, not the model quality.
+    """
+    errors: list[str] = []
+    warnings: list[str] = []
+    logs: list[str] = []
+
+    try:
+        training_datasets, preprocessing_pipeline, configuration = _resolve_training_pipeline_refs(db, payload)
+        training_parameters = _merged_training_parameters(configuration, payload.training_parameters)
+    except ValueError as exc:
+        return TrainingPipelineDryRunResponse(valid=False, mode="failed", errors=[str(exc)])
+
+    logs.append(f"Training parameters: {training_parameters}")
+
+    first_dataset = training_datasets[0]
+    try:
+        source_image, resolve_warnings = resolve_first_training_image(db, first_dataset)
+    except ValueError as exc:
+        return TrainingPipelineDryRunResponse(
+            valid=False,
+            mode="failed",
+            errors=[str(exc)],
+            logs=logs,
+            training_dataset_name=first_dataset.name,
+        )
+    warnings.extend(resolve_warnings)
+    logs.append(
+        f"Using first image of training dataset '{first_dataset.name}': "
+        f"{source_image.file_path} @ {source_image.timestamp_parsed.isoformat()}"
+    )
+
+    try:
+        graph = PreprocessingGraph.model_validate(preprocessing_pipeline.graph)
+        previews, final_image = execute_with_previews(graph, source_image.file_path)
+    except (ValueError, FileNotFoundError) as exc:
+        return TrainingPipelineDryRunResponse(
+            valid=False,
+            mode="failed",
+            errors=[f"Preprocessing failed: {exc}"],
+            warnings=warnings,
+            logs=logs,
+            training_dataset_name=first_dataset.name,
+            source_image_path=source_image.file_path,
+            source_timestamp=source_image.timestamp_parsed,
+        )
+    logs.append(f"Preprocessing produced {len(previews)} step outputs, final {previews[-1].width}x{previews[-1].height}")
+
+    base_response = dict(
+        warnings=warnings,
+        logs=logs,
+        training_dataset_name=first_dataset.name,
+        source_image_path=source_image.file_path,
+        source_timestamp=source_image.timestamp_parsed,
+        preprocessing_previews=previews,
+    )
+
+    if configuration.builder_kind == "form":
+        # Fit-style methods (e.g. mean image) have no forward pass to demo; the
+        # preprocessed image is exactly what training would accumulate.
+        logs.append("Method is fitted directly; skipping the forward pass.")
+        return TrainingPipelineDryRunResponse(
+            valid=True,
+            mode="fit_contribution",
+            errors=errors,
+            note=(
+                f"'{configuration.name}' is a fit-style method without a neural forward pass. "
+                "The preprocessed image shown above is the first contribution that would be "
+                "accumulated into the artifact during training."
+            ),
+            **base_response,
+        )
+
+    try:
+        result = run_image_forward_pass(configuration.method_graph, configuration.method_config, final_image)
+    except ValueError as exc:
+        last = previews[-1]
+        method_config = configuration.method_config or {}
+        errors.append(str(exc))
+        errors.append(
+            f"Preprocessing output: {last.width}x{last.height} ({last.channels} channel(s)); method input: "
+            f"{method_config.get('input_width', '?')}x{method_config.get('input_height', '?')} "
+            f"({method_config.get('input_channels', '?')} channel(s))."
+        )
+        return TrainingPipelineDryRunResponse(valid=False, mode="failed", errors=errors, **base_response)
+
+    warnings.extend(result["warnings"])
+    logs.extend(result["logs"])
+    output_image = result["output"]
+    width, height, channels, dtype, value_min, value_max = image_metadata(output_image)
+    return TrainingPipelineDryRunResponse(
+        valid=True,
+        mode="forward_pass",
+        errors=errors,
+        model_output=TrainingPipelineModelOutput(
+            input_shape=result["input_shape"],
+            output_shape=result["output_shape"],
+            width=width,
+            height=height,
+            channels=channels,
+            dtype=dtype,
+            value_min=value_min,
+            value_max=value_max,
+            image_data_url=encode_png_data_url(output_image),
+            elapsed_ms=result["elapsed_ms"],
+        ),
+        **base_response,
+    )

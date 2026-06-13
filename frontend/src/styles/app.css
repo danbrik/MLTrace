@@ -209,6 +209,16 @@ body {
   border-left-color: #228be6;
 }
 
+.model-section-dataset {
+  background: #f0fdfa;
+  border-left-color: #0d9488;
+}
+
+.model-section-preprocess {
+  background: #fefce8;
+  border-left-color: #ca8a04;
+}
+
 .model-diagram-arrow {
   color: #667085;
   flex: 0 0 auto;

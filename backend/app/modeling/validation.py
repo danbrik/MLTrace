@@ -5,6 +5,8 @@ from math import floor
 from time import perf_counter
 from typing import Any
 
+from app.modeling.forward import forward_through_graph
+
 
 @dataclass(frozen=True)
 class TensorSpec:
@@ -321,38 +323,14 @@ def _run_torch_check(
     logs: list[str],
     started_at: float,
 ) -> dict:
-    nn = torch.nn
-    encoder = nn.Sequential(*[_torch_layer(nn, layer) for layer in method_graph.get("encoder", [])])
-    logs.append("Building decoder")
-    decoder = nn.Sequential(*[_torch_layer(nn, layer) for layer in method_graph.get("decoder", [])])
-    encoder.eval()
-    decoder.eval()
-
     expected_shape = (1, input_spec.channels, input_spec.height, input_spec.width)
-    builder_kind = method_graph.get("builder_kind")
     logs.append(f"Running dummy input {expected_shape}")
-    with torch.no_grad():
-        x = torch.zeros((1, input_spec.channels, input_spec.height, input_spec.width), dtype=torch.float32)
-        logs.append("Running encoder")
-        encoded = encoder(x)
-        if builder_kind == "sequential_variational_autoencoder":
-            encoded_shape = tuple(encoded.shape[1:])
-            flat = encoded.flatten(1)
-            latent_dim = int(method_config["latent_dim"])
-            logs.append(f"Projecting encoder output to mu/logvar latent dim {latent_dim}")
-            to_mu = nn.Linear(flat.shape[1], latent_dim)
-            z = to_mu(flat)
-            to_seed = nn.Linear(latent_dim, flat.shape[1])
-            seed = to_seed(z).reshape((x.shape[0], *encoded_shape))
-        else:
-            logs.append("Using encoder output as AE latent tensor")
-            seed = encoded
-        logs.append("Running decoder")
-        output = decoder(seed)
-        output_shape = tuple(output.shape)
-        logs.append("Checking decoder output")
-        if output_shape != expected_shape:
-            raise ValueError(f"dummy forward produced {output_shape}, expected {expected_shape}")
+    x = torch.zeros(expected_shape, dtype=torch.float32)
+    output = forward_through_graph(torch, method_graph, method_config, x, logs)
+    output_shape = tuple(output.shape)
+    logs.append("Checking decoder output")
+    if output_shape != expected_shape:
+        raise ValueError(f"dummy forward produced {output_shape}, expected {expected_shape}")
 
     logs.append("Passed")
     return {
@@ -364,51 +342,3 @@ def _run_torch_check(
     }
 
 
-def _torch_layer(nn, layer: dict):
-    layer_type = layer["type"]
-    cfg = layer.get("config") or {}
-    if layer_type == "Conv2d":
-        return nn.LazyConv2d(
-            out_channels=int(cfg["out_channels"]),
-            kernel_size=int(cfg["kernel_size"]),
-            stride=int(cfg.get("stride", 1)),
-            padding=int(cfg.get("padding", 0)),
-            bias=bool(cfg.get("bias", True)),
-        )
-    if layer_type == "ConvTranspose2d":
-        lazy_conv_transpose = getattr(nn, "LazyConvTranspose2d", None)
-        if lazy_conv_transpose is None:
-            raise ValueError("torch.nn.LazyConvTranspose2d is unavailable.")
-        return lazy_conv_transpose(
-            out_channels=int(cfg["out_channels"]),
-            kernel_size=int(cfg["kernel_size"]),
-            stride=int(cfg.get("stride", 1)),
-            padding=int(cfg.get("padding", 0)),
-            output_padding=int(cfg.get("output_padding", 0)),
-            bias=bool(cfg.get("bias", True)),
-        )
-    if layer_type == "BatchNorm2d":
-        return nn.BatchNorm2d(num_features=int(cfg["num_features"]), eps=float(cfg.get("eps", 0.00001)), momentum=float(cfg.get("momentum", 0.1)))
-    if layer_type == "MaxPool2d":
-        return nn.MaxPool2d(kernel_size=int(cfg["kernel_size"]), stride=int(cfg.get("stride") or cfg["kernel_size"]), padding=int(cfg.get("padding", 0)))
-    if layer_type == "Upsample":
-        return nn.Upsample(scale_factor=float(cfg["scale_factor"]), mode=str(cfg["mode"]))
-    if layer_type == "Dropout2d":
-        return nn.Dropout2d(p=float(cfg.get("p", 0.1)))
-    if layer_type == "Flatten":
-        return nn.Flatten(start_dim=int(cfg.get("start_dim", 1)), end_dim=int(cfg.get("end_dim", -1)))
-    if layer_type == "Unflatten":
-        return nn.Unflatten(1, (int(cfg["channels"]), int(cfg["height"]), int(cfg["width"])))
-    if layer_type == "Linear":
-        return nn.LazyLinear(out_features=int(cfg["out_features"]), bias=bool(cfg.get("bias", True)))
-    if layer_type == "ReLU":
-        return nn.ReLU(inplace=bool(cfg.get("inplace", False)))
-    if layer_type == "LeakyReLU":
-        return nn.LeakyReLU(negative_slope=float(cfg.get("negative_slope", 0.01)), inplace=bool(cfg.get("inplace", False)))
-    if layer_type == "GELU":
-        return nn.GELU()
-    if layer_type == "Sigmoid":
-        return nn.Sigmoid()
-    if layer_type == "Tanh":
-        return nn.Tanh()
-    raise ValueError(f"Unknown Torch layer: {layer_type}")
