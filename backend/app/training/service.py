@@ -145,6 +145,9 @@ def delete_training_run(db: Session, run_id: int) -> bool:
         return False
     if run.status == "running":
         raise RunConflict("Abort the run before removing it.")
+    testing_run_id = db.scalar(select(models.TestingRun.id).where(models.TestingRun.training_run_id == run_id))
+    if testing_run_id is not None:
+        raise RunConflict("Delete testing runs for this training run before removing it.")
     shutil.rmtree(_run_dir(run.id), ignore_errors=True)
     db.delete(run)
     db.commit()

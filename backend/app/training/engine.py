@@ -101,7 +101,7 @@ def _loss_fn(torch, name: str):
     return nn.MSELoss()
 
 
-def _build_model(torch, configuration: models.MethodConfiguration):
+def _build_model(torch, configuration: models.MethodConfiguration, *, deterministic_vae: bool = False):
     """Build a persistent, trainable encoder/decoder model for the configuration."""
     nn = torch.nn
     method_graph = configuration.method_graph
@@ -149,7 +149,7 @@ def _build_model(torch, configuration: models.MethodConfiguration):
             mu = self.to_mu(flat)
             logvar = self.to_logvar(flat)
             std = torch.exp(0.5 * logvar)
-            z = mu + torch.randn_like(std) * std
+            z = mu if deterministic_vae else mu + torch.randn_like(std) * std
             seed = self.to_seed(z).reshape((x.shape[0], *self._encoded_shape))
             return apply_activation(self.decoder(seed)), (mu, logvar)
 

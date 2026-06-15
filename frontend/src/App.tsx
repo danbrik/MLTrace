@@ -1,5 +1,5 @@
 import { AppShell, Box, Button, Group, Stack, Text, Title } from '@mantine/core';
-import { BrainCircuit, Database, ListChecks, Rocket, Route, Workflow } from 'lucide-react';
+import { BrainCircuit, Database, FlaskConical, ListChecks, Rocket, Route, Workflow } from 'lucide-react';
 import { useState } from 'react';
 
 import { DatasetsPage } from './pages/DatasetsPage';
@@ -8,6 +8,7 @@ import { PreprocessingPipelinesPage } from './pages/PreprocessingPipelinesPage';
 import { TrainingDatasetsPage } from './pages/TrainingDatasetsPage';
 import { TrainingPipelinesPage } from './pages/TrainingPipelinesPage';
 import { TrainingRunsPage } from './pages/TrainingRunsPage';
+import { TestingRunsPage } from './pages/TestingRunsPage';
 
 type Page =
   | 'datasets'
@@ -15,7 +16,8 @@ type Page =
   | 'preprocessing'
   | 'methods'
   | 'training-pipelines'
-  | 'training-runs';
+  | 'training-runs'
+  | 'testing-runs';
 
 export function App() {
   const [page, setPage] = useState<Page>('datasets');
@@ -87,6 +89,14 @@ export function App() {
           >
             Training Runs
           </Button>
+          <Button
+            leftSection={<FlaskConical size={18} />}
+            variant={page === 'testing-runs' ? 'filled' : 'subtle'}
+            justify="flex-start"
+            onClick={() => setPage('testing-runs')}
+          >
+            Testing Runs
+          </Button>
         </Stack>
       </AppShell.Navbar>
 
@@ -108,6 +118,9 @@ export function App() {
         </Box>
         <Box display={page === 'training-runs' ? 'block' : 'none'}>
           <TrainingRunsPage active={page === 'training-runs'} />
+        </Box>
+        <Box display={page === 'testing-runs' ? 'block' : 'none'}>
+          <TestingRunsPage active={page === 'testing-runs'} />
         </Box>
       </AppShell.Main>
     </AppShell>

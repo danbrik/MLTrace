@@ -352,5 +352,112 @@ class TrainingRunMetric(Base):
     training_run: Mapped[TrainingRun] = relationship(back_populates="metrics")
 
 
+class RoiDefinition(Base):
+    """Reusable rectangular ROI in preprocessed image coordinates."""
+
+    __tablename__ = "roi_definitions"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    name: Mapped[str] = mapped_column(String(255), nullable=False, unique=True)
+    description: Mapped[str | None] = mapped_column(Text)
+    image_width: Mapped[int] = mapped_column(Integer, nullable=False)
+    image_height: Mapped[int] = mapped_column(Integer, nullable=False)
+    x: Mapped[int] = mapped_column(Integer, nullable=False)
+    y: Mapped[int] = mapped_column(Integer, nullable=False)
+    width: Mapped[int] = mapped_column(Integer, nullable=False)
+    height: Mapped[int] = mapped_column(Integer, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=False), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=False), server_default=func.now(), onupdate=func.now()
+    )
+
+
+class TestingRun(Base):
+    """A saved testing execution over one train/test dataset and one trained artifact."""
+
+    __tablename__ = "testing_runs"
+    __table_args__ = (
+        Index("ix_testing_runs_status", "status"),
+        Index("ix_testing_runs_created_at", "created_at"),
+        Index("ix_testing_runs_score_mean", "score_mean"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    training_run_id: Mapped[int] = mapped_column(ForeignKey("training_runs.id", ondelete="RESTRICT"), nullable=False)
+    training_dataset_id: Mapped[int] = mapped_column(
+        ForeignKey("training_datasets.id", ondelete="RESTRICT"), nullable=False
+    )
+    roi_id: Mapped[int | None] = mapped_column(ForeignKey("roi_definitions.id", ondelete="SET NULL"))
+
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="running")
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=False))
+    ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=False))
+    duration_seconds: Mapped[float | None] = mapped_column(Float)
+    error_message: Mapped[str | None] = mapped_column(Text)
+
+    image_count: Mapped[int | None] = mapped_column(Integer)
+    score_mean: Mapped[float | None] = mapped_column(Float)
+    score_min: Mapped[float | None] = mapped_column(Float)
+    score_max: Mapped[float | None] = mapped_column(Float)
+    full_mse_mean: Mapped[float | None] = mapped_column(Float)
+    roi_mse_mean: Mapped[float | None] = mapped_column(Float)
+    results_path: Mapped[str | None] = mapped_column(Text)
+    results_size_bytes: Mapped[int | None] = mapped_column(BigInteger)
+
+    # Denormalized snapshot for stable filtering/display even when source
+    # objects are renamed later.
+    training_run_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    training_pipeline_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    training_dataset_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    preprocessing_pipeline_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    method_type: Mapped[str] = mapped_column(String(128), nullable=False)
+    method_family: Mapped[str] = mapped_column(String(128), nullable=False)
+    training_mode: Mapped[str] = mapped_column(String(64), nullable=False)
+    artifact_kind: Mapped[str] = mapped_column(String(64), nullable=False)
+    artifact_path: Mapped[str] = mapped_column(Text, nullable=False)
+    roi_name: Mapped[str | None] = mapped_column(String(255))
+    roi_geometry: Mapped[dict | None] = mapped_column(json_type())
+
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=False), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=False), server_default=func.now(), onupdate=func.now()
+    )
+
+    training_run: Mapped[TrainingRun] = relationship()
+    training_dataset: Mapped[TrainingDataset] = relationship()
+    roi: Mapped[RoiDefinition | None] = relationship()
+    results: Mapped[list["TestingRunResult"]] = relationship(
+        back_populates="testing_run",
+        cascade="all, delete-orphan",
+        order_by="TestingRunResult.position",
+    )
+
+
+class TestingRunResult(Base):
+    """Per-image reconstruction/error row for one testing run."""
+
+    __tablename__ = "testing_run_results"
+    __table_args__ = (
+        Index("ix_testing_run_results_run_position", "testing_run_id", "position"),
+        Index("ix_testing_run_results_timestamp", "timestamp"),
+        Index("ix_testing_run_results_score", "score"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    testing_run_id: Mapped[int] = mapped_column(ForeignKey("testing_runs.id", ondelete="CASCADE"), nullable=False)
+    position: Mapped[int] = mapped_column(Integer, nullable=False)
+    image_path: Mapped[str] = mapped_column(Text, nullable=False)
+    timestamp: Mapped[datetime] = mapped_column(DateTime(timezone=False), nullable=False)
+    score: Mapped[float] = mapped_column(Float, nullable=False)
+    full_mse: Mapped[float] = mapped_column(Float, nullable=False)
+    roi_mse: Mapped[float | None] = mapped_column(Float)
+    width: Mapped[int] = mapped_column(Integer, nullable=False)
+    height: Mapped[int] = mapped_column(Integer, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=False), server_default=func.now())
+
+    testing_run: Mapped[TestingRun] = relationship(back_populates="results")
+
+
 ModelConfiguration = MethodConfiguration
 ModelConfigurationParameter = MethodConfigurationParameter

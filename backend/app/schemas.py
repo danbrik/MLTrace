@@ -1,4 +1,5 @@
 from datetime import datetime
+from typing import ClassVar
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
@@ -466,6 +467,135 @@ class TrainingRunRead(BaseModel):
 
 class TrainingRunLogResponse(BaseModel):
     log: str
+
+
+class RoiDefinitionCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=255)
+    description: str | None = None
+    image_width: int = Field(ge=1)
+    image_height: int = Field(ge=1)
+    x: int = Field(ge=0)
+    y: int = Field(ge=0)
+    width: int = Field(ge=1)
+    height: int = Field(ge=1)
+
+    @field_validator("width")
+    @classmethod
+    def validate_width(cls, value: int, info):
+        x = info.data.get("x")
+        image_width = info.data.get("image_width")
+        if x is not None and image_width is not None and x + value > image_width:
+            raise ValueError("ROI width extends beyond image_width")
+        return value
+
+    @field_validator("height")
+    @classmethod
+    def validate_height(cls, value: int, info):
+        y = info.data.get("y")
+        image_height = info.data.get("image_height")
+        if y is not None and image_height is not None and y + value > image_height:
+            raise ValueError("ROI height extends beyond image_height")
+        return value
+
+
+class RoiDefinitionRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    name: str
+    description: str | None
+    image_width: int
+    image_height: int
+    x: int
+    y: int
+    width: int
+    height: int
+    created_at: datetime
+    updated_at: datetime
+
+
+class RoiPreviewRequest(BaseModel):
+    training_run_id: int
+    training_dataset_id: int
+
+
+class RoiPreviewResponse(BaseModel):
+    training_run_id: int
+    training_dataset_id: int
+    preprocessing_pipeline_id: int
+    source_image_path: str
+    source_timestamp: datetime
+    width: int
+    height: int
+    channels: int
+    dtype: str
+    image_data_url: str
+
+
+class TestingRunCreate(BaseModel):
+    __test__: ClassVar[bool] = False
+
+    training_run_id: int
+    training_dataset_id: int
+    roi_id: int | None = None
+    name: str | None = Field(default=None, max_length=255)
+
+
+class TestingRunResultRead(BaseModel):
+    __test__: ClassVar[bool] = False
+
+    id: int
+    position: int
+    image_path: str
+    timestamp: datetime
+    score: float
+    full_mse: float
+    roi_mse: float | None
+    width: int
+    height: int
+
+
+class TestingRunRead(BaseModel):
+    __test__: ClassVar[bool] = False
+
+    id: int
+    name: str
+    training_run_id: int
+    training_dataset_id: int
+    roi_id: int | None
+    status: str
+    started_at: datetime | None
+    ended_at: datetime | None
+    duration_seconds: float | None
+    error_message: str | None
+    image_count: int | None
+    score_mean: float | None
+    score_min: float | None
+    score_max: float | None
+    full_mse_mean: float | None
+    roi_mse_mean: float | None
+    results_path: str | None
+    results_size_bytes: int | None
+    training_run_name: str
+    training_pipeline_name: str
+    training_dataset_name: str
+    preprocessing_pipeline_name: str
+    method_type: str
+    method_family: str
+    training_mode: str
+    artifact_kind: str
+    artifact_path: str
+    roi_name: str | None
+    roi_geometry: dict | None
+    created_at: datetime
+    updated_at: datetime
+
+
+class TestingRunResultsResponse(BaseModel):
+    __test__: ClassVar[bool] = False
+
+    testing_run: TestingRunRead
+    results: list[TestingRunResultRead]
 
 
 ModelArchitectureRead = MethodDefinitionRead

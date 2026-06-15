@@ -12,6 +12,11 @@ import type {
   PreprocessingPipeline,
   PreprocessingPreview,
   PreprocessingStepDefinition,
+  RoiDefinition,
+  RoiDefinitionPayload,
+  RoiPreview,
+  TestingRun,
+  TestingRunResults,
   TrainingDataset,
   TrainingDatasetPreview,
   TrainingDatasetRuleInput,
@@ -345,6 +350,52 @@ export function restartTrainingRun(runId: number): Promise<TrainingRun> {
 
 export async function deleteTrainingRun(runId: number): Promise<void> {
   await request<void>(`/api/training-runs/${runId}`, { method: 'DELETE' });
+}
+
+export function listRois(): Promise<RoiDefinition[]> {
+  return request<RoiDefinition[]>('/api/rois');
+}
+
+export function createRoi(payload: RoiDefinitionPayload): Promise<RoiDefinition> {
+  return request<RoiDefinition>('/api/rois', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function deleteRoi(roiId: number): Promise<void> {
+  await request<void>(`/api/rois/${roiId}`, { method: 'DELETE' });
+}
+
+export function previewRoi(payload: { training_run_id: number; training_dataset_id: number }): Promise<RoiPreview> {
+  return request<RoiPreview>('/api/rois/preview', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  }, 120_000);
+}
+
+export function listTestingRuns(): Promise<TestingRun[]> {
+  return request<TestingRun[]>('/api/testing-runs');
+}
+
+export function createTestingRun(payload: {
+  training_run_id: number;
+  training_dataset_id: number;
+  roi_id?: number | null;
+  name?: string | null;
+}): Promise<TestingRun> {
+  return request<TestingRun>('/api/testing-runs', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  }, 300_000);
+}
+
+export function getTestingRunResults(runId: number): Promise<TestingRunResults> {
+  return request<TestingRunResults>(`/api/testing-runs/${runId}/results`);
+}
+
+export async function deleteTestingRun(runId: number): Promise<void> {
+  await request<void>(`/api/testing-runs/${runId}`, { method: 'DELETE' });
 }
 
 export const listModelArchitectures = listMethodDefinitions;

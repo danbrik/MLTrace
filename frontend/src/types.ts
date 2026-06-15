@@ -464,6 +464,97 @@ export type TrainingRunFilters = {
   max_duration?: number | null;
 };
 
+export type RoiDefinition = {
+  id: number;
+  name: string;
+  description: string | null;
+  image_width: number;
+  image_height: number;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  created_at: string;
+  updated_at: string;
+};
+
+export type RoiDefinitionPayload = {
+  name: string;
+  description?: string | null;
+  image_width: number;
+  image_height: number;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+};
+
+export type RoiPreview = {
+  training_run_id: number;
+  training_dataset_id: number;
+  preprocessing_pipeline_id: number;
+  source_image_path: string;
+  source_timestamp: string;
+  width: number;
+  height: number;
+  channels: number;
+  dtype: string;
+  image_data_url: string;
+};
+
+export type TestingRunStatus = 'running' | 'finished' | 'failed';
+
+export type TestingRun = {
+  id: number;
+  name: string;
+  training_run_id: number;
+  training_dataset_id: number;
+  roi_id: number | null;
+  status: TestingRunStatus | string;
+  started_at: string | null;
+  ended_at: string | null;
+  duration_seconds: number | null;
+  error_message: string | null;
+  image_count: number | null;
+  score_mean: number | null;
+  score_min: number | null;
+  score_max: number | null;
+  full_mse_mean: number | null;
+  roi_mse_mean: number | null;
+  results_path: string | null;
+  results_size_bytes: number | null;
+  training_run_name: string;
+  training_pipeline_name: string;
+  training_dataset_name: string;
+  preprocessing_pipeline_name: string;
+  method_type: string;
+  method_family: string;
+  training_mode: string;
+  artifact_kind: string;
+  artifact_path: string;
+  roi_name: string | null;
+  roi_geometry: Record<string, unknown> | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type TestingRunResult = {
+  id: number;
+  position: number;
+  image_path: string;
+  timestamp: string;
+  score: number;
+  full_mse: number;
+  roi_mse: number | null;
+  width: number;
+  height: number;
+};
+
+export type TestingRunResults = {
+  testing_run: TestingRun;
+  results: TestingRunResult[];
+};
+
 export type ModelArchitecture = MethodDefinition;
 export type ModelConfigurationParameter = MethodConfigurationParameter;
 export type ModelConfiguration = MethodConfiguration;

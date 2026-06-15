@@ -24,6 +24,13 @@ from app.schemas import (
     PreprocessingPreviewRequest,
     PreprocessingPreviewResponse,
     PreprocessingStepRead,
+    RoiDefinitionCreate,
+    RoiDefinitionRead,
+    RoiPreviewRequest,
+    RoiPreviewResponse,
+    TestingRunCreate,
+    TestingRunRead,
+    TestingRunResultsResponse,
     TimestampFormatConfirm,
     TrainingDatasetCreate,
     TrainingDatasetPreviewRequest,
@@ -37,6 +44,7 @@ from app.schemas import (
     TrainingRunLogResponse,
     TrainingRunRead,
 )
+from app.testing import service as testing_service
 from app.training import service as training_service
 from app.training.scheduler import scheduler
 from app.training.service import RunConflict
@@ -449,6 +457,66 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
         if not deleted:
             raise HTTPException(status_code=404, detail="Training run not found.")
+        return None
+
+    @app.get("/api/rois", response_model=list[RoiDefinitionRead])
+    def api_list_rois(db: Session = Depends(get_db)):
+        return testing_service.list_rois(db)
+
+    @app.post("/api/rois", response_model=RoiDefinitionRead)
+    def api_create_roi(payload: RoiDefinitionCreate, db: Session = Depends(get_db)):
+        try:
+            return testing_service.create_roi(db, payload)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except IntegrityError as exc:
+            db.rollback()
+            raise HTTPException(status_code=409, detail="An ROI with this name already exists.") from exc
+
+    @app.post("/api/rois/preview", response_model=RoiPreviewResponse)
+    def api_preview_roi(payload: RoiPreviewRequest, db: Session = Depends(get_db)):
+        try:
+            return testing_service.preview_roi_image(db, payload)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.delete("/api/rois/{roi_id}", status_code=204)
+    def api_delete_roi(roi_id: int, db: Session = Depends(get_db)):
+        deleted = testing_service.delete_roi(db, roi_id)
+        if not deleted:
+            raise HTTPException(status_code=404, detail="ROI not found.")
+        return None
+
+    @app.get("/api/testing-runs", response_model=list[TestingRunRead])
+    def api_list_testing_runs(db: Session = Depends(get_db)):
+        return testing_service.list_testing_runs(db)
+
+    @app.post("/api/testing-runs", response_model=TestingRunRead)
+    def api_create_testing_run(payload: TestingRunCreate, db: Session = Depends(get_db)):
+        try:
+            return testing_service.create_testing_run(db, payload)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.get("/api/testing-runs/{run_id}", response_model=TestingRunRead)
+    def api_get_testing_run(run_id: int, db: Session = Depends(get_db)):
+        run = testing_service.get_testing_run(db, run_id)
+        if run is None:
+            raise HTTPException(status_code=404, detail="Testing run not found.")
+        return run
+
+    @app.get("/api/testing-runs/{run_id}/results", response_model=TestingRunResultsResponse)
+    def api_get_testing_run_results(run_id: int, db: Session = Depends(get_db)):
+        response = testing_service.get_testing_run_results(db, run_id)
+        if response is None:
+            raise HTTPException(status_code=404, detail="Testing run not found.")
+        return response
+
+    @app.delete("/api/testing-runs/{run_id}", status_code=204)
+    def api_delete_testing_run(run_id: int, db: Session = Depends(get_db)):
+        deleted = testing_service.delete_testing_run(db, run_id)
+        if not deleted:
+            raise HTTPException(status_code=404, detail="Testing run not found.")
         return None
 
     # Temporary compatibility aliases for clients still calling the Phase 3 Models API.
