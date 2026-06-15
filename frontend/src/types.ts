@@ -61,10 +61,12 @@ export type TrainingDatasetPreview = {
 export type TrainingDataset = {
   id: number;
   name: string;
+  usage_label: 'train' | 'test' | 'validation' | 'mixed' | string;
   notes: string | null;
   created_at: string;
   dataset_names: string[];
   image_resolutions: string[];
+  image_signatures: string[];
   total_matching_images: number;
   total_selected_images: number;
   rules: Array<{
@@ -76,6 +78,10 @@ export type TrainingDataset = {
     folder_relative_path: string;
     folder_first_timestamp: string | null;
     folder_last_timestamp: string | null;
+    folder_extension_summary: Record<string, number> | null;
+    folder_resolution_summary: Record<string, number> | null;
+    folder_image_metadata: Record<string, unknown> | null;
+    folder_image_signature: string | null;
     start_timestamp: string;
     end_timestamp: string;
     stride: number;

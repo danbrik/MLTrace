@@ -19,6 +19,13 @@ import { useMemo, useState } from 'react';
 import { datasetResolutions, datasetSizeSignature } from './graph';
 import type { TrainingDataset } from '../types';
 
+const USAGE_OPTIONS = [
+  { value: 'train', label: 'Train' },
+  { value: 'test', label: 'Test' },
+  { value: 'validation', label: 'Validation' },
+  { value: 'mixed', label: 'Mixed' },
+];
+
 function arraysEqual(a: string[], b: string[]): boolean {
   return a.length === b.length && a.every((value, index) => value === b[index]);
 }
@@ -42,6 +49,17 @@ function ImageSizeCell({ resolutions }: { resolutions: string[] }) {
   );
 }
 
+function usageLabel(value: string): string {
+  return USAGE_OPTIONS.find((option) => option.value === value)?.label ?? value;
+}
+
+function usageColor(value: string): string {
+  if (value === 'test') return 'orange';
+  if (value === 'validation') return 'violet';
+  if (value === 'mixed') return 'gray';
+  return 'teal';
+}
+
 export function TrainingDatasetPicker({
   trainingDatasets,
   selectedIds,
@@ -53,6 +71,7 @@ export function TrainingDatasetPicker({
 }) {
   const [search, setSearch] = useState('');
   const [sizeFilter, setSizeFilter] = useState<string | null>(null);
+  const [usageFilter, setUsageFilter] = useState<string | null>(null);
 
   const datasetById = useMemo(
     () => new Map(trainingDatasets.map((dataset) => [dataset.id, dataset])),
@@ -83,6 +102,7 @@ export function TrainingDatasetPicker({
         if (!matches) return false;
       }
       if (sizeFilter && !resolutions.includes(sizeFilter)) return false;
+      if (usageFilter && (dataset.usage_label ?? 'train') !== usageFilter) return false;
       // Selection-driven size constraint: known sizes must match the signature;
       // unknown-size datasets stay visible (compatibility can't be disproven).
       if (selectedSignature && resolutions.length > 0 && !arraysEqual(resolutions, selectedSignature)) {
@@ -90,7 +110,7 @@ export function TrainingDatasetPicker({
       }
       return true;
     });
-  }, [trainingDatasets, search, sizeFilter, selectedSignature]);
+  }, [trainingDatasets, search, sizeFilter, usageFilter, selectedSignature]);
 
   const selected = selectedIds
     .map((id) => datasetById.get(id))
@@ -108,7 +128,7 @@ export function TrainingDatasetPicker({
     <Paper withBorder p="md" radius="sm">
       <Stack gap="md">
         <Group justify="space-between" align="center">
-          <Title order={3}>1. Training Sets</Title>
+          <Title order={3}>1. Train/Test Sets</Title>
           <Badge variant="light">{selectedIds.length} selected</Badge>
         </Group>
         <Group grow>
@@ -119,6 +139,7 @@ export function TrainingDatasetPicker({
             onChange={(event) => setSearch(event.currentTarget.value)}
           />
           <Select placeholder="Image size" data={sizeOptions} value={sizeFilter} onChange={setSizeFilter} clearable />
+          <Select placeholder="Label" data={USAGE_OPTIONS} value={usageFilter} onChange={setUsageFilter} clearable />
         </Group>
         {selectedSignature && (
           <Text size="xs" c="dimmed">
@@ -131,6 +152,7 @@ export function TrainingDatasetPicker({
             <Table.Thead>
               <Table.Tr>
                 <Table.Th>Name</Table.Th>
+                <Table.Th>Label</Table.Th>
                 <Table.Th>Datasets</Table.Th>
                 <Table.Th>Image size</Table.Th>
                 <Table.Th>Images</Table.Th>
@@ -143,6 +165,11 @@ export function TrainingDatasetPicker({
                 return (
                   <Table.Tr key={dataset.id}>
                     <Table.Td>{dataset.name}</Table.Td>
+                    <Table.Td>
+                      <Badge size="xs" variant="light" color={usageColor(dataset.usage_label ?? 'train')}>
+                        {usageLabel(dataset.usage_label ?? 'train')}
+                      </Badge>
+                    </Table.Td>
                     <Table.Td>
                       <Group gap={4}>
                         {dataset.dataset_names.map((name) => (
@@ -174,7 +201,7 @@ export function TrainingDatasetPicker({
           </Table>
         </ScrollArea>
         {trainingDatasets.length === 0 && (
-          <Alert color="blue">No training datasets available yet. Create one on the Training Datasets page.</Alert>
+          <Alert color="blue">No train/test datasets available yet. Create one on the Train/Test Datasets page.</Alert>
         )}
 
         {selected.length > 0 && (
@@ -195,7 +222,8 @@ export function TrainingDatasetPicker({
                       </Text>
                       <Text size="xs" c="dimmed">
                         {dataset.total_selected_images} images ·{' '}
-                        {datasetResolutions(dataset).join(', ') || 'size n/a'} · {dataset.dataset_names.join(', ')}
+                        {usageLabel(dataset.usage_label ?? 'train')} · {datasetResolutions(dataset).join(', ') || 'size n/a'} ·{' '}
+                        {dataset.dataset_names.join(', ')}
                       </Text>
                     </div>
                   </Group>

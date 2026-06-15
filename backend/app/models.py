@@ -93,6 +93,7 @@ class TrainingDataset(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     dataset_id: Mapped[int | None] = mapped_column(ForeignKey("datasets.id", ondelete="RESTRICT"))
     name: Mapped[str] = mapped_column(String(255), nullable=False)
+    usage_label: Mapped[str] = mapped_column(String(32), nullable=False, default="train")
     notes: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=False), server_default=func.now())
 

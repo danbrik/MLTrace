@@ -53,7 +53,7 @@ export function App() {
             justify="flex-start"
             onClick={() => setPage('training-datasets')}
           >
-            Training Datasets
+            Train/Test Datasets
           </Button>
           <Button
             leftSection={<Workflow size={18} />}

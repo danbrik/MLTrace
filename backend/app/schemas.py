@@ -93,6 +93,7 @@ class TrainingDatasetPreviewResponse(BaseModel):
 
 class TrainingDatasetCreate(BaseModel):
     name: str = Field(min_length=1, max_length=255)
+    usage_label: str = Field(default="train", pattern="^(train|test|validation|mixed)$")
     notes: str | None = None
     rules: list[TrainingDatasetRuleInput] = Field(min_length=1)
 
@@ -106,6 +107,10 @@ class TrainingDatasetRuleRead(BaseModel):
     folder_relative_path: str
     folder_first_timestamp: datetime | None
     folder_last_timestamp: datetime | None
+    folder_extension_summary: dict | None = None
+    folder_resolution_summary: dict | None = None
+    folder_image_metadata: dict | None = None
+    folder_image_signature: str | None = None
     start_timestamp: datetime
     end_timestamp: datetime
     stride: int
@@ -116,12 +121,14 @@ class TrainingDatasetRuleRead(BaseModel):
 class TrainingDatasetRead(BaseModel):
     id: int
     name: str
+    usage_label: str = "train"
     notes: str | None
     created_at: datetime
     dataset_names: list[str]
     # Sorted unique "WxH" image resolutions across all rule folders. Drives the
     # size column and the size-compatibility cross-filtering on the UI.
     image_resolutions: list[str] = []
+    image_signatures: list[str] = []
     total_matching_images: int
     total_selected_images: int
     rules: list[TrainingDatasetRuleRead] = []

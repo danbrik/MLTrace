@@ -264,7 +264,7 @@ def delete_dataset(db: Session, dataset_id: int) -> bool:
     ) or 0
     if referenced_training_rules:
         raise ValueError(
-            "Dataset is used by saved training datasets. Delete those training datasets before deleting the dataset."
+            "Dataset is used by saved train/test datasets. Delete those train/test datasets before deleting the dataset."
         )
 
     folder_ids = list(
@@ -320,6 +320,7 @@ def create_training_dataset(db: Session, payload: TrainingDatasetCreate) -> Trai
 
     training_dataset = models.TrainingDataset(
         name=payload.name,
+        usage_label=payload.usage_label,
         notes=payload.notes,
     )
     db.add(training_dataset)
@@ -390,7 +391,7 @@ def delete_training_dataset(db: Session, training_dataset_id: int) -> bool:
     ) or 0
     if referencing_pipelines:
         raise ValueError(
-            "Training dataset is used by saved training pipelines. Delete those training pipelines first."
+            "Train/test dataset is used by saved training pipelines. Delete those training pipelines first."
         )
     db.delete(training_dataset)
     db.commit()
@@ -412,6 +413,7 @@ def validate_rules(db: Session, rules) -> None:
     if missing:
         raise ValueError(f"Folders do not exist: {missing}")
 
+    signatures: set[str] = set()
     for rule in rules:
         folder = folders[rule.folder_id]
         if folder.first_timestamp is None or folder.last_timestamp is None:
@@ -421,6 +423,18 @@ def validate_rules(db: Session, rules) -> None:
                 f"Rule for folder {folder.relative_path} must stay within "
                 f"{folder.first_timestamp.isoformat()} and {folder.last_timestamp.isoformat()}."
             )
+        signature = folder_image_signature(folder)
+        if signature is None:
+            raise ValueError(
+                f"Folder {folder.relative_path} is missing image metadata. Rescan the source dataset before using it."
+            )
+        signatures.add(signature)
+
+    if len(signatures) > 1:
+        raise ValueError(
+            "All ranges in one train/test dataset must use the same image data signature. "
+            f"Found: {', '.join(sorted(signatures))}."
+        )
 
 
 def count_rule_images(db: Session, rule: models.TrainingDatasetRule) -> tuple[int, int]:
@@ -460,10 +474,27 @@ def count_images_in_folder_range(folder: models.DatasetFolder, start_timestamp, 
     return end_offset - start_offset + 1
 
 
+def folder_image_signature(folder: models.DatasetFolder) -> str | None:
+    """Stable compatibility key for combining folders into one train/test set."""
+    if not folder.resolution_summary or not folder.extension_summary or not folder.image_metadata:
+        return None
+    resolutions = ",".join(sorted(str(key) for key in folder.resolution_summary.keys()))
+    extensions = ",".join(sorted(str(key) for key in folder.extension_summary.keys()))
+    dtype = folder.image_metadata.get("dtype") or "unknown-dtype"
+    channels = folder.image_metadata.get("channels")
+    mode = folder.image_metadata.get("mode") or "unknown-mode"
+    if channels is None:
+        channels_text = "unknown-ch"
+    else:
+        channels_text = f"{channels}ch"
+    return f"{resolutions} | {extensions} | {dtype} | {channels_text} | {mode}"
+
+
 def serialize_training_dataset(db: Session, training_dataset: models.TrainingDataset) -> TrainingDatasetRead:
     rule_reads: list[TrainingDatasetRuleRead] = []
     dataset_names: set[str] = set()
     resolutions: set[str] = set()
+    signatures: set[str] = set()
     total_matching = 0
     total_selected = 0
 
@@ -485,6 +516,9 @@ def serialize_training_dataset(db: Session, training_dataset: models.TrainingDat
         dataset_names.add(dataset.name)
         if folder.resolution_summary:
             resolutions.update(folder.resolution_summary.keys())
+        signature = folder_image_signature(folder)
+        if signature:
+            signatures.add(signature)
         rule_reads.append(
             TrainingDatasetRuleRead(
                 id=rule.id,
@@ -495,6 +529,10 @@ def serialize_training_dataset(db: Session, training_dataset: models.TrainingDat
                 folder_relative_path=folder.relative_path,
                 folder_first_timestamp=folder.first_timestamp,
                 folder_last_timestamp=folder.last_timestamp,
+                folder_extension_summary=folder.extension_summary,
+                folder_resolution_summary=folder.resolution_summary,
+                folder_image_metadata=folder.image_metadata,
+                folder_image_signature=signature,
                 start_timestamp=rule.start_timestamp,
                 end_timestamp=rule.end_timestamp,
                 stride=rule.stride,
@@ -506,10 +544,12 @@ def serialize_training_dataset(db: Session, training_dataset: models.TrainingDat
     return TrainingDatasetRead(
         id=training_dataset.id,
         name=training_dataset.name,
+        usage_label=training_dataset.usage_label,
         notes=training_dataset.notes,
         created_at=training_dataset.created_at,
         dataset_names=sorted(dataset_names),
         image_resolutions=sorted(resolutions),
+        image_signatures=sorted(signatures),
         total_matching_images=total_matching,
         total_selected_images=total_selected,
         rules=rule_reads,
@@ -1351,62 +1391,14 @@ def serialize_training_pipeline(db: Session, pipeline: models.TrainingPipeline) 
     )
 
 
-def resolve_first_training_image(
-    db: Session, training_dataset: models.TrainingDataset
-) -> tuple[models.DatasetImage, list[str]]:
-    """Return the first indexed image of a training dataset for the dummy test.
+def resolve_first_training_image(_db: Session, training_dataset: models.TrainingDataset):
+    """Return the first concrete image selected by a train/test dataset."""
+    from app.training.data import enumerate_training_dataset_image_records
 
-    Rules are visited in the same deterministic order used by
-    serialize_training_dataset; per rule the chronologically first indexed
-    image inside the rule's time range wins. The scanner only indexes
-    representative images, so when no indexed image falls inside any rule
-    range we fall back to the first indexed image of a rule's folder and warn.
-    """
-    warnings: list[str] = []
-    ordered_rules = sorted(
-        training_dataset.rules,
-        key=lambda item: (
-            item.start_timestamp,
-            item.end_timestamp,
-            item.folder.dataset.name,
-            item.folder.relative_path,
-            item.id,
-        ),
-    )
-    if not ordered_rules:
-        raise ValueError(f"Training dataset '{training_dataset.name}' has no rules.")
-
-    for rule in ordered_rules:
-        image = db.scalar(
-            select(models.DatasetImage)
-            .where(
-                models.DatasetImage.folder_id == rule.folder_id,
-                models.DatasetImage.timestamp_parsed >= rule.start_timestamp,
-                models.DatasetImage.timestamp_parsed <= rule.end_timestamp,
-            )
-            .order_by(models.DatasetImage.timestamp_parsed.asc(), models.DatasetImage.id.asc())
-            .limit(1)
-        )
-        if image is not None:
-            return image, warnings
-
-    # Fallback: only representative images are indexed, so the rule ranges may
-    # contain no indexed row even though the folder has matching files on disk.
-    for rule in ordered_rules:
-        image = db.scalar(
-            select(models.DatasetImage)
-            .where(models.DatasetImage.folder_id == rule.folder_id)
-            .order_by(models.DatasetImage.timestamp_parsed.asc(), models.DatasetImage.id.asc())
-            .limit(1)
-        )
-        if image is not None:
-            warnings.append(
-                "No indexed image falls inside the rule time ranges; using the folder's first indexed "
-                "image for the dummy test."
-            )
-            return image, warnings
-
-    raise ValueError(f"Training dataset '{training_dataset.name}' contains no indexed images.")
+    images = enumerate_training_dataset_image_records(training_dataset)
+    if not images:
+        raise ValueError(f"Training dataset '{training_dataset.name}' contains no matching image files.")
+    return images[0], []
 
 
 def dry_run_training_pipeline(db: Session, payload: TrainingPipelineDryRunRequest) -> TrainingPipelineDryRunResponse:

@@ -120,6 +120,7 @@ export function previewTrainingDataset(payload: {
 
 export function createTrainingDataset(payload: {
   name: string;
+  usage_label?: string;
   notes?: string;
   rules: TrainingDatasetRuleInput[];
 }): Promise<TrainingDataset> {

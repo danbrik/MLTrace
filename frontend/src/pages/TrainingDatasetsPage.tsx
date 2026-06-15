@@ -40,9 +40,18 @@ type FolderChoice = {
   folder: DatasetFolder;
   value: string;
   label: string;
+  signature: string | null;
+  metadataLabel: string;
   min: string;
   max: string;
 };
+
+const USAGE_OPTIONS = [
+  { value: 'train', label: 'Train' },
+  { value: 'test', label: 'Test' },
+  { value: 'validation', label: 'Validation' },
+  { value: 'mixed', label: 'Mixed' },
+];
 
 function toInputDateTime(value: string | null): string {
   if (!value) return '';
@@ -56,6 +65,40 @@ function formatTimestamp(value: string | null): string {
 
 function formatNameTimestamp(value: string): string {
   return value.replace('T', ' ');
+}
+
+function usageLabelText(value: string): string {
+  return USAGE_OPTIONS.find((option) => option.value === value)?.label ?? value;
+}
+
+function usageLabelColor(value: string): string {
+  if (value === 'test') return 'orange';
+  if (value === 'validation') return 'violet';
+  if (value === 'mixed') return 'gray';
+  return 'teal';
+}
+
+function summaryKeys(summary: Record<string, number> | null): string[] {
+  return summary ? Object.keys(summary).sort() : [];
+}
+
+function folderImageSignature(folder: DatasetFolder): string | null {
+  if (!folder.resolution_summary || !folder.extension_summary || !folder.image_metadata) return null;
+  const resolution = summaryKeys(folder.resolution_summary).join(',');
+  const extension = summaryKeys(folder.extension_summary).join(',');
+  const dtype = String(folder.image_metadata.dtype ?? 'unknown-dtype');
+  const channels = folder.image_metadata.channels == null ? 'unknown-ch' : `${folder.image_metadata.channels}ch`;
+  const mode = String(folder.image_metadata.mode ?? 'unknown-mode');
+  return `${resolution} | ${extension} | ${dtype} | ${channels} | ${mode}`;
+}
+
+function folderMetadataLabel(folder: DatasetFolder): string {
+  const resolution = summaryKeys(folder.resolution_summary).join(',') || 'size n/a';
+  const extension = summaryKeys(folder.extension_summary).join(',') || 'filetype n/a';
+  const metadata = folder.image_metadata ?? {};
+  const dtype = metadata.dtype ? String(metadata.dtype) : 'dtype n/a';
+  const channels = metadata.channels == null ? 'channels n/a' : `${metadata.channels}ch`;
+  return `${resolution}, ${extension}, ${dtype}, ${channels}`;
 }
 
 function generatedTrainingDatasetName(rules: RuleRow[]): string {
@@ -87,6 +130,8 @@ export function TrainingDatasetsPage() {
   const [inspectedDataset, setInspectedDataset] = useState<TrainingDataset | null>(null);
   const [name, setName] = useState('');
   const [nameEdited, setNameEdited] = useState(false);
+  const [usageLabel, setUsageLabel] = useState('train');
+  const [usageFilter, setUsageFilter] = useState<string | null>(null);
   const [notes, setNotes] = useState('');
   const [rules, setRules] = useState<RuleRow[]>([]);
   const [preview, setPreview] = useState<TrainingDatasetPreview | null>(null);
@@ -103,7 +148,7 @@ export function TrainingDatasetsPage() {
 
   useEffect(() => {
     refresh().catch((error) => {
-      notifications.show({ color: 'red', title: 'Could not load training datasets', message: error.message });
+      notifications.show({ color: 'red', title: 'Could not load train/test datasets', message: error.message });
     });
   }, []);
 
@@ -116,7 +161,9 @@ export function TrainingDatasetsPage() {
             dataset,
             folder,
             value: String(folder.id),
-            label: `${dataset.name} / ${folder.relative_path} (${folder.image_count})`,
+            signature: folderImageSignature(folder),
+            metadataLabel: folderMetadataLabel(folder),
+            label: `${dataset.name} / ${folder.relative_path} (${folderMetadataLabel(folder)})`,
             min: toInputDateTime(folder.first_timestamp),
             max: toInputDateTime(folder.last_timestamp),
           })),
@@ -158,6 +205,30 @@ export function TrainingDatasetsPage() {
   );
 
   const generatedName = useMemo(() => generatedTrainingDatasetName(rules), [rules]);
+
+  const selectedSignatures = useMemo(
+    () =>
+      rules
+        .map((rule) => folderChoiceById.get(rule.folder_id)?.signature ?? null)
+        .filter((signature): signature is string => Boolean(signature)),
+    [folderChoiceById, rules],
+  );
+
+  const signatureError = useMemo(() => {
+    if (rules.length === 0) return null;
+    const missing = rules.some((rule) => !folderChoiceById.get(rule.folder_id)?.signature);
+    if (missing) return 'Every selected folder must have indexed image metadata. Rescan the source dataset if metadata is missing.';
+    const unique = [...new Set(selectedSignatures)];
+    if (unique.length > 1) {
+      return `All ranges in one train/test dataset must use the same image data. Found: ${unique.join(' / ')}.`;
+    }
+    return null;
+  }, [folderChoiceById, rules, selectedSignatures]);
+
+  const filteredTrainingDatasets = useMemo(
+    () => trainingDatasets.filter((dataset) => !usageFilter || (dataset.usage_label ?? 'train') === usageFilter),
+    [trainingDatasets, usageFilter],
+  );
 
   useEffect(() => {
     if (!nameEdited && generatedName) {
@@ -220,15 +291,17 @@ export function TrainingDatasetsPage() {
     try {
       await createTrainingDataset({
         name,
+        usage_label: usageLabel,
         notes,
         rules: rulesPayload(),
       });
       setName('');
       setNameEdited(false);
+      setUsageLabel('train');
       setNotes('');
       setPreview(null);
       await refresh();
-      notifications.show({ color: 'green', title: 'Training dataset saved', message: name });
+      notifications.show({ color: 'green', title: 'Train/test dataset saved', message: name });
     } catch (error) {
       notifications.show({
         color: 'red',
@@ -241,7 +314,7 @@ export function TrainingDatasetsPage() {
   }
 
   async function handleDelete(trainingDataset: TrainingDataset) {
-    const confirmed = window.confirm(`Delete training dataset "${trainingDataset.name}"?`);
+    const confirmed = window.confirm(`Delete train/test dataset "${trainingDataset.name}"?`);
     if (!confirmed) return;
 
     try {
@@ -250,7 +323,7 @@ export function TrainingDatasetsPage() {
         setInspectedDataset(null);
       }
       await refresh();
-      notifications.show({ color: 'green', title: 'Training dataset deleted', message: trainingDataset.name });
+      notifications.show({ color: 'green', title: 'Train/test dataset deleted', message: trainingDataset.name });
     } catch (error) {
       notifications.show({
         color: 'red',
@@ -273,20 +346,21 @@ export function TrainingDatasetsPage() {
     }
   }
 
-  const canSubmit = name.trim() && rules.length > 0 && invalidRules.length === 0;
+  const canSubmit = name.trim() && rules.length > 0 && invalidRules.length === 0 && !signatureError;
 
   return (
     <Stack gap="lg">
       <div>
-        <Title order={2}>Training Datasets</Title>
+        <Title order={2}>Train/Test Datasets</Title>
         <Text c="dimmed" size="sm">
-          Save reusable training-data rules from indexed folders, time ranges, and sampling stride.
+          Save reusable dataset rules from indexed folders, time ranges, and sampling stride. Labels are filters only;
+          train sets can still be used for testing and test sets can still be used for training.
         </Text>
       </div>
 
       <Paper withBorder p="md" radius="sm">
         <Stack gap="md">
-          <Title order={3}>Create training dataset</Title>
+          <Title order={3}>Create train/test dataset</Title>
           <Group align="flex-end" grow>
             <TextInput
               label="Name"
@@ -298,6 +372,12 @@ export function TrainingDatasetsPage() {
                 setName(event.currentTarget.value);
               }}
             />
+            <Select
+              label="Label"
+              data={USAGE_OPTIONS}
+              value={usageLabel}
+              onChange={(value) => setUsageLabel(value ?? 'train')}
+            />
           </Group>
           <Textarea
             label="Notes"
@@ -308,7 +388,7 @@ export function TrainingDatasetsPage() {
 
           {folderChoices.length === 0 && (
             <Alert color="blue" title="No scanned folders">
-              Add and scan at least one dataset before creating a training dataset.
+              Add and scan at least one dataset before creating a train/test dataset.
             </Alert>
           )}
 
@@ -326,6 +406,7 @@ export function TrainingDatasetsPage() {
                   <Table.Thead>
                     <Table.Tr>
                       <Table.Th>Dataset / folder</Table.Th>
+                      <Table.Th>Image data</Table.Th>
                       <Table.Th>Start</Table.Th>
                       <Table.Th>End</Table.Th>
                       <Table.Th>Allowed range</Table.Th>
@@ -347,6 +428,14 @@ export function TrainingDatasetsPage() {
                               onChange={(folderId) => handleFolderChange(rule.localId, folderId)}
                               searchable
                             />
+                          </Table.Td>
+                          <Table.Td>
+                            <Stack gap={2}>
+                              <Text size="xs">{choice?.metadataLabel ?? 'n/a'}</Text>
+                              <Text size="xs" c="dimmed">
+                                {choice?.signature ?? 'Missing metadata'}
+                              </Text>
+                            </Stack>
                           </Table.Td>
                           <Table.Td>
                             <TextInput
@@ -416,6 +505,12 @@ export function TrainingDatasetsPage() {
                 </Alert>
               )}
 
+              {signatureError && (
+                <Alert color="red" title="Image data mismatch">
+                  {signatureError}
+                </Alert>
+              )}
+
               {preview && (
                 <Alert color="green" title="Preview">
                   {preview.total_selected_images} selected images from {preview.total_matching_images} matching images.
@@ -427,7 +522,7 @@ export function TrainingDatasetsPage() {
                   variant="light"
                   onClick={handlePreview}
                   loading={loading}
-                  disabled={rules.length === 0 || invalidRules.length > 0}
+                  disabled={rules.length === 0 || invalidRules.length > 0 || Boolean(signatureError)}
                 >
                   Preview counts
                 </Button>
@@ -437,7 +532,7 @@ export function TrainingDatasetsPage() {
                   loading={loading}
                   disabled={!canSubmit}
                 >
-                  Save training dataset
+                  Save train/test dataset
                 </Button>
               </Group>
             </>
@@ -447,13 +542,24 @@ export function TrainingDatasetsPage() {
 
       <Paper withBorder p="md" radius="sm">
         <Stack gap="md">
-          <Title order={3}>Saved training datasets</Title>
+          <Group justify="space-between" align="flex-end">
+            <Title order={3}>Saved train/test datasets</Title>
+            <Select
+              label="Label filter"
+              data={USAGE_OPTIONS}
+              value={usageFilter}
+              onChange={setUsageFilter}
+              clearable
+            />
+          </Group>
           <ScrollArea>
             <Table verticalSpacing="sm" striped>
               <Table.Thead>
                 <Table.Tr>
                   <Table.Th>Name</Table.Th>
+                  <Table.Th>Label</Table.Th>
                   <Table.Th>Source paths</Table.Th>
+                  <Table.Th>Image data</Table.Th>
                   <Table.Th>Images</Table.Th>
                   <Table.Th>Created</Table.Th>
                   <Table.Th>Notes</Table.Th>
@@ -461,9 +567,14 @@ export function TrainingDatasetsPage() {
                 </Table.Tr>
               </Table.Thead>
               <Table.Tbody>
-                {trainingDatasets.map((trainingDataset) => (
+                {filteredTrainingDatasets.map((trainingDataset) => (
                   <Table.Tr key={trainingDataset.id}>
                     <Table.Td>{trainingDataset.name}</Table.Td>
+                    <Table.Td>
+                      <Badge color={usageLabelColor(trainingDataset.usage_label ?? 'train')} variant="light">
+                        {usageLabelText(trainingDataset.usage_label ?? 'train')}
+                      </Badge>
+                    </Table.Td>
                     <Table.Td>
                       <Group gap="xs">
                         {trainingDataset.dataset_names.map((datasetName) => (
@@ -471,6 +582,21 @@ export function TrainingDatasetsPage() {
                             {datasetName}
                           </Badge>
                         ))}
+                      </Group>
+                    </Table.Td>
+                    <Table.Td>
+                      <Group gap={4}>
+                        {(trainingDataset.image_signatures ?? []).length > 0 ? (
+                          (trainingDataset.image_signatures ?? []).map((signature) => (
+                            <Badge key={signature} size="xs" variant="outline" color="gray">
+                              {signature}
+                            </Badge>
+                          ))
+                        ) : (
+                          <Badge size="xs" variant="outline" color="gray">
+                            n/a
+                          </Badge>
+                        )}
                       </Group>
                     </Table.Td>
                     <Table.Td>{selectedText(trainingDataset)}</Table.Td>
@@ -481,7 +607,7 @@ export function TrainingDatasetsPage() {
                         <Tooltip label="Inspect ranges">
                           <ActionIcon
                             variant="subtle"
-                            aria-label="Inspect training dataset"
+                            aria-label="Inspect train/test dataset"
                             onClick={() => handleInspect(trainingDataset)}
                           >
                             <Info size={18} />
@@ -491,7 +617,7 @@ export function TrainingDatasetsPage() {
                           <ActionIcon
                             color="red"
                             variant="subtle"
-                            aria-label="Delete training dataset"
+                            aria-label="Delete train/test dataset"
                             onClick={() => handleDelete(trainingDataset)}
                           >
                             <Trash2 size={18} />
@@ -510,14 +636,14 @@ export function TrainingDatasetsPage() {
       <Modal
         opened={inspectedDataset !== null}
         onClose={() => setInspectedDataset(null)}
-        title={inspectedDataset ? `Training dataset: ${inspectedDataset.name}` : 'Training dataset'}
+        title={inspectedDataset ? `Train/test dataset: ${inspectedDataset.name}` : 'Train/test dataset'}
         size="xl"
       >
         {inspectedDataset && (
           <Stack gap="md">
             <Alert color="blue" title="Image count">
-              {inspectedDataset.total_selected_images} selected images from {inspectedDataset.total_matching_images}{' '}
-              matching images.
+              {usageLabelText(inspectedDataset.usage_label ?? 'train')} set with {inspectedDataset.total_selected_images} selected
+              images from {inspectedDataset.total_matching_images} matching images.
             </Alert>
             <ScrollArea h={420}>
               <Table verticalSpacing="sm">
@@ -526,6 +652,7 @@ export function TrainingDatasetsPage() {
                     <Table.Th>#</Table.Th>
                     <Table.Th>Dataset</Table.Th>
                     <Table.Th>Folder</Table.Th>
+                    <Table.Th>Image data</Table.Th>
                     <Table.Th>Start</Table.Th>
                     <Table.Th>End</Table.Th>
                     <Table.Th>Stride</Table.Th>
@@ -545,6 +672,18 @@ export function TrainingDatasetsPage() {
                         </Stack>
                       </Table.Td>
                       <Table.Td className="mono">{rule.folder_relative_path}</Table.Td>
+                      <Table.Td>
+                        <Stack gap={2}>
+                          <Text size="xs">{rule.folder_image_signature ?? 'n/a'}</Text>
+                          <Text size="xs" c="dimmed">
+                            {rule.folder_image_metadata
+                              ? `${String(rule.folder_image_metadata.dtype ?? 'dtype n/a')}, ${String(
+                                  rule.folder_image_metadata.channels ?? 'channels n/a',
+                                )}ch`
+                              : 'metadata n/a'}
+                          </Text>
+                        </Stack>
+                      </Table.Td>
                       <Table.Td>{formatTimestamp(rule.start_timestamp)}</Table.Td>
                       <Table.Td>{formatTimestamp(rule.end_timestamp)}</Table.Td>
                       <Table.Td>{rule.stride}</Table.Td>

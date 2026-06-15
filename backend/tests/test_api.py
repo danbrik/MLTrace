@@ -39,10 +39,17 @@ def make_client():
         app.dependency_overrides.clear()
 
 
-def add_scanned_dataset(client: TestClient, root: Path, name: str, folder: str, count: int) -> dict:
+def add_scanned_dataset(
+    client: TestClient,
+    root: Path,
+    name: str,
+    folder: str,
+    count: int,
+    size: tuple[int, int] = (12, 8),
+) -> dict:
     for index in range(count):
         timestamp = datetime(2026, 2, 4, 15, 30, 0) + timedelta(seconds=index * 10)
-        write_tiff(root / f"{folder}_frame_{timestamp:%Y%m%d_%H%M%S}.tif")
+        write_tiff(root / f"{folder}_frame_{timestamp:%Y%m%d_%H%M%S}.tif", size=size)
 
     created = client.post(
         "/api/datasets",
@@ -182,6 +189,7 @@ def test_training_dataset_can_span_datasets_and_be_deleted(tmp_path: Path) -> No
             "/api/training-datasets",
             json={
                 "name": "Combined",
+                "usage_label": "test",
                 "notes": "Two roots",
                 "rules": [
                     {
@@ -201,7 +209,9 @@ def test_training_dataset_can_span_datasets_and_be_deleted(tmp_path: Path) -> No
         )
         assert created.status_code == 200
         training_dataset = created.json()
+        assert training_dataset["usage_label"] == "test"
         assert training_dataset["dataset_names"] == ["A", "B"]
+        assert training_dataset["image_signatures"] == ["12x8 | .tif | uint8 | 1ch | L"]
         assert training_dataset["total_matching_images"] == 9
         assert training_dataset["total_selected_images"] == 7
         assert len(training_dataset["rules"]) == 2
@@ -219,13 +229,50 @@ def test_training_dataset_can_span_datasets_and_be_deleted(tmp_path: Path) -> No
 
         blocked_dataset_delete = client.delete(f"/api/datasets/{dataset_a['id']}")
         assert blocked_dataset_delete.status_code == 409
-        assert "saved training datasets" in blocked_dataset_delete.json()["detail"]
+        assert "saved train/test datasets" in blocked_dataset_delete.json()["detail"]
 
         deleted = client.delete(f"/api/training-datasets/{training_dataset['id']}")
         assert deleted.status_code == 204
         listed = client.get("/api/training-datasets")
         assert listed.status_code == 200
         assert listed.json() == []
+    finally:
+        try:
+            next(client_iter)
+        except StopIteration:
+            pass
+
+
+def test_training_dataset_rejects_mixed_image_signatures(tmp_path: Path) -> None:
+    client_iter = make_client()
+    client = next(client_iter)
+    try:
+        dataset_a = add_scanned_dataset(client, tmp_path / "dataset_a", "A", "0226", 3, size=(12, 8))
+        dataset_b = add_scanned_dataset(client, tmp_path / "dataset_b", "B", "line_01", 3, size=(16, 8))
+
+        response = client.post(
+            "/api/training-datasets",
+            json={
+                "name": "Mixed sizes",
+                "usage_label": "mixed",
+                "rules": [
+                    {
+                        "folder_id": dataset_a["folders"][0]["id"],
+                        "start_timestamp": "2026-02-04T15:30:00",
+                        "end_timestamp": "2026-02-04T15:30:20",
+                        "stride": 1,
+                    },
+                    {
+                        "folder_id": dataset_b["folders"][0]["id"],
+                        "start_timestamp": "2026-02-04T15:30:00",
+                        "end_timestamp": "2026-02-04T15:30:20",
+                        "stride": 1,
+                    },
+                ],
+            },
+        )
+        assert response.status_code == 400
+        assert "same image data signature" in response.json()["detail"]
     finally:
         try:
             next(client_iter)

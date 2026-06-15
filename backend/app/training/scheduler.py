@@ -25,6 +25,7 @@ from datetime import datetime
 from pathlib import Path
 
 from sqlalchemy import select
+from sqlalchemy.engine import make_url
 
 from app import models
 from app.config import get_settings
@@ -35,6 +36,27 @@ logger = logging.getLogger("mltrace.scheduler")
 # backend/ directory: cwd for the worker so `python -m app.training.worker` resolves.
 _BACKEND_DIR = Path(__file__).resolve().parents[2]
 _POLL_INTERVAL_SECONDS = 2.0
+
+
+def _worker_database_url(database_url: str) -> str:
+    """Return a database URL that is safe to pass to worker subprocesses.
+
+    The API commonly runs from the repository root, but training workers are
+    launched with ``cwd=backend/`` so ``python -m app.training.worker`` can
+    import the app package. A relative SQLite URL would therefore point at a
+    different file in the child process. Resolve SQLite file paths before
+    spawning so API and worker always use the same database.
+    """
+    url = make_url(database_url)
+    if not url.drivername.startswith("sqlite") or not url.database or url.database == ":memory:":
+        return database_url
+
+    database_path = Path(url.database).expanduser()
+    if database_path.is_absolute():
+        return database_url
+
+    absolute_path = database_path.resolve()
+    return url.set(database=str(absolute_path)).render_as_string(hide_password=False)
 
 
 def _pid_alive(pid: int | None) -> bool:
@@ -176,6 +198,7 @@ class TrainingScheduler:
 
         env = os.environ.copy()
         env["CUDA_VISIBLE_DEVICES"] = str(gpu_index)
+        env["DATABASE_URL"] = _worker_database_url(get_settings().database_url)
 
         log_file = open(log_path, "a", encoding="utf-8")  # noqa: SIM115 - handed to the child process
         try:

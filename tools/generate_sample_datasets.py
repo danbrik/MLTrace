@@ -37,11 +37,11 @@ def generate_range(
     filename_format: str,
     size: tuple[int, int],
     seed_offset: int,
+    extension: str = ".tiff",
 ) -> None:
     for index in range(count):
         timestamp = start + index * step
         filename = filename_format.format(ts=timestamp)
-        extension = ".tiff" if index % 5 == 0 else ".tif"
         write_tiff(root / f"{filename}{extension}", timestamp, size, seed_offset + index)
 
 
@@ -50,36 +50,36 @@ def main() -> None:
         shutil.rmtree(ROOT)
     ROOT.mkdir(parents=True)
 
-    dataset_a = ROOT / "dataset_alpha_yyyymmdd_underscore"
+    dataset_a = ROOT / "sample_line_a_96x96"
     generate_range(
         dataset_a,
-        datetime(2026, 2, 3, 16, 0, 0),
-        28,
-        timedelta(minutes=30),
-        "camA_{ts:%Y%m%d_%H%M%S}",
-        (128, 96),
+        datetime(2026, 4, 1, 8, 0, 0),
+        18,
+        timedelta(minutes=1),
+        "lineA_{ts:%Y%m%d_%H%M%S}",
+        (96, 96),
         0,
     )
 
-    dataset_b = ROOT / "dataset_beta_compact"
+    dataset_b = ROOT / "sample_line_b_96x96"
     generate_range(
         dataset_b,
-        datetime(2026, 3, 10, 8, 0, 0),
-        36,
-        timedelta(minutes=10),
-        "line01_{ts:%Y%m%d%H%M%S}",
-        (160, 120),
+        datetime(2026, 4, 1, 9, 0, 0),
+        18,
+        timedelta(minutes=1),
+        "lineB_{ts:%Y%m%d_%H%M%S}",
+        (96, 96),
         200,
     )
 
-    dataset_c = ROOT / "dataset_gamma_two_digit_year"
+    dataset_c = ROOT / "sample_line_c_128x96"
     generate_range(
         dataset_c,
-        datetime(2026, 1, 21, 16, 46, 25),
-        24,
-        timedelta(seconds=20),
-        "W14_HF_{ts:%y-%m-%d_%H-%M-%S}",
-        (96, 96),
+        datetime(2026, 4, 1, 10, 0, 0),
+        18,
+        timedelta(minutes=1),
+        "lineC_{ts:%Y%m%d_%H%M%S}",
+        (128, 96),
         400,
     )
 
