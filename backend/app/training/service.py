@@ -132,7 +132,7 @@ def abort_training_run(db: Session, run_id: int) -> TrainingRunRead | None:
         db.commit()
         db.refresh(run)
     elif run.status == "running":
-        scheduler.request_abort(run.id, run.pid)
+        scheduler.request_abort("train", run.id, run.pid)
         # The worker turns SIGTERM into the terminal 'aborted' status.
     else:
         raise RunConflict("Only queued or running runs can be aborted.")

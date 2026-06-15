@@ -1,7 +1,7 @@
 import { Alert, Badge, Button, Group, Paper, Select, Stack, Text, Textarea, TextInput, Title } from '@mantine/core';
 import { useDebouncedValue } from '@mantine/hooks';
 import { notifications } from '@mantine/notifications';
-import { Boxes, BrainCircuit, RotateCcw, Save } from 'lucide-react';
+import { Boxes, BrainCircuit, Pencil, RotateCcw, Save } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 
 import {
@@ -25,8 +25,6 @@ import {
   buildMethodPayload,
   nextAvailableMethodName,
   schemaDefaults,
-  trainingModeColor,
-  trainingModeLabel,
 } from '../methods/utils';
 import type {
   MethodConfiguration,
@@ -57,6 +55,7 @@ export function MethodsPage() {
   const [torchCheckLoading, setTorchCheckLoading] = useState(false);
   const [torchCheckLogs, setTorchCheckLogs] = useState<string[]>([]);
   const [loadedMethodId, setLoadedMethodId] = useState<number | null>(null);
+  const [isEditingLoadedMethod, setIsEditingLoadedMethod] = useState(true);
   const [loading, setLoading] = useState(false);
   const [numericDrafts, setNumericDrafts] = useState<Record<string, NumericDraftState>>({});
 
@@ -101,6 +100,7 @@ export function MethodsPage() {
   const updateLabel = isTrainableArchitecture ? 'Update Architecture' : 'Update Method';
   const saveAsNewLabel = isTrainableArchitecture ? 'Save as New Architecture' : 'Save as New Method';
   const resetLabel = isTrainableArchitecture ? 'Reset Architecture' : 'Reset Method';
+  const loadedReadOnly = loadedMethodId != null && !isEditingLoadedMethod;
   const invalidNumericDrafts = useMemo(
     () => Object.entries(numericDrafts).filter(([, draft]) => draft.dirty && !draft.valid),
     [numericDrafts],
@@ -126,6 +126,7 @@ export function MethodsPage() {
     setTorchCheck(null);
     setTorchCheckLogs([]);
     setLoadedMethodId(null);
+    setIsEditingLoadedMethod(true);
     setNumericDrafts({});
   }
 
@@ -196,6 +197,7 @@ export function MethodsPage() {
     setTorchCheckLogs([]);
     setDiagramError(null);
     setNumericDrafts({});
+    setIsEditingLoadedMethod(false);
   }
 
   async function handleLoadMethod(methodId: number) {
@@ -301,6 +303,7 @@ export function MethodsPage() {
       await refresh();
       if (loadedMethodId === method.id) {
         setLoadedMethodId(null);
+        setIsEditingLoadedMethod(true);
         setNameTouched(false);
       }
       notifications.show({ color: 'green', title: 'Method deleted', message: method.name });
@@ -316,6 +319,21 @@ export function MethodsPage() {
   const saveDisabled = !name.trim() || nameClash || invalidNumericDrafts.length > 0 || architectureCheck?.valid !== true;
 
   function renderSaveActions(showReset = false) {
+    if (loadedReadOnly) {
+      return (
+        <Group justify="flex-end">
+          {showReset && (
+            <Button variant="default" leftSection={<RotateCcw size={18} />} onClick={handleResetCurrentMethod}>
+              {resetLabel}
+            </Button>
+          )}
+          <Button leftSection={<Pencil size={18} />} onClick={() => setIsEditingLoadedMethod(true)}>
+            Edit {isTrainableArchitecture ? 'Architecture' : 'Method'}
+          </Button>
+        </Group>
+      );
+    }
+
     return (
       <Group justify="flex-end">
         {showReset && (
@@ -350,6 +368,7 @@ export function MethodsPage() {
             <TextInput
               label="Method name"
               value={name}
+              disabled={loadedReadOnly}
               onChange={(event) => {
                 setNameTouched(true);
                 setName(event.currentTarget.value);
@@ -360,6 +379,7 @@ export function MethodsPage() {
               label="Method"
               data={methodDefinitions.map((method) => ({ value: method.type, label: method.label }))}
               value={methodType}
+              disabled={loadedReadOnly}
               onChange={(value) => {
                 const method = value ? methodByType.get(value) : undefined;
                 if (method) resetForMethod(method);
@@ -374,9 +394,6 @@ export function MethodsPage() {
                   <Group gap="xs">
                     <BrainCircuit size={18} />
                     <Text fw={700}>{selectedMethod.label}</Text>
-                    <Badge color={trainingModeColor(selectedMethod.training_mode)}>
-                      {trainingModeLabel(selectedMethod.training_mode)}
-                    </Badge>
                   </Group>
                   <Text size="sm" c="dimmed" mt={4}>
                     {selectedMethod.description}
@@ -386,7 +403,12 @@ export function MethodsPage() {
             </Paper>
           )}
 
-          <Textarea label="Description" value={description} onChange={(event) => setDescription(event.currentTarget.value)} />
+          <Textarea label="Description" value={description} disabled={loadedReadOnly} onChange={(event) => setDescription(event.currentTarget.value)} />
+          {loadedReadOnly && (
+            <Alert color="blue" title="Loaded read-only">
+              Click Edit before changing this saved {isTrainableArchitecture ? 'architecture' : 'method'}.
+            </Alert>
+          )}
           {nameClash && (
             <Alert color="red" title="Name already exists">
               Choose a unique name before saving.
@@ -425,6 +447,7 @@ export function MethodsPage() {
               modelGraph={modelGraph}
               layers={layers}
               validation={architectureCheck}
+              disabled={loadedReadOnly}
               onConfigChange={(key, value) => setModelConfig((current) => ({ ...current, [key]: value }))}
               onGraphChange={setModelGraph}
               onNumberDraftChange={handleNumberDraftChange}

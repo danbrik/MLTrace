@@ -1,8 +1,8 @@
-import { ActionIcon, Alert, Badge, Group, Paper, ScrollArea, Stack, Table, Title, Tooltip } from '@mantine/core';
+import { ActionIcon, Alert, Group, Paper, ScrollArea, Stack, Table, Title, Tooltip } from '@mantine/core';
 import { Trash2, Upload } from 'lucide-react';
 
 import type { MethodConfiguration, MethodDefinition } from '../../types';
-import { keyParameters, methodLabel, trainingModeColor, trainingModeLabel } from '../utils';
+import { keyParameters, methodLabel } from '../utils';
 
 export function SavedMethodsTable({
   methods,
@@ -25,7 +25,6 @@ export function SavedMethodsTable({
               <Table.Tr>
                 <Table.Th>Name</Table.Th>
                 <Table.Th>Method</Table.Th>
-                <Table.Th>Training</Table.Th>
                 <Table.Th>Key parameters</Table.Th>
                 <Table.Th>Description</Table.Th>
                 <Table.Th />
@@ -38,11 +37,6 @@ export function SavedMethodsTable({
                   <Table.Tr key={method.id}>
                     <Table.Td>{method.name}</Table.Td>
                     <Table.Td>{methodLabel(methodDefinition, method.method_type)}</Table.Td>
-                    <Table.Td>
-                      <Badge color={trainingModeColor(method.training_mode)} variant="light">
-                        {trainingModeLabel(method.training_mode)}
-                      </Badge>
-                    </Table.Td>
                     <Table.Td>{keyParameters(method)}</Table.Td>
                     <Table.Td>{method.description ?? ''}</Table.Td>
                     <Table.Td>

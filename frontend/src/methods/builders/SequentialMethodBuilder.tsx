@@ -74,6 +74,7 @@ function layerConfigField({
   property,
   onChange,
   fieldId,
+  disabled,
   onNumberDraftChange,
 }: {
   value: unknown;
@@ -81,6 +82,7 @@ function layerConfigField({
   property: SchemaProperty;
   onChange: (key: string, value: unknown) => void;
   fieldId: string;
+  disabled?: boolean;
   onNumberDraftChange?: MethodBuilderProps['onNumberDraftChange'];
 }) {
   const resolvedValue = value ?? property.default ?? '';
@@ -91,6 +93,7 @@ function layerConfigField({
         label={property.label ?? fieldKey}
         data={property.enum}
         value={String(resolvedValue)}
+        disabled={disabled}
         onChange={(next) => onChange(fieldKey, next ?? property.default)}
       />
     );
@@ -101,6 +104,7 @@ function layerConfigField({
         key={fieldKey}
         label={property.label ?? fieldKey}
         checked={resolvedValue === true}
+        disabled={disabled}
         onChange={(event) => onChange(fieldKey, event.currentTarget.checked)}
       />
     );
@@ -114,6 +118,7 @@ function layerConfigField({
         max={property.maximum}
         integerOnly={property.type === 'integer'}
         value={typeof resolvedValue === 'number' || typeof resolvedValue === 'string' ? resolvedValue : ''}
+        disabled={disabled}
         onCommit={(next) => onChange(fieldKey, next)}
         onDraftStateChange={(state) => onNumberDraftChange?.(fieldId, state)}
       />
@@ -124,6 +129,7 @@ function layerConfigField({
       key={fieldKey}
       label={property.label ?? fieldKey}
       value={String(resolvedValue)}
+      disabled={disabled}
       onChange={(event) => onChange(fieldKey, event.currentTarget.value)}
     />
   );
@@ -144,6 +150,7 @@ export function SequentialMethodBuilder({
   modelGraph,
   layers,
   validation,
+  disabled = false,
   onConfigChange,
   onGraphChange,
   onNumberDraftChange,
@@ -189,6 +196,7 @@ export function SequentialMethodBuilder({
   }
 
   function updateLayer(section: GraphSection, layerId: string, partial: Record<string, unknown>) {
+    if (disabled) return;
     onGraphChange((current) =>
       updateGraphSection(current, section, (sectionLayers) =>
         sectionLayers.map((layer) => (layer.id === layerId ? { ...layer, ...partial } : layer)),
@@ -197,6 +205,7 @@ export function SequentialMethodBuilder({
   }
 
   function updateLayerConfig(section: GraphSection, layerId: string, key: string, value: unknown) {
+    if (disabled) return;
     onGraphChange((current) =>
       updateGraphSection(current, section, (sectionLayers) =>
         sectionLayers.map((layer) => (layer.id === layerId ? { ...layer, config: { ...layer.config, [key]: value } } : layer)),
@@ -205,6 +214,7 @@ export function SequentialMethodBuilder({
   }
 
   function addLayer(section: GraphSection, layerType: string | null) {
+    if (disabled) return;
     if (!layerType) return;
     onGraphChange((current) =>
       updateGraphSection(current, section, (sectionLayers) => [...sectionLayers, makeLayer(layerType, layerByType)]),
@@ -212,10 +222,12 @@ export function SequentialMethodBuilder({
   }
 
   function removeLayer(section: GraphSection, layerId: string) {
+    if (disabled) return;
     onGraphChange((current) => updateGraphSection(current, section, (sectionLayers) => sectionLayers.filter((layer) => layer.id !== layerId)));
   }
 
   function moveLayer(section: GraphSection, layerId: string, direction: -1 | 1) {
+    if (disabled) return;
     onGraphChange((current) =>
       updateGraphSection(current, section, (sectionLayers) => {
         const nextLayers = [...sectionLayers];
@@ -251,14 +263,15 @@ export function SequentialMethodBuilder({
               label="Layer category"
               data={layerCategories}
               value={addCategory}
+              disabled={disabled}
               onChange={(nextCategory) => {
                 setAddCategory(nextCategory);
                 setAddType(nextCategory ? (layerOptionsByCategory.get(nextCategory)?.[0]?.value ?? null) : null);
               }}
               flex={1}
             />
-            <Select label="Layer" data={exactLayerOptions} value={addType} onChange={setAddType} searchable flex={1} />
-            <Button leftSection={<Plus size={16} />} variant="light" onClick={() => addLayer(section, addType)} disabled={!addType}>
+            <Select label="Layer" data={exactLayerOptions} value={addType} onChange={setAddType} searchable flex={1} disabled={disabled} />
+            <Button leftSection={<Plus size={16} />} variant="light" onClick={() => addLayer(section, addType)} disabled={disabled || !addType}>
               Add layer
             </Button>
           </Group>
@@ -283,6 +296,7 @@ export function SequentialMethodBuilder({
                       <Select
                         data={layerOptions}
                         value={layer.type}
+                        disabled={disabled}
                         onChange={(nextType) => {
                           if (!nextType) return;
                           updateLayer(section, layer.id, {
@@ -300,17 +314,17 @@ export function SequentialMethodBuilder({
                       )}
                     </Group>
                     <Group gap={4}>
-                      <ActionIcon variant="subtle" disabled={index === 0} onClick={() => moveLayer(section, layer.id, -1)}>
+                      <ActionIcon variant="subtle" disabled={disabled || index === 0} onClick={() => moveLayer(section, layer.id, -1)}>
                         <ArrowUp size={16} />
                       </ActionIcon>
                       <ActionIcon
                         variant="subtle"
-                        disabled={index === sectionLayers.length - 1}
+                        disabled={disabled || index === sectionLayers.length - 1}
                         onClick={() => moveLayer(section, layer.id, 1)}
                       >
                         <ArrowDown size={16} />
                       </ActionIcon>
-                      <ActionIcon color="red" variant="subtle" onClick={() => removeLayer(section, layer.id)}>
+                      <ActionIcon color="red" variant="subtle" disabled={disabled} onClick={() => removeLayer(section, layer.id)}>
                         <Trash2 size={16} />
                       </ActionIcon>
                     </Group>
@@ -330,6 +344,7 @@ export function SequentialMethodBuilder({
                             property,
                             fieldId: `layer.${section}.${layer.id}.${key}`,
                             onChange: (configKey, value) => updateLayerConfig(section, layer.id, configKey, value),
+                            disabled,
                             onNumberDraftChange,
                           }),
                         )}
@@ -358,6 +373,7 @@ export function SequentialMethodBuilder({
           schema={method.method_schema}
           config={modelConfig as ModelConfig}
           keys={['input_channels', 'input_width', 'input_height']}
+          disabled={disabled}
           fieldPrefix="method.input"
           onChange={onConfigChange}
           onNumberDraftChange={onNumberDraftChange}
@@ -375,6 +391,7 @@ export function SequentialMethodBuilder({
           schema={method.method_schema}
           config={modelConfig as ModelConfig}
           keys={['latent_dim', 'kl_weight']}
+          disabled={disabled}
           fieldPrefix="method.latent"
           onChange={onConfigChange}
           onNumberDraftChange={onNumberDraftChange}
@@ -397,6 +414,7 @@ export function SequentialMethodBuilder({
           schema={method.method_schema}
           config={modelConfig as ModelConfig}
           keys={['output_activation']}
+          disabled={disabled}
           fieldPrefix="method.output"
           onChange={onConfigChange}
           onNumberDraftChange={onNumberDraftChange}

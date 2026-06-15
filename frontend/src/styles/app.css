@@ -109,6 +109,28 @@ body {
   pointer-events: none;
 }
 
+.roi-overlay {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+}
+
+.roi-polygon {
+  fill: rgba(253, 126, 20, 0.22);
+  stroke: #fd7e14;
+  stroke-width: 0.6;
+  vector-effect: non-scaling-stroke;
+}
+
+.roi-grid-line {
+  stroke: #ffffff;
+  stroke-width: 0.35;
+  stroke-dasharray: 1 1;
+  vector-effect: non-scaling-stroke;
+}
+
 .crop-rect {
   position: absolute;
   box-sizing: border-box;
@@ -222,4 +244,126 @@ body {
 .model-diagram-arrow {
   color: #667085;
   flex: 0 0 auto;
+}
+
+.analysis-timeseries {
+  min-width: 760px;
+  width: 100%;
+  cursor: crosshair;
+}
+
+.analysis-chart-bg {
+  fill: #ffffff;
+  stroke: #dbe4f0;
+}
+
+.analysis-axis,
+.analysis-grid-line {
+  stroke: #cbd5e1;
+  stroke-width: 1;
+}
+
+.analysis-grid-line {
+  stroke-dasharray: 4 4;
+}
+
+.analysis-axis-label {
+  fill: #64748b;
+  font-size: 12px;
+}
+
+.analysis-line {
+  fill: none;
+  stroke: #228be6;
+  stroke-width: 2.5;
+}
+
+.analysis-hover-line {
+  stroke: #334155;
+  stroke-width: 1;
+  stroke-dasharray: 4 4;
+}
+
+.analysis-hover-point {
+  fill: #228be6;
+  stroke: #ffffff;
+  stroke-width: 2;
+}
+
+.analysis-tooltip-box {
+  fill: rgba(15, 23, 42, 0.9);
+}
+
+.analysis-tooltip-text {
+  fill: #ffffff;
+  font-size: 13px;
+}
+
+.analysis-zoom-selection {
+  fill: rgba(34, 139, 230, 0.16);
+  stroke: rgba(34, 139, 230, 0.8);
+  stroke-width: 1;
+}
+
+.analysis-frame-slider {
+  width: 100%;
+}
+
+.analysis-run-picker {
+  background: #ffffff;
+}
+
+.analysis-selected-row {
+  background: #ebfbee !important;
+}
+
+.analysis-heatmap-wrap {
+  position: relative;
+  width: min(100%, 920px);
+  overflow: hidden;
+  border: 1px solid #dbe4f0;
+  border-radius: 6px;
+  background: #f8fafc;
+}
+
+.analysis-heatmap-image {
+  display: block;
+  width: 100%;
+  height: auto;
+}
+
+.analysis-heatmap-loading {
+  display: grid;
+  min-height: 280px;
+  place-items: center;
+}
+
+.analysis-heatmap-overlay {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+  mix-blend-mode: multiply;
+}
+
+.analysis-heatmap-overlay-image {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+  mix-blend-mode: multiply;
+}
+
+input:disabled,
+textarea:disabled,
+.mantine-Input-input:disabled,
+.mantine-Select-input:disabled,
+.mantine-NumberInput-input:disabled {
+  color: #1f2937 !important;
+  -webkit-text-fill-color: #1f2937 !important;
+  background: #eef2f7 !important;
+  border-color: #9aa6b2 !important;
+  opacity: 1 !important;
 }

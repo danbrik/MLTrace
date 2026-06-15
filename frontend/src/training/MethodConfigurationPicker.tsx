@@ -2,8 +2,10 @@ import {
   ActionIcon,
   Alert,
   Badge,
+  Button,
   Collapse,
   Group,
+  Modal,
   Paper,
   ScrollArea,
   Select,
@@ -14,12 +16,12 @@ import {
   Title,
   Tooltip,
 } from '@mantine/core';
-import { ChevronDown, ChevronRight, Search } from 'lucide-react';
+import { Check, ChevronDown, ChevronRight, Info, Search } from 'lucide-react';
 import { Fragment, useMemo, useState } from 'react';
 
 import { methodInputResolution } from './graph';
-import { formatValue, keyParameters, methodLabel, trainingModeColor, trainingModeLabel } from '../methods/utils';
-import type { MethodConfiguration, MethodDefinition } from '../types';
+import { formatValue, keyParameters, methodLabel } from '../methods/utils';
+import type { MethodConfiguration, MethodDefinition, ModelLayerInstance } from '../types';
 
 const DETAIL_CONFIG_KEYS = [
   'input_channels',
@@ -33,12 +35,84 @@ const DETAIL_CONFIG_KEYS = [
   'output_dtype_policy',
 ];
 
+function renderLayerDetails(title: string, layers: ModelLayerInstance[] | undefined) {
+  if (!layers || layers.length === 0) return null;
+  return (
+    <Stack gap={4}>
+      <Text size="xs" fw={700}>
+        {title}
+      </Text>
+      {layers.map((layer, index) => (
+        <Paper key={layer.id} withBorder p="xs" radius="sm">
+          <Group gap={6} align="flex-start">
+            <Badge size="xs" variant="filled" color="gray">
+              {index + 1}
+            </Badge>
+            <Stack gap={4}>
+              <Text size="xs" fw={700}>
+                {layer.type}
+              </Text>
+              <Group gap={4}>
+                {Object.entries(layer.config ?? {}).map(([key, value]) => (
+                  <Badge key={key} size="xs" variant="light" color="gray">
+                    {key}={formatValue(value)}
+                  </Badge>
+                ))}
+              </Group>
+            </Stack>
+          </Group>
+        </Paper>
+      ))}
+    </Stack>
+  );
+}
+
+function MethodDetails({ configuration, methodByType }: { configuration: MethodConfiguration; methodByType: Map<string, MethodDefinition> }) {
+  return (
+    <Stack gap="md">
+      <div>
+        <Text fw={700}>{configuration.name}</Text>
+        <Text size="sm" c="dimmed">
+          {methodLabel(methodByType.get(configuration.method_type), configuration.method_type)}
+        </Text>
+        {configuration.description && (
+          <Text size="sm" c="dimmed" mt={4}>
+            {configuration.description}
+          </Text>
+        )}
+      </div>
+      <Group gap={6}>
+        {Object.entries(configuration.method_config ?? {}).map(([key, value]) => (
+          <Badge key={key} size="sm" variant="light" color="gray">
+            {key}={formatValue(value)}
+          </Badge>
+        ))}
+      </Group>
+      {configuration.method_graph.latent && (
+        <Paper withBorder p="sm" radius="sm">
+          <Text size="sm" fw={700}>Latent</Text>
+          <Group gap={6} mt={6}>
+            {Object.entries(configuration.method_graph.latent).map(([key, value]) => (
+              <Badge key={key} size="sm" variant="light" color="gray">
+                {key}={formatValue(value)}
+              </Badge>
+            ))}
+          </Group>
+        </Paper>
+      )}
+      {renderLayerDetails('Encoder layers', configuration.method_graph.encoder)}
+      {renderLayerDetails('Decoder layers', configuration.method_graph.decoder)}
+    </Stack>
+  );
+}
+
 export function MethodConfigurationPicker({
   configurations,
   methodByType,
   selectedId,
   onChange,
   requiredInputResolution = null,
+  disabled = false,
 }: {
   configurations: MethodConfiguration[];
   methodByType: Map<string, MethodDefinition>;
@@ -47,22 +121,18 @@ export function MethodConfigurationPicker({
   // Input size the method must accept (= selected pipeline output). When set,
   // only methods of that input size (plus unknown-size ones) remain visible.
   requiredInputResolution?: string | null;
+  disabled?: boolean;
 }) {
   const [search, setSearch] = useState('');
   const [typeFilter, setTypeFilter] = useState<string | null>(null);
-  const [trainingModeFilter, setTrainingModeFilter] = useState<string | null>(null);
   const [resolutionFilter, setResolutionFilter] = useState<string | null>(null);
   const [expandedIds, setExpandedIds] = useState<Set<number>>(new Set());
+  const [detailConfiguration, setDetailConfiguration] = useState<MethodConfiguration | null>(null);
 
   const typeOptions = useMemo(() => {
     const types = [...new Set(configurations.map((configuration) => configuration.method_type))];
     return types.map((type) => ({ value: type, label: methodLabel(methodByType.get(type), type) }));
   }, [configurations, methodByType]);
-
-  const trainingModeOptions = useMemo(() => {
-    const modes = [...new Set(configurations.map((configuration) => configuration.training_mode))];
-    return modes.map((mode) => ({ value: mode, label: trainingModeLabel(mode) }));
-  }, [configurations]);
 
   const resolutionOptions = useMemo(() => {
     const values = new Set<string>();
@@ -85,7 +155,6 @@ export function MethodConfigurationPicker({
         if (resolution !== null && resolution !== requiredInputResolution) return false;
       }
       if (typeFilter && configuration.method_type !== typeFilter) return false;
-      if (trainingModeFilter && configuration.training_mode !== trainingModeFilter) return false;
       if (resolutionFilter && methodInputResolution(configuration) !== resolutionFilter) return false;
       if (!query) return true;
       return (
@@ -93,7 +162,7 @@ export function MethodConfigurationPicker({
         (configuration.description ?? '').toLowerCase().includes(query)
       );
     });
-  }, [configurations, search, typeFilter, trainingModeFilter, resolutionFilter, requiredInputResolution, selectedId]);
+  }, [configurations, search, typeFilter, resolutionFilter, requiredInputResolution, selectedId]);
 
   function toggleExpanded(id: number) {
     setExpandedIds((current) => {
@@ -109,7 +178,9 @@ export function MethodConfigurationPicker({
       <Stack gap="md">
         <Group justify="space-between" align="center">
           <Title order={3}>3. Method / Architecture</Title>
-          {selectedId != null && <Badge variant="light">selected</Badge>}
+          <Group gap="xs">
+            {selectedId != null && <Badge variant="light" color="green">selected</Badge>}
+          </Group>
         </Group>
         <TextInput
           placeholder="Search by name or description"
@@ -119,13 +190,6 @@ export function MethodConfigurationPicker({
         />
         <Group grow>
           <Select placeholder="Method type" data={typeOptions} value={typeFilter} onChange={setTypeFilter} clearable />
-          <Select
-            placeholder="Training mode"
-            data={trainingModeOptions}
-            value={trainingModeFilter}
-            onChange={setTrainingModeFilter}
-            clearable
-          />
           <Select
             placeholder="Input resolution"
             data={resolutionOptions}
@@ -147,8 +211,8 @@ export function MethodConfigurationPicker({
                 <Table.Th>Name</Table.Th>
                 <Table.Th>Method</Table.Th>
                 <Table.Th>Input size</Table.Th>
-                <Table.Th>Training</Table.Th>
                 <Table.Th>Key parameters</Table.Th>
+                <Table.Th />
               </Table.Tr>
             </Table.Thead>
             <Table.Tbody>
@@ -158,11 +222,7 @@ export function MethodConfigurationPicker({
                 const mainRow = (
                   <Table.Tr
                     className={configuration.id === selectedId ? 'pipeline-step selected' : 'pipeline-step'}
-                    style={{ cursor: supported ? 'pointer' : 'not-allowed', opacity: supported ? 1 : 0.45 }}
-                    onClick={() => {
-                      if (!supported) return;
-                      onChange(configuration.id === selectedId ? null : configuration.id);
-                    }}
+                    style={{ opacity: supported ? 1 : 0.45 }}
                   >
                     <Table.Td>
                       <ActionIcon
@@ -189,12 +249,33 @@ export function MethodConfigurationPicker({
                         </Badge>
                       )}
                     </Table.Td>
-                    <Table.Td>
-                      <Badge color={trainingModeColor(configuration.training_mode)} variant="light">
-                        {trainingModeLabel(configuration.training_mode)}
-                      </Badge>
-                    </Table.Td>
                     <Table.Td>{keyParameters(configuration)}</Table.Td>
+                    <Table.Td>
+                      <Group gap={4} justify="flex-end" wrap="nowrap">
+                        <Tooltip label="Inspect method architecture">
+                          <ActionIcon
+                            variant="subtle"
+                            onClick={() => setDetailConfiguration(configuration)}
+                            aria-label={`Inspect method architecture ${configuration.name}`}
+                          >
+                            <Info size={16} />
+                          </ActionIcon>
+                        </Tooltip>
+                        <Button
+                          size="compact-sm"
+                          disabled={disabled || !supported}
+                          color={configuration.id === selectedId ? 'green' : undefined}
+                          variant={configuration.id === selectedId ? 'filled' : 'light'}
+                          leftSection={configuration.id === selectedId ? <Check size={14} /> : undefined}
+                          onClick={() => {
+                            if (!supported) return;
+                            onChange(configuration.id === selectedId ? null : configuration.id);
+                          }}
+                        >
+                          {configuration.id === selectedId ? 'Selected' : 'Select'}
+                        </Button>
+                      </Group>
+                    </Table.Td>
                   </Table.Tr>
                 );
                 return (
@@ -236,6 +317,8 @@ export function MethodConfigurationPicker({
                                 ))}
                               </Group>
                             )}
+                            {renderLayerDetails('Encoder layers', configuration.method_graph.encoder)}
+                            {renderLayerDetails('Decoder layers', configuration.method_graph.decoder)}
                           </Stack>
                         </Collapse>
                       </Table.Td>
@@ -249,6 +332,15 @@ export function MethodConfigurationPicker({
         {configurations.length === 0 && (
           <Alert color="blue">No saved methods available yet. Create one on the Methods page.</Alert>
         )}
+        <Modal
+          opened={detailConfiguration !== null}
+          onClose={() => setDetailConfiguration(null)}
+          title={detailConfiguration ? `Method architecture: ${detailConfiguration.name}` : 'Method architecture'}
+          size="xl"
+          scrollAreaComponent={ScrollArea.Autosize}
+        >
+          {detailConfiguration ? <MethodDetails configuration={detailConfiguration} methodByType={methodByType} /> : null}
+        </Modal>
       </Stack>
     </Paper>
   );

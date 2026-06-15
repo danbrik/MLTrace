@@ -2,8 +2,10 @@ import {
   ActionIcon,
   Alert,
   Badge,
+  Button,
   Collapse,
   Group,
+  Modal,
   MultiSelect,
   Paper,
   ScrollArea,
@@ -13,8 +15,9 @@ import {
   Text,
   TextInput,
   Title,
+  Tooltip,
 } from '@mantine/core';
-import { ChevronDown, ChevronRight, Search } from 'lucide-react';
+import { Check, ChevronDown, ChevronRight, Info, Search } from 'lucide-react';
 import { Fragment, useMemo, useState } from 'react';
 
 import { orderedGraphNodes, pipelineInputResolution, pipelineOutputResolution, stepDetail } from './graph';
@@ -24,11 +27,47 @@ function resolutionLabel(width: number | null, height: number | null): string {
   return width && height ? `${width}x${height}` : 'n/a';
 }
 
+function PreprocessingDetails({ pipeline }: { pipeline: PreprocessingPipeline }) {
+  return (
+    <Stack gap="sm">
+      <Group>
+        <Badge variant="light">Input {resolutionLabel(pipeline.input_width, pipeline.input_height)}</Badge>
+        <Badge variant="light" color="yellow">
+          Output {resolutionLabel(pipeline.output_width, pipeline.output_height)}
+        </Badge>
+      </Group>
+      {pipeline.description && (
+        <Text size="sm" c="dimmed">
+          {pipeline.description}
+        </Text>
+      )}
+      {orderedGraphNodes(pipeline).map((node, index) => (
+        <Paper key={node.id} withBorder p="sm" radius="sm">
+          <Text size="sm" fw={700}>
+            {index + 1}. {node.type}
+          </Text>
+          <Text size="xs" c="dimmed">
+            {stepDetail(node)}
+          </Text>
+          <Group gap={6} mt={6}>
+            {Object.entries(node.config ?? {}).map(([key, value]) => (
+              <Badge key={key} size="sm" variant="light" color="gray">
+                {key}={String(value)}
+              </Badge>
+            ))}
+          </Group>
+        </Paper>
+      ))}
+    </Stack>
+  );
+}
+
 export function PreprocessingPipelinePicker({
   pipelines,
   selectedId,
   onChange,
   requiredInputResolutions = null,
+  disabled = false,
 }: {
   pipelines: PreprocessingPipeline[];
   selectedId: number | null;
@@ -37,12 +76,14 @@ export function PreprocessingPipelinePicker({
   // When set, only pipelines whose input is in this set (plus unknown-input
   // ones) remain visible.
   requiredInputResolutions?: string[] | null;
+  disabled?: boolean;
 }) {
   const [search, setSearch] = useState('');
   const [inputFilter, setInputFilter] = useState<string | null>(null);
   const [outputFilter, setOutputFilter] = useState<string | null>(null);
   const [stepFilter, setStepFilter] = useState<string[]>([]);
   const [expandedIds, setExpandedIds] = useState<Set<number>>(new Set());
+  const [detailPipeline, setDetailPipeline] = useState<PreprocessingPipeline | null>(null);
 
   const inputResolutionOptions = useMemo(() => {
     const values = new Set<string>();
@@ -111,7 +152,9 @@ export function PreprocessingPipelinePicker({
       <Stack gap="md">
         <Group justify="space-between" align="center">
           <Title order={3}>2. Preprocessing Pipeline</Title>
-          {selectedId != null && <Badge variant="light">selected</Badge>}
+          <Group gap="xs">
+            {selectedId != null && <Badge variant="light" color="green">selected</Badge>}
+          </Group>
         </Group>
         <TextInput
           placeholder="Search by name or description"
@@ -159,6 +202,7 @@ export function PreprocessingPipelinePicker({
                 <Table.Th>Input</Table.Th>
                 <Table.Th>Output</Table.Th>
                 <Table.Th>Description</Table.Th>
+                <Table.Th />
               </Table.Tr>
             </Table.Thead>
             <Table.Tbody>
@@ -168,8 +212,6 @@ export function PreprocessingPipelinePicker({
                   <Fragment key={pipeline.id}>
                     <Table.Tr
                       className={pipeline.id === selectedId ? 'pipeline-step selected' : 'pipeline-step'}
-                      style={{ cursor: 'pointer' }}
-                      onClick={() => onChange(pipeline.id === selectedId ? null : pipeline.id)}
                     >
                       <Table.Td>
                         <ActionIcon
@@ -200,9 +242,32 @@ export function PreprocessingPipelinePicker({
                         </Badge>
                       </Table.Td>
                       <Table.Td>{pipeline.description ?? ''}</Table.Td>
+                      <Table.Td>
+                        <Group gap={4} justify="flex-end" wrap="nowrap">
+                          <Tooltip label="Inspect preprocessing pipeline">
+                            <ActionIcon
+                              variant="subtle"
+                              onClick={() => setDetailPipeline(pipeline)}
+                              aria-label={`Inspect preprocessing pipeline ${pipeline.name}`}
+                            >
+                              <Info size={16} />
+                            </ActionIcon>
+                          </Tooltip>
+                          <Button
+                            size="compact-sm"
+                            disabled={disabled}
+                            color={pipeline.id === selectedId ? 'green' : undefined}
+                            variant={pipeline.id === selectedId ? 'filled' : 'light'}
+                            leftSection={pipeline.id === selectedId ? <Check size={14} /> : undefined}
+                            onClick={() => onChange(pipeline.id === selectedId ? null : pipeline.id)}
+                          >
+                            {pipeline.id === selectedId ? 'Selected' : 'Select'}
+                          </Button>
+                        </Group>
+                      </Table.Td>
                     </Table.Tr>
                     <Table.Tr>
-                      <Table.Td colSpan={6} p={0} style={{ borderBottom: expanded ? undefined : 'none' }}>
+                      <Table.Td colSpan={7} p={0} style={{ borderBottom: expanded ? undefined : 'none' }}>
                         <Collapse in={expanded}>
                           <Stack gap={6} p="sm">
                             <Text size="xs">
@@ -229,6 +294,15 @@ export function PreprocessingPipelinePicker({
         {pipelines.length === 0 && (
           <Alert color="blue">No preprocessing pipelines available yet. Create one on the Preprocessing page.</Alert>
         )}
+        <Modal
+          opened={detailPipeline !== null}
+          onClose={() => setDetailPipeline(null)}
+          title={detailPipeline ? `Preprocessing pipeline: ${detailPipeline.name}` : 'Preprocessing pipeline'}
+          size="xl"
+          scrollAreaComponent={ScrollArea.Autosize}
+        >
+          {detailPipeline ? <PreprocessingDetails pipeline={detailPipeline} /> : null}
+        </Modal>
       </Stack>
     </Paper>
   );

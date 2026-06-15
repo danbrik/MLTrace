@@ -5,7 +5,7 @@ import type { PointerEvent } from 'react';
 import { clamp, cropRectFromConfig, pointFromEvent, type CropDrag, type CropMode } from './geometry';
 import type { StepControl, StepControlProps } from './types';
 
-function CropBoxControl({ inputImage, config, onChange }: StepControlProps) {
+function CropBoxControl({ inputImage, config, disabled, onChange }: StepControlProps) {
   const cropDragRef = useRef<CropDrag | null>(null);
   const rect = cropRectFromConfig(config, inputImage);
   const toPct = {
@@ -16,6 +16,7 @@ function CropBoxControl({ inputImage, config, onChange }: StepControlProps) {
   };
 
   function onPointerMove(event: PointerEvent<HTMLDivElement>) {
+    if (disabled) return;
     const drag = cropDragRef.current;
     if (!drag) return;
     const point = pointFromEvent(event, inputImage);
@@ -39,6 +40,7 @@ function CropBoxControl({ inputImage, config, onChange }: StepControlProps) {
   }
 
   function startDrag(event: PointerEvent<HTMLElement>, mode: CropMode) {
+    if (disabled) return;
     event.preventDefault();
     event.stopPropagation();
     const point = pointFromEvent(event as unknown as PointerEvent<HTMLDivElement>, inputImage);

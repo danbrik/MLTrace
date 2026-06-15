@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import csv
+import json
 import shutil
 import time
 from datetime import UTC, datetime
 from pathlib import Path
 
 import numpy as np
+from PIL import Image, ImageDraw
 from sqlalchemy import delete, select
 from sqlalchemy.orm import Session, selectinload
 
@@ -14,18 +16,22 @@ from app import models
 from app.database import data_dir
 from app.preprocessing.pipeline import encode_png_data_url, image_metadata, run_pipeline_array
 from app.schemas import (
+    HeatmapRunCreate,
+    HeatmapRunRead,
     PreprocessingGraph,
     RoiDefinitionCreate,
     RoiDefinitionRead,
     RoiPreviewRequest,
     RoiPreviewResponse,
     TestingRunCreate,
+    TestingRunResultImageResponse,
     TestingRunRead,
     TestingRunResultRead,
     TestingRunResultsResponse,
 )
 from app.training.data import ResolvedDatasetImage, enumerate_training_dataset_image_records
 from app.training.engine import _build_model, _to_nchw
+from app.training.scheduler import scheduler
 
 
 def _utcnow() -> datetime:
@@ -41,6 +47,7 @@ def _testing_run_dir(run_id: int) -> Path:
 def _roi_geometry(roi: models.RoiDefinition | None) -> dict | None:
     if roi is None:
         return None
+    points = _roi_points(roi)
     return {
         "image_width": roi.image_width,
         "image_height": roi.image_height,
@@ -48,10 +55,53 @@ def _roi_geometry(roi: models.RoiDefinition | None) -> dict | None:
         "y": roi.y,
         "width": roi.width,
         "height": roi.height,
+        "geometry_type": roi.geometry_type,
+        "points": points,
+        "tile_rows": roi.tile_rows,
+        "tile_cols": roi.tile_cols,
     }
 
 
+def _rectangle_points(x: int, y: int, width: int, height: int) -> list[dict]:
+    return [
+        {"x": float(x), "y": float(y)},
+        {"x": float(x + width), "y": float(y)},
+        {"x": float(x + width), "y": float(y + height)},
+        {"x": float(x), "y": float(y + height)},
+    ]
+
+
+def _payload_points(payload: RoiDefinitionCreate) -> list[dict]:
+    if payload.points:
+        return [{"x": float(point.x), "y": float(point.y)} for point in payload.points]
+    return _rectangle_points(payload.x, payload.y, payload.width, payload.height)
+
+
+def _roi_points(roi: models.RoiDefinition) -> list[dict]:
+    if roi.points and len(roi.points) == 4:
+        return [{"x": float(point["x"]), "y": float(point["y"])} for point in roi.points]
+    return _rectangle_points(roi.x, roi.y, roi.width, roi.height)
+
+
+def _bounding_box(points: list[dict], image_width: int, image_height: int) -> tuple[int, int, int, int]:
+    min_x = max(0, min(point["x"] for point in points))
+    max_x = min(image_width, max(point["x"] for point in points))
+    min_y = max(0, min(point["y"] for point in points))
+    max_y = min(image_height, max(point["y"] for point in points))
+    x = int(np.floor(min_x))
+    y = int(np.floor(min_y))
+    width = max(1, int(np.ceil(max_x)) - x)
+    height = max(1, int(np.ceil(max_y)) - y)
+    return x, y, width, height
+
+
 def _validate_roi_payload(payload: RoiDefinitionCreate) -> None:
+    points = _payload_points(payload)
+    if len(points) != 4:
+        raise ValueError("ROI must define exactly four corner points.")
+    for index, point in enumerate(points, start=1):
+        if point["x"] < 0 or point["x"] > payload.image_width or point["y"] < 0 or point["y"] > payload.image_height:
+            raise ValueError(f"ROI point {index} is outside the image bounds.")
     if payload.x + payload.width > payload.image_width:
         raise ValueError("ROI width extends beyond image width.")
     if payload.y + payload.height > payload.image_height:
@@ -65,7 +115,20 @@ def list_rois(db: Session) -> list[RoiDefinitionRead]:
 
 def create_roi(db: Session, payload: RoiDefinitionCreate) -> RoiDefinitionRead:
     _validate_roi_payload(payload)
-    roi = models.RoiDefinition(**payload.model_dump())
+    data = payload.model_dump()
+    points = _payload_points(payload)
+    x, y, width, height = _bounding_box(points, payload.image_width, payload.image_height)
+    data.update(
+        {
+            "x": x,
+            "y": y,
+            "width": width,
+            "height": height,
+            "geometry_type": payload.geometry_type or "polygon",
+            "points": points,
+        }
+    )
+    roi = models.RoiDefinition(**data)
     db.add(roi)
     db.commit()
     db.refresh(roi)
@@ -154,14 +217,94 @@ def _mse(left: np.ndarray, right: np.ndarray) -> float:
     return float(np.mean(delta * delta))
 
 
-def _crop_roi(image: np.ndarray, roi: models.RoiDefinition) -> np.ndarray:
+def _mse_masked(left: np.ndarray, right: np.ndarray, mask: np.ndarray) -> float:
+    if left.shape != right.shape:
+        raise ValueError(f"Cannot score arrays with different shapes: {left.shape} vs {right.shape}.")
+    if mask.shape != left.shape[:2]:
+        raise ValueError(f"ROI mask shape {mask.shape} does not match image shape {left.shape[:2]}.")
+    delta = left.astype(np.float64) - right.astype(np.float64)
+    values = delta[mask]
+    if values.size == 0:
+        raise ValueError("ROI mask contains no pixels.")
+    return float(np.mean(values * values))
+
+
+def _validate_roi_size(image: np.ndarray, roi: models.RoiDefinition) -> tuple[int, int]:
     height, width = image.shape[:2]
     if roi.image_width != width or roi.image_height != height:
         raise ValueError(
             f"ROI '{roi.name}' is tuned for {roi.image_width}x{roi.image_height}, "
             f"but testing image is {width}x{height}."
         )
-    return image[roi.y : roi.y + roi.height, roi.x : roi.x + roi.width]
+    return width, height
+
+
+def _polygon_mask(width: int, height: int, points: list[dict]) -> np.ndarray:
+    mask_image = Image.new("L", (width, height), 0)
+    polygon = [(float(point["x"]), float(point["y"])) for point in points]
+    ImageDraw.Draw(mask_image).polygon(polygon, fill=1)
+    return np.asarray(mask_image, dtype=bool)
+
+
+def _interpolate_quad(points: list[dict], u: float, v: float) -> dict:
+    # Points are ordered top-left, top-right, bottom-right, bottom-left. This
+    # bilinear interpolation keeps tile cells aligned with skewed quadrilaterals.
+    tl, tr, br, bl = points
+    top_x = tl["x"] + (tr["x"] - tl["x"]) * u
+    top_y = tl["y"] + (tr["y"] - tl["y"]) * u
+    bottom_x = bl["x"] + (br["x"] - bl["x"]) * u
+    bottom_y = bl["y"] + (br["y"] - bl["y"]) * u
+    return {
+        "x": top_x + (bottom_x - top_x) * v,
+        "y": top_y + (bottom_y - top_y) * v,
+    }
+
+
+def _tile_polygons(points: list[dict], rows: int, cols: int) -> list[dict]:
+    tiles: list[dict] = []
+    for row in range(rows):
+        for col in range(cols):
+            u0 = col / cols
+            u1 = (col + 1) / cols
+            v0 = row / rows
+            v1 = (row + 1) / rows
+            tiles.append(
+                {
+                    "row": row + 1,
+                    "col": col + 1,
+                    "points": [
+                        _interpolate_quad(points, u0, v0),
+                        _interpolate_quad(points, u1, v0),
+                        _interpolate_quad(points, u1, v1),
+                        _interpolate_quad(points, u0, v1),
+                    ],
+                }
+            )
+    return tiles
+
+
+def _roi_scores(
+    source: np.ndarray, reconstruction: np.ndarray, roi: models.RoiDefinition
+) -> tuple[float, list[dict]]:
+    width, height = _validate_roi_size(source, roi)
+    points = _roi_points(roi)
+    roi_mask = _polygon_mask(width, height, points)
+    roi_mse = _mse_masked(source, reconstruction, roi_mask)
+    tile_scores: list[dict] = []
+    rows = max(1, int(roi.tile_rows or 1))
+    cols = max(1, int(roi.tile_cols or 1))
+    for tile in _tile_polygons(points, rows, cols):
+        mask = _polygon_mask(width, height, tile["points"])
+        pixel_count = int(mask.sum())
+        tile_scores.append(
+            {
+                "row": tile["row"],
+                "col": tile["col"],
+                "mse": None if pixel_count == 0 else _mse_masked(source, reconstruction, mask),
+                "pixels": pixel_count,
+            }
+        )
+    return roi_mse, tile_scores
 
 
 class ArtifactEvaluator:
@@ -229,7 +372,9 @@ class ArtifactEvaluator:
             reconstruction, _ = self.model(x)
         return _as_image(reconstruction.squeeze(0).cpu().numpy())
 
-    def score(self, image: np.ndarray, roi: models.RoiDefinition | None) -> tuple[float, float | None, int, int]:
+    def score(
+        self, image: np.ndarray, roi: models.RoiDefinition | None
+    ) -> tuple[float, float | None, int, int, list[dict] | None]:
         reconstruction = self.reconstruct(image)
         source = image
         if self.mean_image is None:
@@ -237,9 +382,10 @@ class ArtifactEvaluator:
         width, height, _, _, _, _ = image_metadata(source)
         full_mse = _mse(source, reconstruction)
         roi_mse = None
+        tile_scores = None
         if roi is not None:
-            roi_mse = _mse(_crop_roi(source, roi), _crop_roi(reconstruction, roi))
-        return full_mse, roi_mse, width, height
+            roi_mse, tile_scores = _roi_scores(source, reconstruction, roi)
+        return full_mse, roi_mse, width, height, tile_scores
 
 
 def _snapshot_name(training_run: models.TrainingRun) -> str:
@@ -254,9 +400,12 @@ def _serialize_testing_run(run: models.TestingRun) -> TestingRunRead:
         training_dataset_id=run.training_dataset_id,
         roi_id=run.roi_id,
         status=run.status,
+        enqueued_at=run.enqueued_at,
         started_at=run.started_at,
         ended_at=run.ended_at,
         duration_seconds=run.duration_seconds,
+        gpu_index=run.gpu_index,
+        device=run.device,
         error_message=run.error_message,
         image_count=run.image_count,
         score_mean=run.score_mean,
@@ -291,6 +440,7 @@ def _serialize_result(result: models.TestingRunResult) -> TestingRunResultRead:
         score=result.score,
         full_mse=result.full_mse,
         roi_mse=result.roi_mse,
+        tile_scores=result.tile_scores,
         width=result.width,
         height=result.height,
     )
@@ -320,10 +470,205 @@ def get_testing_run_results(db: Session, run_id: int) -> TestingRunResultsRespon
     )
 
 
+def get_testing_run_result_image(
+    db: Session, run_id: int, result_id: int
+) -> TestingRunResultImageResponse | None:
+    """Return the preprocessed source image used for one testing result.
+
+    Testing results store local filesystem paths. The browser cannot display
+    those paths directly, so Analysis asks the backend to re-run the saved
+    preprocessing graph for the specific result row and return a PNG data URL.
+    """
+
+    result = db.scalar(
+        select(models.TestingRunResult)
+        .where(
+            models.TestingRunResult.id == result_id,
+            models.TestingRunResult.testing_run_id == run_id,
+        )
+        .options(
+            selectinload(models.TestingRunResult.testing_run)
+            .selectinload(models.TestingRun.training_run)
+            .selectinload(models.TrainingRun.training_pipeline)
+            .selectinload(models.TrainingPipeline.preprocessing_pipeline)
+        )
+    )
+    if result is None:
+        return None
+
+    preprocessing = result.testing_run.training_run.training_pipeline.preprocessing_pipeline
+    graph = PreprocessingGraph.model_validate(preprocessing.graph)
+    image = run_pipeline_array(graph, result.image_path)
+    width, height, channels, dtype, _, _ = image_metadata(image)
+    return TestingRunResultImageResponse(
+        testing_run_id=run_id,
+        result_id=result_id,
+        image_path=result.image_path,
+        timestamp=result.timestamp,
+        width=width,
+        height=height,
+        channels=channels,
+        dtype=dtype,
+        image_data_url=encode_png_data_url(image),
+    )
+
+
+def _load_testing_result_for_heatmap(
+    db: Session, run_id: int, result_id: int
+) -> models.TestingRunResult | None:
+    return db.scalar(
+        select(models.TestingRunResult)
+        .where(
+            models.TestingRunResult.id == result_id,
+            models.TestingRunResult.testing_run_id == run_id,
+        )
+        .options(
+            selectinload(models.TestingRunResult.testing_run)
+            .selectinload(models.TestingRun.training_run)
+            .selectinload(models.TrainingRun.training_pipeline)
+            .selectinload(models.TrainingPipeline.preprocessing_pipeline),
+            selectinload(models.TestingRunResult.testing_run)
+            .selectinload(models.TestingRun.training_run)
+            .selectinload(models.TrainingRun.training_pipeline)
+            .selectinload(models.TrainingPipeline.method_configuration),
+        )
+    )
+
+
+def _pixel_error_map(source: np.ndarray, reconstruction: np.ndarray) -> np.ndarray:
+    if source.shape != reconstruction.shape:
+        raise ValueError(f"Cannot build heatmap for different shapes: {source.shape} vs {reconstruction.shape}.")
+    delta = source.astype(np.float64) - reconstruction.astype(np.float64)
+    squared = delta * delta
+    if squared.ndim == 3:
+        return np.mean(squared, axis=2)
+    return squared
+
+
+def _heatmap_overlay(error_map: np.ndarray) -> np.ndarray:
+    max_error = float(np.max(error_map)) if error_map.size else 0.0
+    if max_error <= 0:
+        normalized = np.zeros_like(error_map, dtype=np.float64)
+    else:
+        normalized = np.clip(error_map / max_error, 0.0, 1.0)
+    overlay = np.zeros((*error_map.shape, 4), dtype=np.uint8)
+    overlay[..., 0] = 255
+    overlay[..., 1] = np.asarray(42 * (1.0 - normalized), dtype=np.uint8)
+    overlay[..., 3] = np.asarray(35 + normalized * 210, dtype=np.uint8)
+    return overlay
+
+
+def compute_heatmap_run(db: Session, payload: HeatmapRunCreate) -> HeatmapRunRead:
+    """Compute or return a cached CPU pixel-level reconstruction-error heatmap."""
+    existing = db.scalar(
+        select(models.HeatmapRun).where(
+            models.HeatmapRun.testing_run_id == payload.testing_run_id,
+            models.HeatmapRun.testing_result_id == payload.testing_result_id,
+            models.HeatmapRun.status == "finished",
+        )
+    )
+    if existing is not None:
+        return HeatmapRunRead.model_validate(existing)
+
+    result = _load_testing_result_for_heatmap(db, payload.testing_run_id, payload.testing_result_id)
+    if result is None:
+        raise ValueError("Testing result does not exist.")
+    testing_run = result.testing_run
+    training_run = testing_run.training_run
+    if testing_run.status != "finished":
+        raise ValueError("Heatmaps can only be computed for finished testing runs.")
+    if training_run is None:
+        raise ValueError("Training run no longer exists.")
+
+    row = db.scalar(
+        select(models.HeatmapRun).where(
+            models.HeatmapRun.testing_run_id == payload.testing_run_id,
+            models.HeatmapRun.testing_result_id == payload.testing_result_id,
+        )
+    )
+    if row is None:
+        row = models.HeatmapRun(
+            testing_run_id=payload.testing_run_id,
+            testing_result_id=payload.testing_result_id,
+        )
+        db.add(row)
+    row.image_path = result.image_path
+    row.timestamp = result.timestamp
+    row.status = "running"
+    row.error_message = None
+    row.width = result.width
+    row.height = result.height
+    row.channels = 1
+    row.dtype = "pending"
+    row.max_error = 0.0
+    row.mean_error = 0.0
+    row.max_x = 0
+    row.max_y = 0
+    row.source_image_data_url = ""
+    row.heatmap_image_data_url = ""
+    row.updated_at = _utcnow()
+    db.commit()
+
+    try:
+        preprocessing = training_run.training_pipeline.preprocessing_pipeline
+        image = run_pipeline_array(PreprocessingGraph.model_validate(preprocessing.graph), result.image_path)
+        evaluator = ArtifactEvaluator(training_run)
+        reconstruction = evaluator.reconstruct(image)
+        source = image if evaluator.mean_image is not None else _as_image(_to_nchw(image))
+        error_map = _pixel_error_map(source, reconstruction)
+        max_y, max_x = np.unravel_index(int(np.argmax(error_map)), error_map.shape)
+        width, height, channels, dtype, _, _ = image_metadata(source)
+
+        row.status = "finished"
+        row.error_message = None
+        row.width = width
+        row.height = height
+        row.channels = channels
+        row.dtype = dtype
+        row.max_error = float(np.max(error_map))
+        row.mean_error = float(np.mean(error_map))
+        row.max_x = int(max_x)
+        row.max_y = int(max_y)
+        row.source_image_data_url = encode_png_data_url(source)
+        row.heatmap_image_data_url = encode_png_data_url(_heatmap_overlay(error_map))
+        row.updated_at = _utcnow()
+        db.commit()
+        db.refresh(row)
+        return HeatmapRunRead.model_validate(row)
+    except Exception as exc:
+        db.rollback()
+        row = db.scalar(
+            select(models.HeatmapRun).where(
+                models.HeatmapRun.testing_run_id == payload.testing_run_id,
+                models.HeatmapRun.testing_result_id == payload.testing_result_id,
+            )
+        )
+        if row is not None:
+            row.status = "failed"
+            row.error_message = str(exc)
+            row.updated_at = _utcnow()
+            db.commit()
+        raise
+
+
+def list_heatmap_runs(db: Session) -> list[HeatmapRunRead]:
+    rows = db.scalars(select(models.HeatmapRun).order_by(models.HeatmapRun.created_at.desc())).all()
+    return [HeatmapRunRead.model_validate(row) for row in rows]
+
+
+def clear_heatmap_runs(db: Session) -> int:
+    count = len(db.scalars(select(models.HeatmapRun.id)).all())
+    db.execute(delete(models.HeatmapRun))
+    db.commit()
+    return count
+
+
 def delete_testing_run(db: Session, run_id: int) -> bool:
     run = db.get(models.TestingRun, run_id)
     if run is None:
         return False
+    if run.status == "running":
+        raise ValueError("Abort the testing run before removing it.")
     shutil.rmtree(_testing_run_dir(run.id), ignore_errors=True)
     db.delete(run)
     db.commit()
@@ -334,7 +679,17 @@ def _write_results_csv(testing_run: models.TestingRun, rows: list[models.Testing
     path = _testing_run_dir(testing_run.id) / "reconstruction_errors.csv"
     with open(path, "w", encoding="utf-8", newline="") as handle:
         writer = csv.writer(handle)
-        writer.writerow(["position", "timestamp", "image_path", "score", "full_mse", "roi_mse", "width", "height"])
+        writer.writerow([
+            "position",
+            "timestamp",
+            "image_path",
+            "score",
+            "full_mse",
+            "roi_mse",
+            "tile_scores_json",
+            "width",
+            "height",
+        ])
         for row in rows:
             writer.writerow([
                 row.position,
@@ -343,13 +698,59 @@ def _write_results_csv(testing_run: models.TestingRun, rows: list[models.Testing
                 row.score,
                 row.full_mse,
                 "" if row.roi_mse is None else row.roi_mse,
+                "" if row.tile_scores is None else json.dumps(row.tile_scores, sort_keys=True),
                 row.width,
                 row.height,
             ])
     return path
 
 
-def create_testing_run(db: Session, payload: TestingRunCreate) -> TestingRunRead:
+class TestingConflict(Exception):
+    """Raised when an identical testing configuration already exists (HTTP 409)."""
+
+    def __init__(self, existing: models.TestingRun) -> None:
+        self.existing = existing
+        super().__init__(
+            f"A testing run for this model + dataset + ROI already exists as '{existing.name}'."
+        )
+
+
+def _find_duplicate_testing_run(
+    db: Session, training_run_id: int, training_dataset_id: int, roi_id: int | None
+) -> models.TestingRun | None:
+    query = select(models.TestingRun).where(
+        models.TestingRun.training_run_id == training_run_id,
+        models.TestingRun.training_dataset_id == training_dataset_id,
+    )
+    query = query.where(
+        models.TestingRun.roi_id.is_(None) if roi_id is None else models.TestingRun.roi_id == roi_id
+    )
+    return db.scalar(query)
+
+
+def _reset_testing_run_for_queue(run: models.TestingRun) -> None:
+    run.status = "queued"
+    run.enqueued_at = _utcnow()
+    run.started_at = None
+    run.ended_at = None
+    run.duration_seconds = None
+    run.gpu_index = None
+    run.device = None
+    run.pid = None
+    run.log_path = None
+    run.error_message = None
+    run.image_count = None
+    run.score_mean = None
+    run.score_min = None
+    run.score_max = None
+    run.full_mse_mean = None
+    run.roi_mse_mean = None
+    run.results_path = None
+    run.results_size_bytes = None
+
+
+def enqueue_testing_run(db: Session, payload: TestingRunCreate, *, wake_scheduler: bool = True) -> TestingRunRead:
+    """Validate refs, dedup, and queue a testing run for the scheduler."""
     training_run = _load_training_run(db, payload.training_run_id)
     if training_run is None:
         raise ValueError(f"Training run does not exist: {payload.training_run_id}")
@@ -366,18 +767,20 @@ def create_testing_run(db: Session, payload: TestingRunCreate) -> TestingRunRead
     if payload.roi_id is not None and roi is None:
         raise ValueError(f"ROI does not exist: {payload.roi_id}")
 
+    existing = _find_duplicate_testing_run(db, training_run.id, training_dataset.id, roi.id if roi else None)
+    if existing is not None:
+        raise TestingConflict(existing)
+
     pipeline = training_run.training_pipeline
     configuration = pipeline.method_configuration
     name = payload.name or f"{training_dataset.name} on {_snapshot_name(training_run)}"
-    started = time.perf_counter()
-    now = _utcnow()
     testing_run = models.TestingRun(
         name=name,
         training_run_id=training_run.id,
         training_dataset_id=training_dataset.id,
         roi_id=roi.id if roi else None,
-        status="running",
-        started_at=now,
+        status="queued",
+        enqueued_at=_utcnow(),
         training_run_name=_snapshot_name(training_run),
         training_pipeline_name=pipeline.name,
         training_dataset_name=training_dataset.name,
@@ -393,61 +796,129 @@ def create_testing_run(db: Session, payload: TestingRunCreate) -> TestingRunRead
     db.add(testing_run)
     db.commit()
     db.refresh(testing_run)
-
-    try:
-        graph = PreprocessingGraph.model_validate(pipeline.preprocessing_pipeline.graph)
-        records = enumerate_training_dataset_image_records(training_dataset)
-        if not records:
-            raise ValueError("Train/test dataset produced no images.")
-        evaluator = ArtifactEvaluator(training_run)
-        result_rows: list[models.TestingRunResult] = []
-        scores: list[float] = []
-        full_scores: list[float] = []
-        roi_scores: list[float] = []
-
-        for position, record in enumerate(records):
-            image = run_pipeline_array(graph, record.file_path)
-            full_mse, roi_mse, width, height = evaluator.score(image, roi)
-            score = roi_mse if roi_mse is not None else full_mse
-            scores.append(score)
-            full_scores.append(full_mse)
-            if roi_mse is not None:
-                roi_scores.append(roi_mse)
-            row = models.TestingRunResult(
-                testing_run_id=testing_run.id,
-                position=position,
-                image_path=record.file_path,
-                timestamp=record.timestamp_parsed,
-                score=score,
-                full_mse=full_mse,
-                roi_mse=roi_mse,
-                width=width,
-                height=height,
-            )
-            db.add(row)
-            result_rows.append(row)
-
-        db.flush()
-        results_path = _write_results_csv(testing_run, result_rows)
-        testing_run.status = "finished"
-        testing_run.ended_at = _utcnow()
-        testing_run.duration_seconds = round(time.perf_counter() - started, 3)
-        testing_run.image_count = len(result_rows)
-        testing_run.score_mean = float(np.mean(scores))
-        testing_run.score_min = float(np.min(scores))
-        testing_run.score_max = float(np.max(scores))
-        testing_run.full_mse_mean = float(np.mean(full_scores))
-        testing_run.roi_mse_mean = float(np.mean(roi_scores)) if roi_scores else None
-        testing_run.results_path = str(results_path)
-        testing_run.results_size_bytes = results_path.stat().st_size
-    except Exception as exc:
-        testing_run.status = "failed"
-        testing_run.ended_at = _utcnow()
-        testing_run.duration_seconds = round(time.perf_counter() - started, 3)
-        testing_run.error_message = str(exc)
-    db.commit()
-    db.refresh(testing_run)
+    if wake_scheduler:
+        scheduler.wake()
     return _serialize_testing_run(testing_run)
+
+
+def create_testing_run(db: Session, payload: TestingRunCreate) -> TestingRunRead:
+    """Synchronous testing helper retained for unit tests.
+
+    The public API queues testing runs via ``enqueue_testing_run``. Tests and
+    low-level service callers sometimes need deterministic in-process execution
+    against their own session, so this helper runs the same scoring path without
+    spawning the scheduler worker.
+    """
+
+    queued = enqueue_testing_run(db, payload, wake_scheduler=False)
+    run = db.get(models.TestingRun, queued.id)
+    if run is None:
+        raise ValueError("Queued testing run disappeared before execution.")
+
+    started = time.perf_counter()
+    run.status = "running"
+    run.started_at = _utcnow()
+    run.device = "CPU"
+    db.commit()
+
+    training_run = _load_training_run(db, run.training_run_id)
+    training_dataset = _load_training_dataset(db, run.training_dataset_id)
+    if training_run is None or training_dataset is None:
+        raise ValueError("Training run or train/test dataset no longer exists.")
+    roi = db.get(models.RoiDefinition, run.roi_id) if run.roi_id is not None else None
+    graph = PreprocessingGraph.model_validate(training_run.training_pipeline.preprocessing_pipeline.graph)
+    records = enumerate_training_dataset_image_records(training_dataset)
+    evaluator = ArtifactEvaluator(training_run)
+    rows: list[models.TestingRunResult] = []
+    scores: list[float] = []
+    full_scores: list[float] = []
+    roi_scores: list[float] = []
+    for position, record in enumerate(records):
+        image = run_pipeline_array(graph, record.file_path)
+        full_mse, roi_mse, width, height, tile_scores = evaluator.score(image, roi)
+        score = roi_mse if roi_mse is not None else full_mse
+        row = models.TestingRunResult(
+            testing_run_id=run.id,
+            position=position,
+            image_path=record.file_path,
+            timestamp=record.timestamp_parsed,
+            score=score,
+            full_mse=full_mse,
+            roi_mse=roi_mse,
+            tile_scores=tile_scores,
+            width=width,
+            height=height,
+        )
+        db.add(row)
+        rows.append(row)
+        scores.append(score)
+        full_scores.append(full_mse)
+        if roi_mse is not None:
+            roi_scores.append(roi_mse)
+
+    db.flush()
+    results_path = _write_results_csv(run, rows)
+    run.status = "finished"
+    run.ended_at = _utcnow()
+    run.duration_seconds = round(time.perf_counter() - started, 3)
+    run.image_count = len(rows)
+    run.score_mean = float(np.mean(scores)) if scores else None
+    run.score_min = float(np.min(scores)) if scores else None
+    run.score_max = float(np.max(scores)) if scores else None
+    run.full_mse_mean = float(np.mean(full_scores)) if full_scores else None
+    run.roi_mse_mean = float(np.mean(roi_scores)) if roi_scores else None
+    run.results_path = str(results_path)
+    run.results_size_bytes = results_path.stat().st_size
+    db.commit()
+    db.refresh(run)
+    return _serialize_testing_run(run)
+
+
+def abort_testing_run(db: Session, run_id: int) -> TestingRunRead | None:
+    run = db.get(models.TestingRun, run_id)
+    if run is None:
+        return None
+    if run.status == "queued":
+        run.status = "aborted"
+        run.ended_at = _utcnow()
+        run.error_message = "Aborted before it started."
+        db.commit()
+        db.refresh(run)
+    elif run.status == "running":
+        scheduler.request_abort("test", run.id, run.pid)
+    else:
+        raise ValueError("Only queued or running runs can be aborted.")
+    return _serialize_testing_run(run)
+
+
+def restart_testing_run(db: Session, run_id: int) -> TestingRunRead | None:
+    run = db.get(models.TestingRun, run_id)
+    if run is None:
+        return None
+    if run.status in ("queued", "running"):
+        raise ValueError("Run is already queued or running.")
+    # Clear prior results/CSV and re-queue the same row (one history per config).
+    db.execute(delete(models.TestingRunResult).where(models.TestingRunResult.testing_run_id == run.id))
+    shutil.rmtree(_testing_run_dir(run.id), ignore_errors=True)
+    _reset_testing_run_for_queue(run)
+    db.commit()
+    db.refresh(run)
+    scheduler.wake()
+    return _serialize_testing_run(run)
+
+
+def read_testing_log(db: Session, run_id: int, max_lines: int = 400) -> str | None:
+    run = db.get(models.TestingRun, run_id)
+    if run is None:
+        return None
+    if not run.log_path:
+        return ""
+    try:
+        with open(run.log_path, encoding="utf-8", errors="replace") as handle:
+            lines = handle.readlines()
+    except FileNotFoundError:
+        return ""
+    return "".join(lines[-max_lines:])
 
 
 def clear_testing_rows_for_training_run(db: Session, training_run_id: int) -> None:

@@ -3,6 +3,7 @@ import {
   Alert,
   Badge,
   Group,
+  Modal,
   Paper,
   ScrollArea,
   Select,
@@ -13,7 +14,7 @@ import {
   Title,
   Tooltip,
 } from '@mantine/core';
-import { ArrowDown, ArrowUp, Plus, Search, Trash2 } from 'lucide-react';
+import { ArrowDown, ArrowUp, Info, Plus, Search, Trash2 } from 'lucide-react';
 import { useMemo, useState } from 'react';
 
 import { datasetResolutions, datasetSizeSignature } from './graph';
@@ -60,18 +61,73 @@ function usageColor(value: string): string {
   return 'teal';
 }
 
+function strideSummary(dataset: TrainingDataset): string {
+  const values = [...new Set(dataset.rules.map((rule) => rule.stride))].sort((a, b) => a - b);
+  if (values.length === 0) return 'n/a';
+  return values.length === 1 ? String(values[0]) : values.join(', ');
+}
+
+function renderDatasetDetails(dataset: TrainingDataset) {
+  return (
+    <Stack gap="md">
+      <div>
+        <Text fw={700}>{dataset.name}</Text>
+        <Text size="sm" c="dimmed">
+          {dataset.total_selected_images} selected images · {usageLabel(dataset.usage_label ?? 'train')} · sizes{' '}
+          {datasetResolutions(dataset).join(', ') || 'n/a'}
+        </Text>
+      </div>
+      <Table striped verticalSpacing="xs">
+        <Table.Thead>
+          <Table.Tr>
+            <Table.Th>Dataset</Table.Th>
+            <Table.Th>Folder</Table.Th>
+            <Table.Th>Start</Table.Th>
+            <Table.Th>End</Table.Th>
+            <Table.Th>Stride</Table.Th>
+            <Table.Th>Matching</Table.Th>
+            <Table.Th>Selected</Table.Th>
+            <Table.Th>Image data</Table.Th>
+          </Table.Tr>
+        </Table.Thead>
+        <Table.Tbody>
+          {dataset.rules.map((rule) => (
+            <Table.Tr key={rule.id}>
+              <Table.Td>{rule.dataset_name}</Table.Td>
+              <Table.Td>{rule.folder_relative_path}</Table.Td>
+              <Table.Td>{new Date(rule.start_timestamp).toLocaleString()}</Table.Td>
+              <Table.Td>{new Date(rule.end_timestamp).toLocaleString()}</Table.Td>
+              <Table.Td>{rule.stride}</Table.Td>
+              <Table.Td>{rule.matching_images}</Table.Td>
+              <Table.Td>{rule.selected_images}</Table.Td>
+              <Table.Td>
+                <Text size="xs" c="dimmed">
+                  {rule.folder_image_signature ?? datasetResolutions(dataset).join(', ') ?? 'n/a'}
+                </Text>
+              </Table.Td>
+            </Table.Tr>
+          ))}
+        </Table.Tbody>
+      </Table>
+    </Stack>
+  );
+}
+
 export function TrainingDatasetPicker({
   trainingDatasets,
   selectedIds,
   onChange,
+  disabled = false,
 }: {
   trainingDatasets: TrainingDataset[];
   selectedIds: number[];
   onChange: (ids: number[]) => void;
+  disabled?: boolean;
 }) {
   const [search, setSearch] = useState('');
   const [sizeFilter, setSizeFilter] = useState<string | null>(null);
   const [usageFilter, setUsageFilter] = useState<string | null>(null);
+  const [detailDataset, setDetailDataset] = useState<TrainingDataset | null>(null);
 
   const datasetById = useMemo(
     () => new Map(trainingDatasets.map((dataset) => [dataset.id, dataset])),
@@ -117,6 +173,7 @@ export function TrainingDatasetPicker({
     .filter((dataset): dataset is TrainingDataset => dataset !== undefined);
 
   function move(index: number, offset: number) {
+    if (disabled) return;
     const target = index + offset;
     if (target < 0 || target >= selectedIds.length) return;
     const next = [...selectedIds];
@@ -128,8 +185,12 @@ export function TrainingDatasetPicker({
     <Paper withBorder p="md" radius="sm">
       <Stack gap="md">
         <Group justify="space-between" align="center">
-          <Title order={3}>1. Train/Test Sets</Title>
-          <Badge variant="light">{selectedIds.length} selected</Badge>
+          <Title order={3}>1. Trainsets</Title>
+          <Group gap="xs">
+            <Badge variant="light" color={selectedIds.length > 0 ? 'green' : 'gray'}>
+              {selectedIds.length} selected
+            </Badge>
+          </Group>
         </Group>
         <Group grow>
           <TextInput
@@ -155,6 +216,7 @@ export function TrainingDatasetPicker({
                 <Table.Th>Label</Table.Th>
                 <Table.Th>Datasets</Table.Th>
                 <Table.Th>Image size</Table.Th>
+                <Table.Th>Stride</Table.Th>
                 <Table.Th>Images</Table.Th>
                 <Table.Th />
               </Table.Tr>
@@ -163,7 +225,7 @@ export function TrainingDatasetPicker({
               {filtered.map((dataset) => {
                 const alreadySelected = selectedIds.includes(dataset.id);
                 return (
-                  <Table.Tr key={dataset.id}>
+                  <Table.Tr key={dataset.id} className={alreadySelected ? 'pipeline-step selected' : 'pipeline-step'}>
                     <Table.Td>{dataset.name}</Table.Td>
                     <Table.Td>
                       <Badge size="xs" variant="light" color={usageColor(dataset.usage_label ?? 'train')}>
@@ -182,17 +244,25 @@ export function TrainingDatasetPicker({
                     <Table.Td>
                       <ImageSizeCell resolutions={datasetResolutions(dataset)} />
                     </Table.Td>
+                    <Table.Td>{strideSummary(dataset)}</Table.Td>
                     <Table.Td>{dataset.total_selected_images}</Table.Td>
                     <Table.Td>
-                      <Tooltip label={alreadySelected ? 'Already added' : 'Add to pipeline'}>
-                        <ActionIcon
-                          variant="subtle"
-                          disabled={alreadySelected}
-                          onClick={() => onChange([...selectedIds, dataset.id])}
-                        >
-                          <Plus size={18} />
-                        </ActionIcon>
-                      </Tooltip>
+                      <Group gap={4} justify="flex-end" wrap="nowrap">
+                        <Tooltip label="Inspect trainset rules">
+                          <ActionIcon variant="subtle" onClick={() => setDetailDataset(dataset)}>
+                            <Info size={16} />
+                          </ActionIcon>
+                        </Tooltip>
+                        <Tooltip label={alreadySelected ? 'Already added' : 'Add to pipeline'}>
+                          <ActionIcon
+                            variant="subtle"
+                            disabled={disabled || alreadySelected}
+                            onClick={() => onChange([...selectedIds, dataset.id])}
+                          >
+                            <Plus size={18} />
+                          </ActionIcon>
+                        </Tooltip>
+                      </Group>
                     </Table.Td>
                   </Table.Tr>
                 );
@@ -222,18 +292,21 @@ export function TrainingDatasetPicker({
                       </Text>
                       <Text size="xs" c="dimmed">
                         {dataset.total_selected_images} images ·{' '}
-                        {usageLabel(dataset.usage_label ?? 'train')} · {datasetResolutions(dataset).join(', ') || 'size n/a'} ·{' '}
-                        {dataset.dataset_names.join(', ')}
+                        {usageLabel(dataset.usage_label ?? 'train')} · stride {strideSummary(dataset)} ·{' '}
+                        {datasetResolutions(dataset).join(', ') || 'size n/a'} · {dataset.dataset_names.join(', ')}
                       </Text>
                     </div>
                   </Group>
                   <Group gap={4} wrap="nowrap">
-                    <ActionIcon variant="subtle" disabled={index === 0} onClick={() => move(index, -1)}>
+                    <ActionIcon variant="subtle" onClick={() => setDetailDataset(dataset)}>
+                      <Info size={16} />
+                    </ActionIcon>
+                    <ActionIcon variant="subtle" disabled={disabled || index === 0} onClick={() => move(index, -1)}>
                       <ArrowUp size={16} />
                     </ActionIcon>
                     <ActionIcon
                       variant="subtle"
-                      disabled={index === selected.length - 1}
+                      disabled={disabled || index === selected.length - 1}
                       onClick={() => move(index, 1)}
                     >
                       <ArrowDown size={16} />
@@ -241,6 +314,7 @@ export function TrainingDatasetPicker({
                     <ActionIcon
                       color="red"
                       variant="subtle"
+                      disabled={disabled}
                       onClick={() => onChange(selectedIds.filter((id) => id !== dataset.id))}
                     >
                       <Trash2 size={16} />
@@ -251,6 +325,15 @@ export function TrainingDatasetPicker({
             ))}
           </Stack>
         )}
+        <Modal
+          opened={detailDataset !== null}
+          onClose={() => setDetailDataset(null)}
+          title={detailDataset ? `Trainset: ${detailDataset.name}` : 'Trainset'}
+          size="xl"
+          scrollAreaComponent={ScrollArea.Autosize}
+        >
+          {detailDataset ? renderDatasetDetails(detailDataset) : null}
+        </Modal>
       </Stack>
     </Paper>
   );

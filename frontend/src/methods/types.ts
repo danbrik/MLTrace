@@ -19,6 +19,7 @@ export type MethodBuilderProps = {
   modelGraph: ModelGraph;
   layers: ModelLayerDefinition[];
   validation: MethodValidationResponse | null;
+  disabled?: boolean;
   onConfigChange: (key: string, value: unknown) => void;
   onGraphChange: (graph: ModelGraph | ((current: ModelGraph) => ModelGraph)) => void;
   onNumberDraftChange?: (fieldId: string, state: NumericDraftState | null) => void;
@@ -40,6 +41,7 @@ export type SchemaFormProps = {
   config: ModelConfig;
   keys?: string[];
   onChange: (key: string, value: unknown) => void;
+  disabled?: boolean;
   fieldPrefix?: string;
   onNumberDraftChange?: (fieldId: string, state: NumericDraftState | null) => void;
 };

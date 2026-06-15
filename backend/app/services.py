@@ -1184,6 +1184,59 @@ def _scalar_value_type(value: object) -> str:
 # --- Training pipelines -----------------------------------------------------
 
 
+class DuplicatePipelineError(ValueError):
+    """Raised when a training pipeline with an identical configuration exists."""
+
+    def __init__(self, existing: "models.TrainingPipeline") -> None:
+        self.existing = existing
+        super().__init__(
+            f"An identical training pipeline configuration already exists as '{existing.name}'."
+        )
+
+
+def training_pipeline_signature(
+    dataset_ids,
+    preprocessing_pipeline_id: int,
+    method_configuration_id: int,
+    shuffle: bool,
+    training_parameters: dict | None,
+) -> str:
+    """Stable hash of the full configuration, independent of name/order.
+
+    Mirrored by alembic migration 0016 for backfilling existing rows.
+    """
+    import hashlib
+    import json
+
+    canonical = {
+        "datasets": sorted({int(value) for value in dataset_ids}),
+        "preprocessing": int(preprocessing_pipeline_id),
+        "method": int(method_configuration_id),
+        "shuffle": bool(shuffle),
+        "params": training_parameters or {},
+    }
+    blob = json.dumps(canonical, sort_keys=True, separators=(",", ":"), default=str)
+    return hashlib.sha256(blob.encode()).hexdigest()
+
+
+def find_training_pipeline_by_signature(
+    db: Session, payload: TrainingPipelinePayload
+) -> models.TrainingPipeline | None:
+    """Return an existing pipeline whose full configuration matches the payload."""
+    _, _, configuration = _resolve_training_pipeline_refs(db, payload)
+    training_parameters = _merged_training_parameters(configuration, payload.training_parameters)
+    signature = training_pipeline_signature(
+        payload.training_dataset_ids,
+        payload.preprocessing_pipeline_id,
+        payload.method_configuration_id,
+        payload.shuffle,
+        training_parameters,
+    )
+    return db.scalar(
+        select(models.TrainingPipeline).where(models.TrainingPipeline.config_signature == signature)
+    )
+
+
 def _assert_unique_training_pipeline_name(db: Session, name: str, exclude_id: int | None = None) -> None:
     query = select(models.TrainingPipeline).where(func.lower(models.TrainingPipeline.name) == name.lower())
     if exclude_id is not None:
@@ -1248,6 +1301,18 @@ def create_training_pipeline(db: Session, payload: TrainingPipelineCreate) -> Tr
     _assert_unique_training_pipeline_name(db, payload.name)
     training_datasets, _, configuration = _resolve_training_pipeline_refs(db, payload)
     training_parameters = _merged_training_parameters(configuration, payload.training_parameters)
+    signature = training_pipeline_signature(
+        payload.training_dataset_ids,
+        payload.preprocessing_pipeline_id,
+        payload.method_configuration_id,
+        payload.shuffle,
+        training_parameters,
+    )
+    existing = db.scalar(
+        select(models.TrainingPipeline).where(models.TrainingPipeline.config_signature == signature)
+    )
+    if existing is not None:
+        raise DuplicatePipelineError(existing)
 
     pipeline = models.TrainingPipeline(
         name=payload.name,
@@ -1256,6 +1321,7 @@ def create_training_pipeline(db: Session, payload: TrainingPipelineCreate) -> Tr
         method_configuration_id=payload.method_configuration_id,
         shuffle=payload.shuffle,
         training_parameters=training_parameters,
+        config_signature=signature,
     )
     db.add(pipeline)
     db.flush()
@@ -1280,6 +1346,21 @@ def update_training_pipeline(
     _assert_unique_training_pipeline_name(db, payload.name, exclude_id=pipeline_id)
     training_datasets, _, configuration = _resolve_training_pipeline_refs(db, payload)
     training_parameters = _merged_training_parameters(configuration, payload.training_parameters)
+    signature = training_pipeline_signature(
+        payload.training_dataset_ids,
+        payload.preprocessing_pipeline_id,
+        payload.method_configuration_id,
+        payload.shuffle,
+        training_parameters,
+    )
+    existing = db.scalar(
+        select(models.TrainingPipeline).where(
+            models.TrainingPipeline.config_signature == signature,
+            models.TrainingPipeline.id != pipeline_id,
+        )
+    )
+    if existing is not None:
+        raise DuplicatePipelineError(existing)
 
     pipeline.name = payload.name
     pipeline.description = payload.description
@@ -1287,6 +1368,7 @@ def update_training_pipeline(
     pipeline.method_configuration_id = payload.method_configuration_id
     pipeline.shuffle = payload.shuffle
     pipeline.training_parameters = training_parameters
+    pipeline.config_signature = signature
     # Replace entries wholesale; position always reflects the payload order.
     db.execute(
         delete(models.TrainingPipelineDataset).where(

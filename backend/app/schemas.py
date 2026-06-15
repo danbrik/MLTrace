@@ -417,6 +417,12 @@ class TrainingPipelineDryRunResponse(BaseModel):
     note: str | None = None
 
 
+class TrainingPipelineDuplicateResponse(BaseModel):
+    """Result of checking whether an identical pipeline configuration exists."""
+
+    existing_pipeline: TrainingPipelineRead | None = None
+
+
 class TrainingRunEnqueueRequest(BaseModel):
     training_pipeline_id: int
 
@@ -469,6 +475,11 @@ class TrainingRunLogResponse(BaseModel):
     log: str
 
 
+class RoiPoint(BaseModel):
+    x: float
+    y: float
+
+
 class RoiDefinitionCreate(BaseModel):
     name: str = Field(min_length=1, max_length=255)
     description: str | None = None
@@ -478,6 +489,10 @@ class RoiDefinitionCreate(BaseModel):
     y: int = Field(ge=0)
     width: int = Field(ge=1)
     height: int = Field(ge=1)
+    geometry_type: str = "polygon"
+    points: list[RoiPoint] | None = None
+    tile_rows: int = Field(default=1, ge=1, le=20)
+    tile_cols: int = Field(default=1, ge=1, le=20)
 
     @field_validator("width")
     @classmethod
@@ -510,6 +525,10 @@ class RoiDefinitionRead(BaseModel):
     y: int
     width: int
     height: int
+    geometry_type: str = "polygon"
+    points: list[dict] | None = None
+    tile_rows: int = 1
+    tile_cols: int = 1
     created_at: datetime
     updated_at: datetime
 
@@ -551,6 +570,7 @@ class TestingRunResultRead(BaseModel):
     score: float
     full_mse: float
     roi_mse: float | None
+    tile_scores: list[dict] | None = None
     width: int
     height: int
 
@@ -564,9 +584,12 @@ class TestingRunRead(BaseModel):
     training_dataset_id: int
     roi_id: int | None
     status: str
+    enqueued_at: datetime | None = None
     started_at: datetime | None
     ended_at: datetime | None
     duration_seconds: float | None
+    gpu_index: int | None = None
+    device: str | None = None
     error_message: str | None
     image_count: int | None
     score_mean: float | None
@@ -596,6 +619,60 @@ class TestingRunResultsResponse(BaseModel):
 
     testing_run: TestingRunRead
     results: list[TestingRunResultRead]
+
+
+class TestingRunResultImageResponse(BaseModel):
+    __test__: ClassVar[bool] = False
+
+    testing_run_id: int
+    result_id: int
+    image_path: str
+    timestamp: datetime
+    width: int
+    height: int
+    channels: int
+    dtype: str
+    image_data_url: str
+
+
+class HeatmapRunCreate(BaseModel):
+    testing_run_id: int
+    testing_result_id: int
+
+
+class HeatmapRunRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    testing_run_id: int
+    testing_result_id: int
+    status: str
+    error_message: str | None
+    image_path: str
+    timestamp: datetime
+    width: int
+    height: int
+    channels: int
+    dtype: str
+    max_error: float
+    mean_error: float
+    max_x: int
+    max_y: int
+    source_image_data_url: str
+    heatmap_image_data_url: str
+    created_at: datetime
+    updated_at: datetime
+
+
+class SchedulerSettingsRead(BaseModel):
+    detected_gpu_count: int
+    max_gpu_slots: int
+    only_gpu: bool
+
+
+class SchedulerSettingsUpdate(BaseModel):
+    max_gpu_slots: int = Field(ge=1)
+    only_gpu: bool = False
 
 
 ModelArchitectureRead = MethodDefinitionRead

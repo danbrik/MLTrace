@@ -200,10 +200,14 @@ class TrainingPipeline(Base):
     """
 
     __tablename__ = "training_pipelines"
+    __table_args__ = (Index("ix_training_pipelines_config_signature", "config_signature"),)
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     name: Mapped[str] = mapped_column(String(255), nullable=False, unique=True)
     description: Mapped[str | None] = mapped_column(Text)
+    # Hash of the full configuration (datasets + preprocessing + method + shuffle
+    # + training params), independent of name. Used to block duplicate pipelines.
+    config_signature: Mapped[str | None] = mapped_column(String(64))
     preprocessing_pipeline_id: Mapped[int] = mapped_column(
         ForeignKey("preprocessing_pipelines.id", ondelete="RESTRICT"), nullable=False
     )
@@ -353,7 +357,13 @@ class TrainingRunMetric(Base):
 
 
 class RoiDefinition(Base):
-    """Reusable rectangular ROI in preprocessed image coordinates."""
+    """Reusable ROI in preprocessed image coordinates.
+
+    Older rows may only contain the rectangular x/y/width/height fields. New
+    rows store four ordered points (top-left, top-right, bottom-right,
+    bottom-left) so perspective-like quadrilateral ROIs can be reused across
+    testing runs.
+    """
 
     __tablename__ = "roi_definitions"
 
@@ -366,6 +376,10 @@ class RoiDefinition(Base):
     y: Mapped[int] = mapped_column(Integer, nullable=False)
     width: Mapped[int] = mapped_column(Integer, nullable=False)
     height: Mapped[int] = mapped_column(Integer, nullable=False)
+    geometry_type: Mapped[str] = mapped_column(String(32), nullable=False, default="polygon")
+    points: Mapped[list | None] = mapped_column(json_type())
+    tile_rows: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    tile_cols: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=False), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=False), server_default=func.now(), onupdate=func.now()
@@ -390,11 +404,18 @@ class TestingRun(Base):
     )
     roi_id: Mapped[int | None] = mapped_column(ForeignKey("roi_definitions.id", ondelete="SET NULL"))
 
-    status: Mapped[str] = mapped_column(String(32), nullable=False, default="running")
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="queued")
+    enqueued_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=False))
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=False))
     ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=False))
     duration_seconds: Mapped[float | None] = mapped_column(Float)
     error_message: Mapped[str | None] = mapped_column(Text)
+    # Scheduler/queue fields, mirroring TrainingRun (testing now runs as queued
+    # background jobs through the shared scheduler instead of synchronously).
+    gpu_index: Mapped[int | None] = mapped_column(Integer)
+    device: Mapped[str | None] = mapped_column(String(32))
+    pid: Mapped[int | None] = mapped_column(Integer)
+    log_path: Mapped[str | None] = mapped_column(Text)
 
     image_count: Mapped[int | None] = mapped_column(Integer)
     score_mean: Mapped[float | None] = mapped_column(Float)
@@ -452,11 +473,50 @@ class TestingRunResult(Base):
     score: Mapped[float] = mapped_column(Float, nullable=False)
     full_mse: Mapped[float] = mapped_column(Float, nullable=False)
     roi_mse: Mapped[float | None] = mapped_column(Float)
+    tile_scores: Mapped[list | None] = mapped_column(json_type())
     width: Mapped[int] = mapped_column(Integer, nullable=False)
     height: Mapped[int] = mapped_column(Integer, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=False), server_default=func.now())
 
     testing_run: Mapped[TestingRun] = relationship(back_populates="results")
+
+
+class HeatmapRun(Base):
+    """Cached CPU per-pixel reconstruction error heatmap for one testing image."""
+
+    __tablename__ = "heatmap_runs"
+    __table_args__ = (
+        UniqueConstraint("testing_run_id", "testing_result_id", name="uq_heatmap_result"),
+        Index("ix_heatmap_runs_created_at", "created_at"),
+        Index("ix_heatmap_runs_status", "status"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    testing_run_id: Mapped[int] = mapped_column(ForeignKey("testing_runs.id", ondelete="CASCADE"), nullable=False)
+    testing_result_id: Mapped[int] = mapped_column(
+        ForeignKey("testing_run_results.id", ondelete="CASCADE"), nullable=False
+    )
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="finished")
+    error_message: Mapped[str | None] = mapped_column(Text)
+    image_path: Mapped[str] = mapped_column(Text, nullable=False)
+    timestamp: Mapped[datetime] = mapped_column(DateTime(timezone=False), nullable=False)
+    width: Mapped[int] = mapped_column(Integer, nullable=False)
+    height: Mapped[int] = mapped_column(Integer, nullable=False)
+    channels: Mapped[int] = mapped_column(Integer, nullable=False)
+    dtype: Mapped[str] = mapped_column(String(64), nullable=False)
+    max_error: Mapped[float] = mapped_column(Float, nullable=False)
+    mean_error: Mapped[float] = mapped_column(Float, nullable=False)
+    max_x: Mapped[int] = mapped_column(Integer, nullable=False)
+    max_y: Mapped[int] = mapped_column(Integer, nullable=False)
+    source_image_data_url: Mapped[str] = mapped_column(Text, nullable=False)
+    heatmap_image_data_url: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=False), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=False), server_default=func.now(), onupdate=func.now()
+    )
+
+    testing_run: Mapped[TestingRun] = relationship()
+    testing_result: Mapped[TestingRunResult] = relationship()
 
 
 ModelConfiguration = MethodConfiguration

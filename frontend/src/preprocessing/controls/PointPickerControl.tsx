@@ -4,7 +4,7 @@ import { useEffect, useState } from 'react';
 import { defaultPoints, pointFromEvent, type Point } from './geometry';
 import type { StepControl, StepControlProps } from './types';
 
-function PointPickerControl({ inputImage, config, onChange }: StepControlProps) {
+function PointPickerControl({ inputImage, config, disabled, onChange }: StepControlProps) {
   const [draggingPoint, setDraggingPoint] = useState<number | null>(null);
   const points = (config.source_points as Point[] | undefined) ?? [];
 
@@ -17,6 +17,7 @@ function PointPickerControl({ inputImage, config, onChange }: StepControlProps) 
   }, [inputImage.node_id]);
 
   function updatePoint(index: number, point: Point) {
+    if (disabled) return;
     const next = points.length === 4 ? [...points] : defaultPoints(inputImage.width, inputImage.height);
     next[index] = point;
     onChange({ source_points: next });
@@ -30,7 +31,7 @@ function PointPickerControl({ inputImage, config, onChange }: StepControlProps) 
       <div
         className="warp-picker"
         onPointerMove={(event) => {
-          if (draggingPoint !== null) updatePoint(draggingPoint, pointFromEvent(event, inputImage));
+          if (!disabled && draggingPoint !== null) updatePoint(draggingPoint, pointFromEvent(event, inputImage));
         }}
         onPointerUp={() => setDraggingPoint(null)}
         onPointerLeave={() => setDraggingPoint(null)}
@@ -61,14 +62,17 @@ function PointPickerControl({ inputImage, config, onChange }: StepControlProps) 
               top: `${(point.y / inputImage.height) * 100}%`,
             }}
             onPointerDown={(event) => {
+              if (disabled) return;
               event.preventDefault();
               event.currentTarget.setPointerCapture(event.pointerId);
               setDraggingPoint(index);
             }}
             onPointerUp={(event) => {
+              if (disabled) return;
               event.currentTarget.releasePointerCapture(event.pointerId);
               setDraggingPoint(null);
             }}
+            disabled={disabled}
           >
             {index + 1}
           </button>

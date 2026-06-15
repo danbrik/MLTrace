@@ -7,6 +7,7 @@ import type { PreprocessingPreviewImage } from '../../types';
 export type StepControlProps = {
   inputImage: PreprocessingPreviewImage;
   config: Record<string, unknown>;
+  disabled?: boolean;
   onChange: (partial: Record<string, unknown>) => void;
 };
 

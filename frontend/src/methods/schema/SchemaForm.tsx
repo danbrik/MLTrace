@@ -27,6 +27,7 @@ function SchemaField({
   fieldKey,
   property,
   onChange,
+  disabled,
   fieldPrefix,
   onNumberDraftChange,
 }: {
@@ -34,6 +35,7 @@ function SchemaField({
   fieldKey: string;
   property: SchemaProperty;
   onChange: (key: string, value: unknown) => void;
+  disabled?: boolean;
   fieldPrefix?: string;
   onNumberDraftChange?: SchemaFormProps['onNumberDraftChange'];
 }) {
@@ -47,6 +49,7 @@ function SchemaField({
         label={label}
         data={property.enum}
         value={String(value)}
+        disabled={disabled}
         onChange={(next) => onChange(fieldKey, next ?? property.default)}
       />
     );
@@ -58,6 +61,7 @@ function SchemaField({
         key={fieldKey}
         label={label}
         checked={value === true}
+        disabled={disabled}
         onChange={(event) => onChange(fieldKey, event.currentTarget.checked)}
       />
     );
@@ -72,6 +76,7 @@ function SchemaField({
         max={property.maximum}
         integerOnly={property.type === 'integer'}
         value={typeof value === 'number' || typeof value === 'string' ? value : ''}
+        disabled={disabled}
         onCommit={(next) => onChange(fieldKey, next)}
         onDraftStateChange={(state) => onNumberDraftChange?.(`${fieldPrefix ?? 'schema'}.${fieldKey}`, state)}
       />
@@ -83,12 +88,13 @@ function SchemaField({
       key={fieldKey}
       label={label}
       value={String(value)}
+      disabled={disabled}
       onChange={(event) => onChange(fieldKey, event.currentTarget.value)}
     />
   );
 }
 
-export function SchemaForm({ title, schema, config, keys, onChange, fieldPrefix, onNumberDraftChange }: SchemaFormProps) {
+export function SchemaForm({ title, schema, config, keys, onChange, disabled, fieldPrefix, onNumberDraftChange }: SchemaFormProps) {
   const entries = Object.entries(schema?.properties ?? {}).filter(([key]) => !keys || keys.includes(key));
   const fields = entries.map(([key, property]) => (
     <SchemaField
@@ -97,6 +103,7 @@ export function SchemaForm({ title, schema, config, keys, onChange, fieldPrefix,
       fieldKey={key}
       property={property}
       onChange={onChange}
+      disabled={disabled}
       fieldPrefix={fieldPrefix}
       onNumberDraftChange={onNumberDraftChange}
     />

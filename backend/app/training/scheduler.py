@@ -1,26 +1,28 @@
-"""Background scheduler that runs queued training runs as GPU-pinned subprocesses.
+"""Background scheduler that runs queued jobs as GPU-pinned subprocesses.
 
-A single daemon thread (started from the FastAPI lifespan) polls the
-``training_runs`` table and, while fewer than ``max_concurrent_trainings`` runs
-are active, launches the next queued run as a detached
-``python -m app.training.worker <id>`` process with ``CUDA_VISIBLE_DEVICES``
-pinned to one free GPU index. stdout/stderr go to ``.mltrace/runs/<id>/worker.log``.
+A single daemon thread (started from the FastAPI lifespan) dispatches both
+**training** and **testing** jobs from the ``training_runs`` and ``testing_runs``
+tables. While fewer than ``max_concurrent_trainings`` jobs are active it launches
+the next queued job (across both kinds, oldest first) as a detached
+``python -m app.{training|testing}.worker <id>`` process with
+``CUDA_VISIBLE_DEVICES`` pinned to one free GPU index. stdout/stderr go to
+``.mltrace/{runs|testing_runs}/<id>/worker.log``.
 
-The training processes are independent of the API process: if uvicorn restarts,
+The worker processes are independent of the API process: if uvicorn restarts,
 in-flight workers keep running and the scheduler reconciles them on startup via
 the stored PIDs. Aborts are delivered as SIGTERM (the worker turns that into an
-``aborted`` status); queued runs are aborted directly in the DB.
+``aborted`` status); queued jobs are aborted directly in the DB.
 """
 
 from __future__ import annotations
 
 import logging
 import os
+import json
 import signal
 import subprocess
 import sys
 import threading
-import time
 from datetime import datetime
 from pathlib import Path
 
@@ -33,19 +35,75 @@ from app.database import SessionLocal, data_dir
 
 logger = logging.getLogger("mltrace.scheduler")
 
-# backend/ directory: cwd for the worker so `python -m app.training.worker` resolves.
+# backend/ directory: cwd for workers so `python -m app.*.worker` resolves.
 _BACKEND_DIR = Path(__file__).resolve().parents[2]
 _POLL_INTERVAL_SECONDS = 2.0
+
+# Per job-kind configuration: ORM model, worker module, and log/artifact subdir.
+_KINDS: dict[str, dict] = {
+    "train": {"model": models.TrainingRun, "module": "app.training.worker", "subdir": "runs"},
+    "test": {"model": models.TestingRun, "module": "app.testing.worker", "subdir": "testing_runs"},
+}
+
+
+def _settings_path() -> Path:
+    return data_dir() / "scheduler_settings.json"
+
+
+def detect_gpu_count() -> int:
+    try:
+        import torch
+
+        return int(torch.cuda.device_count()) if torch.cuda.is_available() else 0
+    except Exception:  # noqa: BLE001 - torch is optional and GPU discovery is best effort
+        return 0
+
+
+def get_scheduler_settings() -> dict:
+    detected = detect_gpu_count()
+    fallback_slots = max(1, get_settings().max_concurrent_trainings)
+    default_slots = max(1, min(fallback_slots, detected or fallback_slots))
+    raw: dict = {}
+    path = _settings_path()
+    if path.exists():
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:  # noqa: BLE001 - ignore corrupt local preference files
+            raw = {}
+    max_slots = int(raw.get("max_gpu_slots") or default_slots)
+    if detected > 0:
+        max_slots = min(max(1, max_slots), detected)
+    else:
+        max_slots = max(1, max_slots)
+    return {
+        "detected_gpu_count": detected,
+        "max_gpu_slots": max_slots,
+        "only_gpu": bool(raw.get("only_gpu", False)),
+    }
+
+
+def update_scheduler_settings(max_gpu_slots: int, only_gpu: bool) -> dict:
+    detected = detect_gpu_count()
+    slots = int(max_gpu_slots)
+    if detected > 0:
+        slots = min(max(1, slots), detected)
+    else:
+        slots = max(1, slots)
+    payload = {"max_gpu_slots": slots, "only_gpu": bool(only_gpu)}
+    path = _settings_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+    return {"detected_gpu_count": detected, **payload}
 
 
 def _worker_database_url(database_url: str) -> str:
     """Return a database URL that is safe to pass to worker subprocesses.
 
-    The API commonly runs from the repository root, but training workers are
-    launched with ``cwd=backend/`` so ``python -m app.training.worker`` can
-    import the app package. A relative SQLite URL would therefore point at a
-    different file in the child process. Resolve SQLite file paths before
-    spawning so API and worker always use the same database.
+    The API commonly runs from the repository root, but workers are launched
+    with ``cwd=backend/`` so ``python -m app.*.worker`` can import the app
+    package. A relative SQLite URL would therefore point at a different file in
+    the child process. Resolve SQLite file paths before spawning so API and
+    worker always use the same database.
     """
     url = make_url(database_url)
     if not url.drivername.startswith("sqlite") or not url.database or url.database == ":memory:":
@@ -69,9 +127,10 @@ def _pid_alive(pid: int | None) -> bool:
     return True
 
 
-class TrainingScheduler:
+class JobScheduler:
     def __init__(self) -> None:
-        self._processes: dict[int, subprocess.Popen] = {}  # run_id -> Popen
+        # Keyed by (kind, run_id).
+        self._processes: dict[tuple[str, int], subprocess.Popen] = {}
         self._lock = threading.Lock()
         self._thread: threading.Thread | None = None
         self._stop = threading.Event()
@@ -84,9 +143,9 @@ class TrainingScheduler:
             return
         self._reconcile_on_startup()
         self._stop.clear()
-        self._thread = threading.Thread(target=self._loop, name="training-scheduler", daemon=True)
+        self._thread = threading.Thread(target=self._loop, name="job-scheduler", daemon=True)
         self._thread.start()
-        logger.info("Training scheduler started (max_concurrent=%s)", get_settings().max_concurrent_trainings)
+        logger.info("Job scheduler started (%s)", get_scheduler_settings())
 
     def stop(self) -> None:
         self._stop.set()
@@ -98,10 +157,10 @@ class TrainingScheduler:
 
     # -- abort ---------------------------------------------------------------
 
-    def request_abort(self, run_id: int, pid: int | None) -> None:
+    def request_abort(self, kind: str, run_id: int, pid: int | None) -> None:
         """Signal a running worker to stop (SIGTERM). Safe across API restarts."""
         with self._lock:
-            proc = self._processes.get(run_id)
+            proc = self._processes.get((kind, run_id))
         if proc is not None and proc.poll() is None:
             proc.terminate()
             return
@@ -109,36 +168,57 @@ class TrainingScheduler:
             try:
                 os.kill(pid, signal.SIGTERM)
             except OSError:
-                logger.warning("Could not signal pid %s for run %s", pid, run_id)
+                logger.warning("Could not signal pid %s for %s run %s", pid, kind, run_id)
 
     # -- internal ------------------------------------------------------------
 
     def _reconcile_on_startup(self) -> None:
-        """After an API restart we lost the Popen handles. Mark runs whose worker
+        """After an API restart we lost the Popen handles. Mark jobs whose worker
         process is gone as failed; leave still-alive detached workers running."""
         db = SessionLocal()
         try:
-            running = list(db.scalars(select(models.TrainingRun).where(models.TrainingRun.status == "running")))
-            for run in running:
-                if not _pid_alive(run.pid):
-                    run.status = "failed"
-                    run.ended_at = datetime.utcnow()
-                    run.error_message = "Worker process was not running after a server restart."
+            for spec in _KINDS.values():
+                model = spec["model"]
+                for run in db.scalars(select(model).where(model.status == "running")):
+                    if not _pid_alive(run.pid):
+                        run.status = "failed"
+                        run.ended_at = datetime.utcnow()
+                        run.error_message = "Worker process was not running after a server restart."
             db.commit()
         finally:
             db.close()
 
     def _busy_gpus(self, db) -> set[int]:
-        rows = db.scalars(
-            select(models.TrainingRun.gpu_index).where(models.TrainingRun.status == "running")
-        )
-        return {index for index in rows if index is not None}
+        busy: set[int] = set()
+        for spec in _KINDS.values():
+            model = spec["model"]
+            for index in db.scalars(select(model.gpu_index).where(model.status == "running")):
+                if index is not None:
+                    busy.add(index)
+        return busy
 
     def _free_gpu(self, busy: set[int], limit: int) -> int | None:
         for index in range(limit):
             if index not in busy:
                 return index
         return None
+
+    def _active_count(self, db) -> int:
+        total = 0
+        for spec in _KINDS.values():
+            model = spec["model"]
+            total += len(db.scalars(select(model.id).where(model.status == "running")).all())
+        return total
+
+    def _queued_jobs(self, db) -> list[tuple[str, object]]:
+        """All queued jobs across kinds, oldest first (by enqueued_at then id)."""
+        jobs: list[tuple] = []
+        for kind, spec in _KINDS.items():
+            model = spec["model"]
+            for run in db.scalars(select(model).where(model.status == "queued")):
+                jobs.append((run.enqueued_at or datetime.min, run.id, kind, run))
+        jobs.sort(key=lambda item: (item[0], item[1]))
+        return [(kind, run) for _, _, kind, run in jobs]
 
     def _loop(self) -> None:
         while not self._stop.is_set():
@@ -150,60 +230,63 @@ class TrainingScheduler:
             self._wake.clear()
 
     def _tick(self) -> None:
-        limit = max(1, get_settings().max_concurrent_trainings)
+        scheduler_settings = get_scheduler_settings()
+        detected_gpus = int(scheduler_settings["detected_gpu_count"])
+        only_gpu = bool(scheduler_settings["only_gpu"])
+        limit = max(1, int(scheduler_settings["max_gpu_slots"]))
         db = SessionLocal()
         try:
             # Reap finished processes; mark crashed workers (no terminal status) failed.
             with self._lock:
-                finished_ids = [rid for rid, proc in self._processes.items() if proc.poll() is not None]
-                for rid in finished_ids:
-                    self._processes.pop(rid, None)
-            for rid in finished_ids:
-                run = db.get(models.TrainingRun, rid)
+                finished = [key for key, proc in self._processes.items() if proc.poll() is not None]
+                for key in finished:
+                    self._processes.pop(key, None)
+            for kind, run_id in finished:
+                model = _KINDS[kind]["model"]
+                run = db.get(model, run_id)
                 if run is not None and run.status == "running":
                     run.status = "failed"
                     run.ended_at = datetime.utcnow()
                     run.error_message = run.error_message or "Worker exited without reporting a result."
-            if finished_ids:
+            if finished:
                 db.commit()
 
             busy = self._busy_gpus(db)
-            active = len(busy)
+            active = self._active_count(db)
             if active >= limit:
                 return
+            if only_gpu and detected_gpus <= 0:
+                return
 
-            queued = list(
-                db.scalars(
-                    select(models.TrainingRun)
-                    .where(models.TrainingRun.status == "queued")
-                    .order_by(models.TrainingRun.enqueued_at.asc(), models.TrainingRun.id.asc())
-                )
-            )
-            for run in queued:
+            gpu_limit = min(limit, detected_gpus) if detected_gpus > 0 else 0
+
+            for kind, run in self._queued_jobs(db):
                 if active >= limit:
                     break
-                gpu = self._free_gpu(busy, limit)
-                if gpu is None:
+                gpu = self._free_gpu(busy, gpu_limit) if gpu_limit > 0 else None
+                if gpu is None and (only_gpu or detected_gpus > 0):
                     break
-                self._launch(db, run, gpu)
-                busy.add(gpu)
+                self._launch(db, kind, run, gpu)
+                if gpu is not None:
+                    busy.add(gpu)
                 active += 1
         finally:
             db.close()
 
-    def _launch(self, db, run: models.TrainingRun, gpu_index: int) -> None:
-        artifact_dir = data_dir() / "runs" / str(run.id)
+    def _launch(self, db, kind: str, run, gpu_index: int | None) -> None:
+        spec = _KINDS[kind]
+        artifact_dir = data_dir() / spec["subdir"] / str(run.id)
         artifact_dir.mkdir(parents=True, exist_ok=True)
         log_path = artifact_dir / "worker.log"
 
         env = os.environ.copy()
-        env["CUDA_VISIBLE_DEVICES"] = str(gpu_index)
+        env["CUDA_VISIBLE_DEVICES"] = "" if gpu_index is None else str(gpu_index)
         env["DATABASE_URL"] = _worker_database_url(get_settings().database_url)
 
         log_file = open(log_path, "a", encoding="utf-8")  # noqa: SIM115 - handed to the child process
         try:
             proc = subprocess.Popen(
-                [sys.executable, "-m", "app.training.worker", str(run.id)],
+                [sys.executable, "-m", spec["module"], str(run.id)],
                 cwd=str(_BACKEND_DIR),
                 env=env,
                 stdout=log_file,
@@ -222,8 +305,8 @@ class TrainingScheduler:
         db.commit()
 
         with self._lock:
-            self._processes[run.id] = proc
-        logger.info("Launched training run %s on GPU %s (pid %s)", run.id, gpu_index, proc.pid)
+            self._processes[(kind, run.id)] = proc
+        logger.info("Launched %s run %s on %s (pid %s)", kind, run.id, f"GPU {gpu_index}" if gpu_index is not None else "CPU", proc.pid)
 
 
-scheduler = TrainingScheduler()
+scheduler = JobScheduler()

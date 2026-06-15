@@ -23,7 +23,7 @@ import {
 } from '@mantine/core';
 import { useDebouncedValue } from '@mantine/hooks';
 import { notifications } from '@mantine/notifications';
-import { ArrowDown, ArrowUp, Eye, Info, Plus, Save, Settings2, Trash2, Upload } from 'lucide-react';
+import { ArrowDown, ArrowUp, Eye, Info, Pencil, Plus, Save, Settings2, Trash2, Upload } from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
 import type { ReactNode } from 'react';
 
@@ -166,6 +166,7 @@ export function PreprocessingPipelinesPage() {
   const [sourceImage, setSourceImage] = useState<PreprocessingPreviewImage | null>(null);
   const [sourceLoading, setSourceLoading] = useState(false);
   const [loadedPipelineId, setLoadedPipelineId] = useState<number | null>(null);
+  const [isEditingLoadedPipeline, setIsEditingLoadedPipeline] = useState(true);
   const [designResolution, setDesignResolution] = useState<PipelineDesignResolution>(EMPTY_DESIGN_RESOLUTION);
   const [previewError, setPreviewError] = useState<string | null>(null);
   const [nodes, setNodes] = useState<PipelineNode[]>([
@@ -238,6 +239,8 @@ export function PreprocessingPipelinesPage() {
     return pipelines.some((pipeline) => pipeline.name.trim().toLowerCase() === trimmed);
   }, [name, pipelines]);
 
+  const loadedReadOnly = loadedPipelineId != null && !isEditingLoadedPipeline;
+
   // The image that flows INTO a step is the output of the preceding step. For the
   // first real step (index 1) the loaded source image is that output and is always
   // available immediately; deeper steps require a full pipeline preview to exist.
@@ -255,6 +258,7 @@ export function PreprocessingPipelinesPage() {
   }
 
   function updateNodeConfig(nodeIdToUpdate: string, key: string, value: unknown, markStale = true) {
+    if (loadedReadOnly) return;
     setNodes((current) =>
       current.map((node) =>
         node.id === nodeIdToUpdate
@@ -266,6 +270,7 @@ export function PreprocessingPipelinesPage() {
   }
 
   function updateNodeConfigMany(nodeIdToUpdate: string, partial: Record<string, unknown>, markStale = true) {
+    if (loadedReadOnly) return;
     setNodes((current) =>
       current.map((node) =>
         node.id === nodeIdToUpdate
@@ -298,6 +303,7 @@ export function PreprocessingPipelinesPage() {
   }
 
   function addStep(step: PreprocessingStepDefinition) {
+    if (loadedReadOnly) return;
     if (step.type === 'load_image' && nodes.some((node) => node.data.stepType === 'load_image')) {
       notifications.show({ color: 'yellow', title: 'Only one load_image step is allowed', message: '' });
       return;
@@ -329,6 +335,7 @@ export function PreprocessingPipelinesPage() {
   }
 
   function removeNode(nodeIdToRemove: string) {
+    if (loadedReadOnly) return;
     const node = nodes.find((item) => item.id === nodeIdToRemove);
     if (!node || node.data.stepType === 'load_image') return;
     const nextNodes = nodes.filter((item) => item.id !== nodeIdToRemove);
@@ -338,6 +345,7 @@ export function PreprocessingPipelinesPage() {
   }
 
   function moveNode(nodeIdToMove: string, direction: -1 | 1) {
+    if (loadedReadOnly) return;
     const index = nodes.findIndex((node) => node.id === nodeIdToMove);
     if (index < 0) return;
     const nextIndex = index + direction;
@@ -428,6 +436,7 @@ export function PreprocessingPipelinesPage() {
     setPreviewStale(false);
     setPreviewError(null);
     setLoadedPipelineId(pipeline.id);
+    setIsEditingLoadedPipeline(false);
     setSelectedFolderId(pipeline.preview_folder_id ? String(pipeline.preview_folder_id) : null);
     setDesignResolution({
       input_width: pipeline.input_width,
@@ -457,6 +466,7 @@ export function PreprocessingPipelinesPage() {
       const created = await createPreprocessingPipeline(payload);
       await refresh();
       setLoadedPipelineId(created.id);
+      setIsEditingLoadedPipeline(false);
       setNameTouched(true);
       setDesignResolution({
         input_width: created.input_width,
@@ -484,6 +494,7 @@ export function PreprocessingPipelinesPage() {
     try {
       const updated = await updatePreprocessingPipeline(loadedPipelineId, payload);
       await refresh();
+      setIsEditingLoadedPipeline(false);
       setDesignResolution({
         input_width: updated.input_width,
         input_height: updated.input_height,
@@ -553,6 +564,10 @@ export function PreprocessingPipelinesPage() {
     try {
       await deletePreprocessingPipeline(pipeline.id);
       await refresh();
+      if (loadedPipelineId === pipeline.id) {
+        setLoadedPipelineId(null);
+        setIsEditingLoadedPipeline(true);
+      }
       notifications.show({ color: 'green', title: 'Pipeline deleted', message: pipeline.name });
     } catch (error) {
       notifications.show({
@@ -575,6 +590,7 @@ export function PreprocessingPipelinesPage() {
   }, [selectedFolderId]);
 
   useEffect(() => {
+    if (loadedReadOnly) return;
     if (!sourceImage) return;
     const loadNode = nodes.find((node) => node.data.stepType === 'load_image');
     if (!loadNode || loadNode.data.config.lock_size !== undefined) return;
@@ -588,13 +604,14 @@ export function PreprocessingPipelinesPage() {
       true,
     );
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sourceImage]);
+  }, [sourceImage, loadedReadOnly]);
 
   useEffect(() => {
+    if (loadedReadOnly) return;
     if (!selectedFolderOption) return;
     seedLoadImageFromFolder(selectedFolderOption.folder);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedFolderOption?.value]);
+  }, [selectedFolderOption?.value, loadedReadOnly]);
 
   // Keep the full-pipeline preview in sync automatically (debounced) so every block's
   // input image (the previous step's output) always reflects the current configuration.
@@ -632,6 +649,7 @@ export function PreprocessingPipelinesPage() {
         <Control
           inputImage={inputImage}
           config={node.data.config}
+          disabled={loadedReadOnly}
           onChange={(partial) => updateNodeConfigMany(node.id, partial)}
         />
       );
@@ -691,6 +709,7 @@ export function PreprocessingPipelinesPage() {
           label={property.label ?? key}
           data={property.enum}
           value={String(value)}
+          disabled={loadedReadOnly}
           onChange={(next) => updateNodeConfig(node.id, key, next ?? property.default)}
         />
       );
@@ -704,6 +723,7 @@ export function PreprocessingPipelinesPage() {
           min={property.minimum}
           max={property.maximum}
           value={typeof value === 'number' ? value : Number(value)}
+          disabled={loadedReadOnly}
           onChange={(next) => updateNodeConfig(node.id, key, typeof next === 'number' ? next : property.default)}
         />
       );
@@ -714,6 +734,7 @@ export function PreprocessingPipelinesPage() {
         key={key}
         label={property.label ?? key}
         value={String(value)}
+        disabled={loadedReadOnly}
         onChange={(event) => updateNodeConfig(node.id, key, event.currentTarget.value)}
       />
     );
@@ -741,7 +762,7 @@ export function PreprocessingPipelinesPage() {
           </div>
           <Switch
             checked={lockEnabled}
-            disabled={!sourceImage}
+            disabled={loadedReadOnly || !sourceImage}
             onChange={(event) => {
               const checked = event.currentTarget.checked;
               if (checked && sourceImage) {
@@ -780,6 +801,14 @@ export function PreprocessingPipelinesPage() {
   }
 
   function renderSaveButtons() {
+    if (loadedReadOnly) {
+      return (
+        <Button leftSection={<Pencil size={18} />} onClick={() => setIsEditingLoadedPipeline(true)}>
+          Edit pipeline
+        </Button>
+      );
+    }
+
     const createDisabled = !name.trim() || createNameClash || !canStoreDesignResolution;
     if (loadedPipelineId != null) {
       return (
@@ -819,8 +848,9 @@ export function PreprocessingPipelinesPage() {
           <Group grow align="flex-end">
             <TextInput
               label="Pipeline name"
-              description={loadedPipelineId != null ? 'Editing a saved pipeline.' : undefined}
+              description={loadedReadOnly ? 'Loaded read-only.' : loadedPipelineId != null ? 'Editing a saved pipeline.' : undefined}
               value={name}
+              disabled={loadedReadOnly}
               onChange={(event) => {
                 setNameTouched(true);
                 setName(event.currentTarget.value);
@@ -848,6 +878,7 @@ export function PreprocessingPipelinesPage() {
               placeholder="Select a dataset folder"
               data={folderOptions.map((option) => ({ value: option.value, label: option.label }))}
               value={selectedFolderId}
+              disabled={loadedReadOnly}
               onChange={(value) => {
                 setSelectedFolderId(value);
                 setSourceImage(null);
@@ -888,7 +919,12 @@ export function PreprocessingPipelinesPage() {
               {designMismatchMessage}
             </Alert>
           )}
-          <Textarea label="Description" value={description} onChange={(event) => setDescription(event.currentTarget.value)} />
+          <Textarea label="Description" value={description} disabled={loadedReadOnly} onChange={(event) => setDescription(event.currentTarget.value)} />
+          {loadedReadOnly && (
+            <Alert color="blue" title="Loaded read-only">
+              Click Edit pipeline before changing this saved preprocessing pipeline.
+            </Alert>
+          )}
           <Group justify="flex-end">
             <Button leftSection={<Eye size={18} />} variant="light" onClick={handlePreview} loading={loading} disabled={!selectedFolderId}>
               Preview
@@ -921,7 +957,7 @@ export function PreprocessingPipelinesPage() {
                       variant="light"
                       onClick={() => addStep(step)}
                       aria-label={`Add ${step.label}`}
-                      disabled={!selectedFolderId}
+                      disabled={loadedReadOnly || !selectedFolderId}
                     >
                       <Plus size={16} />
                     </ActionIcon>
@@ -963,12 +999,12 @@ export function PreprocessingPipelinesPage() {
                           </div>
                         </Group>
                         <Group gap={4}>
-                          <ActionIcon variant="subtle" disabled={!selectedFolderId || index <= 1} onClick={() => moveNode(node.id, -1)}>
+                          <ActionIcon variant="subtle" disabled={loadedReadOnly || !selectedFolderId || index <= 1} onClick={() => moveNode(node.id, -1)}>
                             <ArrowUp size={16} />
                           </ActionIcon>
                           <ActionIcon
                             variant="subtle"
-                            disabled={!selectedFolderId || index === 0 || index === nodes.length - 1}
+                            disabled={loadedReadOnly || !selectedFolderId || index === 0 || index === nodes.length - 1}
                             onClick={() => moveNode(node.id, 1)}
                           >
                             <ArrowDown size={16} />
@@ -976,7 +1012,7 @@ export function PreprocessingPipelinesPage() {
                           <ActionIcon
                             variant="subtle"
                             color="red"
-                            disabled={!selectedFolderId || node.data.stepType === 'load_image'}
+                            disabled={loadedReadOnly || !selectedFolderId || node.data.stepType === 'load_image'}
                             onClick={() => removeNode(node.id)}
                           >
                             <Trash2 size={16} />

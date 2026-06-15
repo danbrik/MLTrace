@@ -474,6 +474,10 @@ export type RoiDefinition = {
   y: number;
   width: number;
   height: number;
+  geometry_type: string;
+  points: Array<{ x: number; y: number }> | null;
+  tile_rows: number;
+  tile_cols: number;
   created_at: string;
   updated_at: string;
 };
@@ -487,6 +491,10 @@ export type RoiDefinitionPayload = {
   y: number;
   width: number;
   height: number;
+  geometry_type?: string;
+  points?: Array<{ x: number; y: number }> | null;
+  tile_rows?: number;
+  tile_cols?: number;
 };
 
 export type RoiPreview = {
@@ -502,7 +510,7 @@ export type RoiPreview = {
   image_data_url: string;
 };
 
-export type TestingRunStatus = 'running' | 'finished' | 'failed';
+export type TestingRunStatus = 'queued' | 'running' | 'finished' | 'failed' | 'aborted';
 
 export type TestingRun = {
   id: number;
@@ -511,9 +519,12 @@ export type TestingRun = {
   training_dataset_id: number;
   roi_id: number | null;
   status: TestingRunStatus | string;
+  enqueued_at: string | null;
   started_at: string | null;
   ended_at: string | null;
   duration_seconds: number | null;
+  gpu_index: number | null;
+  device: string | null;
   error_message: string | null;
   image_count: number | null;
   score_mean: number | null;
@@ -546,6 +557,7 @@ export type TestingRunResult = {
   score: number;
   full_mse: number;
   roi_mse: number | null;
+  tile_scores: Array<Record<string, unknown>> | null;
   width: number;
   height: number;
 };
@@ -553,6 +565,46 @@ export type TestingRunResult = {
 export type TestingRunResults = {
   testing_run: TestingRun;
   results: TestingRunResult[];
+};
+
+export type TestingRunResultImage = {
+  testing_run_id: number;
+  result_id: number;
+  image_path: string;
+  timestamp: string;
+  width: number;
+  height: number;
+  channels: number;
+  dtype: string;
+  image_data_url: string;
+};
+
+export type HeatmapRun = {
+  id: number;
+  testing_run_id: number;
+  testing_result_id: number;
+  status: string;
+  error_message: string | null;
+  image_path: string;
+  timestamp: string;
+  width: number;
+  height: number;
+  channels: number;
+  dtype: string;
+  max_error: number;
+  mean_error: number;
+  max_x: number;
+  max_y: number;
+  source_image_data_url: string;
+  heatmap_image_data_url: string;
+  created_at: string;
+  updated_at: string;
+};
+
+export type SchedulerSettings = {
+  detected_gpu_count: number;
+  max_gpu_slots: number;
+  only_gpu: boolean;
 };
 
 export type ModelArchitecture = MethodDefinition;

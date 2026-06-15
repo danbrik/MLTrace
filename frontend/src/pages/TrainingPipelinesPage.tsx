@@ -11,17 +11,20 @@ import {
   Title,
 } from '@mantine/core';
 import { notifications } from '@mantine/notifications';
-import { RotateCcw, Save } from 'lucide-react';
+import { Pencil, Rocket, RotateCcw, Save } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 
 import {
+  ApiError,
   createTrainingPipeline,
   deleteTrainingPipeline,
+  enqueueTrainingRun,
   listMethodConfigurations,
   listMethodDefinitions,
   listPreprocessingPipelines,
   listTrainingDatasets,
   listTrainingPipelines,
+  resolveDuplicateTrainingPipeline,
   updateTrainingPipeline,
 } from '../api';
 import { SchemaForm } from '../methods/schema/SchemaForm';
@@ -54,7 +57,13 @@ function nextAvailablePipelineName(pipelines: TrainingPipeline[]): string {
   return `${base} ${Date.now()}`;
 }
 
-export function TrainingPipelinesPage({ active = true }: { active?: boolean }) {
+export function TrainingPipelinesPage({
+  active = true,
+  onRunQueued,
+}: {
+  active?: boolean;
+  onRunQueued?: () => void;
+}) {
   const [trainingDatasets, setTrainingDatasets] = useState<TrainingDataset[]>([]);
   const [preprocessingPipelines, setPreprocessingPipelines] = useState<PreprocessingPipeline[]>([]);
   const [configurations, setConfigurations] = useState<MethodConfiguration[]>([]);
@@ -70,7 +79,9 @@ export function TrainingPipelinesPage({ active = true }: { active?: boolean }) {
   const [shuffle, setShuffle] = useState(true);
   const [trainingParameters, setTrainingParameters] = useState<Record<string, unknown>>({});
   const [loadedPipelineId, setLoadedPipelineId] = useState<number | null>(null);
+  const [isEditingLoadedPipeline, setIsEditingLoadedPipeline] = useState(true);
   const [loading, setLoading] = useState(false);
+  const [running, setRunning] = useState(false);
   const [numericDrafts, setNumericDrafts] = useState<Record<string, NumericDraftState>>({});
 
   async function refresh() {
@@ -212,6 +223,7 @@ export function TrainingPipelinesPage({ active = true }: { active?: boolean }) {
 
   function loadPipelineIntoBuilder(pipeline: TrainingPipeline) {
     setLoadedPipelineId(pipeline.id);
+    setIsEditingLoadedPipeline(false);
     setName(pipeline.name);
     setNameTouched(true);
     setDescription(pipeline.description ?? '');
@@ -230,6 +242,7 @@ export function TrainingPipelinesPage({ active = true }: { active?: boolean }) {
 
   function handleReset() {
     setLoadedPipelineId(null);
+    setIsEditingLoadedPipeline(true);
     setNameTouched(false);
     setName(nextAvailablePipelineName(pipelines));
     setDescription('');
@@ -241,16 +254,18 @@ export function TrainingPipelinesPage({ active = true }: { active?: boolean }) {
     setNumericDrafts({});
   }
 
+  function hasInvalidDrafts(): boolean {
+    if (invalidNumericDrafts.length === 0) return false;
+    notifications.show({
+      color: 'red',
+      title: 'Fix numeric inputs first',
+      message: invalidNumericDrafts[0][1].message ?? 'One numeric input has an invalid draft value.',
+    });
+    return true;
+  }
+
   async function handleSave(asNew: boolean) {
-    if (!payload) return;
-    if (invalidNumericDrafts.length > 0) {
-      notifications.show({
-        color: 'red',
-        title: 'Fix numeric inputs before saving',
-        message: invalidNumericDrafts[0][1].message ?? 'One numeric input has an invalid draft value.',
-      });
-      return;
-    }
+    if (!payload || hasInvalidDrafts()) return;
     setLoading(true);
     try {
       const savePayload = { ...payload, name: name.trim(), description };
@@ -266,13 +281,54 @@ export function TrainingPipelinesPage({ active = true }: { active?: boolean }) {
         message: saved.name,
       });
     } catch (error) {
+      // 409 duplicate: name the existing pipeline (config-based, ignores name).
+      if (error instanceof ApiError && error.status === 409) {
+        notifications.show({ color: 'orange', title: 'Duplicate configuration', message: error.message });
+      } else {
+        notifications.show({
+          color: 'red',
+          title: 'Save failed',
+          message: error instanceof Error ? error.message : 'Unknown error',
+        });
+      }
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  // "Run" = ensure a pipeline exists for the current configuration (reusing an
+  // identical one if present, never creating a duplicate), then queue a run.
+  async function handleRun() {
+    if (!payload || hasInvalidDrafts()) return;
+    setRunning(true);
+    try {
+      const { existing_pipeline } = await resolveDuplicateTrainingPipeline(payload);
+      let target = existing_pipeline;
+      if (target) {
+        if (target.id !== loadedPipelineId) {
+          loadPipelineIntoBuilder(target);
+          notifications.show({
+            color: 'blue',
+            title: 'Using existing pipeline',
+            message: `Identical configuration already saved as '${target.name}'.`,
+          });
+        }
+      } else {
+        target = await createTrainingPipeline({ ...payload, name: name.trim(), description });
+        await refresh();
+        loadPipelineIntoBuilder(target);
+      }
+      await enqueueTrainingRun(target.id);
+      notifications.show({ color: 'green', title: 'Training queued', message: target.name });
+      onRunQueued?.();
+    } catch (error) {
       notifications.show({
         color: 'red',
-        title: 'Save failed',
+        title: 'Run failed',
         message: error instanceof Error ? error.message : 'Unknown error',
       });
     } finally {
-      setLoading(false);
+      setRunning(false);
     }
   }
 
@@ -305,6 +361,7 @@ export function TrainingPipelinesPage({ active = true }: { active?: boolean }) {
   }, []);
 
   const saveDisabled = !payload || !name.trim() || nameClash || invalidNumericDrafts.length > 0;
+  const loadedReadOnly = loadedPipelineId != null && !isEditingLoadedPipeline;
 
   return (
     <Stack gap="lg">
@@ -322,31 +379,59 @@ export function TrainingPipelinesPage({ active = true }: { active?: boolean }) {
             <TextInput
               label="Training pipeline name"
               value={name}
+              disabled={loadedReadOnly}
               onChange={(event) => {
                 setNameTouched(true);
                 setName(event.currentTarget.value);
               }}
               error={nameClash ? 'A training pipeline with this name already exists.' : undefined}
             />
-            <Textarea label="Description" rows={1} value={description} onChange={(event) => setDescription(event.currentTarget.value)} />
+            <Textarea label="Description" rows={1} value={description} disabled={loadedReadOnly} onChange={(event) => setDescription(event.currentTarget.value)} />
           </Group>
+          {loadedReadOnly && (
+            <Alert color="blue" title="Loaded read-only">
+              Click Edit before changing this saved training pipeline. You can still run the loaded pipeline.
+            </Alert>
+          )}
           <Group justify="flex-end">
             <Button variant="default" leftSection={<RotateCcw size={18} />} onClick={handleReset}>
               Reset
             </Button>
-            {loadedPipelineId != null && (
-              <Button
-                variant="light"
-                leftSection={<Save size={18} />}
-                loading={loading}
-                disabled={saveDisabled}
-                onClick={() => handleSave(true)}
-              >
-                Save as New
+            {loadedReadOnly ? (
+              <Button leftSection={<Pencil size={18} />} onClick={() => setIsEditingLoadedPipeline(true)}>
+                Edit pipeline
               </Button>
+            ) : (
+              <>
+                {loadedPipelineId != null && (
+                  <Button
+                    variant="light"
+                    leftSection={<Save size={18} />}
+                    loading={loading}
+                    disabled={saveDisabled || running}
+                    onClick={() => handleSave(true)}
+                  >
+                    Save as New
+                  </Button>
+                )}
+                <Button
+                  variant="light"
+                  leftSection={<Save size={18} />}
+                  loading={loading}
+                  disabled={saveDisabled || running}
+                  onClick={() => handleSave(false)}
+                >
+                  {loadedPipelineId != null ? 'Update' : 'Save'}
+                </Button>
+              </>
             )}
-            <Button leftSection={<Save size={18} />} loading={loading} disabled={saveDisabled} onClick={() => handleSave(false)}>
-              {loadedPipelineId != null ? 'Update Training Pipeline' : 'Save Training Pipeline'}
+            <Button
+              leftSection={<Rocket size={18} />}
+              loading={running}
+              disabled={saveDisabled || loading}
+              onClick={handleRun}
+            >
+              Run
             </Button>
           </Group>
         </Stack>
@@ -356,12 +441,14 @@ export function TrainingPipelinesPage({ active = true }: { active?: boolean }) {
         trainingDatasets={trainingDatasets}
         selectedIds={selectedDatasetIds}
         onChange={setSelectedDatasetIds}
+        disabled={loadedReadOnly}
       />
       <PreprocessingPipelinePicker
         pipelines={preprocessingPipelines}
         selectedId={selectedPipelineId}
         onChange={setSelectedPipelineId}
         requiredInputResolutions={requiredInputResolutions}
+        disabled={loadedReadOnly}
       />
       <MethodConfigurationPicker
         configurations={configurations}
@@ -369,6 +456,7 @@ export function TrainingPipelinesPage({ active = true }: { active?: boolean }) {
         selectedId={selectedConfigurationId}
         onChange={handleConfigurationChange}
         requiredInputResolution={pipelineOutput}
+        disabled={loadedReadOnly}
       />
 
       <Paper withBorder p="md" radius="sm">
@@ -386,6 +474,7 @@ export function TrainingPipelinesPage({ active = true }: { active?: boolean }) {
             <SchemaForm
               schema={trainingSchema}
               config={trainingParameters}
+              disabled={loadedReadOnly}
               fieldPrefix="training"
               onChange={(key, value) => setTrainingParameters((current) => ({ ...current, [key]: value }))}
               onNumberDraftChange={handleNumberDraftChange}
@@ -394,6 +483,7 @@ export function TrainingPipelinesPage({ active = true }: { active?: boolean }) {
           <Switch
             label="Shuffle combined training sets during training"
             checked={shuffle}
+            disabled={loadedReadOnly}
             onChange={(event) => setShuffle(event.currentTarget.checked)}
           />
         </Stack>
@@ -420,7 +510,14 @@ export function TrainingPipelinesPage({ active = true }: { active?: boolean }) {
 
       <DryRunPanel payload={payload} disabled={!payload || invalidNumericDrafts.length > 0} />
 
-      <SavedTrainingPipelinesTable pipelines={pipelines} onLoad={handleLoadPipeline} onDelete={handleDelete} />
+      <SavedTrainingPipelinesTable
+        pipelines={pipelines}
+        trainingDatasets={trainingDatasets}
+        preprocessingPipelines={preprocessingPipelines}
+        methodConfigurations={configurations}
+        onLoad={handleLoadPipeline}
+        onDelete={handleDelete}
+      />
     </Stack>
   );
 }

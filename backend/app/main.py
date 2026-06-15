@@ -12,6 +12,8 @@ from app.schemas import (
     DatasetConnectionTestResponse,
     DatasetCreate,
     DatasetRead,
+    HeatmapRunCreate,
+    HeatmapRunRead,
     MethodConfigurationCreate,
     MethodConfigurationPayload,
     MethodConfigurationRead,
@@ -28,7 +30,10 @@ from app.schemas import (
     RoiDefinitionRead,
     RoiPreviewRequest,
     RoiPreviewResponse,
+    SchedulerSettingsRead,
+    SchedulerSettingsUpdate,
     TestingRunCreate,
+    TestingRunResultImageResponse,
     TestingRunRead,
     TestingRunResultsResponse,
     TimestampFormatConfirm,
@@ -39,16 +44,20 @@ from app.schemas import (
     TrainingPipelineCreate,
     TrainingPipelineDryRunRequest,
     TrainingPipelineDryRunResponse,
+    TrainingPipelineDuplicateResponse,
+    TrainingPipelinePayload,
     TrainingPipelineRead,
     TrainingRunEnqueueRequest,
     TrainingRunLogResponse,
     TrainingRunRead,
 )
 from app.testing import service as testing_service
+from app.testing.service import TestingConflict
 from app.training import service as training_service
-from app.training.scheduler import scheduler
+from app.training.scheduler import get_scheduler_settings, scheduler, update_scheduler_settings
 from app.training.service import RunConflict
 from app.services import (
+    DuplicatePipelineError,
     create_dataset,
     create_method_configuration,
     create_preprocessing_pipeline,
@@ -60,6 +69,7 @@ from app.services import (
     delete_training_dataset,
     delete_training_pipeline,
     dry_run_training_pipeline,
+    find_training_pipeline_by_signature,
     get_dataset_or_404,
     get_method_configuration,
     get_method_definition,
@@ -332,11 +342,29 @@ def create_app() -> FastAPI:
     def api_create_training_pipeline(payload: TrainingPipelineCreate, db: Session = Depends(get_db)):
         try:
             return create_training_pipeline(db, payload)
+        except DuplicatePipelineError as exc:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "message": str(exc),
+                    "existing_pipeline_id": exc.existing.id,
+                    "existing_name": exc.existing.name,
+                },
+            ) from exc
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         except IntegrityError as exc:
             db.rollback()
             raise HTTPException(status_code=409, detail="A training pipeline with this name already exists.") from exc
+
+    @app.post("/api/training-pipelines/resolve-duplicate", response_model=TrainingPipelineDuplicateResponse)
+    def api_resolve_duplicate_training_pipeline(payload: TrainingPipelinePayload, db: Session = Depends(get_db)):
+        try:
+            existing = find_training_pipeline_by_signature(db, payload)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        existing_read = get_training_pipeline(db, existing.id) if existing is not None else None
+        return TrainingPipelineDuplicateResponse(existing_pipeline=existing_read)
 
     @app.post("/api/training-pipelines/dry-run", response_model=TrainingPipelineDryRunResponse)
     def api_dry_run_training_pipeline(payload: TrainingPipelineDryRunRequest, db: Session = Depends(get_db)):
@@ -355,6 +383,15 @@ def create_app() -> FastAPI:
     ):
         try:
             updated = update_training_pipeline(db, pipeline_id, payload)
+        except DuplicatePipelineError as exc:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "message": str(exc),
+                    "existing_pipeline_id": exc.existing.id,
+                    "existing_name": exc.existing.name,
+                },
+            ) from exc
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         except IntegrityError as exc:
@@ -492,9 +529,18 @@ def create_app() -> FastAPI:
         return testing_service.list_testing_runs(db)
 
     @app.post("/api/testing-runs", response_model=TestingRunRead)
-    def api_create_testing_run(payload: TestingRunCreate, db: Session = Depends(get_db)):
+    def api_enqueue_testing_run(payload: TestingRunCreate, db: Session = Depends(get_db)):
         try:
-            return testing_service.create_testing_run(db, payload)
+            return testing_service.enqueue_testing_run(db, payload)
+        except TestingConflict as exc:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "message": str(exc),
+                    "existing_testing_run_id": exc.existing.id,
+                    "existing_name": exc.existing.name,
+                },
+            ) from exc
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -512,9 +558,76 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=404, detail="Testing run not found.")
         return response
 
+    @app.get(
+        "/api/testing-runs/{run_id}/results/{result_id}/image",
+        response_model=TestingRunResultImageResponse,
+    )
+    def api_get_testing_run_result_image(run_id: int, result_id: int, db: Session = Depends(get_db)):
+        try:
+            response = testing_service.get_testing_run_result_image(db, run_id, result_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        if response is None:
+            raise HTTPException(status_code=404, detail="Testing result not found.")
+        return response
+
+    @app.get("/api/heatmaps", response_model=list[HeatmapRunRead])
+    def api_list_heatmaps(db: Session = Depends(get_db)):
+        return testing_service.list_heatmap_runs(db)
+
+    @app.post("/api/heatmaps", response_model=HeatmapRunRead)
+    def api_create_heatmap(payload: HeatmapRunCreate, db: Session = Depends(get_db)):
+        try:
+            return testing_service.compute_heatmap_run(db, payload)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.delete("/api/heatmaps", status_code=204)
+    def api_clear_heatmaps(db: Session = Depends(get_db)):
+        testing_service.clear_heatmap_runs(db)
+        return None
+
+    @app.get("/api/scheduler/settings", response_model=SchedulerSettingsRead)
+    def api_get_scheduler_settings():
+        return get_scheduler_settings()
+
+    @app.put("/api/scheduler/settings", response_model=SchedulerSettingsRead)
+    def api_update_scheduler_settings(payload: SchedulerSettingsUpdate):
+        return update_scheduler_settings(payload.max_gpu_slots, payload.only_gpu)
+
+    @app.get("/api/testing-runs/{run_id}/log", response_model=TrainingRunLogResponse)
+    def api_get_testing_run_log(run_id: int, db: Session = Depends(get_db)):
+        log = testing_service.read_testing_log(db, run_id)
+        if log is None:
+            raise HTTPException(status_code=404, detail="Testing run not found.")
+        return TrainingRunLogResponse(log=log)
+
+    @app.post("/api/testing-runs/{run_id}/abort", response_model=TestingRunRead)
+    def api_abort_testing_run(run_id: int, db: Session = Depends(get_db)):
+        try:
+            run = testing_service.abort_testing_run(db, run_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        if run is None:
+            raise HTTPException(status_code=404, detail="Testing run not found.")
+        return run
+
+    @app.post("/api/testing-runs/{run_id}/restart", response_model=TestingRunRead)
+    def api_restart_testing_run(run_id: int, db: Session = Depends(get_db)):
+        try:
+            run = testing_service.restart_testing_run(db, run_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        if run is None:
+            raise HTTPException(status_code=404, detail="Testing run not found.")
+        return run
+
     @app.delete("/api/testing-runs/{run_id}", status_code=204)
     def api_delete_testing_run(run_id: int, db: Session = Depends(get_db)):
-        deleted = testing_service.delete_testing_run(db, run_id)
+        try:
+            deleted = testing_service.delete_testing_run(db, run_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
         if not deleted:
             raise HTTPException(status_code=404, detail="Testing run not found.")
         return None

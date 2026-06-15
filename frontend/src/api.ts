@@ -1,6 +1,7 @@
 import type {
   Dataset,
   DatasetConnectionTest,
+  HeatmapRun,
   MethodConfiguration,
   MethodConfigurationPayload,
   MethodConfigurationSavePayload,
@@ -15,7 +16,9 @@ import type {
   RoiDefinition,
   RoiDefinitionPayload,
   RoiPreview,
+  SchedulerSettings,
   TestingRun,
+  TestingRunResultImage,
   TestingRunResults,
   TrainingDataset,
   TrainingDatasetPreview,
@@ -29,6 +32,19 @@ import type {
 } from './types';
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? 'http://localhost:8000';
+
+/** Error carrying the HTTP status and the raw `detail` payload (string or object). */
+export class ApiError extends Error {
+  status: number;
+  detail: unknown;
+
+  constructor(message: string, status: number, detail: unknown) {
+    super(message);
+    this.name = 'ApiError';
+    this.status = status;
+    this.detail = detail;
+  }
+}
 
 async function request<T>(path: string, options?: RequestInit, timeoutMs?: number): Promise<T> {
   const controller = timeoutMs ? new AbortController() : null;
@@ -59,7 +75,16 @@ async function request<T>(path: string, options?: RequestInit, timeoutMs?: numbe
 
   if (!response.ok) {
     const body = await response.json().catch(() => undefined);
-    throw new Error(body?.detail ?? `Request failed with status ${response.status}`);
+    const detail = body?.detail;
+    // `detail` can be a string (most errors) or a structured object (e.g. the
+    // duplicate-pipeline 409 carrying the existing pipeline id).
+    const message =
+      typeof detail === 'string'
+        ? detail
+        : (detail && typeof detail === 'object' && 'message' in detail
+            ? String((detail as { message: unknown }).message)
+            : `Request failed with status ${response.status}`);
+    throw new ApiError(message, response.status, detail);
   }
 
   if (response.status === 204) {
@@ -314,6 +339,15 @@ export function dryRunTrainingPipeline(payload: TrainingPipelinePayload): Promis
   }, 120_000);
 }
 
+export function resolveDuplicateTrainingPipeline(
+  payload: TrainingPipelinePayload,
+): Promise<{ existing_pipeline: TrainingPipeline | null }> {
+  return request<{ existing_pipeline: TrainingPipeline | null }>('/api/training-pipelines/resolve-duplicate', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
+}
+
 export function listTrainingRuns(filters: TrainingRunFilters = {}): Promise<TrainingRun[]> {
   const params = new URLSearchParams();
   for (const [key, value] of Object.entries(filters)) {
@@ -378,7 +412,7 @@ export function listTestingRuns(): Promise<TestingRun[]> {
   return request<TestingRun[]>('/api/testing-runs');
 }
 
-export function createTestingRun(payload: {
+export function enqueueTestingRun(payload: {
   training_run_id: number;
   training_dataset_id: number;
   roi_id?: number | null;
@@ -387,11 +421,53 @@ export function createTestingRun(payload: {
   return request<TestingRun>('/api/testing-runs', {
     method: 'POST',
     body: JSON.stringify(payload),
-  }, 300_000);
+  });
 }
 
 export function getTestingRunResults(runId: number): Promise<TestingRunResults> {
   return request<TestingRunResults>(`/api/testing-runs/${runId}/results`);
+}
+
+export function getTestingRunResultImage(runId: number, resultId: number): Promise<TestingRunResultImage> {
+  return request<TestingRunResultImage>(`/api/testing-runs/${runId}/results/${resultId}/image`, undefined, 120_000);
+}
+
+export function listHeatmaps(): Promise<HeatmapRun[]> {
+  return request<HeatmapRun[]>('/api/heatmaps');
+}
+
+export function createHeatmap(payload: { testing_run_id: number; testing_result_id: number }): Promise<HeatmapRun> {
+  return request<HeatmapRun>('/api/heatmaps', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  }, 120_000);
+}
+
+export async function clearHeatmaps(): Promise<void> {
+  await request<void>('/api/heatmaps', { method: 'DELETE' });
+}
+
+export function getSchedulerSettings(): Promise<SchedulerSettings> {
+  return request<SchedulerSettings>('/api/scheduler/settings');
+}
+
+export function updateSchedulerSettings(payload: { max_gpu_slots: number; only_gpu: boolean }): Promise<SchedulerSettings> {
+  return request<SchedulerSettings>('/api/scheduler/settings', {
+    method: 'PUT',
+    body: JSON.stringify(payload),
+  });
+}
+
+export function getTestingRunLog(runId: number): Promise<{ log: string }> {
+  return request<{ log: string }>(`/api/testing-runs/${runId}/log`);
+}
+
+export function abortTestingRun(runId: number): Promise<TestingRun> {
+  return request<TestingRun>(`/api/testing-runs/${runId}/abort`, { method: 'POST' });
+}
+
+export function restartTestingRun(runId: number): Promise<TestingRun> {
+  return request<TestingRun>(`/api/testing-runs/${runId}/restart`, { method: 'POST' });
 }
 
 export async function deleteTestingRun(runId: number): Promise<void> {

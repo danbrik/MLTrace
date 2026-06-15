@@ -1,13 +1,26 @@
-import { AppShell, Box, Button, Group, Stack, Text, Title } from '@mantine/core';
-import { BrainCircuit, Database, FlaskConical, ListChecks, Rocket, Route, Workflow } from 'lucide-react';
+import { AppShell, Box, Button, Group, Stack, Text, Title, Tooltip, ActionIcon } from '@mantine/core';
+import {
+  BarChart3,
+  BrainCircuit,
+  CalendarClock,
+  Database,
+  FlaskConical,
+  ListChecks,
+  PanelLeftClose,
+  PanelLeftOpen,
+  Route,
+  Workflow,
+} from 'lucide-react';
 import { useState } from 'react';
+import type React from 'react';
 
+import { AnalysisPage } from './pages/AnalysisPage';
 import { DatasetsPage } from './pages/DatasetsPage';
 import { MethodsPage } from './pages/ModelsPage';
 import { PreprocessingPipelinesPage } from './pages/PreprocessingPipelinesPage';
+import { SchedulerPage } from './pages/SchedulerPage';
 import { TrainingDatasetsPage } from './pages/TrainingDatasetsPage';
 import { TrainingPipelinesPage } from './pages/TrainingPipelinesPage';
-import { TrainingRunsPage } from './pages/TrainingRunsPage';
 import { TestingRunsPage } from './pages/TestingRunsPage';
 
 type Page =
@@ -16,16 +29,29 @@ type Page =
   | 'preprocessing'
   | 'methods'
   | 'training-pipelines'
-  | 'training-runs'
-  | 'testing-runs';
+  | 'testing'
+  | 'analysis'
+  | 'scheduler';
 
 export function App() {
   const [page, setPage] = useState<Page>('datasets');
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+
+  const navItems: Array<{ id: Page; label: string; icon: React.ReactNode }> = [
+    { id: 'datasets', label: 'Datasets', icon: <Database size={18} /> },
+    { id: 'training-datasets', label: 'Train/Test Datasets', icon: <ListChecks size={18} /> },
+    { id: 'preprocessing', label: 'Preprocessing', icon: <Workflow size={18} /> },
+    { id: 'methods', label: 'Methods', icon: <BrainCircuit size={18} /> },
+    { id: 'training-pipelines', label: 'Training Pipelines', icon: <Route size={18} /> },
+    { id: 'testing', label: 'Inference', icon: <FlaskConical size={18} /> },
+    { id: 'analysis', label: 'Analysis', icon: <BarChart3 size={18} /> },
+    { id: 'scheduler', label: 'Scheduler', icon: <CalendarClock size={18} /> },
+  ];
 
   return (
     <AppShell
       header={{ height: 64 }}
-      navbar={{ width: 260, breakpoint: 0 }}
+      navbar={{ width: sidebarCollapsed ? 78 : 260, breakpoint: 0 }}
       padding="md"
     >
       <AppShell.Header>
@@ -41,62 +67,47 @@ export function App() {
 
       <AppShell.Navbar p="md">
         <Stack gap="xs">
-          <Button
-            leftSection={<Database size={18} />}
-            variant={page === 'datasets' ? 'filled' : 'subtle'}
-            justify="flex-start"
-            onClick={() => setPage('datasets')}
-          >
-            Datasets
-          </Button>
-          <Button
-            leftSection={<ListChecks size={18} />}
-            variant={page === 'training-datasets' ? 'filled' : 'subtle'}
-            justify="flex-start"
-            onClick={() => setPage('training-datasets')}
-          >
-            Train/Test Datasets
-          </Button>
-          <Button
-            leftSection={<Workflow size={18} />}
-            variant={page === 'preprocessing' ? 'filled' : 'subtle'}
-            justify="flex-start"
-            onClick={() => setPage('preprocessing')}
-          >
-            Preprocessing
-          </Button>
-          <Button
-            leftSection={<BrainCircuit size={18} />}
-            variant={page === 'methods' ? 'filled' : 'subtle'}
-            justify="flex-start"
-            onClick={() => setPage('methods')}
-          >
-            Methods
-          </Button>
-          <Button
-            leftSection={<Route size={18} />}
-            variant={page === 'training-pipelines' ? 'filled' : 'subtle'}
-            justify="flex-start"
-            onClick={() => setPage('training-pipelines')}
-          >
-            Training Pipelines
-          </Button>
-          <Button
-            leftSection={<Rocket size={18} />}
-            variant={page === 'training-runs' ? 'filled' : 'subtle'}
-            justify="flex-start"
-            onClick={() => setPage('training-runs')}
-          >
-            Training Runs
-          </Button>
-          <Button
-            leftSection={<FlaskConical size={18} />}
-            variant={page === 'testing-runs' ? 'filled' : 'subtle'}
-            justify="flex-start"
-            onClick={() => setPage('testing-runs')}
-          >
-            Testing Runs
-          </Button>
+          <Group justify={sidebarCollapsed ? 'center' : 'space-between'} mb="xs">
+            {!sidebarCollapsed && (
+              <Text size="xs" fw={700} c="dimmed" tt="uppercase">
+                Navigation
+              </Text>
+            )}
+            <Tooltip label={sidebarCollapsed ? 'Expand sidebar' : 'Collapse sidebar'} position="right">
+              <ActionIcon
+                variant="subtle"
+                aria-label={sidebarCollapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+                onClick={() => setSidebarCollapsed((current) => !current)}
+              >
+                {sidebarCollapsed ? <PanelLeftOpen size={18} /> : <PanelLeftClose size={18} />}
+              </ActionIcon>
+            </Tooltip>
+          </Group>
+          {navItems.map((item) =>
+            sidebarCollapsed ? (
+              <Tooltip key={item.id} label={item.label} position="right">
+                <ActionIcon
+                  size="lg"
+                  radius="sm"
+                  variant={page === item.id ? 'filled' : 'subtle'}
+                  aria-label={item.label}
+                  onClick={() => setPage(item.id)}
+                >
+                  {item.icon}
+                </ActionIcon>
+              </Tooltip>
+            ) : (
+              <Button
+                key={item.id}
+                leftSection={item.icon}
+                variant={page === item.id ? 'filled' : 'subtle'}
+                justify="flex-start"
+                onClick={() => setPage(item.id)}
+              >
+                {item.label}
+              </Button>
+            ),
+          )}
         </Stack>
       </AppShell.Navbar>
 
@@ -114,13 +125,16 @@ export function App() {
           <MethodsPage />
         </Box>
         <Box display={page === 'training-pipelines' ? 'block' : 'none'}>
-          <TrainingPipelinesPage active={page === 'training-pipelines'} />
+          <TrainingPipelinesPage active={page === 'training-pipelines'} onRunQueued={() => setPage('scheduler')} />
         </Box>
-        <Box display={page === 'training-runs' ? 'block' : 'none'}>
-          <TrainingRunsPage active={page === 'training-runs'} />
+        <Box display={page === 'testing' ? 'block' : 'none'}>
+          <TestingRunsPage active={page === 'testing'} onRunQueued={() => setPage('scheduler')} />
         </Box>
-        <Box display={page === 'testing-runs' ? 'block' : 'none'}>
-          <TestingRunsPage active={page === 'testing-runs'} />
+        <Box display={page === 'analysis' ? 'block' : 'none'}>
+          <AnalysisPage active={page === 'analysis'} />
+        </Box>
+        <Box display={page === 'scheduler' ? 'block' : 'none'}>
+          <SchedulerPage active={page === 'scheduler'} />
         </Box>
       </AppShell.Main>
     </AppShell>
