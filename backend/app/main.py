@@ -1,3 +1,5 @@
+from contextlib import asynccontextmanager
+
 from fastapi import Depends, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.exc import IntegrityError
@@ -31,7 +33,13 @@ from app.schemas import (
     TrainingPipelineDryRunRequest,
     TrainingPipelineDryRunResponse,
     TrainingPipelineRead,
+    TrainingRunEnqueueRequest,
+    TrainingRunLogResponse,
+    TrainingRunRead,
 )
+from app.training import service as training_service
+from app.training.scheduler import scheduler
+from app.training.service import RunConflict
 from app.services import (
     create_dataset,
     create_method_configuration,
@@ -70,9 +78,20 @@ from app.services import (
 )
 
 
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Start the background training scheduler with the API process. Detached
+    # worker subprocesses survive an API restart and are reconciled on startup.
+    scheduler.start()
+    try:
+        yield
+    finally:
+        scheduler.stop()
+
+
 def create_app() -> FastAPI:
     settings = get_settings()
-    app = FastAPI(title="MLTrace API", version="0.1.0")
+    app = FastAPI(title="MLTrace API", version="0.1.0", lifespan=lifespan)
     app.add_middleware(
         CORSMiddleware,
         allow_origins=settings.cors_origin_list,
@@ -339,9 +358,97 @@ def create_app() -> FastAPI:
 
     @app.delete("/api/training-pipelines/{pipeline_id}", status_code=204)
     def api_delete_training_pipeline(pipeline_id: int, db: Session = Depends(get_db)):
-        deleted = delete_training_pipeline(db, pipeline_id)
+        try:
+            deleted = delete_training_pipeline(db, pipeline_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
         if not deleted:
             raise HTTPException(status_code=404, detail="Training pipeline not found.")
+        return None
+
+    @app.post("/api/training-runs", response_model=TrainingRunRead)
+    def api_enqueue_training_run(payload: TrainingRunEnqueueRequest, db: Session = Depends(get_db)):
+        try:
+            return training_service.enqueue_training_run(db, payload.training_pipeline_id)
+        except RunConflict as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.get("/api/training-runs", response_model=list[TrainingRunRead])
+    def api_list_training_runs(
+        status: str | None = None,
+        method_type: str | None = None,
+        training_mode: str | None = None,
+        builder_kind: str | None = None,
+        search: str | None = None,
+        min_val_loss: float | None = None,
+        max_val_loss: float | None = None,
+        min_train_loss: float | None = None,
+        max_train_loss: float | None = None,
+        min_duration: float | None = None,
+        max_duration: float | None = None,
+        db: Session = Depends(get_db),
+    ):
+        return training_service.list_training_runs(
+            db,
+            status=status,
+            method_type=method_type,
+            training_mode=training_mode,
+            builder_kind=builder_kind,
+            search=search,
+            min_val_loss=min_val_loss,
+            max_val_loss=max_val_loss,
+            min_train_loss=min_train_loss,
+            max_train_loss=max_train_loss,
+            min_duration=min_duration,
+            max_duration=max_duration,
+        )
+
+    @app.get("/api/training-runs/{run_id}", response_model=TrainingRunRead)
+    def api_get_training_run(run_id: int, db: Session = Depends(get_db)):
+        run = training_service.get_training_run(db, run_id)
+        if run is None:
+            raise HTTPException(status_code=404, detail="Training run not found.")
+        return run
+
+    @app.get("/api/training-runs/{run_id}/log", response_model=TrainingRunLogResponse)
+    def api_get_training_run_log(run_id: int, db: Session = Depends(get_db)):
+        log = training_service.read_run_log(db, run_id)
+        if log is None:
+            raise HTTPException(status_code=404, detail="Training run not found.")
+        return TrainingRunLogResponse(log=log)
+
+    @app.post("/api/training-runs/{run_id}/abort", response_model=TrainingRunRead)
+    def api_abort_training_run(run_id: int, db: Session = Depends(get_db)):
+        try:
+            run = training_service.abort_training_run(db, run_id)
+        except RunConflict as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        if run is None:
+            raise HTTPException(status_code=404, detail="Training run not found.")
+        return run
+
+    @app.post("/api/training-runs/{run_id}/restart", response_model=TrainingRunRead)
+    def api_restart_training_run(run_id: int, db: Session = Depends(get_db)):
+        try:
+            run = training_service.restart_training_run(db, run_id)
+        except RunConflict as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        if run is None:
+            raise HTTPException(status_code=404, detail="Training run not found.")
+        return run
+
+    @app.delete("/api/training-runs/{run_id}", status_code=204)
+    def api_delete_training_run(run_id: int, db: Session = Depends(get_db)):
+        try:
+            deleted = training_service.delete_training_run(db, run_id)
+        except RunConflict as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        if not deleted:
+            raise HTTPException(status_code=404, detail="Training run not found.")
         return None
 
     # Temporary compatibility aliases for clients still calling the Phase 3 Models API.

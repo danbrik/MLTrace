@@ -348,6 +348,8 @@ export type TrainingPipeline = {
   training_parameters: Record<string, unknown>;
   preprocessing_pipeline_id: number;
   preprocessing_pipeline_name: string;
+  preprocessing_input_width: number | null;
+  preprocessing_input_height: number | null;
   preprocessing_output_width: number | null;
   preprocessing_output_height: number | null;
   method_configuration_id: number;
@@ -399,6 +401,61 @@ export type TrainingPipelineDryRun = {
   preprocessing_previews: PreprocessingPreviewImage[];
   model_output: TrainingPipelineModelOutput | null;
   note: string | null;
+};
+
+export type TrainingRunStatus = 'queued' | 'running' | 'finished' | 'failed' | 'aborted';
+
+export type TrainingRunMetric = {
+  epoch: number;
+  train_loss: number | null;
+  val_loss: number | null;
+};
+
+export type TrainingRun = {
+  id: number;
+  training_pipeline_id: number;
+  status: TrainingRunStatus;
+  enqueued_at: string | null;
+  started_at: string | null;
+  ended_at: string | null;
+  duration_seconds: number | null;
+  gpu_index: number | null;
+  device: string | null;
+  epochs_total: number | null;
+  epochs_completed: number;
+  train_loss: number | null;
+  val_loss: number | null;
+  best_val_loss: number | null;
+  image_count: number | null;
+  artifact_kind: string | null;
+  artifact_path: string | null;
+  artifact_size_bytes: number | null;
+  error_message: string | null;
+  training_pipeline_name: string;
+  method_type: string;
+  method_family: string;
+  training_mode: string;
+  builder_kind: string;
+  preprocessing_pipeline_name: string;
+  dataset_names: string[];
+  shuffle: boolean;
+  input_resolution: string | null;
+  epochs: number | null;
+  learning_rate: number | null;
+  training_parameters: Record<string, unknown>;
+  created_at: string;
+  updated_at: string;
+  metrics: TrainingRunMetric[];
+};
+
+export type TrainingRunFilters = {
+  status?: string | null;
+  method_type?: string | null;
+  training_mode?: string | null;
+  search?: string | null;
+  max_val_loss?: number | null;
+  max_train_loss?: number | null;
+  max_duration?: number | null;
 };
 
 export type ModelArchitecture = MethodDefinition;

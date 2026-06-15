@@ -19,6 +19,8 @@ import type {
   TrainingPipelineDryRun,
   TrainingPipelinePayload,
   TrainingPipelineSavePayload,
+  TrainingRun,
+  TrainingRunFilters,
 } from './types';
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? 'http://localhost:8000';
@@ -304,6 +306,44 @@ export function dryRunTrainingPipeline(payload: TrainingPipelinePayload): Promis
     method: 'POST',
     body: JSON.stringify(payload),
   }, 120_000);
+}
+
+export function listTrainingRuns(filters: TrainingRunFilters = {}): Promise<TrainingRun[]> {
+  const params = new URLSearchParams();
+  for (const [key, value] of Object.entries(filters)) {
+    if (value !== null && value !== undefined && value !== '') {
+      params.set(key, String(value));
+    }
+  }
+  const query = params.toString();
+  return request<TrainingRun[]>(`/api/training-runs${query ? `?${query}` : ''}`);
+}
+
+export function getTrainingRun(runId: number): Promise<TrainingRun> {
+  return request<TrainingRun>(`/api/training-runs/${runId}`);
+}
+
+export function getTrainingRunLog(runId: number): Promise<{ log: string }> {
+  return request<{ log: string }>(`/api/training-runs/${runId}/log`);
+}
+
+export function enqueueTrainingRun(trainingPipelineId: number): Promise<TrainingRun> {
+  return request<TrainingRun>('/api/training-runs', {
+    method: 'POST',
+    body: JSON.stringify({ training_pipeline_id: trainingPipelineId }),
+  });
+}
+
+export function abortTrainingRun(runId: number): Promise<TrainingRun> {
+  return request<TrainingRun>(`/api/training-runs/${runId}/abort`, { method: 'POST' });
+}
+
+export function restartTrainingRun(runId: number): Promise<TrainingRun> {
+  return request<TrainingRun>(`/api/training-runs/${runId}/restart`, { method: 'POST' });
+}
+
+export async function deleteTrainingRun(runId: number): Promise<void> {
+  await request<void>(`/api/training-runs/${runId}`, { method: 'DELETE' });
 }
 
 export const listModelArchitectures = listMethodDefinitions;

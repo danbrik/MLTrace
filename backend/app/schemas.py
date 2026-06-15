@@ -354,6 +354,8 @@ class TrainingPipelineRead(BaseModel):
     training_parameters: dict
     preprocessing_pipeline_id: int
     preprocessing_pipeline_name: str
+    preprocessing_input_width: int | None
+    preprocessing_input_height: int | None
     preprocessing_output_width: int | None
     preprocessing_output_height: int | None
     method_configuration_id: int
@@ -405,6 +407,58 @@ class TrainingPipelineDryRunResponse(BaseModel):
     preprocessing_previews: list[PreprocessingPreviewImage] = []
     model_output: TrainingPipelineModelOutput | None = None
     note: str | None = None
+
+
+class TrainingRunEnqueueRequest(BaseModel):
+    training_pipeline_id: int
+
+
+class TrainingRunMetricRead(BaseModel):
+    epoch: int
+    train_loss: float | None
+    val_loss: float | None
+
+
+class TrainingRunRead(BaseModel):
+    id: int
+    training_pipeline_id: int
+    status: str
+    enqueued_at: datetime | None
+    started_at: datetime | None
+    ended_at: datetime | None
+    duration_seconds: float | None
+    gpu_index: int | None
+    device: str | None
+    epochs_total: int | None
+    epochs_completed: int
+    train_loss: float | None
+    val_loss: float | None
+    best_val_loss: float | None
+    image_count: int | None
+    artifact_kind: str | None
+    artifact_path: str | None
+    artifact_size_bytes: int | None
+    error_message: str | None
+    # Denormalized pipeline snapshot (for display + filtering).
+    training_pipeline_name: str
+    method_type: str
+    method_family: str
+    training_mode: str
+    builder_kind: str
+    preprocessing_pipeline_name: str
+    dataset_names: list[str]
+    shuffle: bool
+    input_resolution: str | None
+    epochs: int | None
+    learning_rate: float | None
+    training_parameters: dict
+    created_at: datetime
+    updated_at: datetime
+    metrics: list[TrainingRunMetricRead] = []
+
+
+class TrainingRunLogResponse(BaseModel):
+    log: str
 
 
 ModelArchitectureRead = MethodDefinitionRead

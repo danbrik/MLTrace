@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from sqlalchemy import BigInteger, DateTime, ForeignKey, Index, Integer, String, Text, UniqueConstraint, func
+from sqlalchemy import BigInteger, DateTime, Float, ForeignKey, Index, Integer, String, Text, UniqueConstraint, func
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from sqlalchemy.types import JSON
@@ -248,6 +248,107 @@ class TrainingPipelineDataset(Base):
 
     training_pipeline: Mapped[TrainingPipeline] = relationship(back_populates="entries")
     training_dataset: Mapped[TrainingDataset] = relationship()
+
+
+class TrainingRun(Base):
+    """Execution state of a training pipeline: queue position, live status,
+    metrics, and the resulting artifact.
+
+    Exactly one run exists per training pipeline (UNIQUE training_pipeline_id) —
+    "restart" resets this row rather than creating history. Filterable pipeline
+    properties are denormalized onto the row so the runs overview can be queried
+    and sorted from a single indexed table without joins.
+    """
+
+    __tablename__ = "training_runs"
+    __table_args__ = (
+        UniqueConstraint("training_pipeline_id", name="uq_training_run_pipeline"),
+        Index("ix_training_runs_status", "status"),
+        Index("ix_training_runs_method_type", "method_type"),
+        Index("ix_training_runs_training_mode", "training_mode"),
+        Index("ix_training_runs_builder_kind", "builder_kind"),
+        Index("ix_training_runs_created_at", "created_at"),
+        Index("ix_training_runs_val_loss", "val_loss"),
+        Index("ix_training_runs_train_loss", "train_loss"),
+        Index("ix_training_runs_duration", "duration_seconds"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    training_pipeline_id: Mapped[int] = mapped_column(
+        ForeignKey("training_pipelines.id", ondelete="CASCADE"), nullable=False
+    )
+
+    # Execution lifecycle.
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="queued")
+    enqueued_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=False))
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=False))
+    ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=False))
+    duration_seconds: Mapped[float | None] = mapped_column(Float)
+    gpu_index: Mapped[int | None] = mapped_column(Integer)
+    # Actual compute device used by the worker ("CPU" or "GPU:<index>"), set at
+    # runtime — reflects the CPU fallback when no CUDA device is available.
+    device: Mapped[str | None] = mapped_column(String(32))
+    pid: Mapped[int | None] = mapped_column(Integer)
+    log_path: Mapped[str | None] = mapped_column(Text)
+    error_message: Mapped[str | None] = mapped_column(Text)
+
+    # Progress and metrics (train/val loss are null for fit-style methods).
+    epochs_total: Mapped[int | None] = mapped_column(Integer)
+    epochs_completed: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    train_loss: Mapped[float | None] = mapped_column(Float)
+    val_loss: Mapped[float | None] = mapped_column(Float)
+    best_val_loss: Mapped[float | None] = mapped_column(Float)
+    image_count: Mapped[int | None] = mapped_column(Integer)
+
+    # Artifact (model weights or mean image) written to disk.
+    artifact_kind: Mapped[str | None] = mapped_column(String(64))
+    artifact_path: Mapped[str | None] = mapped_column(Text)
+    artifact_size_bytes: Mapped[int | None] = mapped_column(BigInteger)
+
+    # Denormalized pipeline snapshot for single-table filtering / sorting.
+    training_pipeline_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    method_type: Mapped[str] = mapped_column(String(128), nullable=False)
+    method_family: Mapped[str] = mapped_column(String(128), nullable=False)
+    training_mode: Mapped[str] = mapped_column(String(64), nullable=False)
+    builder_kind: Mapped[str] = mapped_column(String(128), nullable=False)
+    preprocessing_pipeline_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    dataset_names: Mapped[list] = mapped_column(json_type(), nullable=False)
+    dataset_names_text: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    shuffle: Mapped[bool] = mapped_column(nullable=False, default=True)
+    input_resolution: Mapped[str | None] = mapped_column(String(32))
+    epochs: Mapped[int | None] = mapped_column(Integer)
+    learning_rate: Mapped[float | None] = mapped_column(Float)
+    training_parameters: Mapped[dict] = mapped_column(json_type(), nullable=False)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=False), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=False), server_default=func.now(), onupdate=func.now()
+    )
+
+    training_pipeline: Mapped[TrainingPipeline] = relationship()
+    metrics: Mapped[list["TrainingRunMetric"]] = relationship(
+        back_populates="training_run",
+        cascade="all, delete-orphan",
+        order_by="TrainingRunMetric.epoch",
+    )
+
+
+class TrainingRunMetric(Base):
+    """Per-epoch loss curve point for a gradient-trained run."""
+
+    __tablename__ = "training_run_metrics"
+    __table_args__ = (Index("ix_training_run_metrics_run_epoch", "training_run_id", "epoch"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    training_run_id: Mapped[int] = mapped_column(
+        ForeignKey("training_runs.id", ondelete="CASCADE"), nullable=False
+    )
+    epoch: Mapped[int] = mapped_column(Integer, nullable=False)
+    train_loss: Mapped[float | None] = mapped_column(Float)
+    val_loss: Mapped[float | None] = mapped_column(Float)
+    recorded_at: Mapped[datetime] = mapped_column(DateTime(timezone=False), server_default=func.now())
+
+    training_run: Mapped[TrainingRun] = relationship(back_populates="metrics")
 
 
 ModelConfiguration = MethodConfiguration

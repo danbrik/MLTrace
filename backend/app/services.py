@@ -1296,6 +1296,16 @@ def delete_training_pipeline(db: Session, pipeline_id: int) -> bool:
     pipeline = db.get(models.TrainingPipeline, pipeline_id)
     if pipeline is None:
         return False
+    active_run = db.scalar(
+        select(func.count(models.TrainingRun.id)).where(
+            models.TrainingRun.training_pipeline_id == pipeline_id,
+            models.TrainingRun.status.in_(["queued", "running"]),
+        )
+    ) or 0
+    if active_run:
+        raise ValueError(
+            "This training pipeline has a queued or running training run. Abort it before deleting the pipeline."
+        )
     db.delete(pipeline)
     db.commit()
     return True
@@ -1325,6 +1335,8 @@ def serialize_training_pipeline(db: Session, pipeline: models.TrainingPipeline) 
         training_parameters=pipeline.training_parameters,
         preprocessing_pipeline_id=pipeline.preprocessing_pipeline_id,
         preprocessing_pipeline_name=pipeline.preprocessing_pipeline.name,
+        preprocessing_input_width=pipeline.preprocessing_pipeline.input_width,
+        preprocessing_input_height=pipeline.preprocessing_pipeline.input_height,
         preprocessing_output_width=pipeline.preprocessing_pipeline.output_width,
         preprocessing_output_height=pipeline.preprocessing_pipeline.output_height,
         method_configuration_id=pipeline.method_configuration_id,

@@ -170,3 +170,21 @@ def execute_with_previews(
 def execute_preview(graph: PreprocessingGraph, source_image_path: str) -> list[PreprocessingPreviewImage]:
     previews, _ = execute_with_previews(graph, source_image_path)
     return previews
+
+
+def run_pipeline_array(graph: PreprocessingGraph, source_image_path: str) -> np.ndarray:
+    """Run the pipeline on one image and return only the final numpy array.
+
+    Used by training (which processes many images): unlike execute_with_previews
+    it skips the per-step PNG encoding, so it is much cheaper in a loop.
+    """
+    ordered_nodes = validate_linear_graph(graph)
+    context = {"source_image_path": source_image_path}
+    image: np.ndarray | None = None
+    for index, node in enumerate(ordered_nodes):
+        step = registry.get(node.type)
+        image = step.apply(image, node.config, context)
+        if index == 0:
+            context["source_shape"] = image.shape
+    assert image is not None  # validate_linear_graph guarantees the load_image node
+    return image
