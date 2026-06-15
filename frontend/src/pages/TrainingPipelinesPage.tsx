@@ -1,7 +1,6 @@
 import {
   Alert,
   Button,
-  Grid,
   Group,
   Paper,
   Stack,
@@ -28,6 +27,7 @@ import {
 import { SchemaForm } from '../methods/schema/SchemaForm';
 import type { NumericDraftState } from '../methods/types';
 import { schemaDefaults } from '../methods/utils';
+import { datasetSizeSignature, pipelineOutputResolution } from '../training/graph';
 import { DryRunPanel } from '../training/DryRunPanel';
 import { MethodConfigurationPicker } from '../training/MethodConfigurationPicker';
 import { PreprocessingPipelinePicker } from '../training/PreprocessingPipelinePicker';
@@ -135,6 +135,28 @@ export function TrainingPipelinesPage({ active = true }: { active?: boolean }) {
 
   const trainingSchema = selectedDefinition?.training_schema;
   const hasTrainingParameters = Object.keys(trainingSchema?.properties ?? {}).length > 0;
+
+  // Cross-filter constraints propagated down the size chain:
+  //   dataset image size -> pipeline input size -> (pipeline output -> method input).
+  const requiredInputResolutions = useMemo(
+    () => datasetSizeSignature(selectedDatasetIds, datasetById),
+    [selectedDatasetIds, datasetById],
+  );
+  const pipelineOutput = selectedPipeline ? pipelineOutputResolution(selectedPipeline) : null;
+
+  // Pre-flight warning: selected dataset image size vs. preprocessing input size.
+  const datasetInputMismatch = useMemo(() => {
+    if (!selectedPipeline || !requiredInputResolutions) return null;
+    const pipelineInput =
+      selectedPipeline.input_width && selectedPipeline.input_height
+        ? `${selectedPipeline.input_width}x${selectedPipeline.input_height}`
+        : null;
+    if (!pipelineInput || requiredInputResolutions.includes(pipelineInput)) return null;
+    return (
+      `Selected datasets are ${requiredInputResolutions.join(', ')} but the preprocessing pipeline expects ` +
+      `input ${pipelineInput}. The dummy test will fail until the sizes match.`
+    );
+  }, [selectedPipeline, requiredInputResolutions]);
 
   // Pre-flight resolution comparison: warns before the user even runs the dummy test.
   const resolutionMismatch = useMemo(() => {
@@ -330,30 +352,24 @@ export function TrainingPipelinesPage({ active = true }: { active?: boolean }) {
         </Stack>
       </Paper>
 
-      <Grid gutter="md" align="flex-start">
-        <Grid.Col span={{ base: 12, lg: 4 }}>
-          <TrainingDatasetPicker
-            trainingDatasets={trainingDatasets}
-            selectedIds={selectedDatasetIds}
-            onChange={setSelectedDatasetIds}
-          />
-        </Grid.Col>
-        <Grid.Col span={{ base: 12, lg: 4 }}>
-          <PreprocessingPipelinePicker
-            pipelines={preprocessingPipelines}
-            selectedId={selectedPipelineId}
-            onChange={setSelectedPipelineId}
-          />
-        </Grid.Col>
-        <Grid.Col span={{ base: 12, lg: 4 }}>
-          <MethodConfigurationPicker
-            configurations={configurations}
-            methodByType={methodByType}
-            selectedId={selectedConfigurationId}
-            onChange={handleConfigurationChange}
-          />
-        </Grid.Col>
-      </Grid>
+      <TrainingDatasetPicker
+        trainingDatasets={trainingDatasets}
+        selectedIds={selectedDatasetIds}
+        onChange={setSelectedDatasetIds}
+      />
+      <PreprocessingPipelinePicker
+        pipelines={preprocessingPipelines}
+        selectedId={selectedPipelineId}
+        onChange={setSelectedPipelineId}
+        requiredInputResolutions={requiredInputResolutions}
+      />
+      <MethodConfigurationPicker
+        configurations={configurations}
+        methodByType={methodByType}
+        selectedId={selectedConfigurationId}
+        onChange={handleConfigurationChange}
+        requiredInputResolution={pipelineOutput}
+      />
 
       <Paper withBorder p="md" radius="sm">
         <Stack gap="md">
@@ -382,6 +398,12 @@ export function TrainingPipelinesPage({ active = true }: { active?: boolean }) {
           />
         </Stack>
       </Paper>
+
+      {datasetInputMismatch && (
+        <Alert color="yellow" title="Shape mismatch">
+          {datasetInputMismatch}
+        </Alert>
+      )}
 
       {resolutionMismatch && (
         <Alert color="yellow" title="Shape mismatch">

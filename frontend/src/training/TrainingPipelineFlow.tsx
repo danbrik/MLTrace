@@ -1,36 +1,8 @@
 import { Alert, Badge, Paper, ScrollArea, Stack, Text, Title } from '@mantine/core';
 import { ArrowRight, Shuffle } from 'lucide-react';
 
-import type {
-  MethodConfiguration,
-  PreprocessingGraphNode,
-  PreprocessingPipeline,
-  TrainingDataset,
-} from '../types';
-
-/** Order the linear preprocessing chain by following its edges (load_image first). */
-function orderedGraphNodes(pipeline: PreprocessingPipeline): PreprocessingGraphNode[] {
-  const { nodes, edges } = pipeline.graph;
-  if (edges.length === 0) return nodes;
-  const nodeById = new Map(nodes.map((node) => [node.id, node]));
-  const nextBySource = new Map(edges.map((edge) => [edge.source, edge.target]));
-  const targets = new Set(edges.map((edge) => edge.target));
-  let currentId = nodes.find((node) => !targets.has(node.id))?.id;
-  const ordered: PreprocessingGraphNode[] = [];
-  while (currentId && nodeById.has(currentId) && ordered.length < nodes.length) {
-    ordered.push(nodeById.get(currentId)!);
-    currentId = nextBySource.get(currentId);
-  }
-  return ordered.length === nodes.length ? ordered : nodes;
-}
-
-function stepDetail(node: PreprocessingGraphNode): string {
-  const interesting = ['width', 'height', 'mode', 'method', 'dtype', 'x', 'y'];
-  const parts = interesting
-    .filter((key) => node.config[key] !== undefined)
-    .map((key) => `${key}=${node.config[key]}`);
-  return parts.length > 0 ? parts.join(', ') : 'default config';
-}
+import { orderedGraphNodes, stepDetail } from './graph';
+import type { MethodConfiguration, PreprocessingPipeline, TrainingDataset } from '../types';
 
 function FlowNode({ section, label, detail }: { section: string; label: string; detail: string }) {
   return (

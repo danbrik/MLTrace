@@ -463,6 +463,7 @@ def count_images_in_folder_range(folder: models.DatasetFolder, start_timestamp, 
 def serialize_training_dataset(db: Session, training_dataset: models.TrainingDataset) -> TrainingDatasetRead:
     rule_reads: list[TrainingDatasetRuleRead] = []
     dataset_names: set[str] = set()
+    resolutions: set[str] = set()
     total_matching = 0
     total_selected = 0
 
@@ -482,6 +483,8 @@ def serialize_training_dataset(db: Session, training_dataset: models.TrainingDat
         total_matching += matching
         total_selected += selected
         dataset_names.add(dataset.name)
+        if folder.resolution_summary:
+            resolutions.update(folder.resolution_summary.keys())
         rule_reads.append(
             TrainingDatasetRuleRead(
                 id=rule.id,
@@ -506,6 +509,7 @@ def serialize_training_dataset(db: Session, training_dataset: models.TrainingDat
         notes=training_dataset.notes,
         created_at=training_dataset.created_at,
         dataset_names=sorted(dataset_names),
+        image_resolutions=sorted(resolutions),
         total_matching_images=total_matching,
         total_selected_images=total_selected,
         rules=rule_reads,

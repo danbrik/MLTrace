@@ -5,6 +5,7 @@ import {
   Group,
   Paper,
   ScrollArea,
+  Select,
   Stack,
   Table,
   Text,
@@ -15,7 +16,31 @@ import {
 import { ArrowDown, ArrowUp, Plus, Search, Trash2 } from 'lucide-react';
 import { useMemo, useState } from 'react';
 
+import { datasetResolutions, datasetSizeSignature } from './graph';
 import type { TrainingDataset } from '../types';
+
+function arraysEqual(a: string[], b: string[]): boolean {
+  return a.length === b.length && a.every((value, index) => value === b[index]);
+}
+
+function ImageSizeCell({ resolutions }: { resolutions: string[] }) {
+  if (resolutions.length === 0) {
+    return (
+      <Badge size="xs" variant="outline" color="gray">
+        n/a
+      </Badge>
+    );
+  }
+  return (
+    <Group gap={4}>
+      {resolutions.map((resolution) => (
+        <Badge key={resolution} size="xs" variant="light" color="teal">
+          {resolution}
+        </Badge>
+      ))}
+    </Group>
+  );
+}
 
 export function TrainingDatasetPicker({
   trainingDatasets,
@@ -27,21 +52,45 @@ export function TrainingDatasetPicker({
   onChange: (ids: number[]) => void;
 }) {
   const [search, setSearch] = useState('');
+  const [sizeFilter, setSizeFilter] = useState<string | null>(null);
 
   const datasetById = useMemo(
     () => new Map(trainingDatasets.map((dataset) => [dataset.id, dataset])),
     [trainingDatasets],
   );
 
+  const sizeOptions = useMemo(() => {
+    const values = new Set<string>();
+    trainingDatasets.forEach((dataset) => datasetResolutions(dataset).forEach((resolution) => values.add(resolution)));
+    return [...values].sort();
+  }, [trainingDatasets]);
+
+  // Image-size signature of the already-selected datasets. Once set, only
+  // datasets of the same size (or unknown size) stay addable.
+  const selectedSignature = useMemo(
+    () => datasetSizeSignature(selectedIds, datasetById),
+    [selectedIds, datasetById],
+  );
+
   const filtered = useMemo(() => {
     const query = search.trim().toLowerCase();
-    if (!query) return trainingDatasets;
-    return trainingDatasets.filter(
-      (dataset) =>
-        dataset.name.toLowerCase().includes(query) ||
-        dataset.dataset_names.some((name) => name.toLowerCase().includes(query)),
-    );
-  }, [trainingDatasets, search]);
+    return trainingDatasets.filter((dataset) => {
+      const resolutions = datasetResolutions(dataset);
+      if (query) {
+        const matches =
+          dataset.name.toLowerCase().includes(query) ||
+          dataset.dataset_names.some((name) => name.toLowerCase().includes(query));
+        if (!matches) return false;
+      }
+      if (sizeFilter && !resolutions.includes(sizeFilter)) return false;
+      // Selection-driven size constraint: known sizes must match the signature;
+      // unknown-size datasets stay visible (compatibility can't be disproven).
+      if (selectedSignature && resolutions.length > 0 && !arraysEqual(resolutions, selectedSignature)) {
+        return false;
+      }
+      return true;
+    });
+  }, [trainingDatasets, search, sizeFilter, selectedSignature]);
 
   const selected = selectedIds
     .map((id) => datasetById.get(id))
@@ -62,18 +111,28 @@ export function TrainingDatasetPicker({
           <Title order={3}>1. Training Sets</Title>
           <Badge variant="light">{selectedIds.length} selected</Badge>
         </Group>
-        <TextInput
-          placeholder="Search by name or source dataset"
-          leftSection={<Search size={16} />}
-          value={search}
-          onChange={(event) => setSearch(event.currentTarget.value)}
-        />
+        <Group grow>
+          <TextInput
+            placeholder="Search by name or source dataset"
+            leftSection={<Search size={16} />}
+            value={search}
+            onChange={(event) => setSearch(event.currentTarget.value)}
+          />
+          <Select placeholder="Image size" data={sizeOptions} value={sizeFilter} onChange={setSizeFilter} clearable />
+        </Group>
+        {selectedSignature && (
+          <Text size="xs" c="dimmed">
+            Locked to image size {selectedSignature.join(', ')} by the current selection. Unknown-size sets stay
+            listed.
+          </Text>
+        )}
         <ScrollArea h={selectedIds.length > 0 ? 180 : 240}>
           <Table striped highlightOnHover verticalSpacing="xs">
             <Table.Thead>
               <Table.Tr>
                 <Table.Th>Name</Table.Th>
                 <Table.Th>Datasets</Table.Th>
+                <Table.Th>Image size</Table.Th>
                 <Table.Th>Images</Table.Th>
                 <Table.Th />
               </Table.Tr>
@@ -87,11 +146,14 @@ export function TrainingDatasetPicker({
                     <Table.Td>
                       <Group gap={4}>
                         {dataset.dataset_names.map((name) => (
-                          <Badge key={name} size="xs" variant="light" color="teal">
+                          <Badge key={name} size="xs" variant="light" color="gray">
                             {name}
                           </Badge>
                         ))}
                       </Group>
+                    </Table.Td>
+                    <Table.Td>
+                      <ImageSizeCell resolutions={datasetResolutions(dataset)} />
                     </Table.Td>
                     <Table.Td>{dataset.total_selected_images}</Table.Td>
                     <Table.Td>
@@ -132,7 +194,8 @@ export function TrainingDatasetPicker({
                         {dataset.name}
                       </Text>
                       <Text size="xs" c="dimmed">
-                        {dataset.total_selected_images} images · {dataset.dataset_names.join(', ')}
+                        {dataset.total_selected_images} images ·{' '}
+                        {datasetResolutions(dataset).join(', ') || 'size n/a'} · {dataset.dataset_names.join(', ')}
                       </Text>
                     </div>
                   </Group>

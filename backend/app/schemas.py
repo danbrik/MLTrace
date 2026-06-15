@@ -119,6 +119,9 @@ class TrainingDatasetRead(BaseModel):
     notes: str | None
     created_at: datetime
     dataset_names: list[str]
+    # Sorted unique "WxH" image resolutions across all rule folders. Drives the
+    # size column and the size-compatibility cross-filtering on the UI.
+    image_resolutions: list[str] = []
     total_matching_images: int
     total_selected_images: int
     rules: list[TrainingDatasetRuleRead] = []

@@ -1,4 +1,4 @@
-import { Alert, Badge, Button, Grid, Group, Paper, Select, Stack, Text, Textarea, TextInput, Title } from '@mantine/core';
+import { Alert, Badge, Button, Group, Paper, Select, Stack, Text, Textarea, TextInput, Title } from '@mantine/core';
 import { useDebouncedValue } from '@mantine/hooks';
 import { notifications } from '@mantine/notifications';
 import { Boxes, BrainCircuit, RotateCcw, Save } from 'lucide-react';
@@ -387,79 +387,68 @@ export function MethodsPage() {
           )}
 
           <Textarea label="Description" value={description} onChange={(event) => setDescription(event.currentTarget.value)} />
-          {renderSaveActions()}
+          {nameClash && (
+            <Alert color="red" title="Name already exists">
+              Choose a unique name before saving.
+            </Alert>
+          )}
+          {invalidNumericDrafts.length > 0 && (
+            <Alert color="red" title="Invalid numeric input">
+              {invalidNumericDrafts[0][1].message ?? 'Commit or discard the current numeric draft before saving.'}
+            </Alert>
+          )}
+          <Group justify="space-between" align="center">
+            <Badge color={architectureCheck?.valid ? 'green' : 'red'} variant="light" size="lg">
+              {architectureCheck?.valid ? 'Ready to save' : 'Blocked'}
+            </Badge>
+            {renderSaveActions(true)}
+          </Group>
         </Stack>
       </Paper>
 
-      <Grid gutter="md" align="flex-start">
-        <Grid.Col span={{ base: 12, xl: 8 }}>
-          <Paper withBorder p="md" radius="sm">
-            <Stack gap="md">
-              <Group gap="xs">
-                <Boxes size={18} />
-                <Title order={3}>{builderTitle}</Title>
-              </Group>
-              {!selectedMethod && <Alert color="blue">Loading method definitions.</Alert>}
-              {selectedMethod && !BuilderComponent && (
-                <Alert color="red" title="Unsupported method builder">
-                  No frontend builder is registered for builder_kind "{selectedMethod.builder_kind}".
-                </Alert>
-              )}
-              {selectedMethod && BuilderComponent && (
-                <BuilderComponent
-                  method={selectedMethod}
-                  modelConfig={modelConfig}
-                  modelGraph={modelGraph}
-                  layers={layers}
-                  validation={architectureCheck}
-                  onConfigChange={(key, value) => setModelConfig((current) => ({ ...current, [key]: value }))}
-                  onGraphChange={setModelGraph}
-                  onNumberDraftChange={handleNumberDraftChange}
-                />
-              )}
-            </Stack>
-          </Paper>
-        </Grid.Col>
-        <Grid.Col span={{ base: 12, xl: 4 }}>
-          <Paper withBorder p="md" radius="sm">
-            <Stack gap="md">
-              <ArchitectureCheckPanel validation={architectureCheck} modelConfig={modelConfig} />
-              {selectedMethod?.builder_kind !== 'form' && (
-                <TorchCheckPanel
-                  validation={architectureCheck}
-                  torchCheck={torchCheck}
-                  loading={torchCheckLoading}
-                  logs={torchCheckLogs}
-                  onRun={handleRunTorchCheck}
-                />
-              )}
-              <Title order={3}>Diagram</Title>
-              <MethodDiagramPanel diagram={diagram} error={diagramError} />
-            </Stack>
-          </Paper>
-          <Paper withBorder p="md" radius="sm" mt="md">
-            <Stack gap="md">
-              <Group justify="space-between" align="center">
-                <Title order={3}>{isTrainableArchitecture ? 'Architecture Actions' : 'Method Actions'}</Title>
-                <Badge color={architectureCheck?.valid ? 'green' : 'red'} variant="light">
-                  {architectureCheck?.valid ? 'Ready to save' : 'Blocked'}
-                </Badge>
-              </Group>
-              {nameClash && (
-                <Alert color="red" title="Name already exists">
-                  Choose a unique name before saving.
-                </Alert>
-              )}
-              {invalidNumericDrafts.length > 0 && (
-                <Alert color="red" title="Invalid numeric input">
-                  {invalidNumericDrafts[0][1].message ?? 'Commit or discard the current numeric draft before saving.'}
-                </Alert>
-              )}
-              {renderSaveActions(true)}
-            </Stack>
-          </Paper>
-        </Grid.Col>
-      </Grid>
+      <Paper withBorder p="md" radius="sm">
+        <Stack gap="md">
+          <Group gap="xs">
+            <Boxes size={18} />
+            <Title order={3}>{builderTitle}</Title>
+          </Group>
+          {!selectedMethod && <Alert color="blue">Loading method definitions.</Alert>}
+          {selectedMethod && !BuilderComponent && (
+            <Alert color="red" title="Unsupported method builder">
+              No frontend builder is registered for builder_kind "{selectedMethod.builder_kind}".
+            </Alert>
+          )}
+          {selectedMethod && BuilderComponent && (
+            <BuilderComponent
+              method={selectedMethod}
+              modelConfig={modelConfig}
+              modelGraph={modelGraph}
+              layers={layers}
+              validation={architectureCheck}
+              onConfigChange={(key, value) => setModelConfig((current) => ({ ...current, [key]: value }))}
+              onGraphChange={setModelGraph}
+              onNumberDraftChange={handleNumberDraftChange}
+            />
+          )}
+        </Stack>
+      </Paper>
+
+      <Paper withBorder p="md" radius="sm">
+        <Stack gap="md">
+          <ArchitectureCheckPanel validation={architectureCheck} modelConfig={modelConfig} />
+          {selectedMethod?.builder_kind !== 'form' && (
+            <TorchCheckPanel
+              validation={architectureCheck}
+              torchCheck={torchCheck}
+              loading={torchCheckLoading}
+              logs={torchCheckLogs}
+              onRun={handleRunTorchCheck}
+            />
+          )}
+          <Title order={3}>Diagram</Title>
+          <MethodDiagramPanel diagram={diagram} error={diagramError} />
+        </Stack>
+      </Paper>
 
       <SavedMethodsTable methods={methods} methodByType={methodByType} onLoad={handleLoadMethod} onDelete={handleDelete} />
     </Stack>

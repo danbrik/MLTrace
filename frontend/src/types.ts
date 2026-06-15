@@ -64,6 +64,7 @@ export type TrainingDataset = {
   notes: string | null;
   created_at: string;
   dataset_names: string[];
+  image_resolutions: string[];
   total_matching_images: number;
   total_selected_images: number;
   rules: Array<{
