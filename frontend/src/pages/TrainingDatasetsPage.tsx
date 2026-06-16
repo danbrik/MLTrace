@@ -18,6 +18,8 @@ import {
   Tooltip,
 } from '@mantine/core';
 import { notifications } from '@mantine/notifications';
+
+import { StepCard } from '../components/StepCard';
 import { Info, Plus, Save, Trash2 } from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
 
@@ -358,9 +360,7 @@ export function TrainingDatasetsPage() {
         </Text>
       </div>
 
-      <Paper withBorder p="md" radius="sm">
-        <Stack gap="md">
-          <Title order={3}>Create train/test dataset</Title>
+      <StepCard title="Create train/test dataset" color="blue">
           <Group align="flex-end" grow>
             <TextInput
               label="Name"
@@ -537,21 +537,21 @@ export function TrainingDatasetsPage() {
               </Group>
             </>
           )}
-        </Stack>
-      </Paper>
+      </StepCard>
 
-      <Paper withBorder p="md" radius="sm">
-        <Stack gap="md">
-          <Group justify="space-between" align="flex-end">
-            <Title order={3}>Saved train/test datasets</Title>
-            <Select
-              label="Label filter"
-              data={USAGE_OPTIONS}
-              value={usageFilter}
-              onChange={setUsageFilter}
-              clearable
-            />
-          </Group>
+      <StepCard
+        title="Saved train/test datasets"
+        color="cyan"
+        action={
+          <Select
+            label="Label filter"
+            data={USAGE_OPTIONS}
+            value={usageFilter}
+            onChange={setUsageFilter}
+            clearable
+          />
+        }
+      >
           <ScrollArea>
             <Table verticalSpacing="sm" striped>
               <Table.Thead>
@@ -630,8 +630,7 @@ export function TrainingDatasetsPage() {
               </Table.Tbody>
             </Table>
           </ScrollArea>
-        </Stack>
-      </Paper>
+      </StepCard>
 
       <Modal
         opened={inspectedDataset !== null}

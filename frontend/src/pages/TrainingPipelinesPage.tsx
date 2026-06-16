@@ -27,6 +27,7 @@ import {
   resolveDuplicateTrainingPipeline,
   updateTrainingPipeline,
 } from '../api';
+import { StepCard } from '../components/StepCard';
 import { SchemaForm } from '../methods/schema/SchemaForm';
 import type { NumericDraftState } from '../methods/types';
 import { schemaDefaults } from '../methods/utils';
@@ -437,78 +438,83 @@ export function TrainingPipelinesPage({
         </Stack>
       </Paper>
 
-      <TrainingDatasetPicker
-        trainingDatasets={trainingDatasets}
-        selectedIds={selectedDatasetIds}
-        onChange={setSelectedDatasetIds}
-        disabled={loadedReadOnly}
-      />
-      <PreprocessingPipelinePicker
-        pipelines={preprocessingPipelines}
-        selectedId={selectedPipelineId}
-        onChange={setSelectedPipelineId}
-        requiredInputResolutions={requiredInputResolutions}
-        disabled={loadedReadOnly}
-      />
-      <MethodConfigurationPicker
-        configurations={configurations}
-        methodByType={methodByType}
-        selectedId={selectedConfigurationId}
-        onChange={handleConfigurationChange}
-        requiredInputResolution={pipelineOutput}
-        disabled={loadedReadOnly}
-      />
+      <StepCard index={1} title="Train/test sets" color="blue" complete={selectedDatasetIds.length > 0}>
+        <TrainingDatasetPicker
+          trainingDatasets={trainingDatasets}
+          selectedIds={selectedDatasetIds}
+          onChange={setSelectedDatasetIds}
+          disabled={loadedReadOnly}
+          embedded
+        />
+      </StepCard>
 
-      <Paper withBorder p="md" radius="sm">
-        <Stack gap="md">
-          <Title order={3}>Training Parameters</Title>
-          {!selectedConfiguration && (
-            <Alert color="blue">Select a method to configure its training parameters.</Alert>
-          )}
-          {selectedConfiguration && !hasTrainingParameters && (
-            <Alert color="blue">
-              This method is fitted directly and has no gradient training parameters.
-            </Alert>
-          )}
-          {selectedConfiguration && hasTrainingParameters && trainingSchema && (
-            <SchemaForm
-              schema={trainingSchema}
-              config={trainingParameters}
-              disabled={loadedReadOnly}
-              fieldPrefix="training"
-              onChange={(key, value) => setTrainingParameters((current) => ({ ...current, [key]: value }))}
-              onNumberDraftChange={handleNumberDraftChange}
-            />
-          )}
-          <Switch
-            label="Shuffle combined training sets during training"
-            checked={shuffle}
+      <StepCard index={2} title="Preprocessing pipeline" color="violet" complete={selectedPipelineId != null}>
+        <PreprocessingPipelinePicker
+          pipelines={preprocessingPipelines}
+          selectedId={selectedPipelineId}
+          onChange={setSelectedPipelineId}
+          requiredInputResolutions={requiredInputResolutions}
+          disabled={loadedReadOnly}
+          embedded
+        />
+      </StepCard>
+
+      <StepCard index={3} title="Method / architecture" color="teal" complete={selectedConfigurationId != null}>
+        <MethodConfigurationPicker
+          configurations={configurations}
+          methodByType={methodByType}
+          selectedId={selectedConfigurationId}
+          onChange={handleConfigurationChange}
+          requiredInputResolution={pipelineOutput}
+          disabled={loadedReadOnly}
+          embedded
+        />
+      </StepCard>
+
+      <StepCard index={4} title="Training parameters" color="grape">
+        {!selectedConfiguration && (
+          <Alert color="blue">Select a method to configure its training parameters.</Alert>
+        )}
+        {selectedConfiguration && !hasTrainingParameters && (
+          <Alert color="blue">This method is fitted directly and has no gradient training parameters.</Alert>
+        )}
+        {selectedConfiguration && hasTrainingParameters && trainingSchema && (
+          <SchemaForm
+            schema={trainingSchema}
+            config={trainingParameters}
             disabled={loadedReadOnly}
-            onChange={(event) => setShuffle(event.currentTarget.checked)}
+            fieldPrefix="training"
+            onChange={(key, value) => setTrainingParameters((current) => ({ ...current, [key]: value }))}
+            onNumberDraftChange={handleNumberDraftChange}
           />
-        </Stack>
-      </Paper>
+        )}
+        <Switch
+          label="Shuffle combined training sets during training"
+          checked={shuffle}
+          disabled={loadedReadOnly}
+          onChange={(event) => setShuffle(event.currentTarget.checked)}
+        />
+        {datasetInputMismatch && (
+          <Alert color="yellow" title="Shape mismatch">
+            {datasetInputMismatch}
+          </Alert>
+        )}
+        {resolutionMismatch && (
+          <Alert color="yellow" title="Shape mismatch">
+            {resolutionMismatch}
+          </Alert>
+        )}
+      </StepCard>
 
-      {datasetInputMismatch && (
-        <Alert color="yellow" title="Shape mismatch">
-          {datasetInputMismatch}
-        </Alert>
-      )}
-
-      {resolutionMismatch && (
-        <Alert color="yellow" title="Shape mismatch">
-          {resolutionMismatch}
-        </Alert>
-      )}
-
-      <TrainingPipelineFlow
-        trainingDatasets={selectedDatasets}
-        shuffle={shuffle}
-        preprocessingPipeline={selectedPipeline ?? null}
-        configuration={selectedConfiguration ?? null}
-      />
-
-      <DryRunPanel payload={payload} disabled={!payload || invalidNumericDrafts.length > 0} />
+      <StepCard index={5} title="Overview & dry run" color="orange">
+        <TrainingPipelineFlow
+          trainingDatasets={selectedDatasets}
+          shuffle={shuffle}
+          preprocessingPipeline={selectedPipeline ?? null}
+          configuration={selectedConfiguration ?? null}
+        />
+        <DryRunPanel payload={payload} disabled={!payload || invalidNumericDrafts.length > 0} />
+      </StepCard>
 
       <SavedTrainingPipelinesTable
         pipelines={pipelines}

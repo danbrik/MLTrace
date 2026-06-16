@@ -118,11 +118,13 @@ export function TrainingDatasetPicker({
   selectedIds,
   onChange,
   disabled = false,
+  embedded = false,
 }: {
   trainingDatasets: TrainingDataset[];
   selectedIds: number[];
   onChange: (ids: number[]) => void;
   disabled?: boolean;
+  embedded?: boolean;
 }) {
   const [search, setSearch] = useState('');
   const [sizeFilter, setSizeFilter] = useState<string | null>(null);
@@ -182,16 +184,18 @@ export function TrainingDatasetPicker({
   }
 
   return (
-    <Paper withBorder p="md" radius="sm">
+    <Paper withBorder={!embedded} p={embedded ? 0 : 'md'} radius="sm">
       <Stack gap="md">
-        <Group justify="space-between" align="center">
-          <Title order={3}>1. Trainsets</Title>
-          <Group gap="xs">
-            <Badge variant="light" color={selectedIds.length > 0 ? 'green' : 'gray'}>
-              {selectedIds.length} selected
-            </Badge>
+        {!embedded && (
+          <Group justify="space-between" align="center">
+            <Title order={3}>1. Trainsets</Title>
+            <Group gap="xs">
+              <Badge variant="light" color={selectedIds.length > 0 ? 'green' : 'gray'}>
+                {selectedIds.length} selected
+              </Badge>
+            </Group>
           </Group>
-        </Group>
+        )}
         <Group grow>
           <TextInput
             placeholder="Search by name or source dataset"

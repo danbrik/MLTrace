@@ -36,6 +36,7 @@ import {
   previewRoi,
   restartTestingRun,
 } from '../api';
+import { StepCard } from '../components/StepCard';
 import { formatValue, methodLabel } from '../methods/utils';
 import { datasetResolutions, formatResolution, orderedGraphNodes, stepDetail } from '../training/graph';
 import type {
@@ -625,16 +626,19 @@ export function TestingRunsPage({ active = true, onRunQueued }: { active?: boole
       </div>
 
       {/* Step 1: model selection */}
-      <Paper withBorder p="md" radius="sm">
-        <Stack gap="md">
-          <Group justify="space-between" align="center">
-            <Title order={3}>1. Trained Model</Title>
-            {confirmedModel && (
-              <Button variant="subtle" leftSection={<Pencil size={16} />} onClick={() => setConfirmedModelId(null)}>
-                Change model
-              </Button>
-            )}
-          </Group>
+      <StepCard
+        index={1}
+        title="Trained model"
+        color="blue"
+        complete={confirmedModel != null}
+        action={
+          confirmedModel ? (
+            <Button variant="subtle" leftSection={<Pencil size={16} />} onClick={() => setConfirmedModelId(null)}>
+              Change model
+            </Button>
+          ) : undefined
+        }
+      >
 
           {confirmedModel ? (
             <Alert color="green" icon={<Check size={16} />}>
@@ -769,14 +773,11 @@ export function TestingRunsPage({ active = true, onRunQueued }: { active?: boole
               {models.length === 0 && <Alert color="blue">No trained models yet. Run a training pipeline first.</Alert>}
             </>
           )}
-        </Stack>
-      </Paper>
+      </StepCard>
 
       {/* Step 2: compatible dataset + ROI + run */}
       {confirmedModel && (
-        <Paper withBorder p="md" radius="sm">
-          <Stack gap="md">
-            <Title order={3}>2. Inference Dataset & Run</Title>
+        <StepCard index={2} title="Inference dataset & run" color="violet" complete={selectedDatasetId != null}>
             <Text size="xs" c="dimmed">
               Showing datasets whose image size matches the model's preprocessing input ({requiredInputResolution ?? 'any'}).
             </Text>
@@ -941,14 +942,11 @@ export function TestingRunsPage({ active = true, onRunQueued }: { active?: boole
                 />
               </Stack>
             )}
-          </Stack>
-        </Paper>
+        </StepCard>
       )}
 
       {/* Saved ROIs management */}
-      <Paper withBorder p="md" radius="sm">
-        <Stack gap="md">
-          <Title order={3}>Saved ROIs</Title>
+      <StepCard title="Saved ROIs" color="cyan">
           <ScrollArea>
             <Table striped highlightOnHover verticalSpacing="sm">
               <Table.Thead>
@@ -986,8 +984,7 @@ export function TestingRunsPage({ active = true, onRunQueued }: { active?: boole
             </Table>
           </ScrollArea>
           {rois.length === 0 && <Alert color="blue">No ROIs saved yet.</Alert>}
-        </Stack>
-      </Paper>
+      </StepCard>
     </Stack>
     <Modal
       opened={detailModal !== null}

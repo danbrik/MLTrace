@@ -19,6 +19,8 @@ import {
   Tooltip,
 } from '@mantine/core';
 import { notifications } from '@mantine/notifications';
+
+import { StepCard } from '../components/StepCard';
 import { FileText, Info, RotateCcw, Search, StopCircle, Trash2 } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState } from 'react';
 
@@ -317,7 +319,7 @@ export function SchedulerPage({ active = true }: { active?: boolean }) {
         </Text>
       </div>
 
-      <Paper withBorder p="md" radius="sm">
+      <Paper withBorder p="md" radius="sm" style={{ borderLeft: '4px solid var(--mantine-color-blue-5)' }}>
         <Stack gap="md">
           <Group justify="space-between" align="center">
             <div>
@@ -392,9 +394,7 @@ export function SchedulerPage({ active = true }: { active?: boolean }) {
         </Stack>
       </Paper>
 
-      <Paper withBorder p="md" radius="sm">
-        <Stack gap="md">
-          <Title order={3}>Jobs</Title>
+      <StepCard title="Jobs" color="cyan">
           <ScrollArea>
             <Table striped highlightOnHover verticalSpacing="sm" miw={1100}>
               <Table.Thead>
@@ -479,10 +479,9 @@ export function SchedulerPage({ active = true }: { active?: boolean }) {
             </Table>
           </ScrollArea>
           {filteredJobs.length === 0 && <Alert color="blue">No jobs match the current filters.</Alert>}
-        </Stack>
-      </Paper>
+      </StepCard>
 
-      <Paper withBorder p="md" radius="sm">
+      <Paper withBorder p="md" radius="sm" style={{ borderLeft: '4px solid var(--mantine-color-grape-5)' }}>
         <Stack gap="md">
           <Group justify="space-between" align="center">
             <div>

@@ -17,7 +17,7 @@ import {
   Title,
   Tooltip,
 } from '@mantine/core';
-import { Check, ChevronDown, ChevronRight, Info, Search } from 'lucide-react';
+import { ChevronDown, ChevronRight, Info, Pencil, Search } from 'lucide-react';
 import { Fragment, useMemo, useState } from 'react';
 
 import { orderedGraphNodes, pipelineInputResolution, pipelineOutputResolution, stepDetail } from './graph';
@@ -68,6 +68,7 @@ export function PreprocessingPipelinePicker({
   onChange,
   requiredInputResolutions = null,
   disabled = false,
+  embedded = false,
 }: {
   pipelines: PreprocessingPipeline[];
   selectedId: number | null;
@@ -77,6 +78,9 @@ export function PreprocessingPipelinePicker({
   // ones) remain visible.
   requiredInputResolutions?: string[] | null;
   disabled?: boolean;
+  // When embedded the component renders without its own Paper/title (a parent
+  // StepCard provides the frame).
+  embedded?: boolean;
 }) {
   const [search, setSearch] = useState('');
   const [inputFilter, setInputFilter] = useState<string | null>(null);
@@ -147,22 +151,44 @@ export function PreprocessingPipelinePicker({
     });
   }
 
-  return (
-    <Paper withBorder p="md" radius="sm">
-      <Stack gap="md">
-        <Group justify="space-between" align="center">
-          <Title order={3}>2. Preprocessing Pipeline</Title>
-          <Group gap="xs">
-            {selectedId != null && <Badge variant="light" color="green">selected</Badge>}
-          </Group>
-        </Group>
-        <TextInput
-          placeholder="Search by name or description"
-          leftSection={<Search size={16} />}
-          value={search}
-          onChange={(event) => setSearch(event.currentTarget.value)}
-        />
-        <Group grow>
+  const selectedPipeline = pipelines.find((pipeline) => pipeline.id === selectedId) ?? null;
+
+  const confirmation = selectedPipeline && (
+    <Group justify="space-between" align="center" wrap="wrap">
+      <Group gap="xs">
+        <Text fw={600}>{selectedPipeline.name}</Text>
+        <Badge size="xs" variant="light" color="blue">
+          in {resolutionLabel(selectedPipeline.input_width, selectedPipeline.input_height)}
+        </Badge>
+        <Badge size="xs" variant="light" color="yellow">
+          out {resolutionLabel(selectedPipeline.output_width, selectedPipeline.output_height)}
+        </Badge>
+        <Badge size="xs" variant="light" color="gray">
+          {selectedPipeline.graph.nodes.length} steps
+        </Badge>
+        <Tooltip label="Inspect preprocessing pipeline">
+          <ActionIcon variant="subtle" onClick={() => setDetailPipeline(selectedPipeline)} aria-label="Inspect preprocessing pipeline">
+            <Info size={16} />
+          </ActionIcon>
+        </Tooltip>
+      </Group>
+      {!disabled && (
+        <Button variant="subtle" leftSection={<Pencil size={16} />} onClick={() => onChange(null)}>
+          Change
+        </Button>
+      )}
+    </Group>
+  );
+
+  const picker = (
+    <>
+      <TextInput
+        placeholder="Search by name or description"
+        leftSection={<Search size={16} />}
+        value={search}
+        onChange={(event) => setSearch(event.currentTarget.value)}
+      />
+      <Group grow>
           <Select
             placeholder="Input resolution"
             data={inputResolutionOptions}
@@ -255,13 +281,11 @@ export function PreprocessingPipelinePicker({
                           </Tooltip>
                           <Button
                             size="compact-sm"
+                            variant="light"
                             disabled={disabled}
-                            color={pipeline.id === selectedId ? 'green' : undefined}
-                            variant={pipeline.id === selectedId ? 'filled' : 'light'}
-                            leftSection={pipeline.id === selectedId ? <Check size={14} /> : undefined}
-                            onClick={() => onChange(pipeline.id === selectedId ? null : pipeline.id)}
+                            onClick={() => onChange(pipeline.id)}
                           >
-                            {pipeline.id === selectedId ? 'Selected' : 'Select'}
+                            Use
                           </Button>
                         </Group>
                       </Table.Td>
@@ -294,15 +318,44 @@ export function PreprocessingPipelinePicker({
         {pipelines.length === 0 && (
           <Alert color="blue">No preprocessing pipelines available yet. Create one on the Preprocessing page.</Alert>
         )}
-        <Modal
-          opened={detailPipeline !== null}
-          onClose={() => setDetailPipeline(null)}
-          title={detailPipeline ? `Preprocessing pipeline: ${detailPipeline.name}` : 'Preprocessing pipeline'}
-          size="xl"
-          scrollAreaComponent={ScrollArea.Autosize}
-        >
-          {detailPipeline ? <PreprocessingDetails pipeline={detailPipeline} /> : null}
-        </Modal>
+    </>
+  );
+
+  const modal = (
+    <Modal
+      opened={detailPipeline !== null}
+      onClose={() => setDetailPipeline(null)}
+      title={detailPipeline ? `Preprocessing pipeline: ${detailPipeline.name}` : 'Preprocessing pipeline'}
+      size="xl"
+      scrollAreaComponent={ScrollArea.Autosize}
+    >
+      {detailPipeline ? <PreprocessingDetails pipeline={detailPipeline} /> : null}
+    </Modal>
+  );
+
+  const body = (
+    <>
+      {confirmation || picker}
+      {modal}
+    </>
+  );
+
+  if (embedded) {
+    return <Stack gap="md">{body}</Stack>;
+  }
+
+  return (
+    <Paper withBorder p="md" radius="sm">
+      <Stack gap="md">
+        <Group justify="space-between" align="center">
+          <Title order={3}>2. Preprocessing Pipeline</Title>
+          {selectedId != null && (
+            <Badge variant="light" color="green">
+              selected
+            </Badge>
+          )}
+        </Group>
+        {body}
       </Stack>
     </Paper>
   );

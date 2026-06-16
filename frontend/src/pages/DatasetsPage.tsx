@@ -16,6 +16,8 @@ import {
   Title,
 } from '@mantine/core';
 import { notifications } from '@mantine/notifications';
+
+import { StepCard } from '../components/StepCard';
 import { Check, FileSearch, RefreshCw, ScanLine, Trash2 } from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
 
@@ -318,9 +320,7 @@ export function DatasetsPage() {
         )}
       </Group>
 
-      <Paper withBorder p="md" radius="sm">
-        <Stack gap="md">
-          <Title order={3}>Add dataset</Title>
+      <StepCard title="Add dataset" color="blue">
           <Group grow align="flex-end">
             <TextInput
               label="Name"
@@ -414,12 +414,9 @@ export function DatasetsPage() {
               </Stack>
             </ScrollArea>
           </Stack>
-        </Stack>
-      </Paper>
+      </StepCard>
 
-      <Paper withBorder p="md" radius="sm">
-        <Stack gap="md">
-          <Title order={3}>Registered datasets</Title>
+      <StepCard title="Registered datasets" color="cyan">
           <ScrollArea>
             <Table highlightOnHover verticalSpacing="sm">
               <Table.Thead>
@@ -486,8 +483,7 @@ export function DatasetsPage() {
               </Table.Tbody>
             </Table>
           </ScrollArea>
-        </Stack>
-      </Paper>
+      </StepCard>
 
       {selectedDataset && (
         <Paper withBorder p="md" radius="sm">

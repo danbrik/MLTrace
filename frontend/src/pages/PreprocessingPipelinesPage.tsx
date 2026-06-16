@@ -23,6 +23,8 @@ import {
 } from '@mantine/core';
 import { useDebouncedValue } from '@mantine/hooks';
 import { notifications } from '@mantine/notifications';
+
+import { StepCard } from '../components/StepCard';
 import { ArrowDown, ArrowUp, Eye, Info, Pencil, Plus, Save, Settings2, Trash2, Upload } from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
 import type { ReactNode } from 'react';
@@ -843,52 +845,72 @@ export function PreprocessingPipelinesPage() {
         </Text>
       </div>
 
-      <Paper withBorder p="md" radius="sm">
-        <Stack gap="md">
-          <Group grow align="flex-end">
-            <TextInput
-              label="Pipeline name"
-              description={loadedReadOnly ? 'Loaded read-only.' : loadedPipelineId != null ? 'Editing a saved pipeline.' : undefined}
-              value={name}
-              disabled={loadedReadOnly}
-              onChange={(event) => {
-                setNameTouched(true);
-                setName(event.currentTarget.value);
-              }}
-              error={nameClash ? 'A pipeline with this name already exists.' : undefined}
-            />
-            <Select
-              label={
-                <Group gap={6}>
-                  <Text component="span" size="sm" fw={500}>
-                    Preview folder
-                  </Text>
-                  <Tooltip
-                    multiline
-                    w={320}
-                    label="Choose a preview folder before editing the pipeline. MLTrace uses its first image to determine input size, seed size-dependent steps, and run previews."
-                  >
-                    <ActionIcon size="xs" variant="subtle" aria-label="Preview folder info">
-                      <Info size={14} />
-                    </ActionIcon>
-                  </Tooltip>
-                </Group>
-              }
-              description="Loaded once and reused by every preprocessing block."
-              placeholder="Select a dataset folder"
-              data={folderOptions.map((option) => ({ value: option.value, label: option.label }))}
-              value={selectedFolderId}
-              disabled={loadedReadOnly}
-              onChange={(value) => {
-                setSelectedFolderId(value);
-                setSourceImage(null);
-                setPreview(null);
-                setPreviewStale(false);
-                setPreviewError(null);
-              }}
-              searchable
-            />
+      <StepCard title="Pipeline details" color="blue">
+          <TextInput
+            label="Pipeline name"
+            description={loadedReadOnly ? 'Loaded read-only.' : loadedPipelineId != null ? 'Editing a saved pipeline.' : undefined}
+            value={name}
+            disabled={loadedReadOnly}
+            onChange={(event) => {
+              setNameTouched(true);
+              setName(event.currentTarget.value);
+            }}
+            error={nameClash ? 'A pipeline with this name already exists.' : undefined}
+          />
+          <Textarea label="Description" value={description} disabled={loadedReadOnly} onChange={(event) => setDescription(event.currentTarget.value)} />
+          {(designResolution.input_width || designResolution.output_width) && (
+            <Text size="xs" c="dimmed">
+              Stored design input {sizeLabel(designResolution.input_width, designResolution.input_height)}, output{' '}
+              {sizeLabel(designResolution.output_width, designResolution.output_height)}.
+            </Text>
+          )}
+          {loadedReadOnly && (
+            <Alert color="blue" title="Loaded read-only">
+              Click Edit pipeline before changing this saved preprocessing pipeline.
+            </Alert>
+          )}
+          {nameClash && (
+            <Alert color="red" title="Name already exists">
+              Choose a unique pipeline name before saving.
+            </Alert>
+          )}
+          <Group justify="flex-end">
+            {renderSaveButtons()}
           </Group>
+      </StepCard>
+
+      <StepCard index={1} title="Preview folder" color="violet" complete={Boolean(selectedFolderId && sourceImage)}>
+          <Select
+            label={
+              <Group gap={6}>
+                <Text component="span" size="sm" fw={500}>
+                  Preview folder
+                </Text>
+                <Tooltip
+                  multiline
+                  w={320}
+                  label="Choose a preview folder before editing the pipeline. MLTrace uses its first image to determine input size, seed size-dependent steps, and run previews."
+                >
+                  <ActionIcon size="xs" variant="subtle" aria-label="Preview folder info">
+                    <Info size={14} />
+                  </ActionIcon>
+                </Tooltip>
+              </Group>
+            }
+            description="Loaded once and reused by every preprocessing block."
+            placeholder="Select a dataset folder"
+            data={folderOptions.map((option) => ({ value: option.value, label: option.label }))}
+            value={selectedFolderId}
+            disabled={loadedReadOnly}
+            onChange={(value) => {
+              setSelectedFolderId(value);
+              setSourceImage(null);
+              setPreview(null);
+              setPreviewStale(false);
+              setPreviewError(null);
+            }}
+            searchable
+          />
           {selectedFolderId && (
             <Stack gap={2}>
               <Text size="xs" c="dimmed">
@@ -908,32 +930,19 @@ export function PreprocessingPipelinesPage() {
               </Text>
             </Stack>
           )}
-          {(designResolution.input_width || designResolution.output_width) && (
-            <Text size="xs" c="dimmed">
-              Stored design input {sizeLabel(designResolution.input_width, designResolution.input_height)}, output{' '}
-              {sizeLabel(designResolution.output_width, designResolution.output_height)}.
-            </Text>
-          )}
           {designMismatchMessage && (
             <Alert color="yellow" title="Design resolution mismatch">
               {designMismatchMessage}
-            </Alert>
-          )}
-          <Textarea label="Description" value={description} disabled={loadedReadOnly} onChange={(event) => setDescription(event.currentTarget.value)} />
-          {loadedReadOnly && (
-            <Alert color="blue" title="Loaded read-only">
-              Click Edit pipeline before changing this saved preprocessing pipeline.
             </Alert>
           )}
           <Group justify="flex-end">
             <Button leftSection={<Eye size={18} />} variant="light" onClick={handlePreview} loading={loading} disabled={!selectedFolderId}>
               Preview
             </Button>
-            {renderSaveButtons()}
           </Group>
-        </Stack>
-      </Paper>
+      </StepCard>
 
+      <StepCard index={2} title="Build pipeline" color="teal">
       <Grid gutter="md" align="flex-start">
         <Grid.Col span={{ base: 12, lg: 3 }}>
           <Paper withBorder p="md" radius="sm">
@@ -1050,12 +1059,11 @@ export function PreprocessingPipelinesPage() {
           </Paper>
         </Grid.Col>
       </Grid>
+      </StepCard>
 
-      <Paper withBorder p="md" radius="sm">
-        <Stack gap="md">
+      <StepCard index={3} title="Preview" color="grape">
           <Group justify="space-between" align="flex-start">
             <div>
-              <Title order={3}>Preview</Title>
               <Text size="sm" c="dimmed" className="path-text">
                 {preview ? `${preview.source_image_path} at ${previewText(preview.source_timestamp)}` : 'Select a folder and run preview.'}
               </Text>
@@ -1094,12 +1102,9 @@ export function PreprocessingPipelinesPage() {
             </Button>
             {renderSaveButtons()}
           </Group>
-        </Stack>
-      </Paper>
+      </StepCard>
 
-      <Paper withBorder p="md" radius="sm">
-        <Stack gap="md">
-          <Title order={3}>Saved pipelines</Title>
+      <StepCard title="Saved pipelines" color="cyan">
           <ScrollArea>
             <Table striped verticalSpacing="sm">
               <Table.Thead>
@@ -1139,8 +1144,7 @@ export function PreprocessingPipelinesPage() {
               </Table.Tbody>
             </Table>
           </ScrollArea>
-        </Stack>
-      </Paper>
+      </StepCard>
     </Stack>
   );
 }

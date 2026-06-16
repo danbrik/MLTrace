@@ -35,6 +35,7 @@ import {
   listTrainingPipelines,
   listTrainingRuns,
 } from '../api';
+import { StepCard } from '../components/StepCard';
 import { formatValue } from '../methods/utils';
 import { datasetResolutions, formatResolution, orderedGraphNodes, stepDetail } from '../training/graph';
 import type {
@@ -166,32 +167,6 @@ function DetailModal({ detail, onClose }: { detail: DetailModalState; onClose: (
         </ScrollArea>
       </Paper>
     </Modal>
-  );
-}
-
-function StepCard({
-  index,
-  title,
-  color,
-  children,
-}: {
-  index: number;
-  title: string;
-  color: string;
-  children: React.ReactNode;
-}) {
-  return (
-    <Paper withBorder p="md" radius="sm" style={{ borderLeft: `4px solid var(--mantine-color-${color}-5)` }}>
-      <Stack gap="md">
-        <Group gap="xs">
-          <Badge color={color} variant="filled" radius="sm" size="lg">
-            {index}
-          </Badge>
-          <Title order={4}>{title}</Title>
-        </Group>
-        {children}
-      </Stack>
-    </Paper>
   );
 }
 

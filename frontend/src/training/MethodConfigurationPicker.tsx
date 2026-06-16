@@ -16,7 +16,7 @@ import {
   Title,
   Tooltip,
 } from '@mantine/core';
-import { Check, ChevronDown, ChevronRight, Info, Search } from 'lucide-react';
+import { ChevronDown, ChevronRight, Info, Pencil, Search } from 'lucide-react';
 import { Fragment, useMemo, useState } from 'react';
 
 import { methodInputResolution } from './graph';
@@ -113,6 +113,7 @@ export function MethodConfigurationPicker({
   onChange,
   requiredInputResolution = null,
   disabled = false,
+  embedded = false,
 }: {
   configurations: MethodConfiguration[];
   methodByType: Map<string, MethodDefinition>;
@@ -122,6 +123,8 @@ export function MethodConfigurationPicker({
   // only methods of that input size (plus unknown-size ones) remain visible.
   requiredInputResolution?: string | null;
   disabled?: boolean;
+  // When embedded, render without an own Paper/title (parent StepCard frames it).
+  embedded?: boolean;
 }) {
   const [search, setSearch] = useState('');
   const [typeFilter, setTypeFilter] = useState<string | null>(null);
@@ -173,22 +176,46 @@ export function MethodConfigurationPicker({
     });
   }
 
-  return (
-    <Paper withBorder p="md" radius="sm">
-      <Stack gap="md">
-        <Group justify="space-between" align="center">
-          <Title order={3}>3. Method / Architecture</Title>
-          <Group gap="xs">
-            {selectedId != null && <Badge variant="light" color="green">selected</Badge>}
-          </Group>
-        </Group>
-        <TextInput
-          placeholder="Search by name or description"
-          leftSection={<Search size={16} />}
-          value={search}
-          onChange={(event) => setSearch(event.currentTarget.value)}
-        />
-        <Group grow>
+  const selectedConfiguration = configurations.find((configuration) => configuration.id === selectedId) ?? null;
+
+  const confirmation = selectedConfiguration && (
+    <Group justify="space-between" align="center" wrap="wrap">
+      <Group gap="xs">
+        <Text fw={600}>{selectedConfiguration.name}</Text>
+        <Badge size="xs" variant="light">
+          {methodLabel(methodByType.get(selectedConfiguration.method_type), selectedConfiguration.method_type)}
+        </Badge>
+        {methodInputResolution(selectedConfiguration) && (
+          <Badge size="xs" variant="light" color="grape">
+            {methodInputResolution(selectedConfiguration)}
+          </Badge>
+        )}
+        <Text size="xs" c="dimmed">
+          {keyParameters(selectedConfiguration)}
+        </Text>
+        <Tooltip label="Inspect method architecture">
+          <ActionIcon variant="subtle" onClick={() => setDetailConfiguration(selectedConfiguration)} aria-label="Inspect method architecture">
+            <Info size={16} />
+          </ActionIcon>
+        </Tooltip>
+      </Group>
+      {!disabled && (
+        <Button variant="subtle" leftSection={<Pencil size={16} />} onClick={() => onChange(null)}>
+          Change
+        </Button>
+      )}
+    </Group>
+  );
+
+  const picker = (
+    <>
+      <TextInput
+        placeholder="Search by name or description"
+        leftSection={<Search size={16} />}
+        value={search}
+        onChange={(event) => setSearch(event.currentTarget.value)}
+      />
+      <Group grow>
           <Select placeholder="Method type" data={typeOptions} value={typeFilter} onChange={setTypeFilter} clearable />
           <Select
             placeholder="Input resolution"
@@ -263,16 +290,14 @@ export function MethodConfigurationPicker({
                         </Tooltip>
                         <Button
                           size="compact-sm"
+                          variant="light"
                           disabled={disabled || !supported}
-                          color={configuration.id === selectedId ? 'green' : undefined}
-                          variant={configuration.id === selectedId ? 'filled' : 'light'}
-                          leftSection={configuration.id === selectedId ? <Check size={14} /> : undefined}
                           onClick={() => {
                             if (!supported) return;
-                            onChange(configuration.id === selectedId ? null : configuration.id);
+                            onChange(configuration.id);
                           }}
                         >
-                          {configuration.id === selectedId ? 'Selected' : 'Select'}
+                          Use
                         </Button>
                       </Group>
                     </Table.Td>
@@ -332,15 +357,44 @@ export function MethodConfigurationPicker({
         {configurations.length === 0 && (
           <Alert color="blue">No saved methods available yet. Create one on the Methods page.</Alert>
         )}
-        <Modal
-          opened={detailConfiguration !== null}
-          onClose={() => setDetailConfiguration(null)}
-          title={detailConfiguration ? `Method architecture: ${detailConfiguration.name}` : 'Method architecture'}
-          size="xl"
-          scrollAreaComponent={ScrollArea.Autosize}
-        >
-          {detailConfiguration ? <MethodDetails configuration={detailConfiguration} methodByType={methodByType} /> : null}
-        </Modal>
+    </>
+  );
+
+  const modal = (
+    <Modal
+      opened={detailConfiguration !== null}
+      onClose={() => setDetailConfiguration(null)}
+      title={detailConfiguration ? `Method architecture: ${detailConfiguration.name}` : 'Method architecture'}
+      size="xl"
+      scrollAreaComponent={ScrollArea.Autosize}
+    >
+      {detailConfiguration ? <MethodDetails configuration={detailConfiguration} methodByType={methodByType} /> : null}
+    </Modal>
+  );
+
+  const body = (
+    <>
+      {confirmation || picker}
+      {modal}
+    </>
+  );
+
+  if (embedded) {
+    return <Stack gap="md">{body}</Stack>;
+  }
+
+  return (
+    <Paper withBorder p="md" radius="sm">
+      <Stack gap="md">
+        <Group justify="space-between" align="center">
+          <Title order={3}>3. Method / Architecture</Title>
+          {selectedId != null && (
+            <Badge variant="light" color="green">
+              selected
+            </Badge>
+          )}
+        </Group>
+        {body}
       </Stack>
     </Paper>
   );

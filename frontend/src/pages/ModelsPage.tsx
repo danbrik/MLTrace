@@ -1,7 +1,7 @@
 import { Alert, Badge, Button, Group, Paper, Select, Stack, Text, Textarea, TextInput, Title } from '@mantine/core';
 import { useDebouncedValue } from '@mantine/hooks';
 import { notifications } from '@mantine/notifications';
-import { Boxes, BrainCircuit, Pencil, RotateCcw, Save } from 'lucide-react';
+import { BrainCircuit, Pencil, RotateCcw, Save } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 
 import {
@@ -15,6 +15,7 @@ import {
   runMethodTorchCheck,
   updateMethodConfiguration,
 } from '../api';
+import { StepCard } from '../components/StepCard';
 import { ArchitectureCheckPanel } from '../methods/panels/ArchitectureCheckPanel';
 import { MethodDiagramPanel } from '../methods/panels/MethodDiagramPanel';
 import { SavedMethodsTable } from '../methods/panels/SavedMethodsTable';
@@ -129,14 +130,6 @@ export function MethodsPage() {
     setIsEditingLoadedMethod(true);
     setNumericDrafts({});
   }
-
-  useEffect(() => {
-    if (!methodType && methodDefinitions.length > 0 && layers.length > 0) {
-      resetForMethod(methodDefinitions[0]);
-    }
-    // resetForMethod intentionally depends on live layer registry but should only bootstrap once.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [methodDefinitions, layers, methodType]);
 
   function buildPayload(options: { diagramOnly?: boolean } = {}) {
     return buildMethodPayload(selectedMethod, modelGraph, modelConfig, trainingConfig, inferenceConfig, options);
@@ -322,7 +315,7 @@ export function MethodsPage() {
     if (loadedReadOnly) {
       return (
         <Group justify="flex-end">
-          {showReset && (
+          {showReset && selectedMethod && (
             <Button variant="default" leftSection={<RotateCcw size={18} />} onClick={handleResetCurrentMethod}>
               {resetLabel}
             </Button>
@@ -336,7 +329,7 @@ export function MethodsPage() {
 
     return (
       <Group justify="flex-end">
-        {showReset && (
+        {showReset && selectedMethod && (
           <Button variant="default" leftSection={<RotateCcw size={18} />} onClick={handleResetCurrentMethod}>
             {resetLabel}
           </Button>
@@ -362,79 +355,82 @@ export function MethodsPage() {
         </Text>
       </div>
 
-      <Paper withBorder p="md" radius="sm">
-        <Stack gap="md">
-          <Group grow align="flex-start">
-            <TextInput
-              label="Method name"
-              value={name}
-              disabled={loadedReadOnly}
-              onChange={(event) => {
-                setNameTouched(true);
-                setName(event.currentTarget.value);
-              }}
-              error={nameClash ? 'A method with this name already exists.' : undefined}
-            />
-            <Select
-              label="Method"
-              data={methodDefinitions.map((method) => ({ value: method.type, label: method.label }))}
-              value={methodType}
-              disabled={loadedReadOnly}
-              onChange={(value) => {
-                const method = value ? methodByType.get(value) : undefined;
-                if (method) resetForMethod(method);
-              }}
-            />
-          </Group>
-
-          {selectedMethod && (
-            <Paper withBorder p="sm" radius="sm">
-              <Group justify="space-between" align="flex-start">
-                <div>
-                  <Group gap="xs">
-                    <BrainCircuit size={18} />
-                    <Text fw={700}>{selectedMethod.label}</Text>
-                  </Group>
-                  <Text size="sm" c="dimmed" mt={4}>
-                    {selectedMethod.description}
-                  </Text>
-                </div>
-              </Group>
-            </Paper>
-          )}
-
-          <Textarea label="Description" value={description} disabled={loadedReadOnly} onChange={(event) => setDescription(event.currentTarget.value)} />
-          {loadedReadOnly && (
-            <Alert color="blue" title="Loaded read-only">
-              Click Edit before changing this saved {isTrainableArchitecture ? 'architecture' : 'method'}.
-            </Alert>
-          )}
-          {nameClash && (
-            <Alert color="red" title="Name already exists">
-              Choose a unique name before saving.
-            </Alert>
-          )}
-          {invalidNumericDrafts.length > 0 && (
-            <Alert color="red" title="Invalid numeric input">
-              {invalidNumericDrafts[0][1].message ?? 'Commit or discard the current numeric draft before saving.'}
-            </Alert>
-          )}
-          <Group justify="space-between" align="center">
+      <StepCard title="Method details" color="blue">
+        <TextInput
+          label={isTrainableArchitecture ? 'Architecture name' : 'Method name'}
+          value={name}
+          disabled={loadedReadOnly}
+          onChange={(event) => {
+            setNameTouched(true);
+            setName(event.currentTarget.value);
+          }}
+          error={nameClash ? 'A method with this name already exists.' : undefined}
+        />
+        <Textarea
+          label="Description"
+          value={description}
+          disabled={loadedReadOnly}
+          onChange={(event) => setDescription(event.currentTarget.value)}
+        />
+        {loadedReadOnly && (
+          <Alert color="blue" title="Loaded read-only">
+            Click Edit before changing this saved {isTrainableArchitecture ? 'architecture' : 'method'}.
+          </Alert>
+        )}
+        {nameClash && (
+          <Alert color="red" title="Name already exists">
+            Choose a unique name before saving.
+          </Alert>
+        )}
+        {invalidNumericDrafts.length > 0 && (
+          <Alert color="red" title="Invalid numeric input">
+            {invalidNumericDrafts[0][1].message ?? 'Commit or discard the current numeric draft before saving.'}
+          </Alert>
+        )}
+        <Group justify="space-between" align="center">
+          {selectedMethod ? (
             <Badge color={architectureCheck?.valid ? 'green' : 'red'} variant="light" size="lg">
               {architectureCheck?.valid ? 'Ready to save' : 'Blocked'}
             </Badge>
-            {renderSaveActions(true)}
-          </Group>
-        </Stack>
-      </Paper>
+          ) : (
+            <Text size="sm" c="dimmed">
+              Select a method type before saving.
+            </Text>
+          )}
+          {renderSaveActions(true)}
+        </Group>
+      </StepCard>
 
-      <Paper withBorder p="md" radius="sm">
-        <Stack gap="md">
-          <Group gap="xs">
-            <Boxes size={18} />
-            <Title order={3}>{builderTitle}</Title>
-          </Group>
-          {!selectedMethod && <Alert color="blue">Loading method definitions.</Alert>}
+      <StepCard index={1} title="Method type" color="violet" complete={Boolean(selectedMethod)}>
+        <Select
+          label="Method type"
+          placeholder="Select a method type"
+          data={methodDefinitions.map((method) => ({ value: method.type, label: method.label }))}
+          value={methodType}
+          disabled={loadedReadOnly}
+          onChange={(value) => {
+            const method = value ? methodByType.get(value) : undefined;
+            if (method) resetForMethod(method);
+          }}
+        />
+
+        {selectedMethod ? (
+          <Paper withBorder p="sm" radius="sm">
+            <Group gap="xs">
+              <BrainCircuit size={18} />
+              <Text fw={700}>{selectedMethod.label}</Text>
+            </Group>
+            <Text size="sm" c="dimmed" mt={4}>
+              {selectedMethod.description}
+            </Text>
+          </Paper>
+        ) : (
+          <Alert color="blue">Select the method type before configuring architecture parameters.</Alert>
+        )}
+      </StepCard>
+
+      <StepCard index={2} title={builderTitle} color="teal">
+          {!selectedMethod && <Alert color="blue">Select a method type to configure its builder.</Alert>}
           {selectedMethod && !BuilderComponent && (
             <Alert color="red" title="Unsupported method builder">
               No frontend builder is registered for builder_kind "{selectedMethod.builder_kind}".
@@ -453,11 +449,9 @@ export function MethodsPage() {
               onNumberDraftChange={handleNumberDraftChange}
             />
           )}
-        </Stack>
-      </Paper>
+      </StepCard>
 
-      <Paper withBorder p="md" radius="sm">
-        <Stack gap="md">
+      <StepCard index={3} title="Validate" color="grape">
           <ArchitectureCheckPanel validation={architectureCheck} modelConfig={modelConfig} />
           {selectedMethod?.builder_kind !== 'form' && (
             <TorchCheckPanel
@@ -470,8 +464,7 @@ export function MethodsPage() {
           )}
           <Title order={3}>Diagram</Title>
           <MethodDiagramPanel diagram={diagram} error={diagramError} />
-        </Stack>
-      </Paper>
+      </StepCard>
 
       <SavedMethodsTable methods={methods} methodByType={methodByType} onLoad={handleLoadMethod} onDelete={handleDelete} />
     </Stack>
