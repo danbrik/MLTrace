@@ -1,7 +1,7 @@
 [project]
 name = "mltrace"
 version = "0.1.0"
-description = "Local ML experiment platform for image dataset cataloging and training dataset selection."
+description = "Local MLTrace platform for image dataset cataloging, preprocessing, method configuration, training, testing, and analysis."
 requires-python = ">=3.11"
 dependencies = [
     "fastapi>=0.115.0",
