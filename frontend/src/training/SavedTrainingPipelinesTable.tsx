@@ -158,6 +158,8 @@ export function SavedTrainingPipelinesTable({
   methodConfigurations = [],
   onLoad,
   onDelete,
+  isLoading,
+  isDeleting,
 }: {
   pipelines: TrainingPipeline[];
   trainingDatasets?: TrainingDataset[];
@@ -165,6 +167,8 @@ export function SavedTrainingPipelinesTable({
   methodConfigurations?: MethodConfiguration[];
   onLoad: (pipelineId: number) => void;
   onDelete: (pipeline: TrainingPipeline) => void;
+  isLoading?: (pipelineId: number) => boolean;
+  isDeleting?: (pipelineId: number) => boolean;
 }) {
   const [detail, setDetail] = useState<{ title: string; body: React.ReactNode } | null>(null);
   const preprocessingById = new Map(preprocessingPipelines.map((pipeline) => [pipeline.id, pipeline]));
@@ -259,12 +263,23 @@ export function SavedTrainingPipelinesTable({
                   <Table.Td>
                     <Group gap="xs" justify="flex-end" wrap="nowrap">
                       <Tooltip label="Load">
-                        <ActionIcon variant="subtle" onClick={() => onLoad(pipeline.id)}>
+                        <ActionIcon
+                          variant="subtle"
+                          loading={isLoading?.(pipeline.id) ?? false}
+                          disabled={isDeleting?.(pipeline.id) ?? false}
+                          onClick={() => onLoad(pipeline.id)}
+                        >
                           <Upload size={18} />
                         </ActionIcon>
                       </Tooltip>
                       <Tooltip label="Delete">
-                        <ActionIcon color="red" variant="subtle" onClick={() => onDelete(pipeline)}>
+                        <ActionIcon
+                          color="red"
+                          variant="subtle"
+                          loading={isDeleting?.(pipeline.id) ?? false}
+                          disabled={isLoading?.(pipeline.id) ?? false}
+                          onClick={() => onDelete(pipeline)}
+                        >
                           <Trash2 size={18} />
                         </ActionIcon>
                       </Tooltip>

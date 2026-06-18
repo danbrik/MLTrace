@@ -40,6 +40,7 @@ import {
   updatePreprocessingPipeline,
 } from '../api';
 import { CONTROL_REGISTRY } from '../preprocessing/controls';
+import { usePendingIds } from '../hooks/usePendingIds';
 import type {
   Dataset,
   DatasetFolder,
@@ -167,6 +168,7 @@ export function PreprocessingPipelinesPage() {
   const [loading, setLoading] = useState(false);
   const [sourceImage, setSourceImage] = useState<PreprocessingPreviewImage | null>(null);
   const [sourceLoading, setSourceLoading] = useState(false);
+  const rowActions = usePendingIds();
   const [loadedPipelineId, setLoadedPipelineId] = useState<number | null>(null);
   const [isEditingLoadedPipeline, setIsEditingLoadedPipeline] = useState(true);
   const [designResolution, setDesignResolution] = useState<PipelineDesignResolution>(EMPTY_DESIGN_RESOLUTION);
@@ -450,15 +452,15 @@ export function PreprocessingPipelinesPage() {
   }
 
   async function handleLoadPipeline(pipelineId: number) {
-    try {
+    await rowActions.runPending(`load:${pipelineId}`, async () => {
       loadGraph(await getPreprocessingPipeline(pipelineId));
-    } catch (error) {
+    }).catch((error) => {
       notifications.show({
         color: 'red',
         title: 'Could not load pipeline',
         message: error instanceof Error ? error.message : 'Unknown error',
       });
-    }
+    });
   }
 
   async function handleCreate() {
@@ -564,7 +566,7 @@ export function PreprocessingPipelinesPage() {
 
   async function handleDelete(pipeline: PreprocessingPipeline) {
     if (!window.confirm(`Delete preprocessing pipeline "${pipeline.name}"?`)) return;
-    try {
+    await rowActions.runPending(`delete:${pipeline.id}`, async () => {
       await deletePreprocessingPipeline(pipeline.id);
       await refresh();
       if (loadedPipelineId === pipeline.id) {
@@ -572,13 +574,13 @@ export function PreprocessingPipelinesPage() {
         setIsEditingLoadedPipeline(true);
       }
       notifications.show({ color: 'green', title: 'Pipeline deleted', message: pipeline.name });
-    } catch (error) {
+    }).catch((error) => {
       notifications.show({
         color: 'red',
         title: 'Delete failed',
         message: error instanceof Error ? error.message : 'Unknown error',
       });
-    }
+    });
   }
 
   // Load the source image as soon as a preview folder is selected, and keep it
@@ -1136,12 +1138,23 @@ export function PreprocessingPipelinesPage() {
                     <Table.Td>
                       <Group gap="xs" justify="flex-end">
                         <Tooltip label="Load">
-                          <ActionIcon variant="subtle" onClick={() => handleLoadPipeline(pipeline.id)}>
+                          <ActionIcon
+                            variant="subtle"
+                            loading={rowActions.isPending(`load:${pipeline.id}`)}
+                            disabled={rowActions.isPending(`delete:${pipeline.id}`)}
+                            onClick={() => handleLoadPipeline(pipeline.id)}
+                          >
                             <Upload size={18} />
                           </ActionIcon>
                         </Tooltip>
                         <Tooltip label="Delete">
-                          <ActionIcon color="red" variant="subtle" onClick={() => handleDelete(pipeline)}>
+                          <ActionIcon
+                            color="red"
+                            variant="subtle"
+                            loading={rowActions.isPending(`delete:${pipeline.id}`)}
+                            disabled={rowActions.isPending(`load:${pipeline.id}`)}
+                            onClick={() => handleDelete(pipeline)}
+                          >
                             <Trash2 size={18} />
                           </ActionIcon>
                         </Tooltip>

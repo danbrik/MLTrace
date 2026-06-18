@@ -28,6 +28,7 @@ import {
   updateTrainingPipeline,
 } from '../api';
 import { StepCard } from '../components/StepCard';
+import { usePendingIds } from '../hooks/usePendingIds';
 import { SchemaForm } from '../methods/schema/SchemaForm';
 import type { NumericDraftState } from '../methods/types';
 import { schemaDefaults } from '../methods/utils';
@@ -84,6 +85,7 @@ export function TrainingPipelinesPage({
   const [loading, setLoading] = useState(false);
   const [running, setRunning] = useState(false);
   const [numericDrafts, setNumericDrafts] = useState<Record<string, NumericDraftState>>({});
+  const rowActions = usePendingIds();
 
   async function refresh() {
     const [nextDatasets, nextPipelines, nextConfigurations, nextDefinitions, nextTrainingPipelines] =
@@ -236,9 +238,11 @@ export function TrainingPipelinesPage({
     setNumericDrafts({});
   }
 
-  function handleLoadPipeline(pipelineId: number) {
-    const pipeline = pipelines.find((item) => item.id === pipelineId);
-    if (pipeline) loadPipelineIntoBuilder(pipeline);
+  async function handleLoadPipeline(pipelineId: number) {
+    await rowActions.runPending(`load:${pipelineId}`, async () => {
+      const pipeline = pipelines.find((item) => item.id === pipelineId);
+      if (pipeline) loadPipelineIntoBuilder(pipeline);
+    });
   }
 
   function handleReset() {
@@ -335,18 +339,18 @@ export function TrainingPipelinesPage({
 
   async function handleDelete(pipeline: TrainingPipeline) {
     if (!window.confirm(`Delete training pipeline "${pipeline.name}"?`)) return;
-    try {
+    await rowActions.runPending(`delete:${pipeline.id}`, async () => {
       await deleteTrainingPipeline(pipeline.id);
       await refresh();
       if (loadedPipelineId === pipeline.id) handleReset();
       notifications.show({ color: 'green', title: 'Training pipeline deleted', message: pipeline.name });
-    } catch (error) {
+    }).catch((error) => {
       notifications.show({
         color: 'red',
         title: 'Delete failed',
         message: error instanceof Error ? error.message : 'Unknown error',
       });
-    }
+    });
   }
 
   const handleNumberDraftChange = useCallback((fieldId: string, state: NumericDraftState | null) => {
@@ -531,6 +535,8 @@ export function TrainingPipelinesPage({
         methodConfigurations={configurations}
         onLoad={handleLoadPipeline}
         onDelete={handleDelete}
+        isLoading={(pipelineId) => rowActions.isPending(`load:${pipelineId}`)}
+        isDeleting={(pipelineId) => rowActions.isPending(`delete:${pipelineId}`)}
       />
     </Stack>
   );

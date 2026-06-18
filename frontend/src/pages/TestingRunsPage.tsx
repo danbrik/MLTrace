@@ -37,6 +37,7 @@ import {
   restartTestingRun,
 } from '../api';
 import { StepCard } from '../components/StepCard';
+import { usePendingIds } from '../hooks/usePendingIds';
 import { formatValue, methodLabel } from '../methods/utils';
 import { datasetResolutions, formatResolution, orderedGraphNodes, stepDetail } from '../training/graph';
 import type {
@@ -404,6 +405,7 @@ export function TestingRunsPage({ active = true, onRunQueued }: { active?: boole
   const [loadingPreview, setLoadingPreview] = useState(false);
   const [savingRoi, setSavingRoi] = useState(false);
   const [running, setRunning] = useState(false);
+  const rowActions = usePendingIds();
   const [detailModal, setDetailModal] = useState<{ title: string; body: React.ReactNode } | null>(null);
 
   async function refresh() {
@@ -523,6 +525,7 @@ export function TestingRunsPage({ active = true, onRunQueued }: { active?: boole
 
   async function handlePreview() {
     if (!confirmedModelId || !selectedDatasetId) return;
+    if (loadingPreview) return;
     setLoadingPreview(true);
     try {
       const nextPreview = await previewRoi({ training_run_id: confirmedModelId, training_dataset_id: selectedDatasetId });
@@ -538,6 +541,7 @@ export function TestingRunsPage({ active = true, onRunQueued }: { active?: boole
 
   async function handleSaveRoi() {
     if (!preview || !points || !roiName.trim()) return;
+    if (savingRoi) return;
     setSavingRoi(true);
     try {
       const rect = boundingRect(points);
@@ -568,18 +572,19 @@ export function TestingRunsPage({ active = true, onRunQueued }: { active?: boole
 
   async function handleDeleteRoi(roi: RoiDefinition) {
     if (!window.confirm(`Delete ROI "${roi.name}"?`)) return;
-    try {
+    await rowActions.runPending(`delete-roi:${roi.id}`, async () => {
       await deleteRoi(roi.id);
       if (selectedRoiId === String(roi.id)) setSelectedRoiId(null);
       await refresh();
       notifications.show({ color: 'green', title: 'ROI deleted', message: roi.name });
-    } catch (error) {
+    }).catch((error) => {
       notifyError('Could not delete ROI', error);
-    }
+    });
   }
 
   async function handleRun() {
     if (!confirmedModelId || !selectedDatasetId || selectedRoiMismatch) return;
+    if (running) return;
     setRunning(true);
     try {
       const run = await enqueueTestingRun({
@@ -974,7 +979,14 @@ export function TestingRunsPage({ active = true, onRunQueued }: { active?: boole
                     <Table.Td>
                       <Group justify="flex-end">
                         <Tooltip label="Delete ROI">
-                          <ActionIcon aria-label={`Delete ROI ${roi.name}`} color="red" variant="subtle" onClick={() => handleDeleteRoi(roi)}>
+                          <ActionIcon
+                            aria-label={`Delete ROI ${roi.name}`}
+                            color="red"
+                            variant="subtle"
+                            loading={rowActions.isPending(`delete-roi:${roi.id}`)}
+                            disabled={rowActions.isPending(`delete-roi:${roi.id}`)}
+                            onClick={() => handleDeleteRoi(roi)}
+                          >
                             <Trash2 size={18} />
                           </ActionIcon>
                         </Tooltip>

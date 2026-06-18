@@ -36,6 +36,7 @@ import {
   listTrainingRuns,
 } from '../api';
 import { StepCard } from '../components/StepCard';
+import { usePendingIds } from '../hooks/usePendingIds';
 import { formatValue } from '../methods/utils';
 import { datasetResolutions, formatResolution, orderedGraphNodes, stepDetail } from '../training/graph';
 import type {
@@ -754,6 +755,7 @@ export function AnalysisPage({ active = true }: { active?: boolean }) {
   const [plots, setPlots] = useState<AnalysisPlot[]>([]);
   const [heatmapCache, setHeatmapCache] = useState<Record<string, HeatmapRun>>({});
   const [loadingHeatmaps, setLoadingHeatmaps] = useState<Record<string, boolean>>({});
+  const sourceActions = usePendingIds();
   const [addPlotOpen, setAddPlotOpen] = useState(true);
   const [selectedPipelineId, setSelectedPipelineId] = useState<string | null>(null);
   const [pipelineSearch, setPipelineSearch] = useState('');
@@ -1002,37 +1004,36 @@ export function AnalysisPage({ active = true }: { active?: boolean }) {
     return { trainingRun, trainingPipeline, trainset, preprocessing, method };
   }
 
-  function addSource(run: TestingRun) {
+  async function addSource(run: TestingRun) {
     if (selectedSources.some((source) => source.testingRunId === String(run.id))) return;
-    const bounds = sourceBounds(trainingDatasetById.get(run.training_dataset_id));
-    if (draft.plotType === 'heatmap' && draft.heatmapMode === 'single') {
-      setSelectedSources((current) => [
-        ...current,
-        {
-          testingRunId: String(run.id),
-          start: bounds.start,
-          end: bounds.end,
-          sampling: 1,
-          timestamp: bounds.start,
-        },
-      ]);
-      return;
-    }
-    fetchResults(run.id)
-      .then((data) => {
-        const first = data.results[0];
+    await sourceActions.runPending(`add-source:${run.id}`, async () => {
+      const bounds = sourceBounds(trainingDatasetById.get(run.training_dataset_id));
+      if (draft.plotType === 'heatmap' && draft.heatmapMode === 'single') {
         setSelectedSources((current) => [
           ...current,
           {
             testingRunId: String(run.id),
-            start: bounds.start || toDateTimeLocal(first?.timestamp),
-            end: bounds.end || toDateTimeLocal(data.results[data.results.length - 1]?.timestamp),
+            start: bounds.start,
+            end: bounds.end,
             sampling: 1,
-            timestamp: first?.timestamp ?? null,
+            timestamp: bounds.start,
           },
         ]);
-      })
-      .catch((error) => notifyError('Could not load testing results', error));
+        return;
+      }
+      const data = await fetchResults(run.id);
+      const first = data.results[0];
+      setSelectedSources((current) => [
+        ...current,
+        {
+          testingRunId: String(run.id),
+          start: bounds.start || toDateTimeLocal(first?.timestamp),
+          end: bounds.end || toDateTimeLocal(data.results[data.results.length - 1]?.timestamp),
+          sampling: 1,
+          timestamp: first?.timestamp ?? null,
+        },
+      ]);
+    }).catch((error) => notifyError('Could not load testing results', error));
   }
 
   function updateSource(runId: string, patch: Partial<PlotSourceConfig>) {
@@ -1317,10 +1318,11 @@ export function AnalysisPage({ active = true }: { active?: boolean }) {
                                 size="compact-sm"
                                 variant={added ? 'filled' : 'light'}
                                 color={added ? 'green' : 'blue'}
+                                loading={sourceActions.isPending(`add-source:${run.id}`)}
                                 onClick={() => addSource(run)}
-                                disabled={added}
+                                disabled={added || sourceActions.isPending(`add-source:${run.id}`)}
                               >
-                                {added ? 'Added' : 'Add'}
+                                {sourceActions.isPending(`add-source:${run.id}`) ? 'Adding…' : added ? 'Added' : 'Add'}
                               </Button>
                             </Table.Td>
                           </Table.Tr>

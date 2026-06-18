@@ -16,6 +16,7 @@ import {
   updateMethodConfiguration,
 } from '../api';
 import { StepCard } from '../components/StepCard';
+import { usePendingIds } from '../hooks/usePendingIds';
 import { ArchitectureCheckPanel } from '../methods/panels/ArchitectureCheckPanel';
 import { MethodDiagramPanel } from '../methods/panels/MethodDiagramPanel';
 import { SavedMethodsTable } from '../methods/panels/SavedMethodsTable';
@@ -59,6 +60,7 @@ export function MethodsPage() {
   const [isEditingLoadedMethod, setIsEditingLoadedMethod] = useState(true);
   const [loading, setLoading] = useState(false);
   const [numericDrafts, setNumericDrafts] = useState<Record<string, NumericDraftState>>({});
+  const rowActions = usePendingIds();
 
   async function refresh() {
     const [nextMethodDefinitions, nextLayers, nextMethods] = await Promise.all([
@@ -195,15 +197,15 @@ export function MethodsPage() {
   }
 
   async function handleLoadMethod(methodId: number) {
-    try {
+    await rowActions.runPending(`load:${methodId}`, async () => {
       loadMethodIntoBuilder(await getMethodConfiguration(methodId));
-    } catch (error) {
+    }).catch((error) => {
       notifications.show({
         color: 'red',
         title: 'Could not load method',
         message: error instanceof Error ? error.message : 'Unknown error',
       });
-    }
+    });
   }
 
   async function handleSave(asNew: boolean) {
@@ -292,7 +294,7 @@ export function MethodsPage() {
 
   async function handleDelete(method: MethodConfiguration) {
     if (!window.confirm(`Delete method "${method.name}"?`)) return;
-    try {
+    await rowActions.runPending(`delete:${method.id}`, async () => {
       await deleteMethodConfiguration(method.id);
       await refresh();
       if (loadedMethodId === method.id) {
@@ -301,13 +303,13 @@ export function MethodsPage() {
         setNameTouched(false);
       }
       notifications.show({ color: 'green', title: 'Method deleted', message: method.name });
-    } catch (error) {
+    }).catch((error) => {
       notifications.show({
         color: 'red',
         title: 'Delete failed',
         message: error instanceof Error ? error.message : 'Unknown error',
       });
-    }
+    });
   }
 
   const saveDisabled = !name.trim() || nameClash || invalidNumericDrafts.length > 0 || architectureCheck?.valid !== true;
@@ -474,7 +476,14 @@ export function MethodsPage() {
           <MethodDiagramPanel diagram={diagram} error={diagramError} />
       </StepCard>
 
-      <SavedMethodsTable methods={methods} methodByType={methodByType} onLoad={handleLoadMethod} onDelete={handleDelete} />
+      <SavedMethodsTable
+        methods={methods}
+        methodByType={methodByType}
+        onLoad={handleLoadMethod}
+        onDelete={handleDelete}
+        isLoading={(methodId) => rowActions.isPending(`load:${methodId}`)}
+        isDeleting={(methodId) => rowActions.isPending(`delete:${methodId}`)}
+      />
     </Stack>
   );
 }

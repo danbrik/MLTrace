@@ -29,6 +29,7 @@ import {
   rescanDataset,
   testDatasetConnection,
 } from '../api';
+import { usePendingIds } from '../hooks/usePendingIds';
 import type { Dataset, DatasetConnectionTest } from '../types';
 
 type ActivityLogEntry = {
@@ -93,6 +94,7 @@ export function DatasetsPage() {
   const [scanning, setScanning] = useState(false);
   const [activityLog, setActivityLog] = useState<ActivityLogEntry[]>([]);
   const [runningOperation, setRunningOperation] = useState<RunningOperation | null>(null);
+  const rowActions = usePendingIds();
   const [, setElapsedTick] = useState(0);
   const lastWaitLogSecondRef = useRef(0);
 
@@ -147,6 +149,7 @@ export function DatasetsPage() {
   }, [runningElapsedSeconds, runningOperation]);
 
   async function handleCreateDataset() {
+    if (loading) return;
     setLoading(true);
     setElapsedTick(0);
     setRunningOperation({ kind: 'detect-timestamps', label: `Detect timestamps: ${rootPath}`, startedAt: Date.now() });
@@ -180,6 +183,7 @@ export function DatasetsPage() {
   }
 
   async function handleTestConnection() {
+    if (testingConnection) return;
     const startedAt = Date.now();
     setTestingConnection(true);
     setElapsedTick(0);
@@ -225,6 +229,7 @@ export function DatasetsPage() {
 
   async function handleConfirmTimestamp() {
     if (!confirmationDataset) return;
+    if (scanning) return;
     setScanning(true);
     setElapsedTick(0);
     setRunningOperation({ kind: 'scan-dataset', label: `Scan dataset: ${confirmationDataset.root_path}`, startedAt: Date.now() });
@@ -270,30 +275,32 @@ export function DatasetsPage() {
   }
 
   async function handleRescan(datasetId: number) {
+    if (rowActions.isPending(`rescan:${datasetId}`)) return;
     setScanning(true);
     const datasetForLog = datasets.find((dataset) => dataset.id === datasetId);
     setElapsedTick(0);
     setRunningOperation({ kind: 'rescan', label: `Rescan: ${datasetForLog?.root_path ?? datasetId}`, startedAt: Date.now() });
     addActivity('info', `Rescan started for ${datasetForLog?.root_path ?? datasetId}`);
-    try {
+    await rowActions.runPending(`rescan:${datasetId}`, async () => {
       const dataset = await rescanDataset(datasetId);
       addActivity('success', `Rescan finished: ${dataset.folders.length} folder summaries indexed`);
       await refreshDatasets();
       notifications.show({ color: 'green', title: 'Dataset rescanned', message: dataset.root_path });
-    } catch (error) {
+    }).catch((error) => {
       notifications.show({
         color: 'red',
         title: 'Rescan failed',
         message: error instanceof Error ? error.message : 'Unknown error',
       });
       addActivity('error', `Rescan failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
-    } finally {
+    }).finally(() => {
       setScanning(false);
       setRunningOperation(null);
-    }
+    });
   }
 
   async function handleDeleteDataset(dataset: Dataset) {
+    if (deletingDatasetId === dataset.id) return;
     const confirmed = window.confirm(`Delete dataset "${dataset.name}"? Indexed metadata will be removed.`);
     if (!confirmed) return;
     setDeletingDatasetId(dataset.id);
@@ -485,10 +492,16 @@ export function DatasetsPage() {
                             size="compact-sm"
                             variant="light"
                             leftSection={<RefreshCw size={14} />}
-                            disabled={!dataset.timestamp_regex || !dataset.timestamp_format || dataset.is_update_locked}
+                            loading={rowActions.isPending(`rescan:${dataset.id}`)}
+                            disabled={
+                              !dataset.timestamp_regex ||
+                              !dataset.timestamp_format ||
+                              dataset.is_update_locked ||
+                              deletingDatasetId === dataset.id
+                            }
                             onClick={() => handleRescan(dataset.id)}
                           >
-                            Rescan
+                            {rowActions.isPending(`rescan:${dataset.id}`) ? 'Rescanning…' : 'Rescan'}
                           </Button>
                           <Button
                             size="compact-sm"
@@ -496,6 +509,7 @@ export function DatasetsPage() {
                             color="red"
                             leftSection={<Trash2 size={14} />}
                             loading={deletingDatasetId === dataset.id}
+                            disabled={rowActions.isPending(`rescan:${dataset.id}`)}
                             onClick={() => handleDeleteDataset(dataset)}
                           >
                             Delete

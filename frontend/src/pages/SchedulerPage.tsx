@@ -21,6 +21,7 @@ import {
 import { notifications } from '@mantine/notifications';
 
 import { StepCard } from '../components/StepCard';
+import { usePendingIds } from '../hooks/usePendingIds';
 import { FileText, Info, RotateCcw, Search, StopCircle, Trash2 } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState } from 'react';
 
@@ -193,6 +194,8 @@ export function SchedulerPage({ active = true }: { active?: boolean }) {
   const [schedulerSettings, setSchedulerSettings] = useState<SchedulerSettings | null>(null);
   const [settingsDraft, setSettingsDraft] = useState<{ max_gpu_slots: number; only_gpu: boolean } | null>(null);
   const [savingSettings, setSavingSettings] = useState(false);
+  const [clearingHeatmaps, setClearingHeatmaps] = useState(false);
+  const rowActions = usePendingIds();
 
   const [search, setSearch] = useState('');
   const [typeFilter, setTypeFilter] = useState<string | null>(null);
@@ -272,33 +275,34 @@ export function SchedulerPage({ active = true }: { active?: boolean }) {
 
   const heatmapGroups = useMemo(() => summarizeHeatmaps(heatmaps), [heatmaps]);
 
-  async function withRefresh(action: () => Promise<unknown>, errorTitle: string) {
-    try {
+  async function withRefresh(actionId: string, action: () => Promise<unknown>, errorTitle: string) {
+    await rowActions.runPending(actionId, async () => {
       await action();
       await refreshRuns();
-    } catch (error) {
+    }).catch((error) => {
       notifyError(errorTitle, error);
-    }
+    });
   }
 
   function handleAbort(job: SchedulerJob) {
     const action = job.kind === 'train' ? () => abortTrainingRun(job.run.id) : () => abortTestingRun(job.run.id);
-    withRefresh(action, 'Could not abort');
+    withRefresh(`abort:${jobKey(job)}`, action, 'Could not abort');
   }
 
   function handleRestart(job: SchedulerJob) {
     const action = job.kind === 'train' ? () => restartTrainingRun(job.run.id) : () => restartTestingRun(job.run.id);
-    withRefresh(action, 'Could not restart');
+    withRefresh(`restart:${jobKey(job)}`, action, 'Could not restart');
   }
 
   function handleDelete(job: SchedulerJob) {
     if (!window.confirm(`Remove ${job.kind === 'train' ? 'training run' : 'inference'} "${jobName(job)}"?`)) return;
     const action = job.kind === 'train' ? () => deleteTrainingRun(job.run.id) : () => deleteTestingRun(job.run.id);
-    withRefresh(action, 'Could not remove');
+    withRefresh(`delete:${jobKey(job)}`, action, 'Could not remove');
   }
 
   async function handleSaveSettings() {
     if (!settingsDraft) return;
+    if (savingSettings) return;
     setSavingSettings(true);
     try {
       const next = await updateSchedulerSettings(settingsDraft);
@@ -314,11 +318,15 @@ export function SchedulerPage({ active = true }: { active?: boolean }) {
 
   async function handleClearHeatmaps() {
     if (!window.confirm('Clear all cached heatmaps?')) return;
+    if (clearingHeatmaps) return;
+    setClearingHeatmaps(true);
     try {
       await clearHeatmaps();
       setHeatmaps([]);
     } catch (error) {
       notifyError('Could not clear heatmaps', error);
+    } finally {
+      setClearingHeatmaps(false);
     }
   }
 
@@ -427,8 +435,13 @@ export function SchedulerPage({ active = true }: { active?: boolean }) {
                   const run = job.run;
                   const terminal = TERMINAL.has(run.status);
                   const abortable = run.status === 'queued' || run.status === 'running';
+                  const key = jobKey(job);
+                  const rowBusy =
+                    rowActions.isPending(`abort:${key}`) ||
+                    rowActions.isPending(`restart:${key}`) ||
+                    rowActions.isPending(`delete:${key}`);
                   return (
-                    <Table.Tr key={jobKey(job)}>
+                    <Table.Tr key={key}>
                       <Table.Td>
                         <Badge color={job.kind === 'train' ? 'blue' : 'grape'} variant="light">
                           {job.kind === 'train' ? 'Training' : 'Inference'}
@@ -464,21 +477,38 @@ export function SchedulerPage({ active = true }: { active?: boolean }) {
                           </Tooltip>
                           {abortable && (
                             <Tooltip label="Abort">
-                              <ActionIcon color="orange" variant="subtle" onClick={() => handleAbort(job)}>
+                              <ActionIcon
+                                color="orange"
+                                variant="subtle"
+                                loading={rowActions.isPending(`abort:${key}`)}
+                                disabled={rowBusy && !rowActions.isPending(`abort:${key}`)}
+                                onClick={() => handleAbort(job)}
+                              >
                                 <StopCircle size={18} />
                               </ActionIcon>
                             </Tooltip>
                           )}
                           {terminal && (
                             <Tooltip label="Restart">
-                              <ActionIcon variant="subtle" onClick={() => handleRestart(job)}>
+                              <ActionIcon
+                                variant="subtle"
+                                loading={rowActions.isPending(`restart:${key}`)}
+                                disabled={rowBusy && !rowActions.isPending(`restart:${key}`)}
+                                onClick={() => handleRestart(job)}
+                              >
                                 <RotateCcw size={18} />
                               </ActionIcon>
                             </Tooltip>
                           )}
                           {run.status !== 'running' && (
                             <Tooltip label="Remove">
-                              <ActionIcon color="red" variant="subtle" onClick={() => handleDelete(job)}>
+                              <ActionIcon
+                                color="red"
+                                variant="subtle"
+                                loading={rowActions.isPending(`delete:${key}`)}
+                                disabled={rowBusy && !rowActions.isPending(`delete:${key}`)}
+                                onClick={() => handleDelete(job)}
+                              >
                                 <Trash2 size={18} />
                               </ActionIcon>
                             </Tooltip>
@@ -503,8 +533,15 @@ export function SchedulerPage({ active = true }: { active?: boolean }) {
                 Cached CPU pixel-error heatmaps computed from Analysis. These do not occupy GPU queue slots.
               </Text>
             </div>
-            <Button variant="default" color="red" leftSection={<Trash2 size={16} />} disabled={heatmaps.length === 0} onClick={handleClearHeatmaps}>
-              Clear heatmaps
+            <Button
+              variant="default"
+              color="red"
+              leftSection={<Trash2 size={16} />}
+              loading={clearingHeatmaps}
+              disabled={heatmaps.length === 0 || clearingHeatmaps}
+              onClick={handleClearHeatmaps}
+            >
+              {clearingHeatmaps ? 'Clearing…' : 'Clear heatmaps'}
             </Button>
           </Group>
           <ScrollArea>

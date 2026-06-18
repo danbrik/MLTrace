@@ -34,6 +34,7 @@ import {
   refreshTrainingDatasetCounts,
   updateTrainingDataset,
 } from '../api';
+import { usePendingIds } from '../hooks/usePendingIds';
 import type { Dataset, DatasetFolder, TrainingDataset, TrainingDatasetPreview, TrainingDatasetRuleInput } from '../types';
 
 type RuleRow = TrainingDatasetRuleInput & {
@@ -149,6 +150,7 @@ export function TrainingDatasetsPage() {
   const [rules, setRules] = useState<RuleRow[]>([]);
   const [preview, setPreview] = useState<TrainingDatasetPreview | null>(null);
   const [loading, setLoading] = useState(false);
+  const rowActions = usePendingIds();
   const isReadOnly = Boolean(loadedDataset && !isEditingLoaded);
 
   async function refresh() {
@@ -362,17 +364,17 @@ export function TrainingDatasetsPage() {
   }
 
   async function handleLoad(trainingDataset: TrainingDataset) {
-    try {
+    await rowActions.runPending(`load:${trainingDataset.id}`, async () => {
       const details = await getTrainingDataset(trainingDataset.id);
       applyLoadedDataset(details);
       notifications.show({ color: 'blue', title: 'Train/test dataset loaded', message: details.name });
-    } catch (error) {
+    }).catch((error) => {
       notifications.show({
         color: 'red',
         title: 'Load failed',
         message: error instanceof Error ? error.message : 'Unknown error',
       });
-    }
+    });
   }
 
   async function handleUpdate() {
@@ -423,42 +425,42 @@ export function TrainingDatasetsPage() {
   }
 
   async function handleCleanupInvalidRules(trainingDataset: TrainingDataset) {
-    try {
+    await rowActions.runPending(`cleanup:${trainingDataset.id}`, async () => {
       const updated = await cleanupTrainingDatasetInvalidRules(trainingDataset.id);
       if (loadedDataset?.id === updated.id) applyLoadedDataset(updated);
       if (inspectedDataset?.id === updated.id) setInspectedDataset(updated);
       await refresh();
       notifications.show({ color: 'green', title: 'Invalid rules cleaned up', message: updated.name });
-    } catch (error) {
+    }).catch((error) => {
       notifications.show({
         color: 'red',
         title: 'Cleanup failed',
         message: error instanceof Error ? error.message : 'Unknown error',
       });
-    }
+    });
   }
 
   async function handleRefreshCounts(trainingDataset: TrainingDataset) {
-    try {
+    await rowActions.runPending(`refresh-counts:${trainingDataset.id}`, async () => {
       const updated = await refreshTrainingDatasetCounts(trainingDataset.id);
       if (loadedDataset?.id === updated.id) applyLoadedDataset(updated);
       if (inspectedDataset?.id === updated.id) setInspectedDataset(updated);
       await refresh();
       notifications.show({ color: 'green', title: 'Counts refreshed', message: updated.name });
-    } catch (error) {
+    }).catch((error) => {
       notifications.show({
         color: 'red',
         title: 'Refresh counts failed',
         message: error instanceof Error ? error.message : 'Unknown error',
       });
-    }
+    });
   }
 
   async function handleDelete(trainingDataset: TrainingDataset) {
     const confirmed = window.confirm(`Delete train/test dataset "${trainingDataset.name}"?`);
     if (!confirmed) return;
 
-    try {
+    await rowActions.runPending(`delete:${trainingDataset.id}`, async () => {
       await deleteTrainingDataset(trainingDataset.id);
       if (inspectedDataset?.id === trainingDataset.id) {
         setInspectedDataset(null);
@@ -468,26 +470,26 @@ export function TrainingDatasetsPage() {
       }
       await refresh();
       notifications.show({ color: 'green', title: 'Train/test dataset deleted', message: trainingDataset.name });
-    } catch (error) {
+    }).catch((error) => {
       notifications.show({
         color: 'red',
         title: 'Delete failed',
         message: error instanceof Error ? error.message : 'Unknown error',
       });
-    }
+    });
   }
 
   async function handleInspect(trainingDataset: TrainingDataset) {
-    try {
+    await rowActions.runPending(`inspect:${trainingDataset.id}`, async () => {
       const details = await getTrainingDataset(trainingDataset.id);
       setInspectedDataset(details);
-    } catch (error) {
+    }).catch((error) => {
       notifications.show({
         color: 'red',
         title: 'Inspect failed',
         message: error instanceof Error ? error.message : 'Unknown error',
       });
-    }
+    });
   }
 
   const canSubmit = Boolean(name.trim() && rules.length > 0 && invalidRules.length === 0 && !signatureError);
@@ -820,13 +822,21 @@ export function TrainingDatasetsPage() {
                     <Table.Td>{trainingDataset.notes ?? ''}</Table.Td>
                     <Table.Td>
                       <Group gap="xs" justify="flex-end">
-                        <Button size="xs" variant="light" onClick={() => handleLoad(trainingDataset)}>
-                          Load
+                        <Button
+                          size="xs"
+                          variant="light"
+                          loading={rowActions.isPending(`load:${trainingDataset.id}`)}
+                          disabled={rowActions.isPending(`delete:${trainingDataset.id}`)}
+                          onClick={() => handleLoad(trainingDataset)}
+                        >
+                          {rowActions.isPending(`load:${trainingDataset.id}`) ? 'Loading…' : 'Load'}
                         </Button>
                         <Tooltip label="Inspect ranges">
                           <ActionIcon
                             variant="subtle"
                             aria-label="Inspect train/test dataset"
+                            loading={rowActions.isPending(`inspect:${trainingDataset.id}`)}
+                            disabled={rowActions.isPending(`delete:${trainingDataset.id}`)}
                             onClick={() => handleInspect(trainingDataset)}
                           >
                             <Info size={18} />
@@ -838,9 +848,10 @@ export function TrainingDatasetsPage() {
                             variant="light"
                             color="yellow"
                             onClick={() => handleCleanupInvalidRules(trainingDataset)}
-                            disabled={trainingDataset.is_update_locked}
+                            loading={rowActions.isPending(`cleanup:${trainingDataset.id}`)}
+                            disabled={trainingDataset.is_update_locked || rowActions.isPending(`delete:${trainingDataset.id}`)}
                           >
-                            Cleanup
+                            {rowActions.isPending(`cleanup:${trainingDataset.id}`) ? 'Cleaning…' : 'Cleanup'}
                           </Button>
                         )}
                         {trainingDataset.counts_missing && (
@@ -850,9 +861,11 @@ export function TrainingDatasetsPage() {
                               variant="light"
                               color="orange"
                               leftSection={<RefreshCw size={14} />}
+                              loading={rowActions.isPending(`refresh-counts:${trainingDataset.id}`)}
+                              disabled={rowActions.isPending(`delete:${trainingDataset.id}`)}
                               onClick={() => handleRefreshCounts(trainingDataset)}
                             >
-                              Refresh counts
+                              {rowActions.isPending(`refresh-counts:${trainingDataset.id}`) ? 'Refreshing…' : 'Refresh counts'}
                             </Button>
                           </Tooltip>
                         )}
@@ -861,6 +874,13 @@ export function TrainingDatasetsPage() {
                             color="red"
                             variant="subtle"
                             aria-label="Delete train/test dataset"
+                            loading={rowActions.isPending(`delete:${trainingDataset.id}`)}
+                            disabled={
+                              rowActions.isPending(`load:${trainingDataset.id}`) ||
+                              rowActions.isPending(`inspect:${trainingDataset.id}`) ||
+                              rowActions.isPending(`cleanup:${trainingDataset.id}`) ||
+                              rowActions.isPending(`refresh-counts:${trainingDataset.id}`)
+                            }
                             onClick={() => handleDelete(trainingDataset)}
                           >
                             <Trash2 size={18} />
