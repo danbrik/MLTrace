@@ -61,7 +61,7 @@ export function TrainingPipelineFlow({
                   <FlowNode
                     section="dataset"
                     label={dataset.name}
-                    detail={`${dataset.total_selected_images} images · ${dataset.dataset_names.join(', ')}`}
+                    detail={`${dataset.counts_missing ? 'Counts need refresh' : `${dataset.total_selected_images} images`} · ${dataset.dataset_names.join(', ')}`}
                   />
                   {index < trainingDatasets.length - 1 && <FlowArrow />}
                 </div>

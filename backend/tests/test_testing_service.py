@@ -9,8 +9,9 @@ from sqlalchemy.pool import StaticPool
 
 from app import models
 from app.database import Base
-from app.schemas import RoiDefinitionCreate, RoiPreviewRequest, TestingRunCreate as TestingRunCreatePayload
-from app.testing.service import create_roi, create_testing_run, get_testing_run_results, preview_roi_image
+from app.schemas import HeatmapRunCreate, RoiDefinitionCreate, RoiPreviewRequest, TestingRunCreate as TestingRunCreatePayload
+from app.testing import service as testing_service
+from app.testing.service import compute_heatmap_run, create_roi, create_testing_run, get_testing_run_results, preview_roi_image
 
 
 def write_tiff(path: Path, value: int, size: tuple[int, int] = (8, 6)) -> None:
@@ -56,6 +57,21 @@ def seed_finished_mean_image_run(db, tmp_path: Path):
     )
     db.add(folder)
     db.flush()
+    first_timestamp = datetime(2026, 4, 1, 12, 0, 0)
+    db.add(
+        models.DatasetImage(
+            dataset_id=dataset.id,
+            folder_id=folder.id,
+            file_path=str(root / f"frame_{first_timestamp:%Y%m%d_%H%M%S}.tiff"),
+            relative_path=f"frame_{first_timestamp:%Y%m%d_%H%M%S}.tiff",
+            file_name=f"frame_{first_timestamp:%Y%m%d_%H%M%S}.tiff",
+            extension=".tiff",
+            width=8,
+            height=6,
+            timestamp_raw=f"{first_timestamp:%Y%m%d_%H%M%S}",
+            timestamp_parsed=first_timestamp,
+        )
+    )
     test_set = models.TrainingDataset(name="Test Set", usage_label="test")
     db.add(test_set)
     db.flush()
@@ -132,7 +148,7 @@ def seed_finished_mean_image_run(db, tmp_path: Path):
     return run.id, test_set.id
 
 
-def test_roi_preview_and_mean_image_testing_run(tmp_path: Path) -> None:
+def test_roi_preview_and_mean_image_testing_run(tmp_path: Path, monkeypatch) -> None:
     db = make_db()
     try:
         training_run_id, test_set_id = seed_finished_mean_image_run(db, tmp_path)
@@ -162,5 +178,28 @@ def test_roi_preview_and_mean_image_testing_run(tmp_path: Path) -> None:
         assert len(details.results) == 3
         assert [result.score for result in details.results] == [0.0, 100.0, 400.0]
         assert db.scalar(select(models.TestingRunResult).where(models.TestingRunResult.testing_run_id == testing_run.id))
+
+        middle_result = details.results[1]
+        db.delete(db.get(models.TestingRunResult, middle_result.id))
+        db.commit()
+
+        def fail_if_enumerating(*_args, **_kwargs):
+            raise AssertionError("Direct heatmap lookup must not enumerate all dataset filenames.")
+
+        monkeypatch.setattr(testing_service, "enumerate_training_dataset_image_records", fail_if_enumerating)
+        heatmap = compute_heatmap_run(
+            db,
+            HeatmapRunCreate(testing_run_id=testing_run.id, timestamp=datetime(2026, 4, 1, 12, 0, 10)),
+        )
+        assert heatmap.status == "finished"
+        assert heatmap.testing_result_id is None
+        assert heatmap.image_path.endswith("frame_20260401_120010.tiff")
+        assert heatmap.max_error == 100.0
+
+        cached = compute_heatmap_run(
+            db,
+            HeatmapRunCreate(testing_run_id=testing_run.id, timestamp=datetime(2026, 4, 1, 12, 0, 10)),
+        )
+        assert cached.id == heatmap.id
     finally:
         db.close()

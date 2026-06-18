@@ -20,7 +20,7 @@ import {
 import { notifications } from '@mantine/notifications';
 
 import { StepCard } from '../components/StepCard';
-import { Copy, Edit3, Info, Plus, Save, Trash2 } from 'lucide-react';
+import { Copy, Edit3, Info, Plus, RefreshCw, Save, Trash2 } from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
 
 import {
@@ -31,6 +31,7 @@ import {
   listDatasets,
   listTrainingDatasets,
   previewTrainingDataset,
+  refreshTrainingDatasetCounts,
   updateTrainingDataset,
 } from '../api';
 import type { Dataset, DatasetFolder, TrainingDataset, TrainingDatasetPreview, TrainingDatasetRuleInput } from '../types';
@@ -125,7 +126,13 @@ function newRule(folderChoices: FolderChoice[]): RuleRow | null {
 }
 
 function selectedText(trainingDataset: TrainingDataset): string {
+  if (trainingDataset.counts_missing) return 'Needs refresh';
   return `${trainingDataset.total_selected_images} images`;
+}
+
+function countText(selected: number | null, matching?: number | null): string {
+  if (selected == null || (matching !== undefined && matching == null)) return 'Needs refresh';
+  return matching === undefined ? String(selected) : `${selected} / ${matching}`;
 }
 
 export function TrainingDatasetsPage() {
@@ -426,6 +433,22 @@ export function TrainingDatasetsPage() {
       notifications.show({
         color: 'red',
         title: 'Cleanup failed',
+        message: error instanceof Error ? error.message : 'Unknown error',
+      });
+    }
+  }
+
+  async function handleRefreshCounts(trainingDataset: TrainingDataset) {
+    try {
+      const updated = await refreshTrainingDatasetCounts(trainingDataset.id);
+      if (loadedDataset?.id === updated.id) applyLoadedDataset(updated);
+      if (inspectedDataset?.id === updated.id) setInspectedDataset(updated);
+      await refresh();
+      notifications.show({ color: 'green', title: 'Counts refreshed', message: updated.name });
+    } catch (error) {
+      notifications.show({
+        color: 'red',
+        title: 'Refresh counts failed',
         message: error instanceof Error ? error.message : 'Unknown error',
       });
     }
@@ -735,6 +758,8 @@ export function TrainingDatasetsPage() {
                   <Table.Th>Label</Table.Th>
                   <Table.Th>Source paths</Table.Th>
                   <Table.Th>Image data</Table.Th>
+                  <Table.Th>Start</Table.Th>
+                  <Table.Th>End</Table.Th>
                   <Table.Th>Images</Table.Th>
                   <Table.Th>Created</Table.Th>
                   <Table.Th>Notes</Table.Th>
@@ -750,6 +775,11 @@ export function TrainingDatasetsPage() {
                         {trainingDataset.invalid_rule_count > 0 && (
                           <Badge color="yellow" variant="light">
                             {trainingDataset.invalid_rule_count} invalid rule(s)
+                          </Badge>
+                        )}
+                        {trainingDataset.counts_missing && (
+                          <Badge color="orange" variant="light">
+                            Counts need refresh
                           </Badge>
                         )}
                       </Stack>
@@ -783,6 +813,8 @@ export function TrainingDatasetsPage() {
                         )}
                       </Group>
                     </Table.Td>
+                    <Table.Td>{formatTimestamp(trainingDataset.start_timestamp)}</Table.Td>
+                    <Table.Td>{formatTimestamp(trainingDataset.end_timestamp)}</Table.Td>
                     <Table.Td>{selectedText(trainingDataset)}</Table.Td>
                     <Table.Td>{formatTimestamp(trainingDataset.created_at)}</Table.Td>
                     <Table.Td>{trainingDataset.notes ?? ''}</Table.Td>
@@ -810,6 +842,19 @@ export function TrainingDatasetsPage() {
                           >
                             Cleanup
                           </Button>
+                        )}
+                        {trainingDataset.counts_missing && (
+                          <Tooltip label="Parse filenames once and store image counts for this train/test dataset">
+                            <Button
+                              size="xs"
+                              variant="light"
+                              color="orange"
+                              leftSection={<RefreshCw size={14} />}
+                              onClick={() => handleRefreshCounts(trainingDataset)}
+                            >
+                              Refresh counts
+                            </Button>
+                          </Tooltip>
                         )}
                         <Tooltip label="Delete">
                           <ActionIcon
@@ -839,9 +884,21 @@ export function TrainingDatasetsPage() {
         {inspectedDataset && (
           <Stack gap="md">
             <Alert color="blue" title="Image count">
-              {usageLabelText(inspectedDataset.usage_label ?? 'train')} set with {inspectedDataset.total_selected_images} selected
-              images from {inspectedDataset.total_matching_images} matching images.
+              {inspectedDataset.counts_missing
+                ? `${usageLabelText(inspectedDataset.usage_label ?? 'train')} set has stored rules, but counts need refresh.`
+                : `${usageLabelText(inspectedDataset.usage_label ?? 'train')} set with ${inspectedDataset.total_selected_images} selected images from ${inspectedDataset.total_matching_images} matching images.`}
             </Alert>
+            {inspectedDataset.integrity_warnings.length > 0 && (
+              <Alert color="yellow" title="Integrity warnings">
+                <Stack gap={4}>
+                  {inspectedDataset.integrity_warnings.map((warning) => (
+                    <Text key={warning} size="sm">
+                      {warning}
+                    </Text>
+                  ))}
+                </Stack>
+              </Alert>
+            )}
             <ScrollArea h={420}>
               <Table verticalSpacing="sm">
                 <Table.Thead>
@@ -884,9 +941,7 @@ export function TrainingDatasetsPage() {
                       <Table.Td>{formatTimestamp(rule.start_timestamp)}</Table.Td>
                       <Table.Td>{formatTimestamp(rule.end_timestamp)}</Table.Td>
                       <Table.Td>{rule.stride}</Table.Td>
-                      <Table.Td>
-                        {rule.selected_images} / {rule.matching_images}
-                      </Table.Td>
+                      <Table.Td>{countText(rule.selected_images, rule.matching_images)}</Table.Td>
                     </Table.Tr>
                   ))}
                 </Table.Tbody>

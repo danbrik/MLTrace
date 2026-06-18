@@ -7,6 +7,7 @@ export type DatasetFolder = {
   extension_summary: Record<string, number> | null;
   resolution_summary: Record<string, number> | null;
   image_metadata: Record<string, unknown> | null;
+  filename_template: Record<string, unknown> | null;
   cadence_summary: {
     min_seconds: number | null;
     median_seconds: number | null;
@@ -68,6 +69,8 @@ export type TrainingDataset = {
   usage_label: 'train' | 'test' | 'validation' | 'mixed' | string;
   notes: string | null;
   created_at: string;
+  start_timestamp: string | null;
+  end_timestamp: string | null;
   dataset_names: string[];
   image_resolutions: string[];
   image_signatures: string[];
@@ -89,13 +92,14 @@ export type TrainingDataset = {
     start_timestamp: string;
     end_timestamp: string;
     stride: number;
-    matching_images: number;
-    selected_images: number;
+    matching_images: number | null;
+    selected_images: number | null;
   }>;
   is_update_locked: boolean;
   update_lock_reasons: string[];
   invalid_rule_count: number;
   integrity_warnings: string[];
+  counts_missing: boolean;
 };
 
 export type PreprocessingGraphNode = {
@@ -354,6 +358,8 @@ export type TrainingPipelineDatasetSummary = {
   training_dataset_id: number;
   position: number;
   name: string;
+  start_timestamp: string | null;
+  end_timestamp: string | null;
   total_selected_images: number;
   dataset_names: string[];
 };
@@ -597,7 +603,7 @@ export type TestingRunResultImage = {
 export type HeatmapRun = {
   id: number;
   testing_run_id: number;
-  testing_result_id: number;
+  testing_result_id: number | null;
   status: string;
   error_message: string | null;
   image_path: string;

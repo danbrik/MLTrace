@@ -15,6 +15,7 @@ from sqlalchemy.orm import Session, selectinload
 from app import models
 from app.database import data_dir
 from app.preprocessing.pipeline import encode_png_data_url, image_metadata, run_pipeline_array
+from app.scanner import filename_timestamp_template
 from app.schemas import (
     HeatmapRunCreate,
     HeatmapRunRead,
@@ -536,6 +537,86 @@ def _load_testing_result_for_heatmap(
     )
 
 
+def _load_testing_run_for_heatmap(db: Session, run_id: int) -> models.TestingRun | None:
+    return db.scalar(
+        select(models.TestingRun)
+        .where(models.TestingRun.id == run_id)
+        .options(
+            selectinload(models.TestingRun.training_run)
+            .selectinload(models.TrainingRun.training_pipeline)
+            .selectinload(models.TrainingPipeline.preprocessing_pipeline),
+            selectinload(models.TestingRun.training_run)
+            .selectinload(models.TrainingRun.training_pipeline)
+            .selectinload(models.TrainingPipeline.method_configuration),
+        )
+    )
+
+
+def _folder_filename_template(db: Session, folder: models.DatasetFolder) -> dict:
+    if folder.filename_template:
+        return folder.filename_template
+
+    image = db.scalar(
+        select(models.DatasetImage)
+        .where(models.DatasetImage.folder_id == folder.id)
+        .order_by(models.DatasetImage.timestamp_parsed.asc(), models.DatasetImage.id.asc())
+    )
+    if image is None:
+        raise ValueError(
+            f"Dataset folder '{folder.relative_path}' has no filename template. Rescan the source dataset before computing direct heatmaps."
+        )
+    dataset = folder.dataset
+    if not dataset.timestamp_regex or not dataset.timestamp_format:
+        raise ValueError(f"Dataset '{dataset.name}' has no confirmed timestamp parser.")
+
+    template = filename_timestamp_template(image.file_name, dataset.timestamp_regex, dataset.timestamp_format)
+    folder.filename_template = template
+    db.flush()
+    return template
+
+
+def _direct_heatmap_image_path(db: Session, testing_run: models.TestingRun, timestamp: datetime) -> str:
+    training_dataset = _load_training_dataset(db, testing_run.training_dataset_id)
+    if training_dataset is None:
+        raise ValueError(f"Train/test dataset does not exist: {testing_run.training_dataset_id}")
+
+    attempted_filenames: list[str] = []
+    valid_rules = [
+        rule
+        for rule in training_dataset.rules
+        if rule.folder is not None and rule.folder.dataset is not None
+    ]
+    for rule in sorted(
+        valid_rules,
+        key=lambda item: (
+            item.start_timestamp,
+            item.end_timestamp,
+            item.folder.dataset.name,
+            item.folder.relative_path,
+            item.id,
+        ),
+    ):
+        if timestamp < rule.start_timestamp or timestamp > rule.end_timestamp:
+            continue
+        dataset = rule.folder.dataset
+        if not dataset.timestamp_format:
+            raise ValueError(f"Dataset '{dataset.name}' has no confirmed timestamp format.")
+        template = _folder_filename_template(db, rule.folder)
+        timestamp_raw = timestamp.strftime(template.get("timestamp_format") or dataset.timestamp_format)
+        filename = f"{template.get('prefix', '')}{timestamp_raw}{template.get('suffix', '')}"
+        attempted_filenames.append(filename)
+        folder_path = Path(dataset.root_path).expanduser()
+        if rule.folder.relative_path != ".":
+            folder_path = folder_path / rule.folder.relative_path
+        image_path = folder_path / filename
+        if image_path.exists() and image_path.is_file():
+            return str(image_path)
+
+    if attempted_filenames:
+        raise ValueError(f"Datei mit Filename {attempted_filenames[0]} existiert nicht.")
+    raise ValueError(f"Timestamp {timestamp.isoformat()} is outside the selected inference dataset ranges.")
+
+
 def _pixel_error_map(source: np.ndarray, reconstruction: np.ndarray) -> np.ndarray:
     if source.shape != reconstruction.shape:
         raise ValueError(f"Cannot build heatmap for different shapes: {source.shape} vs {reconstruction.shape}.")
@@ -562,12 +643,26 @@ def _heatmap_overlay(error_map: np.ndarray) -> np.ndarray:
 def compute_heatmap_run(db: Session, payload: HeatmapRunCreate) -> HeatmapRunRead:
     """Compute or return a cached CPU pixel-level reconstruction-error heatmap."""
     result_id = payload.testing_result_id
-    if result_id is None:
+    timestamp = payload.timestamp
+    direct_image_path: str | None = None
+
+    if timestamp is not None:
+        existing_by_timestamp = db.scalar(
+            select(models.HeatmapRun).where(
+                models.HeatmapRun.testing_run_id == payload.testing_run_id,
+                models.HeatmapRun.timestamp == timestamp,
+                models.HeatmapRun.status == "finished",
+            )
+        )
+        if existing_by_timestamp is not None:
+            return HeatmapRunRead.model_validate(existing_by_timestamp)
+
+    if result_id is None and timestamp is not None:
         result = db.scalar(
             select(models.TestingRunResult)
             .where(
                 models.TestingRunResult.testing_run_id == payload.testing_run_id,
-                models.TestingRunResult.timestamp == payload.timestamp,
+                models.TestingRunResult.timestamp == timestamp,
             )
             .options(
                 selectinload(models.TestingRunResult.testing_run)
@@ -581,59 +676,75 @@ def compute_heatmap_run(db: Session, payload: HeatmapRunCreate) -> HeatmapRunRea
             )
         )
         if result is None:
-            timestamp_text = payload.timestamp.isoformat() if payload.timestamp else "unknown"
-            testing_run = db.get(models.TestingRun, payload.testing_run_id)
-            expected_name = None
-            if testing_run is not None and payload.timestamp is not None:
-                training_dataset = _load_training_dataset(db, testing_run.training_dataset_id)
-                if training_dataset is not None:
-                    for record in enumerate_training_dataset_image_records(training_dataset):
-                        if record.timestamp_parsed == payload.timestamp:
-                            expected_name = record.file_name
-                            break
-            if expected_name:
-                raise ValueError(f"Datei mit Filename {expected_name} existiert nicht.")
-            raise ValueError(f"Datei mit Timestamp {timestamp_text} existiert nicht.")
-        result_id = result.id
+            testing_run = _load_testing_run_for_heatmap(db, payload.testing_run_id)
+            if testing_run is None:
+                raise ValueError(f"Testing run does not exist: {payload.testing_run_id}")
+            direct_image_path = _direct_heatmap_image_path(db, testing_run, timestamp)
+        else:
+            result_id = result.id
+    elif result_id is None:
+        raise ValueError("Either testing_result_id or timestamp is required.")
 
-    existing = db.scalar(
-        select(models.HeatmapRun).where(
-            models.HeatmapRun.testing_run_id == payload.testing_run_id,
-            models.HeatmapRun.testing_result_id == result_id,
-            models.HeatmapRun.status == "finished",
+    if result_id is not None:
+        existing = db.scalar(
+            select(models.HeatmapRun).where(
+                models.HeatmapRun.testing_run_id == payload.testing_run_id,
+                models.HeatmapRun.testing_result_id == result_id,
+                models.HeatmapRun.status == "finished",
+            )
         )
-    )
-    if existing is not None:
-        return HeatmapRunRead.model_validate(existing)
+        if existing is not None:
+            return HeatmapRunRead.model_validate(existing)
 
-    result = _load_testing_result_for_heatmap(db, payload.testing_run_id, result_id)
-    if result is None:
-        raise ValueError("Testing result does not exist.")
-    testing_run = result.testing_run
-    training_run = testing_run.training_run
+    if result_id is not None:
+        result = _load_testing_result_for_heatmap(db, payload.testing_run_id, result_id)
+        if result is None:
+            raise ValueError("Testing result does not exist.")
+        testing_run = result.testing_run
+        training_run = testing_run.training_run
+        image_path = result.image_path
+        timestamp = result.timestamp
+        pending_width = result.width
+        pending_height = result.height
+    else:
+        result = None
+        testing_run = _load_testing_run_for_heatmap(db, payload.testing_run_id)
+        if testing_run is None:
+            raise ValueError(f"Testing run does not exist: {payload.testing_run_id}")
+        training_run = testing_run.training_run
+        image_path = direct_image_path
+        pending_width = 1
+        pending_height = 1
+
     if testing_run.status != "finished":
         raise ValueError("Heatmaps can only be computed for finished testing runs.")
     if training_run is None:
         raise ValueError("Training run no longer exists.")
+    if image_path is None or timestamp is None:
+        raise ValueError("Heatmap source image could not be resolved.")
 
-    row = db.scalar(
-        select(models.HeatmapRun).where(
-            models.HeatmapRun.testing_run_id == payload.testing_run_id,
-            models.HeatmapRun.testing_result_id == result_id,
-        )
+    row_query = select(models.HeatmapRun).where(
+        models.HeatmapRun.testing_run_id == payload.testing_run_id,
+        models.HeatmapRun.timestamp == timestamp,
     )
+    row_query = (
+        row_query.where(models.HeatmapRun.testing_result_id == result_id)
+        if result_id is not None
+        else row_query.where(models.HeatmapRun.testing_result_id.is_(None))
+    )
+    row = db.scalar(row_query)
     if row is None:
         row = models.HeatmapRun(
             testing_run_id=payload.testing_run_id,
             testing_result_id=result_id,
         )
         db.add(row)
-    row.image_path = result.image_path
-    row.timestamp = result.timestamp
+    row.image_path = image_path
+    row.timestamp = timestamp
     row.status = "running"
     row.error_message = None
-    row.width = result.width
-    row.height = result.height
+    row.width = pending_width
+    row.height = pending_height
     row.channels = 1
     row.dtype = "pending"
     row.max_error = 0.0
@@ -647,7 +758,7 @@ def compute_heatmap_run(db: Session, payload: HeatmapRunCreate) -> HeatmapRunRea
 
     try:
         preprocessing = training_run.training_pipeline.preprocessing_pipeline
-        image = run_pipeline_array(PreprocessingGraph.model_validate(preprocessing.graph), result.image_path)
+        image = run_pipeline_array(PreprocessingGraph.model_validate(preprocessing.graph), image_path)
         evaluator = ArtifactEvaluator(training_run)
         reconstruction = evaluator.reconstruct(image)
         source = image if evaluator.mean_image is not None else _as_image(_to_nchw(image))
@@ -676,7 +787,7 @@ def compute_heatmap_run(db: Session, payload: HeatmapRunCreate) -> HeatmapRunRea
         row = db.scalar(
             select(models.HeatmapRun).where(
                 models.HeatmapRun.testing_run_id == payload.testing_run_id,
-                models.HeatmapRun.testing_result_id == result_id,
+                models.HeatmapRun.timestamp == timestamp,
             )
         )
         if row is not None:

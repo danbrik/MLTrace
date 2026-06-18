@@ -267,6 +267,7 @@ def scan_dataset(db: Session, dataset: models.Dataset, timestamp_regex: str, tim
                 resolution_summary=summary["resolution_summary"],
                 image_metadata=summary["image_metadata"],
                 cadence_summary=summary["cadence_summary"],
+                filename_template=summary.get("filename_template"),
             )
             db.add(folder)
             folder_records[relative_path] = folder
@@ -391,6 +392,37 @@ def preview_training_dataset(
     )
 
 
+def _count_training_dataset_rule_input(
+    db: Session,
+    rule,
+    count_cache: FolderTimestampCache,
+):
+    folder = db.get(models.DatasetFolder, rule.folder_id)
+    if folder is None:
+        raise ValueError(f"Folder does not exist: {rule.folder_id}")
+    return count_folder_range_images(folder, rule.start_timestamp, rule.end_timestamp, rule.stride, count_cache)
+
+
+def _add_training_dataset_rule_with_counts(
+    db: Session,
+    training_dataset_id: int,
+    rule,
+    count_cache: FolderTimestampCache,
+) -> None:
+    counts = _count_training_dataset_rule_input(db, rule, count_cache)
+    db.add(
+        models.TrainingDatasetRule(
+            training_dataset_id=training_dataset_id,
+            folder_id=rule.folder_id,
+            start_timestamp=rule.start_timestamp,
+            end_timestamp=rule.end_timestamp,
+            stride=rule.stride,
+            matching_images=counts.matching_images,
+            selected_images=counts.selected_images,
+        )
+    )
+
+
 def create_training_dataset(db: Session, payload: TrainingDatasetCreate) -> TrainingDatasetRead:
     validate_rules(db, payload.rules)
 
@@ -402,16 +434,9 @@ def create_training_dataset(db: Session, payload: TrainingDatasetCreate) -> Trai
     db.add(training_dataset)
     db.flush()
 
+    count_cache: FolderTimestampCache = {}
     for rule in payload.rules:
-        db.add(
-            models.TrainingDatasetRule(
-                training_dataset_id=training_dataset.id,
-                folder_id=rule.folder_id,
-                start_timestamp=rule.start_timestamp,
-                end_timestamp=rule.end_timestamp,
-                stride=rule.stride,
-            )
-        )
+        _add_training_dataset_rule_with_counts(db, training_dataset.id, rule, count_cache)
 
     db.commit()
     saved = db.scalar(
@@ -448,16 +473,9 @@ def update_training_dataset(
         )
     )
     db.flush()
+    count_cache: FolderTimestampCache = {}
     for rule in payload.rules:
-        db.add(
-            models.TrainingDatasetRule(
-                training_dataset_id=training_dataset_id,
-                folder_id=rule.folder_id,
-                start_timestamp=rule.start_timestamp,
-                end_timestamp=rule.end_timestamp,
-                stride=rule.stride,
-            )
-        )
+        _add_training_dataset_rule_with_counts(db, training_dataset_id, rule, count_cache)
     db.commit()
     return get_training_dataset(db, training_dataset_id)
 
@@ -474,8 +492,7 @@ def list_training_datasets(db: Session) -> list[TrainingDatasetRead]:
             )
         )
     )
-    count_cache: FolderTimestampCache = {}
-    return [serialize_training_dataset(db, training_dataset, count_cache) for training_dataset in training_datasets]
+    return [serialize_training_dataset(db, training_dataset) for training_dataset in training_datasets]
 
 
 def get_training_dataset(db: Session, training_dataset_id: int) -> TrainingDatasetRead | None:
@@ -490,7 +507,7 @@ def get_training_dataset(db: Session, training_dataset_id: int) -> TrainingDatas
     )
     if training_dataset is None:
         return None
-    return serialize_training_dataset(db, training_dataset, {})
+    return serialize_training_dataset(db, training_dataset)
 
 
 def delete_training_dataset(db: Session, training_dataset_id: int) -> bool:
@@ -535,6 +552,36 @@ def cleanup_invalid_training_dataset_rules(db: Session, training_dataset_id: int
     return get_training_dataset(db, training_dataset_id)
 
 
+def refresh_training_dataset_counts(db: Session, training_dataset_id: int) -> TrainingDatasetRead | None:
+    training_dataset = db.scalar(
+        select(models.TrainingDataset)
+        .where(models.TrainingDataset.id == training_dataset_id)
+        .options(
+            selectinload(models.TrainingDataset.rules)
+            .selectinload(models.TrainingDatasetRule.folder)
+            .selectinload(models.DatasetFolder.dataset)
+        )
+    )
+    if training_dataset is None:
+        return None
+
+    count_cache: FolderTimestampCache = {}
+    for rule in training_dataset.rules:
+        if rule.folder is None or rule.folder.dataset is None:
+            continue
+        counts = count_folder_range_images(
+            rule.folder,
+            rule.start_timestamp,
+            rule.end_timestamp,
+            rule.stride,
+            count_cache,
+        )
+        rule.matching_images = counts.matching_images
+        rule.selected_images = counts.selected_images
+    db.commit()
+    return get_training_dataset(db, training_dataset_id)
+
+
 def validate_rules(db: Session, rules) -> None:
     if not rules:
         raise ValueError("At least one rule is required.")
@@ -576,9 +623,8 @@ def validate_rules(db: Session, rules) -> None:
 
 def count_rule_images(
     db: Session, rule: models.TrainingDatasetRule, count_cache: FolderTimestampCache | None = None
-) -> tuple[int, int]:
-    counts = count_folder_range_images(rule.folder, rule.start_timestamp, rule.end_timestamp, rule.stride, count_cache)
-    return counts.matching_images, counts.selected_images
+) -> tuple[int | None, int | None]:
+    return rule.matching_images, rule.selected_images
 
 
 def count_images_in_folder_range(
@@ -606,17 +652,16 @@ def folder_image_signature(folder: models.DatasetFolder) -> str | None:
     return f"{resolutions} | {extensions} | {dtype} | {channels_text} | {mode}"
 
 
-def serialize_training_dataset(
-    db: Session,
-    training_dataset: models.TrainingDataset,
-    count_cache: FolderTimestampCache | None = None,
-) -> TrainingDatasetRead:
+def serialize_training_dataset(db: Session, training_dataset: models.TrainingDataset) -> TrainingDatasetRead:
     rule_reads: list[TrainingDatasetRuleRead] = []
     dataset_names: set[str] = set()
     resolutions: set[str] = set()
     signatures: set[str] = set()
     total_matching = 0
     total_selected = 0
+    missing_count_rules = 0
+    aggregate_start = None
+    aggregate_end = None
     invalid_rules = [
         rule
         for rule in training_dataset.rules
@@ -645,9 +690,14 @@ def serialize_training_dataset(
     ):
         folder = rule.folder
         dataset = folder.dataset
-        matching, selected = count_rule_images(db, rule, count_cache)
-        total_matching += matching
-        total_selected += selected
+        aggregate_start = rule.start_timestamp if aggregate_start is None else min(aggregate_start, rule.start_timestamp)
+        aggregate_end = rule.end_timestamp if aggregate_end is None else max(aggregate_end, rule.end_timestamp)
+        matching, selected = count_rule_images(db, rule)
+        if matching is None or selected is None:
+            missing_count_rules += 1
+        else:
+            total_matching += matching
+            total_selected += selected
         dataset_names.add(dataset.name)
         if folder.resolution_summary:
             resolutions.update(folder.resolution_summary.keys())
@@ -676,12 +726,19 @@ def serialize_training_dataset(
             )
         )
 
+    if missing_count_rules:
+        integrity_warnings.append(
+            f"Counts need refresh for {missing_count_rules} Train/Test rule(s). Use Refresh counts to compute stored image counts."
+        )
+
     return TrainingDatasetRead(
         id=training_dataset.id,
         name=training_dataset.name,
         usage_label=training_dataset.usage_label,
         notes=training_dataset.notes,
         created_at=training_dataset.created_at,
+        start_timestamp=aggregate_start,
+        end_timestamp=aggregate_end,
         dataset_names=sorted(dataset_names),
         image_resolutions=sorted(resolutions),
         image_signatures=sorted(signatures),
@@ -692,6 +749,7 @@ def serialize_training_dataset(
         update_lock_reasons=lock_reasons,
         invalid_rule_count=len(invalid_rules),
         integrity_warnings=integrity_warnings,
+        counts_missing=missing_count_rules > 0,
     )
 
 
@@ -1564,15 +1622,14 @@ def list_training_pipelines(db: Session) -> list[TrainingPipelineRead]:
     pipelines = list(
         db.scalars(_training_pipeline_query().order_by(models.TrainingPipeline.created_at.desc()))
     )
-    count_cache: FolderTimestampCache = {}
-    return [serialize_training_pipeline(db, pipeline, count_cache) for pipeline in pipelines]
+    return [serialize_training_pipeline(db, pipeline) for pipeline in pipelines]
 
 
 def get_training_pipeline(db: Session, pipeline_id: int) -> TrainingPipelineRead | None:
     pipeline = db.scalar(_training_pipeline_query().where(models.TrainingPipeline.id == pipeline_id))
     if pipeline is None:
         return None
-    return serialize_training_pipeline(db, pipeline, {})
+    return serialize_training_pipeline(db, pipeline)
 
 
 def delete_training_pipeline(db: Session, pipeline_id: int) -> bool:
@@ -1594,21 +1651,19 @@ def delete_training_pipeline(db: Session, pipeline_id: int) -> bool:
     return True
 
 
-def serialize_training_pipeline(
-    db: Session,
-    pipeline: models.TrainingPipeline,
-    count_cache: FolderTimestampCache | None = None,
-) -> TrainingPipelineRead:
+def serialize_training_pipeline(db: Session, pipeline: models.TrainingPipeline) -> TrainingPipelineRead:
     entries: list[TrainingPipelineDatasetRead] = []
     total_selected = 0
     for entry in pipeline.entries:
-        summary = serialize_training_dataset(db, entry.training_dataset, count_cache)
+        summary = serialize_training_dataset(db, entry.training_dataset)
         total_selected += summary.total_selected_images
         entries.append(
             TrainingPipelineDatasetRead(
                 training_dataset_id=entry.training_dataset_id,
                 position=entry.position,
                 name=summary.name,
+                start_timestamp=summary.start_timestamp,
+                end_timestamp=summary.end_timestamp,
                 total_selected_images=summary.total_selected_images,
                 dataset_names=summary.dataset_names,
             )

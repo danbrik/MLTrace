@@ -39,6 +39,7 @@ class DatasetFolderRead(BaseModel):
     resolution_summary: dict | None
     image_metadata: dict | None
     cadence_summary: dict | None
+    filename_template: dict | None = None
 
 
 class DatasetRead(BaseModel):
@@ -117,8 +118,8 @@ class TrainingDatasetRuleRead(BaseModel):
     start_timestamp: datetime
     end_timestamp: datetime
     stride: int
-    matching_images: int
-    selected_images: int
+    matching_images: int | None = None
+    selected_images: int | None = None
 
 
 class TrainingDatasetRead(BaseModel):
@@ -127,6 +128,8 @@ class TrainingDatasetRead(BaseModel):
     usage_label: str = "train"
     notes: str | None
     created_at: datetime
+    start_timestamp: datetime | None = None
+    end_timestamp: datetime | None = None
     dataset_names: list[str]
     # Sorted unique "WxH" image resolutions across all rule folders. Drives the
     # size column and the size-compatibility cross-filtering on the UI.
@@ -139,6 +142,7 @@ class TrainingDatasetRead(BaseModel):
     update_lock_reasons: list[str] = []
     invalid_rule_count: int = 0
     integrity_warnings: list[str] = []
+    counts_missing: bool = False
 
 
 class PreprocessingGraphNode(BaseModel):
@@ -360,6 +364,8 @@ class TrainingPipelineDatasetRead(BaseModel):
     training_dataset_id: int
     position: int
     name: str
+    start_timestamp: datetime | None = None
+    end_timestamp: datetime | None = None
     total_selected_images: int
     dataset_names: list[str]
 
@@ -665,7 +671,7 @@ class HeatmapRunRead(BaseModel):
 
     id: int
     testing_run_id: int
-    testing_result_id: int
+    testing_result_id: int | None
     status: str
     error_message: str | None
     image_path: str

@@ -52,6 +52,7 @@ class DatasetFolder(Base):
     resolution_summary: Mapped[dict | None] = mapped_column(json_type())
     image_metadata: Mapped[dict | None] = mapped_column(json_type())
     cadence_summary: Mapped[dict | None] = mapped_column(json_type())
+    filename_template: Mapped[dict | None] = mapped_column(json_type())
 
     dataset: Mapped[Dataset] = relationship(back_populates="folders")
     images: Mapped[list["DatasetImage"]] = relationship(
@@ -114,6 +115,10 @@ class TrainingDatasetRule(Base):
     start_timestamp: Mapped[datetime] = mapped_column(DateTime(timezone=False), nullable=False)
     end_timestamp: Mapped[datetime] = mapped_column(DateTime(timezone=False), nullable=False)
     stride: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    # Persisted at preview/create/update/refresh time. Listing Train/Test Sets
+    # must not enumerate large image folders just to render metadata.
+    matching_images: Mapped[int | None] = mapped_column(Integer)
+    selected_images: Mapped[int | None] = mapped_column(Integer)
 
     training_dataset: Mapped[TrainingDataset] = relationship(back_populates="rules")
     folder: Mapped[DatasetFolder] = relationship(back_populates="training_rules")
@@ -488,14 +493,15 @@ class HeatmapRun(Base):
     __tablename__ = "heatmap_runs"
     __table_args__ = (
         UniqueConstraint("testing_run_id", "testing_result_id", name="uq_heatmap_result"),
+        Index("ix_heatmap_runs_testing_run_timestamp", "testing_run_id", "timestamp"),
         Index("ix_heatmap_runs_created_at", "created_at"),
         Index("ix_heatmap_runs_status", "status"),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     testing_run_id: Mapped[int] = mapped_column(ForeignKey("testing_runs.id", ondelete="CASCADE"), nullable=False)
-    testing_result_id: Mapped[int] = mapped_column(
-        ForeignKey("testing_run_results.id", ondelete="CASCADE"), nullable=False
+    testing_result_id: Mapped[int | None] = mapped_column(
+        ForeignKey("testing_run_results.id", ondelete="CASCADE"), nullable=True
     )
     status: Mapped[str] = mapped_column(String(32), nullable=False, default="finished")
     error_message: Mapped[str | None] = mapped_column(Text)
@@ -517,7 +523,7 @@ class HeatmapRun(Base):
     )
 
     testing_run: Mapped[TestingRun] = relationship()
-    testing_result: Mapped[TestingRunResult] = relationship()
+    testing_result: Mapped[TestingRunResult | None] = relationship()
 
 
 ModelConfiguration = MethodConfiguration

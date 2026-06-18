@@ -190,6 +190,13 @@ export function cleanupTrainingDatasetInvalidRules(trainingDatasetId: number): P
   });
 }
 
+export function refreshTrainingDatasetCounts(trainingDatasetId: number): Promise<TrainingDataset> {
+  return request<TrainingDataset>(`/api/training-datasets/${trainingDatasetId}/refresh-counts`, {
+    method: 'POST',
+    body: JSON.stringify({}),
+  });
+}
+
 export async function deleteTrainingDataset(trainingDatasetId: number): Promise<void> {
   await request<void>(`/api/training-datasets/${trainingDatasetId}`, {
     method: 'DELETE',

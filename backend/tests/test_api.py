@@ -7,6 +7,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
+from app import services
 from app.database import Base, get_db
 from app.main import app
 
@@ -70,6 +71,8 @@ def add_scanned_dataset(
     dataset = scanned.json()
     assert dataset["status"] == "ready"
     assert dataset["folders"][0]["image_count"] == count
+    assert dataset["folders"][0]["filename_template"]["prefix"] == f"{folder}_frame_"
+    assert dataset["folders"][0]["filename_template"]["suffix"] == ".tif"
     return dataset
 
 
@@ -178,7 +181,7 @@ def test_dataset_connection_probe_reports_limit(tmp_path: Path) -> None:
             pass
 
 
-def test_training_dataset_can_span_datasets_and_be_deleted(tmp_path: Path) -> None:
+def test_training_dataset_can_span_datasets_and_be_deleted(tmp_path: Path, monkeypatch) -> None:
     client_iter = make_client()
     client = next(client_iter)
     try:
@@ -214,11 +217,23 @@ def test_training_dataset_can_span_datasets_and_be_deleted(tmp_path: Path) -> No
         assert training_dataset["image_signatures"] == ["12x8 | .tif | uint8 | 1ch | L"]
         assert training_dataset["total_matching_images"] == 9
         assert training_dataset["total_selected_images"] == 7
+        assert training_dataset["start_timestamp"] == "2026-02-04T15:30:00"
+        assert training_dataset["end_timestamp"] == "2026-02-04T15:30:40"
         assert len(training_dataset["rules"]) == 2
+        assert sorted((rule["matching_images"], rule["selected_images"]) for rule in training_dataset["rules"]) == [
+            (4, 4),
+            (5, 3),
+        ]
+
+        def fail_if_counting_from_files(*_args, **_kwargs):
+            raise AssertionError("Saved Train/Test Dataset reads must use stored counts.")
+
+        monkeypatch.setattr(services, "count_folder_range_images", fail_if_counting_from_files)
 
         details = client.get(f"/api/training-datasets/{training_dataset['id']}")
         assert details.status_code == 200
         assert len(details.json()["rules"]) == 2
+        assert details.json()["counts_missing"] is False
         assert {
             (rule["dataset_name"], rule["folder_relative_path"], rule["start_timestamp"], rule["end_timestamp"], rule["stride"])
             for rule in details.json()["rules"]
@@ -226,6 +241,10 @@ def test_training_dataset_can_span_datasets_and_be_deleted(tmp_path: Path) -> No
             ("A", ".", "2026-02-04T15:30:00", "2026-02-04T15:30:40", 2),
             ("B", ".", "2026-02-04T15:30:00", "2026-02-04T15:30:30", 1),
         }
+
+        listed_before_delete = client.get("/api/training-datasets")
+        assert listed_before_delete.status_code == 200
+        assert listed_before_delete.json()[0]["total_selected_images"] == 7
 
         blocked_dataset_delete = client.delete(f"/api/datasets/{dataset_a['id']}")
         assert blocked_dataset_delete.status_code == 409

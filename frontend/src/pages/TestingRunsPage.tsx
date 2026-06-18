@@ -235,7 +235,9 @@ function renderPipelineDatasets(pipeline: TrainingPipeline | null, datasets: Tra
             <Stack gap="xs">
               <Group justify="space-between">
                 <Text fw={700}>{entry.name}</Text>
-                <Badge variant="light">{entry.total_selected_images} images</Badge>
+                <Badge variant="light">
+                  {dataset?.counts_missing ? 'Counts need refresh' : `${entry.total_selected_images} images`}
+                </Badge>
               </Group>
               {dataset ? (
                 <>
@@ -262,7 +264,7 @@ function renderPipelineDatasets(pipeline: TrainingPipeline | null, datasets: Tra
                           <Table.Td>{new Date(rule.start_timestamp).toLocaleString()}</Table.Td>
                           <Table.Td>{new Date(rule.end_timestamp).toLocaleString()}</Table.Td>
                           <Table.Td>{rule.stride}</Table.Td>
-                          <Table.Td>{rule.selected_images}</Table.Td>
+                          <Table.Td>{rule.selected_images == null ? 'Needs refresh' : rule.selected_images}</Table.Td>
                         </Table.Tr>
                       ))}
                     </Table.Tbody>
@@ -816,7 +818,7 @@ export function TestingRunsPage({ active = true, onRunQueued }: { active?: boole
                           ))}
                         </Group>
                       </Table.Td>
-                      <Table.Td>{dataset.total_selected_images}</Table.Td>
+                      <Table.Td>{dataset.counts_missing ? 'Needs refresh' : dataset.total_selected_images}</Table.Td>
                       <Table.Td>{dataset.id === selectedDatasetId && <Check size={16} />}</Table.Td>
                     </Table.Tr>
                   ))}

@@ -87,6 +87,7 @@ from app.services import (
     list_training_pipelines,
     preview_preprocessing_pipeline,
     preview_training_dataset,
+    refresh_training_dataset_counts,
     run_method_torch_check,
     scan_dataset,
     serialize_dataset,
@@ -234,6 +235,16 @@ def create_app() -> FastAPI:
             updated = cleanup_invalid_training_dataset_rules(db, training_dataset_id)
         except ValueError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
+        if updated is None:
+            raise HTTPException(status_code=404, detail="Training dataset not found.")
+        return updated
+
+    @app.post("/api/training-datasets/{training_dataset_id}/refresh-counts", response_model=TrainingDatasetRead)
+    def api_refresh_training_dataset_counts(training_dataset_id: int, db: Session = Depends(get_db)):
+        try:
+            updated = refresh_training_dataset_counts(db, training_dataset_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
         if updated is None:
             raise HTTPException(status_code=404, detail="Training dataset not found.")
         return updated

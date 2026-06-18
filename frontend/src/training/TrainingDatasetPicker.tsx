@@ -67,13 +67,17 @@ function strideSummary(dataset: TrainingDataset): string {
   return values.length === 1 ? String(values[0]) : values.join(', ');
 }
 
+function countLabel(value: number | null): string {
+  return value == null ? 'Needs refresh' : String(value);
+}
+
 function renderDatasetDetails(dataset: TrainingDataset) {
   return (
     <Stack gap="md">
       <div>
         <Text fw={700}>{dataset.name}</Text>
         <Text size="sm" c="dimmed">
-          {dataset.total_selected_images} selected images · {usageLabel(dataset.usage_label ?? 'train')} · sizes{' '}
+          {dataset.counts_missing ? 'Counts need refresh' : `${dataset.total_selected_images} selected images`} · {usageLabel(dataset.usage_label ?? 'train')} · sizes{' '}
           {datasetResolutions(dataset).join(', ') || 'n/a'}
         </Text>
       </div>
@@ -98,8 +102,8 @@ function renderDatasetDetails(dataset: TrainingDataset) {
               <Table.Td>{new Date(rule.start_timestamp).toLocaleString()}</Table.Td>
               <Table.Td>{new Date(rule.end_timestamp).toLocaleString()}</Table.Td>
               <Table.Td>{rule.stride}</Table.Td>
-              <Table.Td>{rule.matching_images}</Table.Td>
-              <Table.Td>{rule.selected_images}</Table.Td>
+              <Table.Td>{countLabel(rule.matching_images)}</Table.Td>
+              <Table.Td>{countLabel(rule.selected_images)}</Table.Td>
               <Table.Td>
                 <Text size="xs" c="dimmed">
                   {rule.folder_image_signature ?? datasetResolutions(dataset).join(', ') ?? 'n/a'}
@@ -249,7 +253,7 @@ export function TrainingDatasetPicker({
                       <ImageSizeCell resolutions={datasetResolutions(dataset)} />
                     </Table.Td>
                     <Table.Td>{strideSummary(dataset)}</Table.Td>
-                    <Table.Td>{dataset.total_selected_images}</Table.Td>
+                    <Table.Td>{dataset.counts_missing ? 'Needs refresh' : dataset.total_selected_images}</Table.Td>
                     <Table.Td>
                       <Group gap={4} justify="flex-end" wrap="nowrap">
                         <Tooltip label="Inspect trainset rules">
@@ -295,7 +299,7 @@ export function TrainingDatasetPicker({
                         {dataset.name}
                       </Text>
                       <Text size="xs" c="dimmed">
-                        {dataset.total_selected_images} images ·{' '}
+                        {dataset.counts_missing ? 'Counts need refresh' : `${dataset.total_selected_images} images`} ·{' '}
                         {usageLabel(dataset.usage_label ?? 'train')} · stride {strideSummary(dataset)} ·{' '}
                         {datasetResolutions(dataset).join(', ') || 'size n/a'} · {dataset.dataset_names.join(', ')}
                       </Text>

@@ -56,6 +56,26 @@ class FirstTiffProbe:
     reached_limit: bool
 
 
+def filename_timestamp_template(file_name: str, regex: str, timestamp_format: str) -> dict:
+    match = re.search(regex, file_name)
+    if not match:
+        raise ValueError(f"Timestamp regex did not match {file_name}")
+
+    if "timestamp" in match.groupdict():
+        start, end = match.span("timestamp")
+    elif match.groups():
+        start, end = match.span(1)
+    else:
+        start, end = match.span(0)
+
+    return {
+        "prefix": file_name[:start],
+        "suffix": file_name[end:],
+        "timestamp_format": timestamp_format,
+        "example_filename": file_name,
+    }
+
+
 COMMON_TIMESTAMP_PATTERNS: tuple[tuple[str, str], ...] = (
     (r"(?P<timestamp>\d{8}_\d{6})", "%Y%m%d_%H%M%S"),
     (r"(?P<timestamp>\d{8}-\d{6})", "%Y%m%d-%H%M%S"),
@@ -259,6 +279,7 @@ def scan_dataset_files(
             "last_timestamp": end_timestamp,
             "extension_summary": {first_path.suffix.lower(): len(files)},
             "resolution_summary": {f"{metadata.width}x{metadata.height}": len(files)},
+            "filename_template": filename_timestamp_template(first_path.name, timestamp_regex, timestamp_format),
             "image_metadata": {
                 "format": metadata.image_format,
                 "mode": metadata.mode,

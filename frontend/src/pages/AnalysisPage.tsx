@@ -117,6 +117,9 @@ function toDateTimeLocal(value: string | null | undefined): string {
 }
 
 function sourceBounds(dataset: TrainingDataset | null | undefined): { start: string; end: string } {
+  if (dataset?.start_timestamp && dataset?.end_timestamp) {
+    return { start: toDateTimeLocal(dataset.start_timestamp), end: toDateTimeLocal(dataset.end_timestamp) };
+  }
   const starts = (dataset?.rules ?? []).map((rule) => rule.start_timestamp).filter(Boolean).sort();
   const ends = (dataset?.rules ?? []).map((rule) => rule.end_timestamp).filter(Boolean).sort();
   return {
@@ -208,7 +211,7 @@ function renderTrainsetDetails(dataset: TrainingDataset | null) {
         <div>
           <Text fw={700}>{dataset.name}</Text>
           <Text size="sm" c="dimmed">
-            Label {dataset.usage_label} · {dataset.total_selected_images} selected images · Sources {dataset.dataset_names.join(', ')}
+            Label {dataset.usage_label} · {dataset.counts_missing ? 'Counts need refresh' : `${dataset.total_selected_images} selected images`} · Sources {dataset.dataset_names.join(', ')}
           </Text>
         </div>
         <Badge variant="light">{dataset.image_resolutions.join(', ') || 'n/a'}</Badge>
@@ -232,7 +235,7 @@ function renderTrainsetDetails(dataset: TrainingDataset | null) {
               <Table.Td>{new Date(rule.start_timestamp).toLocaleString()}</Table.Td>
               <Table.Td>{new Date(rule.end_timestamp).toLocaleString()}</Table.Td>
               <Table.Td>{rule.stride}</Table.Td>
-              <Table.Td>{rule.selected_images}</Table.Td>
+              <Table.Td>{rule.selected_images == null ? 'Needs refresh' : rule.selected_images}</Table.Td>
             </Table.Tr>
           ))}
         </Table.Tbody>
@@ -856,9 +859,26 @@ export function AnalysisPage({ active = true }: { active?: boolean }) {
 
   useEffect(() => {
     if (selectedRunId === null) return;
+    if (draft.plotType === 'heatmap' && draft.heatmapMode === 'single') {
+      const run = testingRuns.find((item) => item.id === selectedRunId);
+      const bounds = sourceBounds(run ? trainingDatasetById.get(run.training_dataset_id) : null);
+      setDraft((current) => {
+        if (current.testingRunId !== String(selectedRunId)) return current;
+        return {
+          ...current,
+          title: current.title || `Heatmap · ${run?.name ?? `Testing run #${selectedRunId}`}`,
+          start: current.start || bounds.start,
+          end: current.end || bounds.end,
+          timestamp: current.timestamp ?? bounds.start,
+        };
+      });
+      return;
+    }
     fetchResults(selectedRunId)
       .then((data) => {
         if (data.results.length === 0) return;
+        const run = testingRuns.find((item) => item.id === selectedRunId);
+        const bounds = sourceBounds(run ? trainingDatasetById.get(run.training_dataset_id) : null);
         setDraft((current) => {
           if (current.testingRunId !== String(selectedRunId)) return current;
           const first = data.results[0];
@@ -866,14 +886,14 @@ export function AnalysisPage({ active = true }: { active?: boolean }) {
           return {
             ...current,
             title: current.title || `${current.plotType === 'heatmap' ? 'Heatmap' : 'Time series'} · ${data.testing_run.name}`,
-            start: current.start || toDateTimeLocal(first.timestamp),
-            end: current.end || toDateTimeLocal(last.timestamp),
+            start: current.start || bounds.start || toDateTimeLocal(first.timestamp),
+            end: current.end || bounds.end || toDateTimeLocal(last.timestamp),
             timestamp: current.timestamp ?? first.timestamp,
           };
         });
       })
       .catch((error) => notifyError('Could not load testing results', error));
-  }, [fetchResults, selectedRunId]);
+  }, [draft.heatmapMode, draft.plotType, fetchResults, selectedRunId, testingRuns, trainingDatasetById]);
 
   useEffect(() => {
     if (draft.plotType === 'heatmap' && draft.heatmapMode === 'single') return;
@@ -984,8 +1004,8 @@ export function AnalysisPage({ active = true }: { active?: boolean }) {
 
   function addSource(run: TestingRun) {
     if (selectedSources.some((source) => source.testingRunId === String(run.id))) return;
+    const bounds = sourceBounds(trainingDatasetById.get(run.training_dataset_id));
     if (draft.plotType === 'heatmap' && draft.heatmapMode === 'single') {
-      const bounds = sourceBounds(trainingDatasetById.get(run.training_dataset_id));
       setSelectedSources((current) => [
         ...current,
         {
@@ -1001,13 +1021,12 @@ export function AnalysisPage({ active = true }: { active?: boolean }) {
     fetchResults(run.id)
       .then((data) => {
         const first = data.results[0];
-        const last = data.results[data.results.length - 1];
         setSelectedSources((current) => [
           ...current,
           {
             testingRunId: String(run.id),
-            start: toDateTimeLocal(first?.timestamp),
-            end: toDateTimeLocal(last?.timestamp),
+            start: bounds.start || toDateTimeLocal(first?.timestamp),
+            end: bounds.end || toDateTimeLocal(data.results[data.results.length - 1]?.timestamp),
             sampling: 1,
             timestamp: first?.timestamp ?? null,
           },
@@ -1352,8 +1371,8 @@ export function AnalysisPage({ active = true }: { active?: boolean }) {
                               />
                             ) : (
                               <SimpleGrid cols={{ base: 1, md: 3 }}>
-                                <TextInput label="Start" type="datetime-local" value={source.start} onChange={(event) => updateSource(source.testingRunId, { start: event.currentTarget.value })} />
-                                <TextInput label="End" type="datetime-local" value={source.end} onChange={(event) => updateSource(source.testingRunId, { end: event.currentTarget.value })} />
+                                <TextInput label="Start" type="datetime-local" min={bounds.start} max={bounds.end} value={source.start} onChange={(event) => updateSource(source.testingRunId, { start: event.currentTarget.value })} />
+                                <TextInput label="End" type="datetime-local" min={bounds.start} max={bounds.end} value={source.end} onChange={(event) => updateSource(source.testingRunId, { end: event.currentTarget.value })} />
                                 <NumberInput label="Sampling rate" min={1} value={source.sampling} onChange={(value) => updateSource(source.testingRunId, { sampling: valueAsNumber(value, 1) })} />
                               </SimpleGrid>
                             )}
