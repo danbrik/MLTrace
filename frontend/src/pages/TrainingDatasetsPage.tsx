@@ -34,6 +34,7 @@ import {
   refreshTrainingDatasetCounts,
   updateTrainingDataset,
 } from '../api';
+import { DateTime24Input } from '../components/DateTime24Input';
 import { usePendingIds } from '../hooks/usePendingIds';
 import type { Dataset, DatasetFolder, TrainingDataset, TrainingDatasetPreview, TrainingDatasetRuleInput } from '../types';
 
@@ -608,31 +609,23 @@ export function TrainingDatasetsPage() {
                             </Stack>
                           </Table.Td>
                           <Table.Td>
-                            <TextInput
-                              type="datetime-local"
-                              step={1}
+                            <DateTime24Input
                               min={choice?.min}
                               max={choice?.max}
                               error={invalid ? 'Out of range' : undefined}
                               value={rule.start_timestamp}
                               disabled={isReadOnly}
-                              onChange={(event) =>
-                                updateRule(rule.localId, { start_timestamp: event.currentTarget.value })
-                              }
+                              onChange={(value) => updateRule(rule.localId, { start_timestamp: value })}
                             />
                           </Table.Td>
                           <Table.Td>
-                            <TextInput
-                              type="datetime-local"
-                              step={1}
+                            <DateTime24Input
                               min={choice?.min}
                               max={choice?.max}
                               error={invalid ? 'Out of range' : undefined}
                               value={rule.end_timestamp}
                               disabled={isReadOnly}
-                              onChange={(event) =>
-                                updateRule(rule.localId, { end_timestamp: event.currentTarget.value })
-                              }
+                              onChange={(value) => updateRule(rule.localId, { end_timestamp: value })}
                             />
                           </Table.Td>
                           <Table.Td>

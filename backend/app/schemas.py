@@ -685,6 +685,7 @@ class HeatmapRunRead(BaseModel):
     max_x: int
     max_y: int
     source_image_data_url: str
+    reconstruction_image_data_url: str = ""
     heatmap_image_data_url: str
     created_at: datetime
     updated_at: datetime

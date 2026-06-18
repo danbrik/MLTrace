@@ -516,6 +516,7 @@ class HeatmapRun(Base):
     max_x: Mapped[int] = mapped_column(Integer, nullable=False)
     max_y: Mapped[int] = mapped_column(Integer, nullable=False)
     source_image_data_url: Mapped[str] = mapped_column(Text, nullable=False)
+    reconstruction_image_data_url: Mapped[str] = mapped_column(Text, nullable=False, default="")
     heatmap_image_data_url: Mapped[str] = mapped_column(Text, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=False), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(

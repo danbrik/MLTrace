@@ -617,6 +617,7 @@ export type HeatmapRun = {
   max_x: number;
   max_y: number;
   source_image_data_url: string;
+  reconstruction_image_data_url: string;
   heatmap_image_data_url: string;
   created_at: string;
   updated_at: string;

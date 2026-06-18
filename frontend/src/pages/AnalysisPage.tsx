@@ -12,7 +12,9 @@ import {
   ScrollArea,
   Select,
   SimpleGrid,
+  Slider,
   Stack,
+  Switch,
   Table,
   Text,
   TextInput,
@@ -35,6 +37,7 @@ import {
   listTrainingPipelines,
   listTrainingRuns,
 } from '../api';
+import { DateTime24Input } from '../components/DateTime24Input';
 import { StepCard } from '../components/StepCard';
 import { usePendingIds } from '../hooks/usePendingIds';
 import { formatValue } from '../methods/utils';
@@ -64,6 +67,8 @@ type PlotDraft = {
   movingAverage: number;
   heatmapMode: HeatmapMode;
   timestamp: string | null;
+  includeReference: boolean;
+  plotSize: number;
 };
 
 type AnalysisPlot = PlotDraft & {
@@ -92,6 +97,10 @@ type CombinedResult = TestingRunResult & {
 
 function notifyError(title: string, error: unknown) {
   notifications.show({ color: 'red', title, message: error instanceof Error ? error.message : 'Unknown error' });
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : 'Unknown error';
 }
 
 function valueAsNumber(value: string | number, fallback: number): number {
@@ -445,7 +454,7 @@ function TimeSeriesPlot({ plot, results }: { plot: AnalysisPlot; results: Combin
 
   return (
     <Stack gap="xs">
-      <ScrollArea>
+      <ScrollArea style={{ maxWidth: plot.plotSize ?? 560 }}>
         <svg
           ref={svgRef}
           className="analysis-timeseries"
@@ -557,13 +566,15 @@ function HeatmapPlot({
   results,
   heatmapCache,
   loadingHeatmaps,
+  heatmapErrors,
   ensureHeatmap,
 }: {
   plot: AnalysisPlot;
   results: CombinedResult[];
   heatmapCache: Record<string, HeatmapRun>;
   loadingHeatmaps: Record<string, boolean>;
-  ensureHeatmap: (frame: CombinedResult) => Promise<void>;
+  heatmapErrors: Record<string, string>;
+  ensureHeatmap: (frame: CombinedResult, options?: { force?: boolean }) => Promise<void>;
 }) {
   const [frameIndex, setFrameIndex] = useState(0);
   const [playing, setPlaying] = useState(false);
@@ -584,7 +595,7 @@ function HeatmapPlot({
   const currentKey = current ? `${current.testingRunId}:${current.heatmapTimestampOnly ? current.timestamp : current.id}` : '';
   useEffect(() => {
     if (!current) return;
-    ensureHeatmap(current).catch((error) => notifyError('Could not compute heatmap', error));
+    ensureHeatmap(current);
   }, [current, ensureHeatmap]);
 
   useEffect(() => {
@@ -601,6 +612,18 @@ function HeatmapPlot({
 
   const heatmap = heatmapCache[currentKey];
   const loading = loadingHeatmaps[currentKey] === true;
+  const error = heatmapErrors[currentKey];
+  const overlayPanel = heatmap ? (
+    <div className="analysis-heatmap-panel">
+      <Text fw={800} ta="center" className="analysis-heatmap-title">
+        Anomaly Score Heatmap
+      </Text>
+      <div className="analysis-heatmap-image-frame">
+        <img src={heatmap.source_image_data_url} alt="Original with heatmap overlay" className="analysis-heatmap-image" />
+        <img src={heatmap.heatmap_image_data_url} alt="Transparent pixel reconstruction error heatmap" className="analysis-heatmap-overlay-image" />
+      </div>
+    </div>
+  ) : null;
 
   return (
     <Stack gap="sm">
@@ -636,18 +659,53 @@ function HeatmapPlot({
           onChange={(event) => setFrameIndex(Number(event.currentTarget.value))}
         />
       )}
-      <div className="analysis-heatmap-wrap">
+      <div className="analysis-heatmap-wrap" style={{ maxWidth: plot.plotSize ?? 560 }}>
         {heatmap ? (
-          <>
-            <img src={heatmap.source_image_data_url} alt="Testing result source" className="analysis-heatmap-image" />
-            <img src={heatmap.heatmap_image_data_url} alt="Pixel reconstruction error heatmap" className="analysis-heatmap-overlay-image" />
-          </>
+          (plot.includeReference ?? true) ? (
+            <div className="analysis-heatmap-reference-grid">
+              <div className="analysis-heatmap-panel">
+                <Text fw={800} ta="center" className="analysis-heatmap-title">
+                  Original Image
+                </Text>
+                <div className="analysis-heatmap-image-frame">
+                  <img src={heatmap.source_image_data_url} alt="Original source" className="analysis-heatmap-image" />
+                </div>
+              </div>
+              <div className="analysis-heatmap-panel">
+                <Text fw={800} ta="center" className="analysis-heatmap-title">
+                  Reconstructed Image
+                </Text>
+                <div className="analysis-heatmap-image-frame">
+                  <img
+                    src={heatmap.reconstruction_image_data_url || heatmap.source_image_data_url}
+                    alt="Model reconstruction"
+                    className="analysis-heatmap-image"
+                  />
+                </div>
+              </div>
+              {overlayPanel}
+            </div>
+          ) : (
+            overlayPanel
+          )
         ) : (
           <div className="analysis-heatmap-loading">
             {loading ? (
               <Stack gap="xs" align="center">
                 <Loader size="sm" />
                 <Text size="sm">Computing CPU pixel heatmap…</Text>
+              </Stack>
+            ) : error ? (
+              <Stack gap="xs" align="center">
+                <Badge color="red" variant="light">
+                  Failed
+                </Badge>
+                <Text size="sm" ta="center">
+                  {error}
+                </Text>
+                <Button size="compact-sm" variant="light" onClick={() => ensureHeatmap(current, { force: true })}>
+                  Retry heatmap
+                </Button>
               </Stack>
             ) : (
               <Text size="sm">Heatmap queued for computation…</Text>
@@ -667,6 +725,7 @@ function AnalysisPlotCard({
   results,
   heatmapCache,
   loadingHeatmaps,
+  heatmapErrors,
   ensureHeatmap,
   onMove,
   onRemove,
@@ -675,7 +734,8 @@ function AnalysisPlotCard({
   results: CombinedResult[];
   heatmapCache: Record<string, HeatmapRun>;
   loadingHeatmaps: Record<string, boolean>;
-  ensureHeatmap: (frame: CombinedResult) => Promise<void>;
+  heatmapErrors: Record<string, string>;
+  ensureHeatmap: (frame: CombinedResult, options?: { force?: boolean }) => Promise<void>;
   onMove: (direction: -1 | 1) => void;
   onRemove: () => void;
 }) {
@@ -720,6 +780,7 @@ function AnalysisPlotCard({
             results={results}
             heatmapCache={heatmapCache}
             loadingHeatmaps={loadingHeatmaps}
+            heatmapErrors={heatmapErrors}
             ensureHeatmap={ensureHeatmap}
           />
         )}
@@ -739,6 +800,8 @@ function defaultDraft(): PlotDraft {
     movingAverage: 1,
     heatmapMode: 'single',
     timestamp: null,
+    includeReference: true,
+    plotSize: 560,
   };
 }
 
@@ -755,6 +818,7 @@ export function AnalysisPage({ active = true }: { active?: boolean }) {
   const [plots, setPlots] = useState<AnalysisPlot[]>([]);
   const [heatmapCache, setHeatmapCache] = useState<Record<string, HeatmapRun>>({});
   const [loadingHeatmaps, setLoadingHeatmaps] = useState<Record<string, boolean>>({});
+  const [heatmapErrors, setHeatmapErrors] = useState<Record<string, string>>({});
   const sourceActions = usePendingIds();
   const [addPlotOpen, setAddPlotOpen] = useState(true);
   const [selectedPipelineId, setSelectedPipelineId] = useState<string | null>(null);
@@ -841,9 +905,16 @@ export function AnalysisPage({ active = true }: { active?: boolean }) {
   );
 
   const ensureHeatmap = useCallback(
-    async (frame: CombinedResult) => {
+    async (frame: CombinedResult, options?: { force?: boolean }) => {
       const key = `${frame.testingRunId}:${frame.heatmapTimestampOnly ? frame.timestamp : frame.id}`;
-      if (heatmapCache[key] || loadingHeatmaps[key]) return;
+      if (!options?.force && (heatmapCache[key] || loadingHeatmaps[key] || heatmapErrors[key])) return;
+      if (options?.force) {
+        setHeatmapErrors((current) => {
+          const next = { ...current };
+          delete next[key];
+          return next;
+        });
+      }
       setLoadingHeatmaps((current) => ({ ...current, [key]: true }));
       try {
         const heatmap = await createHeatmap(
@@ -852,11 +923,21 @@ export function AnalysisPage({ active = true }: { active?: boolean }) {
             : { testing_run_id: frame.testingRunId, testing_result_id: frame.id },
         );
         setHeatmapCache((current) => ({ ...current, [key]: heatmap }));
+        setHeatmapErrors((current) => {
+          if (!current[key]) return current;
+          const next = { ...current };
+          delete next[key];
+          return next;
+        });
+      } catch (error) {
+        const message = errorMessage(error);
+        setHeatmapErrors((current) => ({ ...current, [key]: message }));
+        notifyError('Could not compute heatmap', error);
       } finally {
         setLoadingHeatmaps((current) => ({ ...current, [key]: false }));
       }
     },
-    [heatmapCache, loadingHeatmaps],
+    [heatmapCache, heatmapErrors, loadingHeatmaps],
   );
 
   useEffect(() => {
@@ -1358,23 +1439,18 @@ export function AnalysisPage({ active = true }: { active?: boolean }) {
                               </ActionIcon>
                             </Group>
                             {draft.plotType === 'heatmap' && draft.heatmapMode === 'single' ? (
-                              <TextInput
+                              <DateTime24Input
                                 label="Timestamp"
-                                type="datetime-local"
-                                step={1}
                                 min={bounds.start}
                                 max={bounds.end}
                                 value={toDateTimeLocal(source.timestamp)}
                                 description={bounds.start && bounds.end ? `${bounds.start.replace('T', ' ')} to ${bounds.end.replace('T', ' ')}` : undefined}
-                                onChange={(event) => {
-                                  const value = event.currentTarget.value;
-                                  updateSource(source.testingRunId, { timestamp: value });
-                                }}
+                                onChange={(value) => updateSource(source.testingRunId, { timestamp: value })}
                               />
                             ) : (
                               <SimpleGrid cols={{ base: 1, md: 3 }}>
-                                <TextInput label="Start" type="datetime-local" min={bounds.start} max={bounds.end} value={source.start} onChange={(event) => updateSource(source.testingRunId, { start: event.currentTarget.value })} />
-                                <TextInput label="End" type="datetime-local" min={bounds.start} max={bounds.end} value={source.end} onChange={(event) => updateSource(source.testingRunId, { end: event.currentTarget.value })} />
+                                <DateTime24Input label="Start" min={bounds.start} max={bounds.end} value={source.start} onChange={(value) => updateSource(source.testingRunId, { start: value })} />
+                                <DateTime24Input label="End" min={bounds.start} max={bounds.end} value={source.end} onChange={(value) => updateSource(source.testingRunId, { end: value })} />
                                 <NumberInput label="Sampling rate" min={1} value={source.sampling} onChange={(value) => updateSource(source.testingRunId, { sampling: valueAsNumber(value, 1) })} />
                               </SimpleGrid>
                             )}
@@ -1422,9 +1498,34 @@ export function AnalysisPage({ active = true }: { active?: boolean }) {
                     }
                   />
                   <TextInput label="Frames" value={`${combinedDraftResults.length} deduplicated frames`} disabled />
-                  <TextInput label="Overlay" value="CPU pixel reconstruction error" disabled />
+                  <Switch
+                    label="Include reference"
+                    description="Show original, reconstruction, and transparent error overlay."
+                    checked={draft.includeReference}
+                    onChange={(event) => {
+                      const checked = event.currentTarget.checked;
+                      setDraft((current) => ({ ...current, includeReference: checked }));
+                    }}
+                  />
                 </SimpleGrid>
               )}
+              <Paper withBorder p="sm" radius="sm">
+                <Text size="sm" fw={600}>
+                  Plot size: {draft.plotSize}px
+                </Text>
+                <Slider
+                  min={360}
+                  max={1200}
+                  step={20}
+                  value={draft.plotSize}
+                  onChange={(value) => setDraft((current) => ({ ...current, plotSize: value }))}
+                  marks={[
+                    { value: 360, label: 'small' },
+                    { value: 760, label: 'medium' },
+                    { value: 1200, label: 'large' },
+                  ]}
+                />
+              </Paper>
               {finishedRuns.length === 0 && <Alert color="blue">No finished testing runs with images are available yet.</Alert>}
               <Group justify="space-between" align="center">
                 <Text size="sm" c="dimmed">
@@ -1458,6 +1559,7 @@ export function AnalysisPage({ active = true }: { active?: boolean }) {
                 results={results}
                 heatmapCache={heatmapCache}
                 loadingHeatmaps={loadingHeatmaps}
+                heatmapErrors={heatmapErrors}
                 ensureHeatmap={ensureHeatmap}
                 onMove={(direction) => movePlot(plot.id, direction)}
                 onRemove={() => setPlots((current) => current.filter((item) => item.id !== plot.id))}

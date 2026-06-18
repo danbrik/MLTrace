@@ -633,10 +633,19 @@ def _heatmap_overlay(error_map: np.ndarray) -> np.ndarray:
         normalized = np.zeros_like(error_map, dtype=np.float64)
     else:
         normalized = np.clip(error_map / max_error, 0.0, 1.0)
+
+    # Jet-style transparent error map: low error stays blue and subtle, high error
+    # becomes yellow/red and more opaque for anomaly-style inspection overlays.
+    red = np.clip(1.5 - np.abs(4.0 * normalized - 3.0), 0.0, 1.0)
+    green = np.clip(1.5 - np.abs(4.0 * normalized - 2.0), 0.0, 1.0)
+    blue = np.clip(1.5 - np.abs(4.0 * normalized - 1.0), 0.0, 1.0)
+    alpha = np.clip(35.0 + normalized * 190.0, 0.0, 225.0)
+
     overlay = np.zeros((*error_map.shape, 4), dtype=np.uint8)
-    overlay[..., 0] = 255
-    overlay[..., 1] = np.asarray(42 * (1.0 - normalized), dtype=np.uint8)
-    overlay[..., 3] = np.asarray(35 + normalized * 210, dtype=np.uint8)
+    overlay[..., 0] = np.asarray(red * 255.0, dtype=np.uint8)
+    overlay[..., 1] = np.asarray(green * 255.0, dtype=np.uint8)
+    overlay[..., 2] = np.asarray(blue * 255.0, dtype=np.uint8)
+    overlay[..., 3] = np.asarray(alpha, dtype=np.uint8)
     return overlay
 
 
@@ -752,6 +761,7 @@ def compute_heatmap_run(db: Session, payload: HeatmapRunCreate) -> HeatmapRunRea
     row.max_x = 0
     row.max_y = 0
     row.source_image_data_url = ""
+    row.reconstruction_image_data_url = ""
     row.heatmap_image_data_url = ""
     row.updated_at = _utcnow()
     db.commit()
@@ -777,6 +787,7 @@ def compute_heatmap_run(db: Session, payload: HeatmapRunCreate) -> HeatmapRunRea
         row.max_x = int(max_x)
         row.max_y = int(max_y)
         row.source_image_data_url = encode_png_data_url(source)
+        row.reconstruction_image_data_url = encode_png_data_url(reconstruction)
         row.heatmap_image_data_url = encode_png_data_url(_heatmap_overlay(error_map))
         row.updated_at = _utcnow()
         db.commit()
