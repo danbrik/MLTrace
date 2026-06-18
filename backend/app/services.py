@@ -24,7 +24,7 @@ from app.preprocessing.pipeline import (
 )
 from app.preprocessing.registry import registry
 from app.scanner import detect_timestamp_pattern, probe_first_direct_tiff, scan_dataset_files
-from app.training.data import count_folder_range_images
+from app.training.data import FolderTimestampCache, count_folder_range_images
 from app.schemas import (
     DatasetConnectionTestResponse,
     DatasetRead,
@@ -364,12 +364,13 @@ def preview_training_dataset(
     previews: list[TrainingDatasetRulePreview] = []
     total_matching = 0
     total_selected = 0
+    count_cache: FolderTimestampCache = {}
 
     for rule in request.rules:
         folder = db.get(models.DatasetFolder, rule.folder_id)
         if folder is None:
             raise ValueError(f"Folder does not exist: {rule.folder_id}")
-        counts = count_folder_range_images(folder, rule.start_timestamp, rule.end_timestamp, rule.stride)
+        counts = count_folder_range_images(folder, rule.start_timestamp, rule.end_timestamp, rule.stride, count_cache)
         previews.append(
             TrainingDatasetRulePreview(
                 folder_id=rule.folder_id,
@@ -473,7 +474,8 @@ def list_training_datasets(db: Session) -> list[TrainingDatasetRead]:
             )
         )
     )
-    return [serialize_training_dataset(db, training_dataset) for training_dataset in training_datasets]
+    count_cache: FolderTimestampCache = {}
+    return [serialize_training_dataset(db, training_dataset, count_cache) for training_dataset in training_datasets]
 
 
 def get_training_dataset(db: Session, training_dataset_id: int) -> TrainingDatasetRead | None:
@@ -488,7 +490,7 @@ def get_training_dataset(db: Session, training_dataset_id: int) -> TrainingDatas
     )
     if training_dataset is None:
         return None
-    return serialize_training_dataset(db, training_dataset)
+    return serialize_training_dataset(db, training_dataset, {})
 
 
 def delete_training_dataset(db: Session, training_dataset_id: int) -> bool:
@@ -572,13 +574,20 @@ def validate_rules(db: Session, rules) -> None:
         )
 
 
-def count_rule_images(db: Session, rule: models.TrainingDatasetRule) -> tuple[int, int]:
-    counts = count_folder_range_images(rule.folder, rule.start_timestamp, rule.end_timestamp, rule.stride)
+def count_rule_images(
+    db: Session, rule: models.TrainingDatasetRule, count_cache: FolderTimestampCache | None = None
+) -> tuple[int, int]:
+    counts = count_folder_range_images(rule.folder, rule.start_timestamp, rule.end_timestamp, rule.stride, count_cache)
     return counts.matching_images, counts.selected_images
 
 
-def count_images_in_folder_range(folder: models.DatasetFolder, start_timestamp, end_timestamp) -> int:
-    return count_folder_range_images(folder, start_timestamp, end_timestamp, 1).matching_images
+def count_images_in_folder_range(
+    folder: models.DatasetFolder,
+    start_timestamp,
+    end_timestamp,
+    count_cache: FolderTimestampCache | None = None,
+) -> int:
+    return count_folder_range_images(folder, start_timestamp, end_timestamp, 1, count_cache).matching_images
 
 
 def folder_image_signature(folder: models.DatasetFolder) -> str | None:
@@ -597,7 +606,11 @@ def folder_image_signature(folder: models.DatasetFolder) -> str | None:
     return f"{resolutions} | {extensions} | {dtype} | {channels_text} | {mode}"
 
 
-def serialize_training_dataset(db: Session, training_dataset: models.TrainingDataset) -> TrainingDatasetRead:
+def serialize_training_dataset(
+    db: Session,
+    training_dataset: models.TrainingDataset,
+    count_cache: FolderTimestampCache | None = None,
+) -> TrainingDatasetRead:
     rule_reads: list[TrainingDatasetRuleRead] = []
     dataset_names: set[str] = set()
     resolutions: set[str] = set()
@@ -632,7 +645,7 @@ def serialize_training_dataset(db: Session, training_dataset: models.TrainingDat
     ):
         folder = rule.folder
         dataset = folder.dataset
-        matching, selected = count_rule_images(db, rule)
+        matching, selected = count_rule_images(db, rule, count_cache)
         total_matching += matching
         total_selected += selected
         dataset_names.add(dataset.name)
@@ -1551,14 +1564,15 @@ def list_training_pipelines(db: Session) -> list[TrainingPipelineRead]:
     pipelines = list(
         db.scalars(_training_pipeline_query().order_by(models.TrainingPipeline.created_at.desc()))
     )
-    return [serialize_training_pipeline(db, pipeline) for pipeline in pipelines]
+    count_cache: FolderTimestampCache = {}
+    return [serialize_training_pipeline(db, pipeline, count_cache) for pipeline in pipelines]
 
 
 def get_training_pipeline(db: Session, pipeline_id: int) -> TrainingPipelineRead | None:
     pipeline = db.scalar(_training_pipeline_query().where(models.TrainingPipeline.id == pipeline_id))
     if pipeline is None:
         return None
-    return serialize_training_pipeline(db, pipeline)
+    return serialize_training_pipeline(db, pipeline, {})
 
 
 def delete_training_pipeline(db: Session, pipeline_id: int) -> bool:
@@ -1580,11 +1594,15 @@ def delete_training_pipeline(db: Session, pipeline_id: int) -> bool:
     return True
 
 
-def serialize_training_pipeline(db: Session, pipeline: models.TrainingPipeline) -> TrainingPipelineRead:
+def serialize_training_pipeline(
+    db: Session,
+    pipeline: models.TrainingPipeline,
+    count_cache: FolderTimestampCache | None = None,
+) -> TrainingPipelineRead:
     entries: list[TrainingPipelineDatasetRead] = []
     total_selected = 0
     for entry in pipeline.entries:
-        summary = serialize_training_dataset(db, entry.training_dataset)
+        summary = serialize_training_dataset(db, entry.training_dataset, count_cache)
         total_selected += summary.total_selected_images
         entries.append(
             TrainingPipelineDatasetRead(

@@ -86,6 +86,7 @@ type PlotSourceConfig = {
 type CombinedResult = TestingRunResult & {
   testingRunId: number;
   testingRunName: string;
+  heatmapTimestampOnly?: boolean;
 };
 
 function notifyError(title: string, error: unknown) {
@@ -113,6 +114,15 @@ function toDateTimeLocal(value: string | null | undefined): string {
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return '';
   return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
+}
+
+function sourceBounds(dataset: TrainingDataset | null | undefined): { start: string; end: string } {
+  const starts = (dataset?.rules ?? []).map((rule) => rule.start_timestamp).filter(Boolean).sort();
+  const ends = (dataset?.rules ?? []).map((rule) => rule.end_timestamp).filter(Boolean).sort();
+  return {
+    start: toDateTimeLocal(starts[0]),
+    end: toDateTimeLocal(ends.at(-1)),
+  };
 }
 
 function filterAndSampleResults(
@@ -547,9 +557,9 @@ function HeatmapPlot({
 }: {
   plot: AnalysisPlot;
   results: CombinedResult[];
-  heatmapCache: Record<number, HeatmapRun>;
-  loadingHeatmaps: Record<number, boolean>;
-  ensureHeatmap: (runId: number, resultId: number) => Promise<void>;
+  heatmapCache: Record<string, HeatmapRun>;
+  loadingHeatmaps: Record<string, boolean>;
+  ensureHeatmap: (frame: CombinedResult) => Promise<void>;
 }) {
   const [frameIndex, setFrameIndex] = useState(0);
   const [playing, setPlaying] = useState(false);
@@ -567,9 +577,10 @@ function HeatmapPlot({
   }, [frameIndex, frames.length]);
 
   const current = frames[frameIndex] ?? null;
+  const currentKey = current ? `${current.testingRunId}:${current.heatmapTimestampOnly ? current.timestamp : current.id}` : '';
   useEffect(() => {
     if (!current) return;
-    ensureHeatmap(current.testingRunId, current.id).catch((error) => notifyError('Could not compute heatmap', error));
+    ensureHeatmap(current).catch((error) => notifyError('Could not compute heatmap', error));
   }, [current, ensureHeatmap]);
 
   useEffect(() => {
@@ -584,8 +595,8 @@ function HeatmapPlot({
     return <Alert color="yellow">No result image matches this selection.</Alert>;
   }
 
-  const heatmap = heatmapCache[current.id];
-  const loading = loadingHeatmaps[current.id] === true;
+  const heatmap = heatmapCache[currentKey];
+  const loading = loadingHeatmaps[currentKey] === true;
 
   return (
     <Stack gap="sm">
@@ -658,9 +669,9 @@ function AnalysisPlotCard({
 }: {
   plot: AnalysisPlot;
   results: CombinedResult[];
-  heatmapCache: Record<number, HeatmapRun>;
-  loadingHeatmaps: Record<number, boolean>;
-  ensureHeatmap: (runId: number, resultId: number) => Promise<void>;
+  heatmapCache: Record<string, HeatmapRun>;
+  loadingHeatmaps: Record<string, boolean>;
+  ensureHeatmap: (frame: CombinedResult) => Promise<void>;
   onMove: (direction: -1 | 1) => void;
   onRemove: () => void;
 }) {
@@ -738,8 +749,8 @@ export function AnalysisPage({ active = true }: { active?: boolean }) {
   const [loadingRunId, setLoadingRunId] = useState<number | null>(null);
   const [draft, setDraft] = useState<PlotDraft>(defaultDraft());
   const [plots, setPlots] = useState<AnalysisPlot[]>([]);
-  const [heatmapCache, setHeatmapCache] = useState<Record<number, HeatmapRun>>({});
-  const [loadingHeatmaps, setLoadingHeatmaps] = useState<Record<number, boolean>>({});
+  const [heatmapCache, setHeatmapCache] = useState<Record<string, HeatmapRun>>({});
+  const [loadingHeatmaps, setLoadingHeatmaps] = useState<Record<string, boolean>>({});
   const [addPlotOpen, setAddPlotOpen] = useState(true);
   const [selectedPipelineId, setSelectedPipelineId] = useState<string | null>(null);
   const [pipelineSearch, setPipelineSearch] = useState('');
@@ -825,14 +836,19 @@ export function AnalysisPage({ active = true }: { active?: boolean }) {
   );
 
   const ensureHeatmap = useCallback(
-    async (runId: number, resultId: number) => {
-      if (heatmapCache[resultId] || loadingHeatmaps[resultId]) return;
-      setLoadingHeatmaps((current) => ({ ...current, [resultId]: true }));
+    async (frame: CombinedResult) => {
+      const key = `${frame.testingRunId}:${frame.heatmapTimestampOnly ? frame.timestamp : frame.id}`;
+      if (heatmapCache[key] || loadingHeatmaps[key]) return;
+      setLoadingHeatmaps((current) => ({ ...current, [key]: true }));
       try {
-        const heatmap = await createHeatmap({ testing_run_id: runId, testing_result_id: resultId });
-        setHeatmapCache((current) => ({ ...current, [resultId]: heatmap }));
+        const heatmap = await createHeatmap(
+          frame.heatmapTimestampOnly
+            ? { testing_run_id: frame.testingRunId, timestamp: frame.timestamp }
+            : { testing_run_id: frame.testingRunId, testing_result_id: frame.id },
+        );
+        setHeatmapCache((current) => ({ ...current, [key]: heatmap }));
       } finally {
-        setLoadingHeatmaps((current) => ({ ...current, [resultId]: false }));
+        setLoadingHeatmaps((current) => ({ ...current, [key]: false }));
       }
     },
     [heatmapCache, loadingHeatmaps],
@@ -860,10 +876,11 @@ export function AnalysisPage({ active = true }: { active?: boolean }) {
   }, [fetchResults, selectedRunId]);
 
   useEffect(() => {
+    if (draft.plotType === 'heatmap' && draft.heatmapMode === 'single') return;
     selectedSources.forEach((source) => {
       fetchResults(Number(source.testingRunId)).catch((error) => notifyError('Could not load testing results', error));
     });
-  }, [fetchResults, selectedSources]);
+  }, [draft.heatmapMode, draft.plotType, fetchResults, selectedSources]);
 
   const filteredDraftResults = useMemo(() => {
     if (!selectedResults) return [];
@@ -873,6 +890,29 @@ export function AnalysisPage({ active = true }: { active?: boolean }) {
   function combinedResultsForSources(sources: PlotSourceConfig[], plotType: PlotType, heatmapMode: HeatmapMode): CombinedResult[] {
     const dedup = new Map<string, CombinedResult>();
     for (const source of sources) {
+      if (plotType === 'heatmap' && heatmapMode === 'single') {
+        if (!source.timestamp) continue;
+        const run = testingRuns.find((item) => item.id === Number(source.testingRunId));
+        const key = `${source.testingRunId}|${source.timestamp}`;
+        if (!dedup.has(key)) {
+          dedup.set(key, {
+            id: -Number(source.testingRunId),
+            position: 0,
+            image_path: '',
+            timestamp: source.timestamp,
+            score: Number.NaN,
+            full_mse: Number.NaN,
+            roi_mse: null,
+            tile_scores: null,
+            width: 0,
+            height: 0,
+            testingRunId: Number(source.testingRunId),
+            testingRunName: run?.name ?? `Testing run #${source.testingRunId}`,
+            heatmapTimestampOnly: true,
+          });
+        }
+        continue;
+      }
       const data = resultsByRunId[Number(source.testingRunId)];
       if (!data) continue;
       const sourceResults =
@@ -896,7 +936,7 @@ export function AnalysisPage({ active = true }: { active?: boolean }) {
   const combinedDraftResults = useMemo(
     () => combinedResultsForSources(selectedSources, draft.plotType, draft.heatmapMode),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [draft.heatmapMode, draft.plotType, resultsByRunId, selectedSources],
+    [draft.heatmapMode, draft.plotType, resultsByRunId, selectedSources, testingRuns],
   );
 
   function addPlot() {
@@ -944,6 +984,20 @@ export function AnalysisPage({ active = true }: { active?: boolean }) {
 
   function addSource(run: TestingRun) {
     if (selectedSources.some((source) => source.testingRunId === String(run.id))) return;
+    if (draft.plotType === 'heatmap' && draft.heatmapMode === 'single') {
+      const bounds = sourceBounds(trainingDatasetById.get(run.training_dataset_id));
+      setSelectedSources((current) => [
+        ...current,
+        {
+          testingRunId: String(run.id),
+          start: bounds.start,
+          end: bounds.end,
+          sampling: 1,
+          timestamp: bounds.start,
+        },
+      ]);
+      return;
+    }
     fetchResults(run.id)
       .then((data) => {
         const first = data.results[0];
@@ -1272,8 +1326,7 @@ export function AnalysisPage({ active = true }: { active?: boolean }) {
                     <Title order={4}>Selected inference datasets</Title>
                     {selectedSources.map((source) => {
                       const run = testingRuns.find((item) => item.id === Number(source.testingRunId));
-                      const data = resultsByRunId[Number(source.testingRunId)];
-                      const timestampOptions = (data?.results ?? []).map((result) => ({ value: result.timestamp, label: resultLabel(result) }));
+                      const bounds = sourceBounds(run ? trainingDatasetById.get(run.training_dataset_id) : null);
                       return (
                         <Paper key={source.testingRunId} withBorder p="sm" radius="sm">
                           <Stack gap="xs">
@@ -1284,13 +1337,18 @@ export function AnalysisPage({ active = true }: { active?: boolean }) {
                               </ActionIcon>
                             </Group>
                             {draft.plotType === 'heatmap' && draft.heatmapMode === 'single' ? (
-                              <Select
+                              <TextInput
                                 label="Timestamp"
-                                placeholder="Select timestamp"
-                                data={timestampOptions}
-                                value={source.timestamp}
-                                searchable
-                                onChange={(value) => updateSource(source.testingRunId, { timestamp: value })}
+                                type="datetime-local"
+                                step={1}
+                                min={bounds.start}
+                                max={bounds.end}
+                                value={toDateTimeLocal(source.timestamp)}
+                                description={bounds.start && bounds.end ? `${bounds.start.replace('T', ' ')} to ${bounds.end.replace('T', ' ')}` : undefined}
+                                onChange={(event) => {
+                                  const value = event.currentTarget.value;
+                                  updateSource(source.testingRunId, { timestamp: value });
+                                }}
                               />
                             ) : (
                               <SimpleGrid cols={{ base: 1, md: 3 }}>
@@ -1367,7 +1425,10 @@ export function AnalysisPage({ active = true }: { active?: boolean }) {
       ) : (
         <Stack gap="md">
           {plots.map((plot) => {
-            const hasAllData = plot.sources.every((source) => resultsByRunId[Number(source.testingRunId)]);
+            const hasAllData =
+              plot.plotType === 'heatmap' && plot.heatmapMode === 'single'
+                ? true
+                : plot.sources.every((source) => resultsByRunId[Number(source.testingRunId)]);
             const results = combinedResultsForSources(plot.sources, plot.plotType, plot.heatmapMode);
             return hasAllData ? (
               <AnalysisPlotCard

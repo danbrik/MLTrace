@@ -561,17 +561,52 @@ def _heatmap_overlay(error_map: np.ndarray) -> np.ndarray:
 
 def compute_heatmap_run(db: Session, payload: HeatmapRunCreate) -> HeatmapRunRead:
     """Compute or return a cached CPU pixel-level reconstruction-error heatmap."""
+    result_id = payload.testing_result_id
+    if result_id is None:
+        result = db.scalar(
+            select(models.TestingRunResult)
+            .where(
+                models.TestingRunResult.testing_run_id == payload.testing_run_id,
+                models.TestingRunResult.timestamp == payload.timestamp,
+            )
+            .options(
+                selectinload(models.TestingRunResult.testing_run)
+                .selectinload(models.TestingRun.training_run)
+                .selectinload(models.TrainingRun.training_pipeline)
+                .selectinload(models.TrainingPipeline.preprocessing_pipeline),
+                selectinload(models.TestingRunResult.testing_run)
+                .selectinload(models.TestingRun.training_run)
+                .selectinload(models.TrainingRun.training_pipeline)
+                .selectinload(models.TrainingPipeline.method_configuration),
+            )
+        )
+        if result is None:
+            timestamp_text = payload.timestamp.isoformat() if payload.timestamp else "unknown"
+            testing_run = db.get(models.TestingRun, payload.testing_run_id)
+            expected_name = None
+            if testing_run is not None and payload.timestamp is not None:
+                training_dataset = _load_training_dataset(db, testing_run.training_dataset_id)
+                if training_dataset is not None:
+                    for record in enumerate_training_dataset_image_records(training_dataset):
+                        if record.timestamp_parsed == payload.timestamp:
+                            expected_name = record.file_name
+                            break
+            if expected_name:
+                raise ValueError(f"Datei mit Filename {expected_name} existiert nicht.")
+            raise ValueError(f"Datei mit Timestamp {timestamp_text} existiert nicht.")
+        result_id = result.id
+
     existing = db.scalar(
         select(models.HeatmapRun).where(
             models.HeatmapRun.testing_run_id == payload.testing_run_id,
-            models.HeatmapRun.testing_result_id == payload.testing_result_id,
+            models.HeatmapRun.testing_result_id == result_id,
             models.HeatmapRun.status == "finished",
         )
     )
     if existing is not None:
         return HeatmapRunRead.model_validate(existing)
 
-    result = _load_testing_result_for_heatmap(db, payload.testing_run_id, payload.testing_result_id)
+    result = _load_testing_result_for_heatmap(db, payload.testing_run_id, result_id)
     if result is None:
         raise ValueError("Testing result does not exist.")
     testing_run = result.testing_run
@@ -584,13 +619,13 @@ def compute_heatmap_run(db: Session, payload: HeatmapRunCreate) -> HeatmapRunRea
     row = db.scalar(
         select(models.HeatmapRun).where(
             models.HeatmapRun.testing_run_id == payload.testing_run_id,
-            models.HeatmapRun.testing_result_id == payload.testing_result_id,
+            models.HeatmapRun.testing_result_id == result_id,
         )
     )
     if row is None:
         row = models.HeatmapRun(
             testing_run_id=payload.testing_run_id,
-            testing_result_id=payload.testing_result_id,
+            testing_result_id=result_id,
         )
         db.add(row)
     row.image_path = result.image_path
@@ -641,7 +676,7 @@ def compute_heatmap_run(db: Session, payload: HeatmapRunCreate) -> HeatmapRunRea
         row = db.scalar(
             select(models.HeatmapRun).where(
                 models.HeatmapRun.testing_run_id == payload.testing_run_id,
-                models.HeatmapRun.testing_result_id == payload.testing_result_id,
+                models.HeatmapRun.testing_result_id == result_id,
             )
         )
         if row is not None:

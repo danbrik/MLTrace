@@ -9,6 +9,7 @@ returns deterministic records without loading image pixels.
 
 from __future__ import annotations
 
+from bisect import bisect_left, bisect_right
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -34,6 +35,11 @@ class RuleImageCount:
     selected_images: int
 
 
+TimestampIndexEntry = tuple[datetime, str, str]
+FolderTimestampCache = dict[int, list[TimestampIndexEntry]]
+_HIGH_SORT_SENTINEL = chr(0x10FFFF)
+
+
 def _sorted_rules(training_dataset: models.TrainingDataset) -> list[models.TrainingDatasetRule]:
     # Same deterministic ordering used by serialize_training_dataset.
     return sorted(
@@ -55,17 +61,19 @@ def _folder_path(folder: models.DatasetFolder) -> Path:
     return root / folder.relative_path
 
 
-def _matching_folder_images(
+def _folder_timestamp_index(
     folder: models.DatasetFolder,
-    start_timestamp: datetime,
-    end_timestamp: datetime,
-) -> list[ResolvedDatasetImage]:
-    """Return all files in a timestamp range without opening image pixels."""
+    cache: FolderTimestampCache | None = None,
+) -> list[TimestampIndexEntry]:
+    """Parse and sort a folder's filename timestamps once per request."""
+    if cache is not None and folder.id in cache:
+        return cache[folder.id]
+
     dataset = folder.dataset
     if not dataset.timestamp_regex or not dataset.timestamp_format:
         raise ValueError(f"Dataset '{dataset.name}' has no confirmed timestamp parser.")
 
-    matching: list[ResolvedDatasetImage] = []
+    entries: list[TimestampIndexEntry] = []
     for path in direct_tiff_files(_folder_path(folder)):
         try:
             _, timestamp = extract_timestamp(path.name, dataset.timestamp_regex, dataset.timestamp_format)
@@ -73,20 +81,37 @@ def _matching_folder_images(
             raise ValueError(
                 f"File '{path.name}' in dataset '{dataset.name}' does not match the confirmed timestamp parser."
             ) from exc
-        if start_timestamp <= timestamp <= end_timestamp:
-            matching.append(
-                ResolvedDatasetImage(
-                    file_path=str(path),
-                    timestamp_parsed=timestamp,
-                    dataset_name=dataset.name,
-                    dataset_root_path=dataset.root_path,
-                    folder_id=folder.id,
-                    folder_relative_path=folder.relative_path,
-                    file_name=path.name,
-                )
-            )
+        entries.append((timestamp, path.name, str(path)))
 
-    matching.sort(key=lambda image: (image.timestamp_parsed, image.file_name, image.file_path))
+    entries.sort()
+    if cache is not None:
+        cache[folder.id] = entries
+    return entries
+
+
+def _matching_folder_images(
+    folder: models.DatasetFolder,
+    start_timestamp: datetime,
+    end_timestamp: datetime,
+) -> list[ResolvedDatasetImage]:
+    """Return all files in a timestamp range without opening image pixels."""
+    dataset = folder.dataset
+    matching: list[ResolvedDatasetImage] = []
+    entries = _folder_timestamp_index(folder)
+    left = bisect_left(entries, (start_timestamp, "", ""))
+    right = bisect_right(entries, (end_timestamp, _HIGH_SORT_SENTINEL, _HIGH_SORT_SENTINEL))
+    for timestamp, file_name, file_path in entries[left:right]:
+        matching.append(
+            ResolvedDatasetImage(
+                file_path=file_path,
+                timestamp_parsed=timestamp,
+                dataset_name=dataset.name,
+                dataset_root_path=dataset.root_path,
+                folder_id=folder.id,
+                folder_relative_path=folder.relative_path,
+                file_name=file_name,
+            )
+        )
     return matching
 
 
@@ -95,24 +120,24 @@ def count_folder_range_images(
     start_timestamp: datetime,
     end_timestamp: datetime,
     stride: int = 1,
+    cache: FolderTimestampCache | None = None,
 ) -> RuleImageCount:
     """Count matching and selected files exactly from filenames only."""
-    dataset = folder.dataset
-    if not dataset.timestamp_regex or not dataset.timestamp_format:
-        raise ValueError(f"Dataset '{dataset.name}' has no confirmed timestamp parser.")
-
-    matching_count = 0
-    for path in direct_tiff_files(_folder_path(folder)):
-        try:
-            _, timestamp = extract_timestamp(path.name, dataset.timestamp_regex, dataset.timestamp_format)
-        except ValueError as exc:
-            raise ValueError(
-                f"File '{path.name}' in dataset '{dataset.name}' does not match the confirmed timestamp parser."
-            ) from exc
-        if start_timestamp <= timestamp <= end_timestamp:
-            matching_count += 1
-
     stride = max(1, stride)
+    if (
+        folder.first_timestamp is not None
+        and folder.last_timestamp is not None
+        and start_timestamp <= folder.first_timestamp
+        and end_timestamp >= folder.last_timestamp
+    ):
+        matching_count = folder.image_count
+        selected_count = (matching_count + stride - 1) // stride if matching_count else 0
+        return RuleImageCount(matching_images=matching_count, selected_images=selected_count)
+
+    entries = _folder_timestamp_index(folder, cache)
+    left = bisect_left(entries, (start_timestamp, "", ""))
+    right = bisect_right(entries, (end_timestamp, _HIGH_SORT_SENTINEL, _HIGH_SORT_SENTINEL))
+    matching_count = max(0, right - left)
     selected_count = (matching_count + stride - 1) // stride if matching_count else 0
     return RuleImageCount(matching_images=matching_count, selected_images=selected_count)
 

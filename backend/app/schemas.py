@@ -1,7 +1,7 @@
 from datetime import datetime
 from typing import ClassVar
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 class DatasetCreate(BaseModel):
@@ -650,7 +650,14 @@ class TestingRunResultImageResponse(BaseModel):
 
 class HeatmapRunCreate(BaseModel):
     testing_run_id: int
-    testing_result_id: int
+    testing_result_id: int | None = None
+    timestamp: datetime | None = None
+
+    @model_validator(mode="after")
+    def validate_result_or_timestamp(self):
+        if self.testing_result_id is None and self.timestamp is None:
+            raise ValueError("Either testing_result_id or timestamp is required.")
+        return self
 
 
 class HeatmapRunRead(BaseModel):
