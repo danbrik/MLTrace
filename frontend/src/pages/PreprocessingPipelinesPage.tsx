@@ -242,6 +242,7 @@ export function PreprocessingPipelinesPage() {
   }, [name, pipelines]);
 
   const loadedReadOnly = loadedPipelineId != null && !isEditingLoadedPipeline;
+  const loadedPipeline = loadedPipelineId != null ? pipelines.find((pipeline) => pipeline.id === loadedPipelineId) ?? null : null;
 
   // The image that flows INTO a step is the output of the preceding step. For the
   // first real step (index 1) the loaded source image is that output and is always
@@ -805,7 +806,7 @@ export function PreprocessingPipelinesPage() {
   function renderSaveButtons() {
     if (loadedReadOnly) {
       return (
-        <Button leftSection={<Pencil size={18} />} onClick={() => setIsEditingLoadedPipeline(true)}>
+        <Button leftSection={<Pencil size={18} />} onClick={() => setIsEditingLoadedPipeline(true)} disabled={loadedPipeline?.is_update_locked}>
           Edit pipeline
         </Button>
       );
@@ -865,8 +866,15 @@ export function PreprocessingPipelinesPage() {
             </Text>
           )}
           {loadedReadOnly && (
-            <Alert color="blue" title="Loaded read-only">
-              Click Edit pipeline before changing this saved preprocessing pipeline.
+            <Alert color={loadedPipeline?.is_update_locked ? 'yellow' : 'blue'} title="Loaded read-only">
+              <Stack gap={4}>
+                <Text size="sm">Click Edit pipeline before changing this saved preprocessing pipeline.</Text>
+                {loadedPipeline?.update_lock_reasons.map((reason) => (
+                  <Text key={reason} size="sm">
+                    {reason}
+                  </Text>
+                ))}
+              </Stack>
             </Alert>
           )}
           {nameClash && (

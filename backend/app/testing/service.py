@@ -408,6 +408,7 @@ def _serialize_testing_run(run: models.TestingRun) -> TestingRunRead:
         device=run.device,
         error_message=run.error_message,
         image_count=run.image_count,
+        expected_image_count=run.expected_image_count,
         score_mean=run.score_mean,
         score_min=run.score_min,
         score_max=run.score_max,
@@ -762,6 +763,7 @@ def enqueue_testing_run(db: Session, payload: TestingRunCreate, *, wake_schedule
     training_dataset = _load_training_dataset(db, payload.training_dataset_id)
     if training_dataset is None:
         raise ValueError(f"Train/test dataset does not exist: {payload.training_dataset_id}")
+    expected_image_count = len(enumerate_training_dataset_image_records(training_dataset))
 
     roi = db.get(models.RoiDefinition, payload.roi_id) if payload.roi_id is not None else None
     if payload.roi_id is not None and roi is None:
@@ -792,6 +794,7 @@ def enqueue_testing_run(db: Session, payload: TestingRunCreate, *, wake_schedule
         artifact_path=training_run.artifact_path,
         roi_name=roi.name if roi else None,
         roi_geometry=_roi_geometry(roi),
+        expected_image_count=expected_image_count,
     )
     db.add(testing_run)
     db.commit()
@@ -828,6 +831,7 @@ def create_testing_run(db: Session, payload: TestingRunCreate) -> TestingRunRead
     roi = db.get(models.RoiDefinition, run.roi_id) if run.roi_id is not None else None
     graph = PreprocessingGraph.model_validate(training_run.training_pipeline.preprocessing_pipeline.graph)
     records = enumerate_training_dataset_image_records(training_dataset)
+    run.expected_image_count = len(records)
     evaluator = ArtifactEvaluator(training_run)
     rows: list[models.TestingRunResult] = []
     scores: list[float] = []

@@ -1311,7 +1311,14 @@ export function AnalysisPage({ active = true }: { active?: boolean }) {
 
               {selectedPipeline && selectedRoiKey && (
                 <StepCard index={4} title="Plot configuration" color="gray">
-              <TextInput label="Plot title" value={draft.title} onChange={(event) => setDraft((current) => ({ ...current, title: event.currentTarget.value }))} />
+              <TextInput
+                label="Plot title"
+                value={draft.title}
+                onChange={(event) => {
+                  const value = event.currentTarget.value;
+                  setDraft((current) => ({ ...current, title: value }));
+                }}
+              />
               {draft.plotType === 'timeseries' ? (
                 <SimpleGrid cols={{ base: 1, md: 3 }}>
                   <NumberInput label="Moving average window" min={1} value={draft.movingAverage} onChange={(value) => setDraft((current) => ({ ...current, movingAverage: valueAsNumber(value, 1) }))} />

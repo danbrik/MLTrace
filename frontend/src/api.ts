@@ -168,6 +168,28 @@ export function getTrainingDataset(trainingDatasetId: number): Promise<TrainingD
   return request<TrainingDataset>(`/api/training-datasets/${trainingDatasetId}`);
 }
 
+export function updateTrainingDataset(
+  trainingDatasetId: number,
+  payload: {
+    name: string;
+    usage_label?: string;
+    notes?: string;
+    rules: TrainingDatasetRuleInput[];
+  },
+): Promise<TrainingDataset> {
+  return request<TrainingDataset>(`/api/training-datasets/${trainingDatasetId}`, {
+    method: 'PUT',
+    body: JSON.stringify(payload),
+  });
+}
+
+export function cleanupTrainingDatasetInvalidRules(trainingDatasetId: number): Promise<TrainingDataset> {
+  return request<TrainingDataset>(`/api/training-datasets/${trainingDatasetId}/cleanup-invalid-rules`, {
+    method: 'POST',
+    body: JSON.stringify({}),
+  });
+}
+
 export async function deleteTrainingDataset(trainingDatasetId: number): Promise<void> {
   await request<void>(`/api/training-datasets/${trainingDatasetId}`, {
     method: 'DELETE',

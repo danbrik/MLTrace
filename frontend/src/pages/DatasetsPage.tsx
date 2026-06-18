@@ -6,7 +6,6 @@ import {
   Group,
   Loader,
   Modal,
-  Paper,
   ScrollArea,
   Stack,
   Table,
@@ -14,18 +13,18 @@ import {
   TextInput,
   Textarea,
   Title,
+  Tooltip,
 } from '@mantine/core';
 import { notifications } from '@mantine/notifications';
 
 import { StepCard } from '../components/StepCard';
-import { Check, FileSearch, RefreshCw, ScanLine, Trash2 } from 'lucide-react';
+import { Check, FileSearch, Info, RefreshCw, ScanLine, Trash2 } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState } from 'react';
 
 import {
   confirmTimestampFormat,
   createDataset,
   deleteDataset,
-  getDataset,
   listDatasets,
   rescanDataset,
   testDatasetConnection,
@@ -75,9 +74,13 @@ function formatImageMetadata(value: Record<string, unknown> | null | undefined):
   return parts.length ? parts.join(', ') : 'n/a';
 }
 
+function formatMeanSpacing(folder: Dataset['folders'][number] | undefined): string {
+  const seconds = folder?.cadence_summary?.mean_seconds ?? folder?.cadence_summary?.median_seconds;
+  return seconds == null ? 'n/a' : `${seconds}s`;
+}
+
 export function DatasetsPage() {
   const [datasets, setDatasets] = useState<Dataset[]>([]);
-  const [selectedDatasetId, setSelectedDatasetId] = useState<number | null>(null);
   const [datasetName, setDatasetName] = useState('');
   const [rootPath, setRootPath] = useState('');
   const [timestampRegex, setTimestampRegex] = useState('');
@@ -105,14 +108,9 @@ export function DatasetsPage() {
     ].slice(0, 30));
   }
 
-  async function refreshDatasets(selectId?: number) {
+  async function refreshDatasets() {
     const nextDatasets = await listDatasets();
     setDatasets(nextDatasets);
-    if (selectId) {
-      setSelectedDatasetId(selectId);
-    } else if (!selectedDatasetId && nextDatasets.length > 0) {
-      setSelectedDatasetId(nextDatasets[0].id);
-    }
   }
 
   useEffect(() => {
@@ -127,10 +125,6 @@ export function DatasetsPage() {
     return () => window.clearInterval(timer);
   }, [runningOperation]);
 
-  const selectedDataset = useMemo(
-    () => datasets.find((dataset) => dataset.id === selectedDatasetId) ?? null,
-    [datasets, selectedDatasetId],
-  );
   const runningElapsedSeconds = runningOperation
     ? Math.floor((Date.now() - runningOperation.startedAt) / 1000)
     : 0;
@@ -171,7 +165,7 @@ export function DatasetsPage() {
       setTimestampRegex(dataset.timestamp_regex ?? '');
       setTimestampFormat(dataset.timestamp_format ?? '');
       setConfirmationDataset(dataset);
-      await refreshDatasets(dataset.id);
+      await refreshDatasets();
     } catch (error) {
       notifications.show({
         color: 'red',
@@ -247,7 +241,7 @@ export function DatasetsPage() {
           : `Scan failed: ${scanned.scan_error ?? 'unknown error'}`,
       );
       setConfirmationDataset(null);
-      await refreshDatasets(scanned.id);
+      await refreshDatasets();
       notifications.show({
         color: scanned.status === 'ready' ? 'green' : 'red',
         title: scanned.status === 'ready' ? 'Dataset scanned' : 'Scan failed',
@@ -284,7 +278,7 @@ export function DatasetsPage() {
     try {
       const dataset = await rescanDataset(datasetId);
       addActivity('success', `Rescan finished: ${dataset.folders.length} folder summaries indexed`);
-      await refreshDatasets(dataset.id);
+      await refreshDatasets();
       notifications.show({ color: 'green', title: 'Dataset rescanned', message: dataset.root_path });
     } catch (error) {
       notifications.show({
@@ -307,10 +301,6 @@ export function DatasetsPage() {
       await deleteDataset(dataset.id);
       const nextDatasets = await listDatasets();
       setDatasets(nextDatasets);
-      setSelectedDatasetId((current) => {
-        if (current !== dataset.id) return current;
-        return nextDatasets[0]?.id ?? null;
-      });
       notifications.show({ color: 'green', title: 'Dataset deleted', message: dataset.name });
     } catch (error) {
       notifications.show({
@@ -320,22 +310,6 @@ export function DatasetsPage() {
       });
     } finally {
       setDeletingDatasetId(null);
-    }
-  }
-
-  async function handleSelectDataset(datasetId: number) {
-    setSelectedDatasetId(datasetId);
-    try {
-      const dataset = await getDataset(datasetId);
-      setDatasets((current) =>
-        current.map((item) => (item.id === dataset.id ? dataset : item)),
-      );
-    } catch (error) {
-      notifications.show({
-        color: 'red',
-        title: 'Could not load dataset',
-        message: error instanceof Error ? error.message : 'Unknown error',
-      });
     }
   }
 
@@ -463,122 +437,83 @@ export function DatasetsPage() {
                   <Table.Th>Status</Table.Th>
                   <Table.Th>Root path</Table.Th>
                   <Table.Th>Timestamp example</Table.Th>
-                  <Table.Th>Folders</Table.Th>
+                  <Table.Th>Images</Table.Th>
+                  <Table.Th>Start</Table.Th>
+                  <Table.Th>End</Table.Th>
+                  <Table.Th>Resolution</Table.Th>
+                  <Table.Th>Image metadata</Table.Th>
+                  <Table.Th>
+                    <Group gap={4}>
+                      Mean spacing
+                      <Tooltip label="Mean spacing is estimated from sampled filename timestamps, rounded to the nearest second. Exact Train/Test counts are computed by parsing filenames in the selected time range.">
+                        <Info size={14} />
+                      </Tooltip>
+                    </Group>
+                  </Table.Th>
                   <Table.Th />
                 </Table.Tr>
               </Table.Thead>
               <Table.Tbody>
-                {datasets.map((dataset) => (
-                  <Table.Tr key={dataset.id}>
-                    <Table.Td>
-                      <Button
-                        variant="subtle"
-                        size="compact-sm"
-                        onClick={() => handleSelectDataset(dataset.id)}
-                      >
-                        {dataset.name}
-                      </Button>
-                    </Table.Td>
-                    <Table.Td>
-                      <Badge color={statusColor(dataset.status)}>{dataset.status}</Badge>
-                    </Table.Td>
-                    <Table.Td className="mono">{dataset.root_path}</Table.Td>
-                    <Table.Td className="mono">{dataset.timestamp_example ?? 'n/a'}</Table.Td>
-                    <Table.Td>{dataset.folders.length}</Table.Td>
-                    <Table.Td>
-                      <Group gap="xs" justify="flex-end">
-                        <Button
-                          size="compact-sm"
-                          variant="light"
-                          leftSection={<Check size={14} />}
-                          onClick={() => handleOpenConfirmation(dataset)}
-                        >
-                          Timestamp
-                        </Button>
-                        <Button
-                          size="compact-sm"
-                          variant="light"
-                          leftSection={<RefreshCw size={14} />}
-                          disabled={!dataset.timestamp_regex || !dataset.timestamp_format}
-                          onClick={() => handleRescan(dataset.id)}
-                        >
-                          Rescan
-                        </Button>
-                        <Button
-                          size="compact-sm"
-                          variant="light"
-                          color="red"
-                          leftSection={<Trash2 size={14} />}
-                          loading={deletingDatasetId === dataset.id}
-                          onClick={() => handleDeleteDataset(dataset)}
-                        >
-                          Delete
-                        </Button>
-                      </Group>
-                    </Table.Td>
-                  </Table.Tr>
-                ))}
+                {datasets.map((dataset) => {
+                  const folder = dataset.folders[0];
+                  return (
+                    <Table.Tr key={dataset.id}>
+                      <Table.Td>{dataset.name}</Table.Td>
+                      <Table.Td>
+                        <Badge color={statusColor(dataset.status)}>{dataset.status}</Badge>
+                      </Table.Td>
+                      <Table.Td className="mono">{dataset.root_path}</Table.Td>
+                      <Table.Td className="mono">{dataset.timestamp_example ?? 'n/a'}</Table.Td>
+                      <Table.Td>{folder?.image_count ?? 'n/a'}</Table.Td>
+                      <Table.Td>{formatTimestamp(folder?.first_timestamp ?? null)}</Table.Td>
+                      <Table.Td>{formatTimestamp(folder?.last_timestamp ?? null)}</Table.Td>
+                      <Table.Td>{formatJsonSummary(folder?.resolution_summary)}</Table.Td>
+                      <Table.Td>{formatImageMetadata(folder?.image_metadata)}</Table.Td>
+                      <Table.Td>{formatMeanSpacing(folder)}</Table.Td>
+                      <Table.Td>
+                        <Group gap="xs" justify="flex-end">
+                          <Button
+                            size="compact-sm"
+                            variant="light"
+                            leftSection={<Check size={14} />}
+                            onClick={() => handleOpenConfirmation(dataset)}
+                            disabled={dataset.is_update_locked}
+                          >
+                            Timestamp
+                          </Button>
+                          <Button
+                            size="compact-sm"
+                            variant="light"
+                            leftSection={<RefreshCw size={14} />}
+                            disabled={!dataset.timestamp_regex || !dataset.timestamp_format || dataset.is_update_locked}
+                            onClick={() => handleRescan(dataset.id)}
+                          >
+                            Rescan
+                          </Button>
+                          <Button
+                            size="compact-sm"
+                            variant="light"
+                            color="red"
+                            leftSection={<Trash2 size={14} />}
+                            loading={deletingDatasetId === dataset.id}
+                            onClick={() => handleDeleteDataset(dataset)}
+                          >
+                            Delete
+                          </Button>
+                        </Group>
+                        {dataset.update_lock_reasons.length > 0 && (
+                          <Text size="xs" c="dimmed" ta="right" mt={4}>
+                            {dataset.update_lock_reasons[0]}
+                          </Text>
+                        )}
+                      </Table.Td>
+                    </Table.Tr>
+                  );
+                })}
               </Table.Tbody>
             </Table>
           </ScrollArea>
       </StepCard>
-
-      {selectedDataset && (
-        <Paper withBorder p="md" radius="sm">
-          <Stack gap="md">
-            <Group justify="space-between" align="flex-start">
-              <div>
-                <Title order={3}>{selectedDataset.name}</Title>
-                <Text size="sm" c="dimmed" className="mono">
-                  {selectedDataset.root_path}
-                </Text>
-              </div>
-              <Badge color={statusColor(selectedDataset.status)}>{selectedDataset.status}</Badge>
-            </Group>
-
-            {selectedDataset.scan_error && (
-              <Alert color="red" title="Last scan error">
-                {selectedDataset.scan_error}
-              </Alert>
-            )}
-
-            <Divider />
-            <Title order={4}>Folder summaries</Title>
-            <ScrollArea>
-              <Table verticalSpacing="sm" striped>
-                <Table.Thead>
-                  <Table.Tr>
-                    <Table.Th>Folder</Table.Th>
-                    <Table.Th>Images</Table.Th>
-                    <Table.Th>Start</Table.Th>
-                    <Table.Th>End</Table.Th>
-                    <Table.Th>Resolution</Table.Th>
-                    <Table.Th>Image metadata</Table.Th>
-                    <Table.Th>Median spacing</Table.Th>
-                  </Table.Tr>
-                </Table.Thead>
-                <Table.Tbody>
-                  {selectedDataset.folders.map((folder) => (
-                    <Table.Tr key={folder.id}>
-                      <Table.Td className="mono">{folder.relative_path}</Table.Td>
-                      <Table.Td>{folder.image_count}</Table.Td>
-                      <Table.Td>{formatTimestamp(folder.first_timestamp)}</Table.Td>
-                      <Table.Td>{formatTimestamp(folder.last_timestamp)}</Table.Td>
-                      <Table.Td>{formatJsonSummary(folder.resolution_summary)}</Table.Td>
-                      <Table.Td>{formatImageMetadata(folder.image_metadata)}</Table.Td>
-                      <Table.Td>
-                        {folder.cadence_summary?.median_seconds == null
-                          ? 'n/a'
-                          : `${folder.cadence_summary.median_seconds}s`}
-                      </Table.Td>
-                    </Table.Tr>
-                  ))}
-                </Table.Tbody>
-              </Table>
-            </ScrollArea>
-          </Stack>
-        </Paper>
-      )}
 
       <Modal
         opened={confirmationDataset !== null}

@@ -10,7 +10,9 @@ export type DatasetFolder = {
   cadence_summary: {
     min_seconds: number | null;
     median_seconds: number | null;
+    mean_seconds?: number | null;
     max_seconds: number | null;
+    sampled_adjacent_pairs?: number | null;
   } | null;
 };
 
@@ -27,6 +29,8 @@ export type Dataset = {
   created_at: string;
   updated_at: string;
   folders: DatasetFolder[];
+  is_update_locked: boolean;
+  update_lock_reasons: string[];
 };
 
 export type DatasetConnectionTest = {
@@ -88,6 +92,10 @@ export type TrainingDataset = {
     matching_images: number;
     selected_images: number;
   }>;
+  is_update_locked: boolean;
+  update_lock_reasons: string[];
+  invalid_rule_count: number;
+  integrity_warnings: string[];
 };
 
 export type PreprocessingGraphNode = {
@@ -146,6 +154,8 @@ export type PreprocessingPipeline = {
   output_height: number | null;
   created_at: string;
   updated_at: string;
+  is_update_locked: boolean;
+  update_lock_reasons: string[];
 };
 
 export type PreprocessingPreviewImage = {
@@ -321,6 +331,8 @@ export type MethodConfiguration = {
   updated_at: string;
   validation: MethodValidation | null;
   parameters: MethodConfigurationParameter[];
+  is_update_locked: boolean;
+  update_lock_reasons: string[];
 };
 
 export type MethodConfigurationPayload = {
@@ -367,6 +379,8 @@ export type TrainingPipeline = {
   training_datasets: TrainingPipelineDatasetSummary[];
   created_at: string;
   updated_at: string;
+  is_update_locked: boolean;
+  update_lock_reasons: string[];
 };
 
 export type TrainingPipelinePayload = {
@@ -527,6 +541,7 @@ export type TestingRun = {
   device: string | null;
   error_message: string | null;
   image_count: number | null;
+  expected_image_count: number | null;
   score_mean: number | null;
   score_min: number | null;
   score_max: number | null;

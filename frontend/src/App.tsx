@@ -14,6 +14,7 @@ import {
 import { useState } from 'react';
 import type React from 'react';
 
+import { PageErrorBoundary } from './components/PageErrorBoundary';
 import { AnalysisPage } from './pages/AnalysisPage';
 import { DatasetsPage } from './pages/DatasetsPage';
 import { MethodsPage } from './pages/ModelsPage';
@@ -131,10 +132,14 @@ export function App() {
           <TestingRunsPage active={page === 'testing'} onRunQueued={() => setPage('scheduler')} />
         </Box>
         <Box display={page === 'analysis' ? 'block' : 'none'}>
-          <AnalysisPage active={page === 'analysis'} />
+          <PageErrorBoundary label="Analysis">
+            <AnalysisPage active={page === 'analysis'} />
+          </PageErrorBoundary>
         </Box>
         <Box display={page === 'scheduler' ? 'block' : 'none'}>
-          <SchedulerPage active={page === 'scheduler'} />
+          <PageErrorBoundary label="Scheduler">
+            <SchedulerPage active={page === 'scheduler'} />
+          </PageErrorBoundary>
         </Box>
       </AppShell.Main>
     </AppShell>

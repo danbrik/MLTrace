@@ -79,6 +79,8 @@ def run_testing(run_id: int, abort_event: threading.Event | None = None) -> None
             records = enumerate_training_dataset_image_records(training_dataset)
             if not records:
                 raise ValueError("Train/test dataset produced no images.")
+            run.expected_image_count = len(records)
+            db.commit()
 
             evaluator = ArtifactEvaluator(training_run)
             result_rows: list[models.TestingRunResult] = []

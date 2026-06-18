@@ -70,6 +70,7 @@ from app.services import (
     delete_training_pipeline,
     dry_run_training_pipeline,
     find_training_pipeline_by_signature,
+    cleanup_invalid_training_dataset_rules,
     get_dataset_or_404,
     get_method_configuration,
     get_method_definition,
@@ -88,12 +89,21 @@ from app.services import (
     preview_training_dataset,
     run_method_torch_check,
     scan_dataset,
+    serialize_dataset,
     test_dataset_connection,
     update_method_configuration,
     update_preprocessing_pipeline,
+    update_training_dataset,
     update_training_pipeline,
     validate_method_configuration,
 )
+
+
+def _value_error_status(exc: ValueError) -> int:
+    message = str(exc).lower()
+    if "not editable" in message or "locked" in message or "already used" in message:
+        return 409
+    return 400
 
 
 @asynccontextmanager
@@ -145,7 +155,7 @@ def create_app() -> FastAPI:
         dataset = get_dataset_or_404(db, dataset_id)
         if dataset is None:
             raise HTTPException(status_code=404, detail="Dataset not found.")
-        return dataset
+        return serialize_dataset(db, dataset)
 
     @app.post("/api/datasets/{dataset_id}/confirm-timestamp-format", response_model=DatasetRead)
     def api_confirm_timestamp_format(
@@ -154,7 +164,10 @@ def create_app() -> FastAPI:
         dataset = get_dataset_or_404(db, dataset_id)
         if dataset is None:
             raise HTTPException(status_code=404, detail="Dataset not found.")
-        return scan_dataset(db, dataset, payload.timestamp_regex, payload.timestamp_format)
+        try:
+            return scan_dataset(db, dataset, payload.timestamp_regex, payload.timestamp_format)
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
 
     @app.post("/api/datasets/{dataset_id}/rescan", response_model=DatasetRead)
     def api_rescan_dataset(dataset_id: int, db: Session = Depends(get_db)):
@@ -163,7 +176,10 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=404, detail="Dataset not found.")
         if not dataset.timestamp_regex or not dataset.timestamp_format:
             raise HTTPException(status_code=400, detail="Timestamp format has not been confirmed yet.")
-        return scan_dataset(db, dataset, dataset.timestamp_regex, dataset.timestamp_format)
+        try:
+            return scan_dataset(db, dataset, dataset.timestamp_regex, dataset.timestamp_format)
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
 
     @app.delete("/api/datasets/{dataset_id}", status_code=204)
     def api_delete_dataset(dataset_id: int, db: Session = Depends(get_db)):
@@ -199,6 +215,28 @@ def create_app() -> FastAPI:
         if training_dataset is None:
             raise HTTPException(status_code=404, detail="Training dataset not found.")
         return training_dataset
+
+    @app.put("/api/training-datasets/{training_dataset_id}", response_model=TrainingDatasetRead)
+    def api_update_training_dataset(
+        training_dataset_id: int, payload: TrainingDatasetCreate, db: Session = Depends(get_db)
+    ):
+        try:
+            updated = update_training_dataset(db, training_dataset_id, payload)
+        except ValueError as exc:
+            raise HTTPException(status_code=_value_error_status(exc), detail=str(exc)) from exc
+        if updated is None:
+            raise HTTPException(status_code=404, detail="Training dataset not found.")
+        return updated
+
+    @app.post("/api/training-datasets/{training_dataset_id}/cleanup-invalid-rules", response_model=TrainingDatasetRead)
+    def api_cleanup_invalid_training_dataset_rules(training_dataset_id: int, db: Session = Depends(get_db)):
+        try:
+            updated = cleanup_invalid_training_dataset_rules(db, training_dataset_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        if updated is None:
+            raise HTTPException(status_code=404, detail="Training dataset not found.")
+        return updated
 
     @app.delete("/api/training-datasets/{training_dataset_id}", status_code=204)
     def api_delete_training_dataset(training_dataset_id: int, db: Session = Depends(get_db)):
@@ -246,7 +284,7 @@ def create_app() -> FastAPI:
         try:
             updated = update_preprocessing_pipeline(db, pipeline_id, payload)
         except ValueError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
+            raise HTTPException(status_code=_value_error_status(exc), detail=str(exc)) from exc
         if updated is None:
             raise HTTPException(status_code=404, detail="Preprocessing pipeline not found.")
         return updated
@@ -316,7 +354,7 @@ def create_app() -> FastAPI:
         try:
             updated = update_method_configuration(db, configuration_id, payload)
         except ValueError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
+            raise HTTPException(status_code=_value_error_status(exc), detail=str(exc)) from exc
         except IntegrityError as exc:
             db.rollback()
             raise HTTPException(status_code=409, detail="A method with this name already exists.") from exc
@@ -352,7 +390,7 @@ def create_app() -> FastAPI:
                 },
             ) from exc
         except ValueError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
+            raise HTTPException(status_code=_value_error_status(exc), detail=str(exc)) from exc
         except IntegrityError as exc:
             db.rollback()
             raise HTTPException(status_code=409, detail="A training pipeline with this name already exists.") from exc

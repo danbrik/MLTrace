@@ -418,6 +418,7 @@ class TestingRun(Base):
     log_path: Mapped[str | None] = mapped_column(Text)
 
     image_count: Mapped[int | None] = mapped_column(Integer)
+    expected_image_count: Mapped[int | None] = mapped_column(Integer)
     score_mean: Mapped[float | None] = mapped_column(Float)
     score_min: Mapped[float | None] = mapped_column(Float)
     score_max: Mapped[float | None] = mapped_column(Float)

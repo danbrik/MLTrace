@@ -119,7 +119,19 @@ function summarizeHeatmaps(heatmaps: HeatmapRun[]): HeatmapGroup[] {
 
 function ProgressCell({ job }: { job: SchedulerJob }) {
   if (job.kind === 'test') {
-    return <Text size="sm">{job.run.image_count != null ? `${job.run.image_count} imgs` : '—'}</Text>;
+    const processed = job.run.image_count ?? 0;
+    const expected = job.run.expected_image_count ?? (job.run.status === 'finished' ? job.run.image_count : null);
+    if (expected && expected > 0) {
+      return (
+        <Stack gap={2}>
+          <Text size="xs">
+            {processed}/{expected} images
+          </Text>
+          <Progress value={Math.min(100, (processed / expected) * 100)} size="sm" radius="sm" color={runStatusColor(job.run.status)} />
+        </Stack>
+      );
+    }
+    return <Text size="sm">{job.run.image_count != null ? `${job.run.image_count}/? images` : '—'}</Text>;
   }
   const run = job.run;
   if (run.builder_kind === 'form') {
@@ -349,12 +361,13 @@ export function SchedulerPage({ active = true }: { active?: boolean }) {
             <Switch
               label="Only run scheduled jobs when a GPU slot is available"
               checked={settingsDraft?.only_gpu ?? false}
-              onChange={(event) =>
+              onChange={(event) => {
+                const checked = event.currentTarget.checked;
                 setSettingsDraft((current) => ({
                   max_gpu_slots: current?.max_gpu_slots ?? 1,
-                  only_gpu: event.currentTarget.checked,
-                }))
-              }
+                  only_gpu: checked,
+                }));
+              }}
             />
             <Button onClick={handleSaveSettings} loading={savingSettings} disabled={!settingsDraft}>
               Save settings

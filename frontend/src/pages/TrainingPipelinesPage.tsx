@@ -363,6 +363,7 @@ export function TrainingPipelinesPage({
 
   const saveDisabled = !payload || !name.trim() || nameClash || invalidNumericDrafts.length > 0;
   const loadedReadOnly = loadedPipelineId != null && !isEditingLoadedPipeline;
+  const loadedPipeline = loadedPipelineId != null ? pipelines.find((pipeline) => pipeline.id === loadedPipelineId) ?? null : null;
 
   return (
     <Stack gap="lg">
@@ -390,8 +391,15 @@ export function TrainingPipelinesPage({
             <Textarea label="Description" rows={1} value={description} disabled={loadedReadOnly} onChange={(event) => setDescription(event.currentTarget.value)} />
           </Group>
           {loadedReadOnly && (
-            <Alert color="blue" title="Loaded read-only">
-              Click Edit before changing this saved training pipeline. You can still run the loaded pipeline.
+            <Alert color={loadedPipeline?.is_update_locked ? 'yellow' : 'blue'} title="Loaded read-only">
+              <Stack gap={4}>
+                <Text size="sm">Click Edit before changing this saved training pipeline. You can still run the loaded pipeline.</Text>
+                {loadedPipeline?.update_lock_reasons.map((reason) => (
+                  <Text key={reason} size="sm">
+                    {reason}
+                  </Text>
+                ))}
+              </Stack>
             </Alert>
           )}
           <Group justify="flex-end">
@@ -399,7 +407,7 @@ export function TrainingPipelinesPage({
               Reset
             </Button>
             {loadedReadOnly ? (
-              <Button leftSection={<Pencil size={18} />} onClick={() => setIsEditingLoadedPipeline(true)}>
+              <Button leftSection={<Pencil size={18} />} onClick={() => setIsEditingLoadedPipeline(true)} disabled={loadedPipeline?.is_update_locked}>
                 Edit pipeline
               </Button>
             ) : (

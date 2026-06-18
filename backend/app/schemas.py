@@ -56,6 +56,8 @@ class DatasetRead(BaseModel):
     created_at: datetime
     updated_at: datetime
     folders: list[DatasetFolderRead] = []
+    is_update_locked: bool = False
+    update_lock_reasons: list[str] = []
 
 
 class TrainingDatasetRuleInput(BaseModel):
@@ -133,6 +135,10 @@ class TrainingDatasetRead(BaseModel):
     total_matching_images: int
     total_selected_images: int
     rules: list[TrainingDatasetRuleRead] = []
+    is_update_locked: bool = False
+    update_lock_reasons: list[str] = []
+    invalid_rule_count: int = 0
+    integrity_warnings: list[str] = []
 
 
 class PreprocessingGraphNode(BaseModel):
@@ -188,6 +194,8 @@ class PreprocessingPipelineRead(BaseModel):
     output_height: int | None
     created_at: datetime
     updated_at: datetime
+    is_update_locked: bool = False
+    update_lock_reasons: list[str] = []
 
 
 class PreprocessingPreviewRequest(BaseModel):
@@ -304,6 +312,8 @@ class MethodConfigurationRead(BaseModel):
     updated_at: datetime
     validation: dict | None = None
     parameters: list[MethodConfigurationParameterRead] = []
+    is_update_locked: bool = False
+    update_lock_reasons: list[str] = []
 
 
 class MethodConfigurationValidationResponse(BaseModel):
@@ -375,6 +385,8 @@ class TrainingPipelineRead(BaseModel):
     training_datasets: list[TrainingPipelineDatasetRead] = []
     created_at: datetime
     updated_at: datetime
+    is_update_locked: bool = False
+    update_lock_reasons: list[str] = []
 
 
 class TrainingPipelineDryRunRequest(TrainingPipelinePayload):
@@ -592,6 +604,7 @@ class TestingRunRead(BaseModel):
     device: str | None = None
     error_message: str | None
     image_count: int | None
+    expected_image_count: int | None = None
     score_mean: float | None
     score_min: float | None
     score_max: float | None

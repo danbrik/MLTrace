@@ -102,6 +102,7 @@ export function MethodsPage() {
   const saveAsNewLabel = isTrainableArchitecture ? 'Save as New Architecture' : 'Save as New Method';
   const resetLabel = isTrainableArchitecture ? 'Reset Architecture' : 'Reset Method';
   const loadedReadOnly = loadedMethodId != null && !isEditingLoadedMethod;
+  const loadedMethod = loadedMethodId != null ? methods.find((method) => method.id === loadedMethodId) ?? null : null;
   const invalidNumericDrafts = useMemo(
     () => Object.entries(numericDrafts).filter(([, draft]) => draft.dirty && !draft.valid),
     [numericDrafts],
@@ -320,7 +321,7 @@ export function MethodsPage() {
               {resetLabel}
             </Button>
           )}
-          <Button leftSection={<Pencil size={18} />} onClick={() => setIsEditingLoadedMethod(true)}>
+          <Button leftSection={<Pencil size={18} />} onClick={() => setIsEditingLoadedMethod(true)} disabled={loadedMethod?.is_update_locked}>
             Edit {isTrainableArchitecture ? 'Architecture' : 'Method'}
           </Button>
         </Group>
@@ -373,8 +374,15 @@ export function MethodsPage() {
           onChange={(event) => setDescription(event.currentTarget.value)}
         />
         {loadedReadOnly && (
-          <Alert color="blue" title="Loaded read-only">
-            Click Edit before changing this saved {isTrainableArchitecture ? 'architecture' : 'method'}.
+          <Alert color={loadedMethod?.is_update_locked ? 'yellow' : 'blue'} title="Loaded read-only">
+            <Stack gap={4}>
+              <Text size="sm">Click Edit before changing this saved {isTrainableArchitecture ? 'architecture' : 'method'}.</Text>
+              {loadedMethod?.update_lock_reasons.map((reason) => (
+                <Text key={reason} size="sm">
+                  {reason}
+                </Text>
+              ))}
+            </Stack>
           </Alert>
         )}
         {nameClash && (

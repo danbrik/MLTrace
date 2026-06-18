@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import logging
-import math
 import time
 from pathlib import Path
 
@@ -25,8 +24,10 @@ from app.preprocessing.pipeline import (
 )
 from app.preprocessing.registry import registry
 from app.scanner import detect_timestamp_pattern, probe_first_direct_tiff, scan_dataset_files
+from app.training.data import count_folder_range_images
 from app.schemas import (
     DatasetConnectionTestResponse,
+    DatasetRead,
     MethodConfigurationCreate,
     MethodConfigurationParameterRead,
     MethodConfigurationPayload,
@@ -57,6 +58,72 @@ from app.schemas import (
 )
 
 logger = logging.getLogger("mltrace.services")
+
+
+def dataset_update_lock_reasons(db: Session, dataset_id: int) -> list[str]:
+    referenced_rules = db.scalar(
+        select(func.count(models.TrainingDatasetRule.id))
+        .join(models.DatasetFolder, models.TrainingDatasetRule.folder_id == models.DatasetFolder.id)
+        .where(models.DatasetFolder.dataset_id == dataset_id)
+    ) or 0
+    if referenced_rules:
+        return ["Dataset parser/rescan is locked because its folders are used by Train/Test Datasets."]
+    return []
+
+
+def training_dataset_update_lock_reasons(db: Session, training_dataset_id: int) -> list[str]:
+    reasons: list[str] = []
+    referencing_pipelines = db.scalar(
+        select(func.count(models.TrainingPipelineDataset.id)).where(
+            models.TrainingPipelineDataset.training_dataset_id == training_dataset_id
+        )
+    ) or 0
+    if referencing_pipelines:
+        reasons.append("Train/Test Dataset not editable, because already used in other Pipelines.")
+    referencing_testing_runs = db.scalar(
+        select(func.count(models.TestingRun.id)).where(
+            models.TestingRun.training_dataset_id == training_dataset_id
+        )
+    ) or 0
+    if referencing_testing_runs:
+        reasons.append("Train/Test Dataset not editable, because already used in Testing Runs.")
+    return reasons
+
+
+def preprocessing_pipeline_update_lock_reasons(db: Session, pipeline_id: int) -> list[str]:
+    referencing_pipelines = db.scalar(
+        select(func.count(models.TrainingPipeline.id)).where(
+            models.TrainingPipeline.preprocessing_pipeline_id == pipeline_id
+        )
+    ) or 0
+    if referencing_pipelines:
+        return ["Preprocessing Pipeline not editable, because already used in Training Pipelines."]
+    return []
+
+
+def method_configuration_update_lock_reasons(db: Session, configuration_id: int) -> list[str]:
+    referencing_pipelines = db.scalar(
+        select(func.count(models.TrainingPipeline.id)).where(
+            models.TrainingPipeline.method_configuration_id == configuration_id
+        )
+    ) or 0
+    if referencing_pipelines:
+        return ["Method/Architecture not editable, because already used in Training Pipelines."]
+    return []
+
+
+def training_pipeline_update_lock_reasons(db: Session, pipeline_id: int) -> list[str]:
+    referencing_runs = db.scalar(
+        select(func.count(models.TrainingRun.id)).where(models.TrainingRun.training_pipeline_id == pipeline_id)
+    ) or 0
+    if referencing_runs:
+        return ["Training Pipeline not editable, because it already has Training Runs."]
+    return []
+
+
+def _raise_if_locked(reasons: list[str]) -> None:
+    if reasons:
+        raise ValueError(reasons[0])
 
 
 def create_dataset(db: Session, name: str, root_path: str) -> models.Dataset:
@@ -163,6 +230,7 @@ def get_dataset_or_404(db: Session, dataset_id: int) -> models.Dataset | None:
 
 
 def scan_dataset(db: Session, dataset: models.Dataset, timestamp_regex: str, timestamp_format: str) -> models.Dataset:
+    _raise_if_locked(dataset_update_lock_reasons(db, dataset.id))
     started_at = time.perf_counter()
     logger.warning("scan_dataset started dataset_id=%s root=%s", dataset.id, dataset.root_path)
     dataset.timestamp_regex = timestamp_regex
@@ -242,14 +310,22 @@ def scan_dataset(db: Session, dataset: models.Dataset, timestamp_regex: str, tim
     return get_dataset_or_404(db, dataset.id) or dataset
 
 
-def list_datasets(db: Session) -> list[models.Dataset]:
-    return list(
+def serialize_dataset(db: Session, dataset: models.Dataset) -> DatasetRead:
+    reasons = dataset_update_lock_reasons(db, dataset.id)
+    return DatasetRead.model_validate(dataset).model_copy(
+        update={"is_update_locked": bool(reasons), "update_lock_reasons": reasons}
+    )
+
+
+def list_datasets(db: Session) -> list[DatasetRead]:
+    datasets = list(
         db.scalars(
             select(models.Dataset)
             .order_by(models.Dataset.created_at.desc())
             .options(selectinload(models.Dataset.folders))
         )
     )
+    return [serialize_dataset(db, dataset) for dataset in datasets]
 
 
 def delete_dataset(db: Session, dataset_id: int) -> bool:
@@ -293,20 +369,19 @@ def preview_training_dataset(
         folder = db.get(models.DatasetFolder, rule.folder_id)
         if folder is None:
             raise ValueError(f"Folder does not exist: {rule.folder_id}")
-        matching = count_images_in_folder_range(folder, rule.start_timestamp, rule.end_timestamp)
-        selected = math.ceil(matching / rule.stride) if matching else 0
+        counts = count_folder_range_images(folder, rule.start_timestamp, rule.end_timestamp, rule.stride)
         previews.append(
             TrainingDatasetRulePreview(
                 folder_id=rule.folder_id,
                 start_timestamp=rule.start_timestamp,
                 end_timestamp=rule.end_timestamp,
                 stride=rule.stride,
-                matching_images=matching,
-                selected_images=selected,
+                matching_images=counts.matching_images,
+                selected_images=counts.selected_images,
             )
         )
-        total_matching += matching
-        total_selected += selected
+        total_matching += counts.matching_images
+        total_selected += counts.selected_images
 
     return TrainingDatasetPreviewResponse(
         total_matching_images=total_matching,
@@ -348,6 +423,42 @@ def create_training_dataset(db: Session, payload: TrainingDatasetCreate) -> Trai
         )
     ) or training_dataset
     return serialize_training_dataset(db, saved)
+
+
+def update_training_dataset(
+    db: Session, training_dataset_id: int, payload: TrainingDatasetCreate
+) -> TrainingDatasetRead | None:
+    training_dataset = db.scalar(
+        select(models.TrainingDataset)
+        .where(models.TrainingDataset.id == training_dataset_id)
+        .options(selectinload(models.TrainingDataset.rules))
+    )
+    if training_dataset is None:
+        return None
+    _raise_if_locked(training_dataset_update_lock_reasons(db, training_dataset_id))
+    validate_rules(db, payload.rules)
+
+    training_dataset.name = payload.name
+    training_dataset.usage_label = payload.usage_label
+    training_dataset.notes = payload.notes
+    db.execute(
+        delete(models.TrainingDatasetRule).where(
+            models.TrainingDatasetRule.training_dataset_id == training_dataset_id
+        )
+    )
+    db.flush()
+    for rule in payload.rules:
+        db.add(
+            models.TrainingDatasetRule(
+                training_dataset_id=training_dataset_id,
+                folder_id=rule.folder_id,
+                start_timestamp=rule.start_timestamp,
+                end_timestamp=rule.end_timestamp,
+                stride=rule.stride,
+            )
+        )
+    db.commit()
+    return get_training_dataset(db, training_dataset_id)
 
 
 def list_training_datasets(db: Session) -> list[TrainingDatasetRead]:
@@ -398,6 +509,30 @@ def delete_training_dataset(db: Session, training_dataset_id: int) -> bool:
     return True
 
 
+def cleanup_invalid_training_dataset_rules(db: Session, training_dataset_id: int) -> TrainingDatasetRead | None:
+    training_dataset = db.scalar(
+        select(models.TrainingDataset)
+        .where(models.TrainingDataset.id == training_dataset_id)
+        .options(
+            selectinload(models.TrainingDataset.rules)
+            .selectinload(models.TrainingDatasetRule.folder)
+            .selectinload(models.DatasetFolder.dataset)
+        )
+    )
+    if training_dataset is None:
+        return None
+    _raise_if_locked(training_dataset_update_lock_reasons(db, training_dataset_id))
+    invalid_rule_ids = [
+        rule.id
+        for rule in training_dataset.rules
+        if rule.folder is None or rule.folder.dataset is None
+    ]
+    if invalid_rule_ids:
+        db.execute(delete(models.TrainingDatasetRule).where(models.TrainingDatasetRule.id.in_(invalid_rule_ids)))
+        db.commit()
+    return get_training_dataset(db, training_dataset_id)
+
+
 def validate_rules(db: Session, rules) -> None:
     if not rules:
         raise ValueError("At least one rule is required.")
@@ -438,40 +573,12 @@ def validate_rules(db: Session, rules) -> None:
 
 
 def count_rule_images(db: Session, rule: models.TrainingDatasetRule) -> tuple[int, int]:
-    matching = count_images_in_folder_range(rule.folder, rule.start_timestamp, rule.end_timestamp)
-    selected = math.ceil(matching / rule.stride) if matching else 0
-    return matching, selected
+    counts = count_folder_range_images(rule.folder, rule.start_timestamp, rule.end_timestamp, rule.stride)
+    return counts.matching_images, counts.selected_images
 
 
 def count_images_in_folder_range(folder: models.DatasetFolder, start_timestamp, end_timestamp) -> int:
-    if folder.first_timestamp is None or folder.last_timestamp is None:
-        return 0
-
-    range_start = max(start_timestamp, folder.first_timestamp)
-    range_end = min(end_timestamp, folder.last_timestamp)
-    if range_end < range_start:
-        return 0
-
-    image_count = folder.image_count
-    if image_count <= 1:
-        return image_count if folder.first_timestamp >= range_start and folder.first_timestamp <= range_end else 0
-
-    cadence_seconds = None
-    if folder.cadence_summary:
-        cadence_seconds = folder.cadence_summary.get("median_seconds")
-    if not cadence_seconds or cadence_seconds <= 0:
-        if range_start <= folder.first_timestamp and range_end >= folder.last_timestamp:
-            return image_count
-        return 0
-
-    start_offset = max(0, math.ceil((range_start - folder.first_timestamp).total_seconds() / cadence_seconds))
-    end_offset = min(
-        image_count - 1,
-        math.floor((range_end - folder.first_timestamp).total_seconds() / cadence_seconds),
-    )
-    if end_offset < start_offset:
-        return 0
-    return end_offset - start_offset + 1
+    return count_folder_range_images(folder, start_timestamp, end_timestamp, 1).matching_images
 
 
 def folder_image_signature(folder: models.DatasetFolder) -> str | None:
@@ -497,6 +604,17 @@ def serialize_training_dataset(db: Session, training_dataset: models.TrainingDat
     signatures: set[str] = set()
     total_matching = 0
     total_selected = 0
+    invalid_rules = [
+        rule
+        for rule in training_dataset.rules
+        if rule.folder is None or rule.folder.dataset is None
+    ]
+    integrity_warnings = []
+    if invalid_rules:
+        integrity_warnings.append(
+            f"{len(invalid_rules)} invalid Train/Test rule(s) reference a missing dataset folder and were skipped."
+        )
+    lock_reasons = training_dataset_update_lock_reasons(db, training_dataset.id)
 
     for rule in sorted(
         [
@@ -557,6 +675,10 @@ def serialize_training_dataset(db: Session, training_dataset: models.TrainingDat
         total_matching_images=total_matching,
         total_selected_images=total_selected,
         rules=rule_reads,
+        is_update_locked=bool(lock_reasons),
+        update_lock_reasons=lock_reasons,
+        invalid_rule_count=len(invalid_rules),
+        integrity_warnings=integrity_warnings,
     )
 
 
@@ -601,7 +723,7 @@ def create_preprocessing_pipeline(db: Session, payload: PreprocessingPipelineCre
     db.add(pipeline)
     db.commit()
     db.refresh(pipeline)
-    return PreprocessingPipelineRead.model_validate(pipeline)
+    return serialize_preprocessing_pipeline(db, pipeline)
 
 
 def update_preprocessing_pipeline(
@@ -610,6 +732,7 @@ def update_preprocessing_pipeline(
     pipeline = db.get(models.PreprocessingPipeline, pipeline_id)
     if pipeline is None:
         return None
+    _raise_if_locked(preprocessing_pipeline_update_lock_reasons(db, pipeline_id))
     validate_linear_graph(payload.graph)
     _assert_unique_pipeline_name(db, payload.name, exclude_id=pipeline_id)
     pipeline.name = payload.name
@@ -628,15 +751,28 @@ def update_preprocessing_pipeline(
         pipeline.output_height = payload.output_height
     db.commit()
     db.refresh(pipeline)
-    return PreprocessingPipelineRead.model_validate(pipeline)
+    return serialize_preprocessing_pipeline(db, pipeline)
 
 
-def list_preprocessing_pipelines(db: Session) -> list[models.PreprocessingPipeline]:
-    return list(db.scalars(select(models.PreprocessingPipeline).order_by(models.PreprocessingPipeline.created_at.desc())))
+def serialize_preprocessing_pipeline(
+    db: Session, pipeline: models.PreprocessingPipeline
+) -> PreprocessingPipelineRead:
+    reasons = preprocessing_pipeline_update_lock_reasons(db, pipeline.id)
+    return PreprocessingPipelineRead.model_validate(pipeline).model_copy(
+        update={"is_update_locked": bool(reasons), "update_lock_reasons": reasons}
+    )
 
 
-def get_preprocessing_pipeline(db: Session, pipeline_id: int) -> models.PreprocessingPipeline | None:
-    return db.get(models.PreprocessingPipeline, pipeline_id)
+def list_preprocessing_pipelines(db: Session) -> list[PreprocessingPipelineRead]:
+    pipelines = list(db.scalars(select(models.PreprocessingPipeline).order_by(models.PreprocessingPipeline.created_at.desc())))
+    return [serialize_preprocessing_pipeline(db, pipeline) for pipeline in pipelines]
+
+
+def get_preprocessing_pipeline(db: Session, pipeline_id: int) -> PreprocessingPipelineRead | None:
+    pipeline = db.get(models.PreprocessingPipeline, pipeline_id)
+    if pipeline is None:
+        return None
+    return serialize_preprocessing_pipeline(db, pipeline)
 
 
 def delete_preprocessing_pipeline(db: Session, pipeline_id: int) -> bool:
@@ -1011,7 +1147,7 @@ def list_method_configurations(db: Session) -> list[MethodConfigurationRead]:
             .options(selectinload(models.MethodConfiguration.parameters))
         )
     )
-    return [serialize_method_configuration(configuration) for configuration in configurations]
+    return [serialize_method_configuration(configuration, db) for configuration in configurations]
 
 
 def get_method_configuration(db: Session, configuration_id: int) -> MethodConfigurationRead | None:
@@ -1022,7 +1158,7 @@ def get_method_configuration(db: Session, configuration_id: int) -> MethodConfig
     )
     if configuration is None:
         return None
-    return serialize_method_configuration(configuration)
+    return serialize_method_configuration(configuration, db)
 
 
 def update_method_configuration(
@@ -1031,6 +1167,7 @@ def update_method_configuration(
     configuration = db.get(models.MethodConfiguration, configuration_id)
     if configuration is None:
         return None
+    _raise_if_locked(method_configuration_update_lock_reasons(db, configuration_id))
     _assert_unique_method_name(db, payload.name, exclude_id=configuration_id)
     method, method_graph, method_config, training_config, inference_config, diagram, validation = _normalize_method_payload(payload)
     configuration.name = payload.name
@@ -1072,7 +1209,9 @@ def delete_method_configuration(db: Session, configuration_id: int) -> bool:
     return True
 
 
-def serialize_method_configuration(configuration: models.MethodConfiguration) -> MethodConfigurationRead:
+def serialize_method_configuration(
+    configuration: models.MethodConfiguration, db: Session | None = None
+) -> MethodConfigurationRead:
     parameters = [
         MethodConfigurationParameterRead(
             path=parameter.path,
@@ -1083,6 +1222,7 @@ def serialize_method_configuration(configuration: models.MethodConfiguration) ->
         )
         for parameter in sorted(configuration.parameters, key=lambda item: item.path)
     ]
+    lock_reasons = method_configuration_update_lock_reasons(db, configuration.id) if db is not None else []
     return MethodConfigurationRead(
         id=configuration.id,
         name=configuration.name,
@@ -1108,6 +1248,8 @@ def serialize_method_configuration(configuration: models.MethodConfiguration) ->
         updated_at=configuration.updated_at,
         validation=configuration.validation,
         parameters=parameters,
+        is_update_locked=bool(lock_reasons),
+        update_lock_reasons=lock_reasons,
     )
 
 
@@ -1347,6 +1489,7 @@ def update_training_pipeline(
     pipeline = db.get(models.TrainingPipeline, pipeline_id)
     if pipeline is None:
         return None
+    _raise_if_locked(training_pipeline_update_lock_reasons(db, pipeline_id))
     _assert_unique_training_pipeline_name(db, payload.name, exclude_id=pipeline_id)
     training_datasets, _, configuration = _resolve_training_pipeline_refs(db, payload)
     training_parameters = _merged_training_parameters(configuration, payload.training_parameters)
@@ -1453,6 +1596,7 @@ def serialize_training_pipeline(db: Session, pipeline: models.TrainingPipeline) 
             )
         )
 
+    lock_reasons = training_pipeline_update_lock_reasons(db, pipeline.id)
     return TrainingPipelineRead(
         id=pipeline.id,
         name=pipeline.name,
@@ -1474,6 +1618,8 @@ def serialize_training_pipeline(db: Session, pipeline: models.TrainingPipeline) 
         training_datasets=entries,
         created_at=pipeline.created_at,
         updated_at=pipeline.updated_at,
+        is_update_locked=bool(lock_reasons),
+        update_lock_reasons=lock_reasons,
     )
 
 

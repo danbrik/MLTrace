@@ -20,16 +20,18 @@ import {
 import { notifications } from '@mantine/notifications';
 
 import { StepCard } from '../components/StepCard';
-import { Info, Plus, Save, Trash2 } from 'lucide-react';
+import { Copy, Edit3, Info, Plus, Save, Trash2 } from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
 
 import {
+  cleanupTrainingDatasetInvalidRules,
   createTrainingDataset,
   deleteTrainingDataset,
   getTrainingDataset,
   listDatasets,
   listTrainingDatasets,
   previewTrainingDataset,
+  updateTrainingDataset,
 } from '../api';
 import type { Dataset, DatasetFolder, TrainingDataset, TrainingDatasetPreview, TrainingDatasetRuleInput } from '../types';
 
@@ -130,6 +132,8 @@ export function TrainingDatasetsPage() {
   const [datasets, setDatasets] = useState<Dataset[]>([]);
   const [trainingDatasets, setTrainingDatasets] = useState<TrainingDataset[]>([]);
   const [inspectedDataset, setInspectedDataset] = useState<TrainingDataset | null>(null);
+  const [loadedDataset, setLoadedDataset] = useState<TrainingDataset | null>(null);
+  const [isEditingLoaded, setIsEditingLoaded] = useState(false);
   const [name, setName] = useState('');
   const [nameEdited, setNameEdited] = useState(false);
   const [usageLabel, setUsageLabel] = useState('train');
@@ -138,6 +142,7 @@ export function TrainingDatasetsPage() {
   const [rules, setRules] = useState<RuleRow[]>([]);
   const [preview, setPreview] = useState<TrainingDatasetPreview | null>(null);
   const [loading, setLoading] = useState(false);
+  const isReadOnly = Boolean(loadedDataset && !isEditingLoaded);
 
   async function refresh() {
     const [nextDatasets, nextTrainingDatasets] = await Promise.all([
@@ -239,6 +244,7 @@ export function TrainingDatasetsPage() {
   }, [generatedName, nameEdited]);
 
   function updateRule(localId: string, patch: Partial<RuleRow>) {
+    if (isReadOnly) return;
     setPreview(null);
     setRules((current) =>
       current.map((rule) => (rule.localId === localId ? { ...rule, ...patch } : rule)),
@@ -257,6 +263,7 @@ export function TrainingDatasetsPage() {
   }
 
   function handleAddRule() {
+    if (isReadOnly) return;
     const rule = newRule(folderChoices);
     if (!rule) return;
     setRules((current) => [...current, rule]);
@@ -264,6 +271,7 @@ export function TrainingDatasetsPage() {
   }
 
   function handleRemoveRule(localId: string) {
+    if (isReadOnly) return;
     setRules((current) => current.filter((rule) => rule.localId !== localId));
     setPreview(null);
   }
@@ -315,6 +323,114 @@ export function TrainingDatasetsPage() {
     }
   }
 
+  function resetBuilder() {
+    setLoadedDataset(null);
+    setIsEditingLoaded(false);
+    setName('');
+    setNameEdited(false);
+    setUsageLabel('train');
+    setNotes('');
+    setPreview(null);
+    const rule = newRule(folderChoices);
+    setRules(rule ? [rule] : []);
+  }
+
+  function applyLoadedDataset(details: TrainingDataset) {
+    setLoadedDataset(details);
+    setIsEditingLoaded(false);
+    setName(details.name);
+    setNameEdited(true);
+    setUsageLabel(details.usage_label ?? 'train');
+    setNotes(details.notes ?? '');
+    setRules(
+      details.rules.map((rule) => ({
+        localId: crypto.randomUUID(),
+        folder_id: rule.folder_id,
+        start_timestamp: toInputDateTime(rule.start_timestamp),
+        end_timestamp: toInputDateTime(rule.end_timestamp),
+        stride: rule.stride,
+      })),
+    );
+    setPreview(null);
+  }
+
+  async function handleLoad(trainingDataset: TrainingDataset) {
+    try {
+      const details = await getTrainingDataset(trainingDataset.id);
+      applyLoadedDataset(details);
+      notifications.show({ color: 'blue', title: 'Train/test dataset loaded', message: details.name });
+    } catch (error) {
+      notifications.show({
+        color: 'red',
+        title: 'Load failed',
+        message: error instanceof Error ? error.message : 'Unknown error',
+      });
+    }
+  }
+
+  async function handleUpdate() {
+    if (!loadedDataset) return;
+    setLoading(true);
+    try {
+      const updated = await updateTrainingDataset(loadedDataset.id, {
+        name,
+        usage_label: usageLabel,
+        notes,
+        rules: rulesPayload(),
+      });
+      applyLoadedDataset(updated);
+      await refresh();
+      notifications.show({ color: 'green', title: 'Train/test dataset updated', message: updated.name });
+    } catch (error) {
+      notifications.show({
+        color: 'red',
+        title: 'Update failed',
+        message: error instanceof Error ? error.message : 'Unknown error',
+      });
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function handleSaveAsNew() {
+    setLoading(true);
+    try {
+      const saved = await createTrainingDataset({
+        name,
+        usage_label: usageLabel,
+        notes,
+        rules: rulesPayload(),
+      });
+      applyLoadedDataset(saved);
+      await refresh();
+      notifications.show({ color: 'green', title: 'Train/test dataset saved as new', message: saved.name });
+    } catch (error) {
+      notifications.show({
+        color: 'red',
+        title: 'Save as new failed',
+        message: error instanceof Error ? error.message : 'Unknown error',
+      });
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function handleCleanupInvalidRules(trainingDataset: TrainingDataset) {
+    try {
+      const updated = await cleanupTrainingDatasetInvalidRules(trainingDataset.id);
+      if (loadedDataset?.id === updated.id) applyLoadedDataset(updated);
+      if (inspectedDataset?.id === updated.id) setInspectedDataset(updated);
+      await refresh();
+      notifications.show({ color: 'green', title: 'Invalid rules cleaned up', message: updated.name });
+    } catch (error) {
+      notifications.show({
+        color: 'red',
+        title: 'Cleanup failed',
+        message: error instanceof Error ? error.message : 'Unknown error',
+      });
+    }
+  }
+
   async function handleDelete(trainingDataset: TrainingDataset) {
     const confirmed = window.confirm(`Delete train/test dataset "${trainingDataset.name}"?`);
     if (!confirmed) return;
@@ -323,6 +439,9 @@ export function TrainingDatasetsPage() {
       await deleteTrainingDataset(trainingDataset.id);
       if (inspectedDataset?.id === trainingDataset.id) {
         setInspectedDataset(null);
+      }
+      if (loadedDataset?.id === trainingDataset.id) {
+        resetBuilder();
       }
       await refresh();
       notifications.show({ color: 'green', title: 'Train/test dataset deleted', message: trainingDataset.name });
@@ -348,7 +467,7 @@ export function TrainingDatasetsPage() {
     }
   }
 
-  const canSubmit = name.trim() && rules.length > 0 && invalidRules.length === 0 && !signatureError;
+  const canSubmit = Boolean(name.trim() && rules.length > 0 && invalidRules.length === 0 && !signatureError);
 
   return (
     <Stack gap="lg">
@@ -361,12 +480,35 @@ export function TrainingDatasetsPage() {
       </div>
 
       <StepCard title="Create train/test dataset" color="blue">
+          {loadedDataset && (
+            <Alert
+              color={loadedDataset.is_update_locked ? 'yellow' : 'blue'}
+              title={isReadOnly ? 'Loaded read-only' : 'Editing loaded dataset'}
+            >
+              <Stack gap="xs">
+                <Text size="sm">
+                  {loadedDataset.name} is loaded. {isReadOnly ? 'Press Edit to change it or save a copy.' : 'Changes can be updated in place or saved as a new dataset.'}
+                </Text>
+                {loadedDataset.update_lock_reasons.map((reason) => (
+                  <Text key={reason} size="sm">
+                    {reason}
+                  </Text>
+                ))}
+                {loadedDataset.integrity_warnings.map((warning) => (
+                  <Text key={warning} size="sm">
+                    {warning}
+                  </Text>
+                ))}
+              </Stack>
+            </Alert>
+          )}
           <Group align="flex-end" grow>
             <TextInput
               label="Name"
               placeholder="AE normal training set v1"
               value={name}
               description="Generated from the earliest selected start and latest selected end."
+              disabled={isReadOnly}
               onChange={(event) => {
                 setNameEdited(true);
                 setName(event.currentTarget.value);
@@ -376,6 +518,7 @@ export function TrainingDatasetsPage() {
               label="Label"
               data={USAGE_OPTIONS}
               value={usageLabel}
+              disabled={isReadOnly}
               onChange={(value) => setUsageLabel(value ?? 'train')}
             />
           </Group>
@@ -383,6 +526,7 @@ export function TrainingDatasetsPage() {
             label="Notes"
             placeholder="Normal state, selected February ranges"
             value={notes}
+            disabled={isReadOnly}
             onChange={(event) => setNotes(event.currentTarget.value)}
           />
 
@@ -396,7 +540,7 @@ export function TrainingDatasetsPage() {
             <>
               <Group justify="space-between">
                 <Title order={4}>Selection ranges</Title>
-                <Button leftSection={<Plus size={18} />} variant="light" onClick={handleAddRule}>
+                <Button leftSection={<Plus size={18} />} variant="light" onClick={handleAddRule} disabled={isReadOnly}>
                   Add range
                 </Button>
               </Group>
@@ -427,6 +571,7 @@ export function TrainingDatasetsPage() {
                               value={String(rule.folder_id)}
                               onChange={(folderId) => handleFolderChange(rule.localId, folderId)}
                               searchable
+                              disabled={isReadOnly}
                             />
                           </Table.Td>
                           <Table.Td>
@@ -445,6 +590,7 @@ export function TrainingDatasetsPage() {
                               max={choice?.max}
                               error={invalid ? 'Out of range' : undefined}
                               value={rule.start_timestamp}
+                              disabled={isReadOnly}
                               onChange={(event) =>
                                 updateRule(rule.localId, { start_timestamp: event.currentTarget.value })
                               }
@@ -458,6 +604,7 @@ export function TrainingDatasetsPage() {
                               max={choice?.max}
                               error={invalid ? 'Out of range' : undefined}
                               value={rule.end_timestamp}
+                              disabled={isReadOnly}
                               onChange={(event) =>
                                 updateRule(rule.localId, { end_timestamp: event.currentTarget.value })
                               }
@@ -472,6 +619,7 @@ export function TrainingDatasetsPage() {
                             <NumberInput
                               min={1}
                               value={rule.stride}
+                              disabled={isReadOnly}
                               onChange={(value) =>
                                 updateRule(rule.localId, { stride: typeof value === 'number' ? value : 1 })
                               }
@@ -488,6 +636,7 @@ export function TrainingDatasetsPage() {
                               variant="subtle"
                               aria-label="Remove rule"
                               onClick={() => handleRemoveRule(rule.localId)}
+                              disabled={isReadOnly}
                             >
                               <Trash2 size={18} />
                             </ActionIcon>
@@ -517,7 +666,11 @@ export function TrainingDatasetsPage() {
                 </Alert>
               )}
 
-              <Group justify="flex-end">
+              <Group justify="space-between">
+                <Button variant="subtle" onClick={resetBuilder}>
+                  Reset
+                </Button>
+                <Group>
                 <Button
                   variant="light"
                   onClick={handlePreview}
@@ -526,14 +679,36 @@ export function TrainingDatasetsPage() {
                 >
                   Preview counts
                 </Button>
-                <Button
-                  leftSection={<Save size={18} />}
-                  onClick={handleSave}
-                  loading={loading}
-                  disabled={!canSubmit}
-                >
-                  Save train/test dataset
-                </Button>
+                {loadedDataset ? (
+                  <>
+                    <Button
+                      leftSection={<Edit3 size={18} />}
+                      variant="light"
+                      onClick={() => setIsEditingLoaded(true)}
+                      disabled={!isReadOnly || loadedDataset.is_update_locked}
+                    >
+                      Edit
+                    </Button>
+                    {isEditingLoaded && (
+                      <Button leftSection={<Save size={18} />} onClick={handleUpdate} loading={loading} disabled={!canSubmit}>
+                        Update
+                      </Button>
+                    )}
+                    <Button leftSection={<Copy size={18} />} onClick={handleSaveAsNew} loading={loading} disabled={!canSubmit}>
+                      Save as new
+                    </Button>
+                  </>
+                ) : (
+                  <Button
+                    leftSection={<Save size={18} />}
+                    onClick={handleSave}
+                    loading={loading}
+                    disabled={!canSubmit}
+                  >
+                    Save train/test dataset
+                  </Button>
+                )}
+                </Group>
               </Group>
             </>
           )}
@@ -569,7 +744,16 @@ export function TrainingDatasetsPage() {
               <Table.Tbody>
                 {filteredTrainingDatasets.map((trainingDataset) => (
                   <Table.Tr key={trainingDataset.id}>
-                    <Table.Td>{trainingDataset.name}</Table.Td>
+                    <Table.Td>
+                      <Stack gap={4}>
+                        <Text>{trainingDataset.name}</Text>
+                        {trainingDataset.invalid_rule_count > 0 && (
+                          <Badge color="yellow" variant="light">
+                            {trainingDataset.invalid_rule_count} invalid rule(s)
+                          </Badge>
+                        )}
+                      </Stack>
+                    </Table.Td>
                     <Table.Td>
                       <Badge color={usageLabelColor(trainingDataset.usage_label ?? 'train')} variant="light">
                         {usageLabelText(trainingDataset.usage_label ?? 'train')}
@@ -604,6 +788,9 @@ export function TrainingDatasetsPage() {
                     <Table.Td>{trainingDataset.notes ?? ''}</Table.Td>
                     <Table.Td>
                       <Group gap="xs" justify="flex-end">
+                        <Button size="xs" variant="light" onClick={() => handleLoad(trainingDataset)}>
+                          Load
+                        </Button>
                         <Tooltip label="Inspect ranges">
                           <ActionIcon
                             variant="subtle"
@@ -613,6 +800,17 @@ export function TrainingDatasetsPage() {
                             <Info size={18} />
                           </ActionIcon>
                         </Tooltip>
+                        {trainingDataset.invalid_rule_count > 0 && (
+                          <Button
+                            size="xs"
+                            variant="light"
+                            color="yellow"
+                            onClick={() => handleCleanupInvalidRules(trainingDataset)}
+                            disabled={trainingDataset.is_update_locked}
+                          >
+                            Cleanup
+                          </Button>
+                        )}
                         <Tooltip label="Delete">
                           <ActionIcon
                             color="red"

@@ -28,6 +28,12 @@ class ResolvedDatasetImage:
     file_name: str
 
 
+@dataclass(frozen=True)
+class RuleImageCount:
+    matching_images: int
+    selected_images: int
+
+
 def _sorted_rules(training_dataset: models.TrainingDataset) -> list[models.TrainingDatasetRule]:
     # Same deterministic ordering used by serialize_training_dataset.
     return sorted(
@@ -49,18 +55,17 @@ def _folder_path(folder: models.DatasetFolder) -> Path:
     return root / folder.relative_path
 
 
-def enumerate_rule_images(rule: models.TrainingDatasetRule) -> list[ResolvedDatasetImage]:
-    """Return concrete files selected by one rule, ordered by timestamp.
-
-    This intentionally does not rely on ``dataset_images`` rows because the fast
-    scanner only persists representative rows for large folders.
-    """
-    folder = rule.folder
+def _matching_folder_images(
+    folder: models.DatasetFolder,
+    start_timestamp: datetime,
+    end_timestamp: datetime,
+) -> list[ResolvedDatasetImage]:
+    """Return all files in a timestamp range without opening image pixels."""
     dataset = folder.dataset
     if not dataset.timestamp_regex or not dataset.timestamp_format:
         raise ValueError(f"Dataset '{dataset.name}' has no confirmed timestamp parser.")
 
-    selected: list[ResolvedDatasetImage] = []
+    matching: list[ResolvedDatasetImage] = []
     for path in direct_tiff_files(_folder_path(folder)):
         try:
             _, timestamp = extract_timestamp(path.name, dataset.timestamp_regex, dataset.timestamp_format)
@@ -68,8 +73,8 @@ def enumerate_rule_images(rule: models.TrainingDatasetRule) -> list[ResolvedData
             raise ValueError(
                 f"File '{path.name}' in dataset '{dataset.name}' does not match the confirmed timestamp parser."
             ) from exc
-        if rule.start_timestamp <= timestamp <= rule.end_timestamp:
-            selected.append(
+        if start_timestamp <= timestamp <= end_timestamp:
+            matching.append(
                 ResolvedDatasetImage(
                     file_path=str(path),
                     timestamp_parsed=timestamp,
@@ -81,7 +86,44 @@ def enumerate_rule_images(rule: models.TrainingDatasetRule) -> list[ResolvedData
                 )
             )
 
-    selected.sort(key=lambda image: (image.timestamp_parsed, image.file_name, image.file_path))
+    matching.sort(key=lambda image: (image.timestamp_parsed, image.file_name, image.file_path))
+    return matching
+
+
+def count_folder_range_images(
+    folder: models.DatasetFolder,
+    start_timestamp: datetime,
+    end_timestamp: datetime,
+    stride: int = 1,
+) -> RuleImageCount:
+    """Count matching and selected files exactly from filenames only."""
+    dataset = folder.dataset
+    if not dataset.timestamp_regex or not dataset.timestamp_format:
+        raise ValueError(f"Dataset '{dataset.name}' has no confirmed timestamp parser.")
+
+    matching_count = 0
+    for path in direct_tiff_files(_folder_path(folder)):
+        try:
+            _, timestamp = extract_timestamp(path.name, dataset.timestamp_regex, dataset.timestamp_format)
+        except ValueError as exc:
+            raise ValueError(
+                f"File '{path.name}' in dataset '{dataset.name}' does not match the confirmed timestamp parser."
+            ) from exc
+        if start_timestamp <= timestamp <= end_timestamp:
+            matching_count += 1
+
+    stride = max(1, stride)
+    selected_count = (matching_count + stride - 1) // stride if matching_count else 0
+    return RuleImageCount(matching_images=matching_count, selected_images=selected_count)
+
+
+def enumerate_rule_images(rule: models.TrainingDatasetRule) -> list[ResolvedDatasetImage]:
+    """Return concrete files selected by one rule, ordered by timestamp.
+
+    This intentionally does not rely on ``dataset_images`` rows because the fast
+    scanner only persists representative rows for large folders.
+    """
+    selected = _matching_folder_images(rule.folder, rule.start_timestamp, rule.end_timestamp)
     return selected[:: max(1, rule.stride)]
 
 

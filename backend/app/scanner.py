@@ -7,7 +7,7 @@ from collections import Counter, defaultdict
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from statistics import median
+from statistics import mean, median
 
 from PIL import Image
 
@@ -224,16 +224,26 @@ def scan_dataset_files(
             continue
 
         cadence_seconds: int | None = None
-        if len(files) >= 3:
+        sample_timestamps: list[datetime] = []
+        for path in files[:257]:
             try:
-                _, second_timestamp = extract_timestamp(files[1].name, timestamp_regex, timestamp_format)
-                _, third_timestamp = extract_timestamp(files[2].name, timestamp_regex, timestamp_format)
-                cadence_seconds = round(abs((third_timestamp - second_timestamp).total_seconds()))
+                _, timestamp = extract_timestamp(path.name, timestamp_regex, timestamp_format)
             except ValueError:
                 skipped_unparseable += len(files)
-                continue
-        elif len(files) == 2:
-            cadence_seconds = round(abs((last_timestamp - first_timestamp).total_seconds()))
+                sample_timestamps = []
+                break
+            sample_timestamps.append(timestamp)
+        if len(sample_timestamps) >= 2:
+            sample_timestamps.sort()
+            sample_deltas = [
+                (right - left).total_seconds()
+                for left, right in zip(sample_timestamps, sample_timestamps[1:])
+                if (right - left).total_seconds() > 0
+            ]
+            if sample_deltas:
+                cadence_seconds = round(mean(sample_deltas))
+        if not sample_timestamps:
+            continue
 
         metadata = read_tiff_metadata(first_path)
         if metadata is None:
@@ -260,7 +270,9 @@ def scan_dataset_files(
             "cadence_summary": {
                 "min_seconds": cadence_seconds,
                 "median_seconds": cadence_seconds,
+                "mean_seconds": cadence_seconds,
                 "max_seconds": cadence_seconds,
+                "sampled_adjacent_pairs": max(0, len(sample_timestamps) - 1),
             },
         }
 
