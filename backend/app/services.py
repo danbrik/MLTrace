@@ -499,7 +499,11 @@ def serialize_training_dataset(db: Session, training_dataset: models.TrainingDat
     total_selected = 0
 
     for rule in sorted(
-        training_dataset.rules,
+        [
+            rule
+            for rule in training_dataset.rules
+            if rule.folder is not None and rule.folder.dataset is not None
+        ],
         key=lambda item: (
             item.start_timestamp,
             item.end_timestamp,

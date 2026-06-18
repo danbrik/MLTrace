@@ -19,7 +19,7 @@ import { notifications } from '@mantine/notifications';
 
 import { StepCard } from '../components/StepCard';
 import { Check, FileSearch, RefreshCw, ScanLine, Trash2 } from 'lucide-react';
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 
 import {
   confirmTimestampFormat,
@@ -37,6 +37,12 @@ type ActivityLogEntry = {
   level: 'info' | 'success' | 'error';
   time: string;
   message: string;
+};
+
+type RunningOperation = {
+  kind: 'detect-timestamps' | 'test-path' | 'scan-dataset' | 'rescan';
+  label: string;
+  startedAt: number;
 };
 
 function formatTimestamp(value: string | null): string {
@@ -83,8 +89,9 @@ export function DatasetsPage() {
   const [deletingDatasetId, setDeletingDatasetId] = useState<number | null>(null);
   const [scanning, setScanning] = useState(false);
   const [activityLog, setActivityLog] = useState<ActivityLogEntry[]>([]);
-  const [runningOperation, setRunningOperation] = useState<{ label: string; startedAt: number } | null>(null);
+  const [runningOperation, setRunningOperation] = useState<RunningOperation | null>(null);
   const [, setElapsedTick] = useState(0);
+  const lastWaitLogSecondRef = useRef(0);
 
   function addActivity(level: ActivityLogEntry['level'], message: string) {
     setActivityLog((current) => [
@@ -128,10 +135,27 @@ export function DatasetsPage() {
     ? Math.floor((Date.now() - runningOperation.startedAt) / 1000)
     : 0;
 
+  useEffect(() => {
+    if (!runningOperation) {
+      lastWaitLogSecondRef.current = 0;
+      return;
+    }
+    if (runningOperation.kind !== 'test-path') return;
+    if (runningElapsedSeconds === 0) return;
+    if (runningElapsedSeconds % 10 !== 0) return;
+    if (lastWaitLogSecondRef.current === runningElapsedSeconds) return;
+
+    lastWaitLogSecondRef.current = runningElapsedSeconds;
+    addActivity(
+      'info',
+      `Test path still waiting after ${runningElapsedSeconds}s. No backend response yet from /api/datasets/test-connection.`,
+    );
+  }, [runningElapsedSeconds, runningOperation]);
+
   async function handleCreateDataset() {
     setLoading(true);
     setElapsedTick(0);
-    setRunningOperation({ label: `Detect timestamps: ${rootPath}`, startedAt: Date.now() });
+    setRunningOperation({ kind: 'detect-timestamps', label: `Detect timestamps: ${rootPath}`, startedAt: Date.now() });
     addActivity('info', `Detect timestamps started for ${rootPath}`);
     try {
       const dataset = await createDataset({ name: datasetName, root_path: rootPath });
@@ -162,13 +186,19 @@ export function DatasetsPage() {
   }
 
   async function handleTestConnection() {
+    const startedAt = Date.now();
     setTestingConnection(true);
     setElapsedTick(0);
-    setRunningOperation({ label: `Test path: ${rootPath}`, startedAt: Date.now() });
+    setRunningOperation({ kind: 'test-path', label: `Test path: ${rootPath}`, startedAt });
     addActivity('info', `Test path started for ${rootPath}`);
+    addActivity('info', 'Dispatching POST /api/datasets/test-connection');
+    addActivity('info', 'Timeout budget: 60s');
+    addActivity('info', 'Waiting for backend path probe (resolve -> exists -> is_dir -> first direct TIFF).');
     try {
       const result = await testDatasetConnection({ root_path: rootPath });
+      const elapsedSeconds = Math.max(1, Math.floor((Date.now() - startedAt) / 1000));
       setConnectionTest(result);
+      addActivity('success', `Backend responded after ${elapsedSeconds}s.`);
       addActivity(
         result.supported_file_found ? 'success' : 'error',
         result.sample_file_path ? `Supported file found: ${result.sample_file_path}` : result.message,
@@ -179,12 +209,20 @@ export function DatasetsPage() {
         message: result.sample_file_path ?? result.message,
       });
     } catch (error) {
+      const elapsedSeconds = Math.max(1, Math.floor((Date.now() - startedAt) / 1000));
+      const errorMessage = error instanceof Error ? error.message : 'Unknown error';
       notifications.show({
         color: 'red',
         title: 'Connection test failed',
-        message: error instanceof Error ? error.message : 'Unknown error',
+        message: errorMessage,
       });
-      addActivity('error', `Test path failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
+      if (errorMessage.startsWith('Request timed out after')) {
+        addActivity(
+          'error',
+          `Test path timed out after ${elapsedSeconds}s. No backend response was received from /api/datasets/test-connection before the client timeout.`,
+        );
+      }
+      addActivity('error', `Test path failed after ${elapsedSeconds}s: ${errorMessage}`);
     } finally {
       setTestingConnection(false);
       setRunningOperation(null);
@@ -195,7 +233,7 @@ export function DatasetsPage() {
     if (!confirmationDataset) return;
     setScanning(true);
     setElapsedTick(0);
-    setRunningOperation({ label: `Scan dataset: ${confirmationDataset.root_path}`, startedAt: Date.now() });
+    setRunningOperation({ kind: 'scan-dataset', label: `Scan dataset: ${confirmationDataset.root_path}`, startedAt: Date.now() });
     addActivity('info', `Confirm timestamp parser started for ${confirmationDataset.root_path}`);
     try {
       const scanned = await confirmTimestampFormat(confirmationDataset.id, {
@@ -241,7 +279,7 @@ export function DatasetsPage() {
     setScanning(true);
     const datasetForLog = datasets.find((dataset) => dataset.id === datasetId);
     setElapsedTick(0);
-    setRunningOperation({ label: `Rescan: ${datasetForLog?.root_path ?? datasetId}`, startedAt: Date.now() });
+    setRunningOperation({ kind: 'rescan', label: `Rescan: ${datasetForLog?.root_path ?? datasetId}`, startedAt: Date.now() });
     addActivity('info', `Rescan started for ${datasetForLog?.root_path ?? datasetId}`);
     try {
       const dataset = await rescanDataset(datasetId);
