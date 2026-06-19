@@ -279,10 +279,18 @@ class JobScheduler:
         artifact_dir = data_dir() / spec["subdir"] / str(run.id)
         artifact_dir.mkdir(parents=True, exist_ok=True)
         log_path = artifact_dir / "worker.log"
+        device_label = f"GPU:{gpu_index}" if gpu_index is not None else "CPU"
 
         env = os.environ.copy()
         env["CUDA_VISIBLE_DEVICES"] = "" if gpu_index is None else str(gpu_index)
         env["DATABASE_URL"] = _worker_database_url(get_settings().database_url)
+
+        with open(log_path, "a", encoding="utf-8") as parent_log:
+            parent_log.write(
+                f"{datetime.utcnow().isoformat()} scheduler: launching {kind} run {run.id} "
+                f"on {device_label} with CUDA_VISIBLE_DEVICES={env['CUDA_VISIBLE_DEVICES']!r}\n"
+            )
+            parent_log.flush()
 
         log_file = open(log_path, "a", encoding="utf-8")  # noqa: SIM115 - handed to the child process
         try:
@@ -300,6 +308,7 @@ class JobScheduler:
         run.status = "running"
         run.started_at = datetime.utcnow()
         run.gpu_index = gpu_index
+        run.device = device_label
         run.pid = proc.pid
         run.log_path = str(log_path)
         run.error_message = None

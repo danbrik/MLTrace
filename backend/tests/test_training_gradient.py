@@ -3,7 +3,7 @@ from pathlib import Path
 
 from app import models
 from app.schemas import PreprocessingGraph
-from app.training.engine import train_gradient
+from app.training.engine import _guard_large_cpu_gradient_training, train_gradient
 
 from tests.test_modeling import autoencoder_payload
 from tests.test_testing_service import make_db, write_tiff
@@ -127,5 +127,21 @@ def test_train_gradient_aborts_promptly(tmp_path: Path) -> None:
             raise AssertionError("Expected AbortedError")
         except AbortedError:
             pass
+    finally:
+        db.close()
+
+
+def test_large_gradient_training_refuses_cpu(tmp_path: Path) -> None:
+    db = make_db()
+    try:
+        _, method, _ = _seed_ae(db, tmp_path, image_count=1)
+        method.method_config = {**method.method_config, "input_width": 960, "input_height": 960, "input_channels": 1}
+
+        try:
+            _guard_large_cpu_gradient_training(method, sample_count=60_177, device_type="cpu")
+            raise AssertionError("Expected large CPU gradient training to be rejected")
+        except ValueError as exc:
+            assert "no CUDA GPU is available" in str(exc)
+            assert "60177 images" in str(exc)
     finally:
         db.close()

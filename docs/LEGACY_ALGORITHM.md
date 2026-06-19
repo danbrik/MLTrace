@@ -224,3 +224,95 @@ Festplatte
 - `batch_size=32` bedeutet: 32 vorbereitete Bilder pro Trainingsschritt.
 - Das Preprocessing passiert online in `__getitem__`.
 - Erst der fertige Batch wird kurz vor dem Forward-Pass auf die GPU verschoben.
+
+Um die Effizienz sauber abzuschätzen, brauche ich genau diese Informationen aus dem alten schnellen Code bzw. von der Linux-Maschine:
+1. Dataset / Dateizugriff
+Wie wird die Liste der Bildpfade gebaut?
+Wird sie pro Run, pro Epoche oder nur einmal erstellt?
+Wird glob, os.scandir, Path.glob, eine CSV/Manifest-Datei oder etwas anderes genutzt?
+Werden Timestamps bei jedem Start neu geparst?
+Liegen die TIFFs lokal auf SSD/NVMe oder auf Netzwerkstorage?
+Sind die TIFFs komprimiert oder unkomprimiert?
+2. Dataset-Klasse
+Bitte zeig mir den alten Dataset/MeltDataset Code, besonders:
+__init__
+__len__
+__getitem__
+alle Hilfsfunktionen für Bildladen und Preprocessing
+Das ist der wichtigste Teil, weil MLTrace aktuell pro __getitem__ noch sehr generisch durch Registry/Graph/Steps läuft.
+3. Bildladen
+Wurde im alten Code mit PIL, cv2.imread, tifffile.imread, imageio oder etwas anderem geladen?
+Wurde direkt grayscale geladen?
+Wurde uint16 -> uint8 gemacht?
+Gab es Memory Mapping, Caching oder persistent geöffnete Handles?
+4. Preprocessing
+Für denselben Run brauche ich exakt:
+Welche Schritte laufen wirklich?
+Warp Perspective ja/nein?
+Resize ja/nein, Zielgröße?
+Crop ja/nein?
+Normalize ja/nein?
+CLAHE ja/nein?
+Augmentation ja/nein?
+Wird das Preprocessing als fertiges torchvision.transforms.Compose/Callable gebaut oder pro Bild dynamisch interpretiert?
+5. DataLoader-Konfiguration
+Bitte exakt aus altem Code:
+batch_size
+shuffle
+num_workers
+pin_memory
+prefetch_factor
+persistent_workers
+drop_last
+multiprocessing_context, falls gesetzt
+collate_fn, falls eigene Funktion
+6. Tensor-Konvertierung
+Gibt __getitem__ im alten Code numpy.ndarray oder direkt torch.Tensor zurück?
+Shape vor Batch: H,W, 1,H,W, oder H,W,1?
+Wird float32 schon im Worker erzeugt?
+Wird durch 255/65535 im Worker skaliert?
+Wird .contiguous() genutzt?
+7. GPU-Transfer
+Wo genau passiert .to(device)?
+Wird non_blocking=True genutzt?
+Wird AMP genutzt?
+Wird channels_last genutzt?
+Wird torch.backends.cudnn.benchmark = True gesetzt?
+8. Training Loop Timing
+Im neuen MLTrace sollten wir Logs einbauen für:
+Zeit von Worker-Start bis Dataset-Manifest fertig
+Zeit bis erstes Sample geladen
+Zeit bis erster Batch geladen
+pro N Batches:data_wait_time
+gpu_compute_time
+batch_total_time
+img/s
+GPU device
+num_workers
+prefetch_factor
+Batch shape/dtype
+
+Damit kannst du im Scheduler-Log direkt sehen: wartet die GPU auf Daten oder ist das Modell selbst langsam?
+9. Modellvergleich
+Für den identischen Vergleich brauche ich:
+alte Architektur exakt
+neue MLTrace-Architektur exakt
+latent_dim
+Inputgröße
+Batch size
+Loss
+Optimizer
+AMP ja/nein
+Validation pro Epoche ja/nein
+Ein wichtiger Verdacht: MLTrace macht aktuell standardmäßig 10% Validation pro Epoche. Wenn dein alter Code keine Validation gemacht hat, kostet MLTrace pro Epoche zusätzlich ~6.000 Bilder bei 60k.
+10. Linux/CUDA-Fakten
+Aus der Zielmaschine:
+torch.__version__
+torch.version.cuda
+torch.cuda.is_available()
+torch.cuda.device_count()
+nvidia-smi während Training
+GPU utilization %
+GPU memory usagelg
+CPU utilization
+Disk read throughput, falls möglich

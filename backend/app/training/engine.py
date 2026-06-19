@@ -32,6 +32,8 @@ logger = logging.getLogger("mltrace.training")
 
 VAL_HOLDOUT_FRACTION = 0.1
 SPLIT_SEED = 42
+CPU_GRADIENT_MAX_IMAGES = 5000
+CPU_GRADIENT_MAX_PIXELS = 512 * 512
 
 
 class AbortedError(Exception):
@@ -100,6 +102,39 @@ def _loss_fn(torch, name: str):
     if name == "smooth_l1":
         return nn.SmoothL1Loss()
     return nn.MSELoss()
+
+
+def _input_pixel_count(configuration: models.MethodConfiguration) -> int:
+    config = configuration.method_config or {}
+    width = int(config.get("input_width") or 0)
+    height = int(config.get("input_height") or 0)
+    channels = int(config.get("input_channels") or 1)
+    return max(0, width * height * channels)
+
+
+def _guard_large_cpu_gradient_training(
+    configuration: models.MethodConfiguration,
+    *,
+    sample_count: int,
+    device_type: str,
+) -> None:
+    """Fail fast instead of silently running large CNN training on CPU.
+
+    Small CPU gradient runs remain useful for development and tests. Large image
+    runs without CUDA otherwise sit at 0 epochs for a long time and then appear
+    to fail without useful progress.
+    """
+    if device_type != "cpu":
+        return
+    pixel_count = _input_pixel_count(configuration)
+    if sample_count <= CPU_GRADIENT_MAX_IMAGES and pixel_count <= CPU_GRADIENT_MAX_PIXELS:
+        return
+    raise ValueError(
+        "Gradient training would run on CPU because no CUDA GPU is available to the worker. "
+        f"Refusing large CPU training ({sample_count} images, {pixel_count} input pixels/image). "
+        "Install a CUDA-enabled torch build/use a CUDA machine, or reduce the dataset/input size. "
+        "In Scheduler, enable 'Only run scheduled jobs when a GPU slot is available' to keep this queued instead of CPU fallback."
+    )
 
 
 def _build_model(torch, configuration: models.MethodConfiguration, *, deterministic_vae: bool = False):
@@ -212,12 +247,17 @@ def train_gradient(
     num_workers = max(0, int(training_parameters.get("num_workers", default_workers)))
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    if device.type != "cuda" and "num_workers" not in training_parameters:
+        logger.info("CUDA unavailable; using num_workers=0 for CPU fallback stability.")
+        num_workers = 0
     # With CUDA_VISIBLE_DEVICES pinned to one GPU, cuda:0 maps to that physical
     # index; fall back to CPU when no CUDA device is available.
     run.device = f"GPU:{run.gpu_index}" if device.type == "cuda" and run.gpu_index is not None else "CPU"
     run.epochs_total = epochs
+    run.image_count = sample_count
     db.commit()
     log_device_diagnostics(logger, run.gpu_index)
+    _guard_large_cpu_gradient_training(configuration, sample_count=sample_count, device_type=device.type)
 
     # Deterministic train/val split over indices (data itself is loaded lazily).
     rng = np.random.default_rng(SPLIT_SEED)
@@ -238,8 +278,15 @@ def train_gradient(
         else None
     )
     logger.info(
-        "Training device=%s samples=%s (train=%s/val=%s) batch=%s workers=%s",
-        run.device, sample_count, len(train_idx), len(val_idx), batch_size, num_workers,
+        "Training device=%s samples=%s (train=%s/val=%s) batch=%s workers=%s amp=%s input_pixels=%s",
+        run.device,
+        sample_count,
+        len(train_idx),
+        len(val_idx),
+        batch_size,
+        num_workers,
+        device.type == "cuda",
+        _input_pixel_count(configuration),
     )
 
     model, is_vae = _build_model(torch, configuration)
@@ -343,10 +390,19 @@ def run_training(run_id: int, abort_event: threading.Event | None = None) -> Non
         pipeline = run.training_pipeline
         configuration = pipeline.method_configuration
         preprocessing = pipeline.preprocessing_pipeline
+        logger.info(
+            "Training run %s preparing pipeline=%s method=%s mode=%s",
+            run_id,
+            pipeline.name,
+            configuration.name,
+            configuration.training_mode,
+        )
 
         try:
             graph = PreprocessingGraph.model_validate(preprocessing.graph)
+            logger.info("Training run %s resolving training image paths", run_id)
             image_paths = enumerate_or_fail(db, pipeline)
+            logger.info("Training run %s resolved %s training image paths", run_id, len(image_paths))
             artifact_dir = _run_artifact_dir(run_id)
 
             if configuration.builder_kind == "form":
