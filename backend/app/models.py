@@ -517,6 +517,9 @@ class HeatmapRun(Base):
     max_y: Mapped[int] = mapped_column(Integer, nullable=False)
     source_image_data_url: Mapped[str] = mapped_column(Text, nullable=False)
     reconstruction_image_data_url: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    # Full-resolution (pixel-exact) raw per-pixel error grid for the scientific
+    # Plotly heatmap (colorbar, axes). Null for heatmaps computed before 0024.
+    error_matrix: Mapped[list | None] = mapped_column(json_type())
     heatmap_image_data_url: Mapped[str] = mapped_column(Text, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=False), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
@@ -525,6 +528,59 @@ class HeatmapRun(Base):
 
     testing_run: Mapped[TestingRun] = relationship()
     testing_result: Mapped[TestingRunResult | None] = relationship()
+
+
+class HeatmapRangeRun(Base):
+    """A queued batch job that renders pixel-error overlay PNG frames for a time
+    range of one testing run, played back as a fast heatmap video. Runs through
+    the shared scheduler (kind ``heatmap``) as a GPU-pinned worker subprocess."""
+
+    __tablename__ = "heatmap_range_runs"
+    __table_args__ = (
+        Index("ix_heatmap_range_runs_status", "status"),
+        Index("ix_heatmap_range_runs_created_at", "created_at"),
+        Index("ix_heatmap_range_runs_signature", "config_signature"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    testing_run_id: Mapped[int] = mapped_column(ForeignKey("testing_runs.id", ondelete="CASCADE"), nullable=False)
+
+    # Scheduler/queue fields, mirroring TestingRun.
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="queued")
+    enqueued_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=False))
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=False))
+    ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=False))
+    duration_seconds: Mapped[float | None] = mapped_column(Float)
+    error_message: Mapped[str | None] = mapped_column(Text)
+    gpu_index: Mapped[int | None] = mapped_column(Integer)
+    device: Mapped[str | None] = mapped_column(String(32))
+    pid: Mapped[int | None] = mapped_column(Integer)
+    log_path: Mapped[str | None] = mapped_column(Text)
+
+    # Range selection + render parameters.
+    start_timestamp: Mapped[datetime] = mapped_column(DateTime(timezone=False), nullable=False)
+    end_timestamp: Mapped[datetime] = mapped_column(DateTime(timezone=False), nullable=False)
+    stride: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    scale_mode: Mapped[str] = mapped_column(String(16), nullable=False, default="per_frame")
+    global_vmax: Mapped[float | None] = mapped_column(Float)
+
+    # Progress counter (done_count / frame_count) + output location.
+    frame_count: Mapped[int | None] = mapped_column(Integer)
+    done_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    frames_dir: Mapped[str | None] = mapped_column(Text)
+
+    # Dedup signature over (testing_run_id, start, end, stride, scale_mode).
+    config_signature: Mapped[str] = mapped_column(String(64), nullable=False)
+
+    # Denormalized snapshot for stable display.
+    testing_run_name: Mapped[str] = mapped_column(String(255), nullable=False)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=False), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=False), server_default=func.now(), onupdate=func.now()
+    )
+
+    testing_run: Mapped[TestingRun] = relationship()
 
 
 ModelConfiguration = MethodConfiguration

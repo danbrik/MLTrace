@@ -2,6 +2,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import Depends, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -12,6 +13,8 @@ from app.schemas import (
     DatasetConnectionTestResponse,
     DatasetCreate,
     DatasetRead,
+    HeatmapRangeRunCreate,
+    HeatmapRangeRunRead,
     HeatmapRunCreate,
     HeatmapRunRead,
     MethodConfigurationCreate,
@@ -51,6 +54,7 @@ from app.schemas import (
     TrainingRunLogResponse,
     TrainingRunRead,
 )
+from app.heatmap import service as heatmap_service
 from app.testing import service as testing_service
 from app.testing.service import TestingConflict
 from app.training import service as training_service
@@ -634,6 +638,58 @@ def create_app() -> FastAPI:
     @app.delete("/api/heatmaps", status_code=204)
     def api_clear_heatmaps(db: Session = Depends(get_db)):
         testing_service.clear_heatmap_runs(db)
+        return None
+
+    @app.get("/api/heatmap-ranges", response_model=list[HeatmapRangeRunRead])
+    def api_list_heatmap_ranges(db: Session = Depends(get_db)):
+        return heatmap_service.list_heatmap_ranges(db)
+
+    @app.post("/api/heatmap-ranges", response_model=HeatmapRangeRunRead)
+    def api_create_heatmap_range(payload: HeatmapRangeRunCreate, db: Session = Depends(get_db)):
+        try:
+            return heatmap_service.enqueue_heatmap_range(db, payload)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.get("/api/heatmap-ranges/{run_id}", response_model=HeatmapRangeRunRead)
+    def api_get_heatmap_range(run_id: int, db: Session = Depends(get_db)):
+        run = heatmap_service.get_heatmap_range(db, run_id)
+        if run is None:
+            raise HTTPException(status_code=404, detail="Heatmap range run not found.")
+        return run
+
+    @app.get("/api/heatmap-ranges/{run_id}/frames/{index}.png")
+    def api_get_heatmap_range_frame(run_id: int, index: int, db: Session = Depends(get_db)):
+        path = heatmap_service.frame_path(db, run_id, index)
+        if path is None:
+            raise HTTPException(status_code=404, detail="Frame not found.")
+        return FileResponse(path, media_type="image/png")
+
+    @app.get("/api/heatmap-ranges/{run_id}/log", response_model=TrainingRunLogResponse)
+    def api_get_heatmap_range_log(run_id: int, db: Session = Depends(get_db)):
+        log = heatmap_service.read_heatmap_range_log(db, run_id)
+        if log is None:
+            raise HTTPException(status_code=404, detail="Heatmap range run not found.")
+        return TrainingRunLogResponse(log=log)
+
+    @app.post("/api/heatmap-ranges/{run_id}/abort", response_model=HeatmapRangeRunRead)
+    def api_abort_heatmap_range(run_id: int, db: Session = Depends(get_db)):
+        try:
+            run = heatmap_service.abort_heatmap_range(db, run_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        if run is None:
+            raise HTTPException(status_code=404, detail="Heatmap range run not found.")
+        return run
+
+    @app.delete("/api/heatmap-ranges/{run_id}", status_code=204)
+    def api_delete_heatmap_range(run_id: int, db: Session = Depends(get_db)):
+        try:
+            deleted = heatmap_service.delete_heatmap_range(db, run_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        if not deleted:
+            raise HTTPException(status_code=404, detail="Heatmap range run not found.")
         return None
 
     @app.get("/api/scheduler/settings", response_model=SchedulerSettingsRead)

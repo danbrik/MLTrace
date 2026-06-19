@@ -5,6 +5,7 @@ import { methodLabel } from '../methods/utils';
 import { orderedGraphNodes, stepDetail, formatResolution } from './graph';
 import { formatDuration } from './runStatus';
 import type {
+  HeatmapRangeRun,
   MethodConfiguration,
   MethodDefinition,
   PreprocessingPipeline,
@@ -15,7 +16,8 @@ import type {
 
 export type SchedulerJob =
   | { kind: 'train'; run: TrainingRun }
-  | { kind: 'test'; run: TestingRun };
+  | { kind: 'test'; run: TestingRun }
+  | { kind: 'heatmap'; run: HeatmapRangeRun };
 
 function Row({ label, children }: { label: string; children: ReactNode }) {
   return (
@@ -107,7 +109,13 @@ export function SchedulerDetailsModal({
   methodByType: Map<string, MethodDefinition>;
   trainingRunById: Map<number, TrainingRun>;
 }) {
-  const title = job ? (job.kind === 'train' ? job.run.training_pipeline_name : job.run.name) : '';
+  const title = job
+    ? job.kind === 'train'
+      ? job.run.training_pipeline_name
+      : job.kind === 'heatmap'
+        ? `Heatmap video · ${job.run.testing_run_name}`
+        : job.run.name
+    : '';
 
   function renderTraining(run: TrainingRun) {
     const pipeline = pipelineById.get(run.training_pipeline_id);
@@ -203,9 +211,46 @@ export function SchedulerDetailsModal({
     );
   }
 
+  function renderHeatmap(run: HeatmapRangeRun) {
+    return (
+      <Stack gap="sm">
+        <Row label="Type">
+          <Badge color="teal" variant="light">Heatmap video</Badge>
+        </Row>
+        <Row label="Inference run"><Text size="sm">{run.testing_run_name}</Text></Row>
+        <Row label="Range">
+          <Text size="sm">
+            {new Date(run.start_timestamp).toLocaleString()} → {new Date(run.end_timestamp).toLocaleString()} · stride {run.stride}
+          </Text>
+        </Row>
+        <Row label="Scale">
+          <Text size="sm">
+            {run.scale_mode === 'shared' ? 'Shared' : 'Per-frame'}
+            {run.scale_mode === 'shared' && run.global_vmax != null ? ` · max ${run.global_vmax.toExponential(3)}` : ''}
+          </Text>
+        </Row>
+        <Row label="Frames">
+          <Text size="sm">
+            {run.done_count}{run.frame_count != null ? ` / ${run.frame_count}` : ''} rendered · {formatDuration(run.duration_seconds)} · {run.device ?? '—'}
+          </Text>
+        </Row>
+        {run.error_message && (
+          <Paper withBorder p="xs" radius="sm" bg="var(--mantine-color-red-0)">
+            <Text size="sm" c="red">{run.error_message}</Text>
+          </Paper>
+        )}
+      </Stack>
+    );
+  }
+
   return (
     <Modal opened={job !== null} onClose={onClose} title={title} size="xl">
-      {job && (job.kind === 'train' ? renderTraining(job.run) : renderTesting(job.run))}
+      {job &&
+        (job.kind === 'train'
+          ? renderTraining(job.run)
+          : job.kind === 'heatmap'
+            ? renderHeatmap(job.run)
+            : renderTesting(job.run))}
     </Modal>
   );
 }

@@ -619,6 +619,31 @@ export type HeatmapRun = {
   source_image_data_url: string;
   reconstruction_image_data_url: string;
   heatmap_image_data_url: string;
+  error_matrix: number[][] | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type HeatmapRangeRun = {
+  id: number;
+  testing_run_id: number;
+  testing_run_name: string;
+  status: string;
+  error_message: string | null;
+  enqueued_at: string | null;
+  started_at: string | null;
+  ended_at: string | null;
+  duration_seconds: number | null;
+  gpu_index: number | null;
+  device: string | null;
+  start_timestamp: string;
+  end_timestamp: string;
+  stride: number;
+  scale_mode: 'per_frame' | 'shared';
+  global_vmax: number | null;
+  frame_count: number | null;
+  done_count: number;
+  config_signature: string;
   created_at: string;
   updated_at: string;
 };

@@ -411,7 +411,7 @@ export function MethodsPage() {
         </Group>
       </StepCard>
 
-      <StepCard index={1} title="Method type" color="violet" complete={Boolean(selectedMethod)}>
+      <StepCard index={1} title="Method type" color="violet">
         <Select
           label="Method type"
           placeholder="Select a method type"

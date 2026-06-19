@@ -43,6 +43,7 @@ _POLL_INTERVAL_SECONDS = 2.0
 _KINDS: dict[str, dict] = {
     "train": {"model": models.TrainingRun, "module": "app.training.worker", "subdir": "runs"},
     "test": {"model": models.TestingRun, "module": "app.testing.worker", "subdir": "testing_runs"},
+    "heatmap": {"model": models.HeatmapRangeRun, "module": "app.heatmap.worker", "subdir": "heatmap_ranges"},
 }
 
 

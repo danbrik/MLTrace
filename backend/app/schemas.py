@@ -1,5 +1,5 @@
 from datetime import datetime
-from typing import ClassVar
+from typing import ClassVar, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -687,6 +687,41 @@ class HeatmapRunRead(BaseModel):
     source_image_data_url: str
     reconstruction_image_data_url: str = ""
     heatmap_image_data_url: str
+    error_matrix: list[list[float]] | None = None
+    created_at: datetime
+    updated_at: datetime
+
+
+class HeatmapRangeRunCreate(BaseModel):
+    testing_run_id: int
+    start_timestamp: datetime
+    end_timestamp: datetime
+    stride: int = Field(default=1, ge=1)
+    scale_mode: Literal["per_frame", "shared"] = "per_frame"
+
+
+class HeatmapRangeRunRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    testing_run_id: int
+    testing_run_name: str
+    status: str
+    error_message: str | None
+    enqueued_at: datetime | None
+    started_at: datetime | None
+    ended_at: datetime | None
+    duration_seconds: float | None
+    gpu_index: int | None
+    device: str | None
+    start_timestamp: datetime
+    end_timestamp: datetime
+    stride: int
+    scale_mode: str
+    global_vmax: float | None
+    frame_count: int | None
+    done_count: int
+    config_signature: str
     created_at: datetime
     updated_at: datetime
 

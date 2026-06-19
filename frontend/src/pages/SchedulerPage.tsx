@@ -26,14 +26,18 @@ import { FileText, Info, RotateCcw, Search, StopCircle, Trash2 } from 'lucide-re
 import { useEffect, useMemo, useRef, useState } from 'react';
 
 import {
+  abortHeatmapRange,
   abortTestingRun,
   abortTrainingRun,
   clearHeatmaps,
+  deleteHeatmapRange,
   deleteTestingRun,
   deleteTrainingRun,
+  getHeatmapRangeLog,
   getSchedulerSettings,
   getTestingRunLog,
   getTrainingRunLog,
+  listHeatmapRanges,
   listMethodConfigurations,
   listMethodDefinitions,
   listPreprocessingPipelines,
@@ -49,6 +53,7 @@ import { SchedulerDetailsModal } from '../training/SchedulerDetailsModal';
 import type { SchedulerJob } from '../training/SchedulerDetailsModal';
 import { formatDuration, runStatusColor } from '../training/runStatus';
 import type {
+  HeatmapRangeRun,
   MethodConfiguration,
   MethodDefinition,
   HeatmapRun,
@@ -83,7 +88,13 @@ function jobKey(job: SchedulerJob): string {
 }
 
 function jobName(job: SchedulerJob): string {
-  return job.kind === 'train' ? job.run.training_pipeline_name : job.run.name;
+  if (job.kind === 'train') return job.run.training_pipeline_name;
+  if (job.kind === 'heatmap') return `Heatmap video · ${job.run.testing_run_name}`;
+  return job.run.name;
+}
+
+function jobMethodType(job: SchedulerJob): string {
+  return job.kind === 'heatmap' ? 'heatmap video' : job.run.method_type;
 }
 
 function summarizeHeatmaps(heatmaps: HeatmapRun[]): HeatmapGroup[] {
@@ -119,6 +130,19 @@ function summarizeHeatmaps(heatmaps: HeatmapRun[]): HeatmapGroup[] {
 }
 
 function ProgressCell({ job }: { job: SchedulerJob }) {
+  if (job.kind === 'heatmap') {
+    const done = job.run.done_count ?? 0;
+    const total = job.run.frame_count ?? null;
+    if (total && total > 0) {
+      return (
+        <Stack gap={2}>
+          <Text size="xs">{done}/{total} frames</Text>
+          <Progress value={Math.min(100, (done / total) * 100)} size="sm" radius="sm" color={runStatusColor(job.run.status)} />
+        </Stack>
+      );
+    }
+    return <Text size="xs" c="dimmed">{done > 0 ? `${done} frames` : '—'}</Text>;
+  }
   if (job.kind === 'test') {
     const processed = job.run.image_count ?? 0;
     const expected = job.run.expected_image_count ?? (job.run.status === 'finished' ? job.run.image_count : null);
@@ -154,7 +178,8 @@ function LogModal({ job, onClose }: { job: SchedulerJob | null; onClose: () => v
     if (!job) return undefined;
     let cancelled = false;
     const load = () => {
-      const fetcher = job.kind === 'train' ? getTrainingRunLog : getTestingRunLog;
+      const fetcher =
+        job.kind === 'train' ? getTrainingRunLog : job.kind === 'heatmap' ? getHeatmapRangeLog : getTestingRunLog;
       fetcher(job.run.id)
         .then((result) => {
           if (!cancelled) setLog(result.log);
@@ -191,6 +216,7 @@ export function SchedulerPage({ active = true }: { active?: boolean }) {
   const [methods, setMethods] = useState<MethodConfiguration[]>([]);
   const [methodDefs, setMethodDefs] = useState<MethodDefinition[]>([]);
   const [heatmaps, setHeatmaps] = useState<HeatmapRun[]>([]);
+  const [heatmapRanges, setHeatmapRanges] = useState<HeatmapRangeRun[]>([]);
   const [schedulerSettings, setSchedulerSettings] = useState<SchedulerSettings | null>(null);
   const [settingsDraft, setSettingsDraft] = useState<{ max_gpu_slots: number; only_gpu: boolean } | null>(null);
   const [savingSettings, setSavingSettings] = useState(false);
@@ -206,10 +232,16 @@ export function SchedulerPage({ active = true }: { active?: boolean }) {
   const [detailJob, setDetailJob] = useState<SchedulerJob | null>(null);
 
   async function refreshRuns() {
-    const [nextTraining, nextTesting, nextHeatmaps] = await Promise.all([listTrainingRuns(), listTestingRuns(), listHeatmaps()]);
+    const [nextTraining, nextTesting, nextHeatmaps, nextHeatmapRanges] = await Promise.all([
+      listTrainingRuns(),
+      listTestingRuns(),
+      listHeatmaps(),
+      listHeatmapRanges(),
+    ]);
     setTrainingRuns(nextTraining);
     setTestingRuns(nextTesting);
     setHeatmaps(nextHeatmaps);
+    setHeatmapRanges(nextHeatmapRanges);
   }
 
   async function refreshSchedulerSettings() {
@@ -253,12 +285,13 @@ export function SchedulerPage({ active = true }: { active?: boolean }) {
     const list: SchedulerJob[] = [
       ...trainingRuns.map((run) => ({ kind: 'train' as const, run })),
       ...testingRuns.map((run) => ({ kind: 'test' as const, run })),
+      ...heatmapRanges.map((run) => ({ kind: 'heatmap' as const, run })),
     ];
     return list.sort((a, b) => (b.run.created_at ?? '').localeCompare(a.run.created_at ?? ''));
-  }, [trainingRuns, testingRuns]);
+  }, [trainingRuns, testingRuns, heatmapRanges]);
 
   const methodOptions = useMemo(
-    () => [...new Set(jobs.map((job) => job.run.method_type))].map((type) => ({ value: type, label: type })),
+    () => [...new Set(jobs.map((job) => jobMethodType(job)))].map((type) => ({ value: type, label: type })),
     [jobs],
   );
 
@@ -267,9 +300,9 @@ export function SchedulerPage({ active = true }: { active?: boolean }) {
     return jobs.filter((job) => {
       if (typeFilter && job.kind !== typeFilter) return false;
       if (statusFilter && job.run.status !== statusFilter) return false;
-      if (methodFilter && job.run.method_type !== methodFilter) return false;
+      if (methodFilter && jobMethodType(job) !== methodFilter) return false;
       if (!query) return true;
-      return jobName(job).toLowerCase().includes(query) || job.run.method_type.toLowerCase().includes(query);
+      return jobName(job).toLowerCase().includes(query) || jobMethodType(job).toLowerCase().includes(query);
     });
   }, [jobs, search, typeFilter, statusFilter, methodFilter]);
 
@@ -285,18 +318,30 @@ export function SchedulerPage({ active = true }: { active?: boolean }) {
   }
 
   function handleAbort(job: SchedulerJob) {
-    const action = job.kind === 'train' ? () => abortTrainingRun(job.run.id) : () => abortTestingRun(job.run.id);
+    const action =
+      job.kind === 'train'
+        ? () => abortTrainingRun(job.run.id)
+        : job.kind === 'heatmap'
+          ? () => abortHeatmapRange(job.run.id)
+          : () => abortTestingRun(job.run.id);
     withRefresh(`abort:${jobKey(job)}`, action, 'Could not abort');
   }
 
   function handleRestart(job: SchedulerJob) {
+    if (job.kind === 'heatmap') return; // heatmap videos are not restartable; re-render from Analysis
     const action = job.kind === 'train' ? () => restartTrainingRun(job.run.id) : () => restartTestingRun(job.run.id);
     withRefresh(`restart:${jobKey(job)}`, action, 'Could not restart');
   }
 
   function handleDelete(job: SchedulerJob) {
-    if (!window.confirm(`Remove ${job.kind === 'train' ? 'training run' : 'inference'} "${jobName(job)}"?`)) return;
-    const action = job.kind === 'train' ? () => deleteTrainingRun(job.run.id) : () => deleteTestingRun(job.run.id);
+    const label = job.kind === 'train' ? 'training run' : job.kind === 'heatmap' ? 'heatmap video' : 'inference';
+    if (!window.confirm(`Remove ${label} "${jobName(job)}"?`)) return;
+    const action =
+      job.kind === 'train'
+        ? () => deleteTrainingRun(job.run.id)
+        : job.kind === 'heatmap'
+          ? () => deleteHeatmapRange(job.run.id)
+          : () => deleteTestingRun(job.run.id);
     withRefresh(`delete:${jobKey(job)}`, action, 'Could not remove');
   }
 
@@ -398,6 +443,7 @@ export function SchedulerPage({ active = true }: { active?: boolean }) {
               data={[
                 { value: 'train', label: 'Training' },
                 { value: 'test', label: 'Inference' },
+                { value: 'heatmap', label: 'Heatmap' },
               ]}
               value={typeFilter}
               onChange={setTypeFilter}
@@ -443,13 +489,16 @@ export function SchedulerPage({ active = true }: { active?: boolean }) {
                   return (
                     <Table.Tr key={key}>
                       <Table.Td>
-                        <Badge color={job.kind === 'train' ? 'blue' : 'grape'} variant="light">
-                          {job.kind === 'train' ? 'Training' : 'Inference'}
+                        <Badge
+                          color={job.kind === 'train' ? 'blue' : job.kind === 'heatmap' ? 'teal' : 'grape'}
+                          variant="light"
+                        >
+                          {job.kind === 'train' ? 'Training' : job.kind === 'heatmap' ? 'Heatmap' : 'Inference'}
                         </Badge>
                       </Table.Td>
                       <Table.Td>{jobName(job)}</Table.Td>
                       <Table.Td>
-                        <Text size="sm">{run.method_type}</Text>
+                        <Text size="sm">{jobMethodType(job)}</Text>
                       </Table.Td>
                       <Table.Td>
                         <Badge color={runStatusColor(run.status)}>{run.status}</Badge>
@@ -488,7 +537,7 @@ export function SchedulerPage({ active = true }: { active?: boolean }) {
                               </ActionIcon>
                             </Tooltip>
                           )}
-                          {terminal && (
+                          {terminal && job.kind !== 'heatmap' && (
                             <Tooltip label="Restart">
                               <ActionIcon
                                 variant="subtle"

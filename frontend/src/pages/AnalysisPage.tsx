@@ -9,10 +9,10 @@ import {
   Modal,
   NumberInput,
   Paper,
+  Progress,
   ScrollArea,
   Select,
   SimpleGrid,
-  Slider,
   Stack,
   Switch,
   Table,
@@ -23,13 +23,16 @@ import {
 } from '@mantine/core';
 import { notifications } from '@mantine/notifications';
 import { ArrowDown, ArrowUp, Check, ChevronDown, ChevronRight, Info, Pause, Pencil, Play, Plus, RotateCcw, Search, Trash2 } from 'lucide-react';
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import type { MouseEvent } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import type React from 'react';
 
 import {
+  abortHeatmapRange,
   createHeatmap,
+  createHeatmapRange,
+  getHeatmapRange,
   getTestingRunResults,
+  heatmapRangeFrameUrl,
   listMethodConfigurations,
   listPreprocessingPipelines,
   listTestingRuns,
@@ -38,11 +41,14 @@ import {
   listTrainingRuns,
 } from '../api';
 import { DateTime24Input } from '../components/DateTime24Input';
+import { PlotlyChart } from '../components/PlotlyChart';
 import { StepCard } from '../components/StepCard';
+import type { Data, Layout } from '../lib/plotly';
 import { usePendingIds } from '../hooks/usePendingIds';
 import { formatValue } from '../methods/utils';
 import { datasetResolutions, formatResolution, orderedGraphNodes, stepDetail } from '../training/graph';
 import type {
+  HeatmapRangeRun,
   HeatmapRun,
   MethodConfiguration,
   PreprocessingPipeline,
@@ -68,7 +74,6 @@ type PlotDraft = {
   heatmapMode: HeatmapMode;
   timestamp: string | null;
   includeReference: boolean;
-  plotSize: number;
 };
 
 type AnalysisPlot = PlotDraft & {
@@ -365,201 +370,74 @@ function renderTrainsetPipelineSummary(pipeline: TrainingPipeline, datasets: Tra
   );
 }
 
+const TRACE_COLORS = ['#1c7ed6', '#e8590c', '#2f9e44', '#9c36b5', '#0c8599', '#e03131', '#5f3dc4', '#66a80f'];
+
 function TimeSeriesPlot({ plot, results }: { plot: AnalysisPlot; results: CombinedResult[] }) {
-  const [hoveredIndex, setHoveredIndex] = useState<number | null>(null);
-  const [zoomRange, setZoomRange] = useState<[number, number] | null>(null);
-  const [dragRange, setDragRange] = useState<{ startX: number; currentX: number } | null>(null);
-  const svgRef = useRef<SVGSVGElement | null>(null);
-  const allPoints = useMemo(() => {
-    const values = movingAverage(results.map(scoreValue), plot.movingAverage);
-    return results.map((result, index) => ({
-      result,
-      timestamp: new Date(result.timestamp).getTime(),
-      value: values[index],
-    }));
+  const traces = useMemo<Data[]>(() => {
+    const groups = new Map<number, { name: string; results: CombinedResult[] }>();
+    for (const result of results) {
+      const group = groups.get(result.testingRunId);
+      if (group) group.results.push(result);
+      else groups.set(result.testingRunId, { name: result.testingRunName, results: [result] });
+    }
+    return [...groups.values()].map((group, index) => {
+      const smoothed = movingAverage(group.results.map(scoreValue), plot.movingAverage);
+      return {
+        type: 'scatter',
+        mode: 'lines',
+        name: group.name,
+        x: group.results.map((result) => result.timestamp),
+        y: smoothed,
+        line: { color: TRACE_COLORS[index % TRACE_COLORS.length], width: 1.5 },
+        hovertemplate: '%{x|%Y-%m-%d %H:%M:%S}<br>error %{y:.5g}<extra>%{fullData.name}</extra>',
+      } as Data;
+    });
   }, [plot.movingAverage, results]);
-  const points = useMemo(
-    () =>
-      zoomRange
-        ? allPoints.filter((point) => point.timestamp >= zoomRange[0] && point.timestamp <= zoomRange[1])
-        : allPoints,
-    [allPoints, zoomRange],
+
+  const layout = useMemo<Partial<Layout>>(
+    () => ({
+      showlegend: traces.length > 1,
+      legend: { orientation: 'h', y: -0.28, x: 0 },
+      hovermode: 'x unified',
+      xaxis: {
+        title: { text: 'Time', font: { size: 12 } },
+        type: 'date',
+        rangeslider: { thickness: 0.08 },
+        showgrid: true,
+        gridcolor: 'rgba(128,128,128,0.15)',
+      },
+      yaxis: {
+        title: { text: 'Reconstruction error', font: { size: 12 } },
+        showgrid: true,
+        gridcolor: 'rgba(128,128,128,0.15)',
+        zeroline: false,
+      },
+      margin: { l: 64, r: 24, t: 12, b: 56 },
+    }),
+    [traces.length],
   );
 
-  if (allPoints.length === 0) {
+  if (results.length === 0) {
     return <Alert color="yellow">No results match this time range.</Alert>;
-  }
-  if (points.length === 0) {
-    return (
-      <Alert color="yellow">
-        <Group justify="space-between">
-          <Text size="sm">No results match the current zoom range.</Text>
-          <Button size="compact-xs" variant="light" onClick={() => setZoomRange(null)}>
-            Reset zoom
-          </Button>
-        </Group>
-      </Alert>
-    );
-  }
-
-  const width = 960;
-  const height = 320;
-  const margin = { top: 24, right: 28, bottom: 46, left: 72 };
-  const innerWidth = width - margin.left - margin.right;
-  const innerHeight = height - margin.top - margin.bottom;
-  const minTime = Math.min(...points.map((point) => point.timestamp));
-  const maxTime = Math.max(...points.map((point) => point.timestamp));
-  const minValue = Math.min(...points.map((point) => point.value));
-  const maxValue = Math.max(...points.map((point) => point.value));
-  const valuePadding = Math.max((maxValue - minValue) * 0.08, maxValue === minValue ? Math.max(maxValue * 0.1, 1) : 0);
-  const yMin = minValue - valuePadding;
-  const yMax = maxValue + valuePadding;
-  const xScale = (timestamp: number) =>
-    margin.left + ((timestamp - minTime) / Math.max(1, maxTime - minTime)) * innerWidth;
-  const yScale = (value: number) =>
-    margin.top + innerHeight - ((value - yMin) / Math.max(1e-12, yMax - yMin)) * innerHeight;
-  const path = points
-    .map((point, index) => `${index === 0 ? 'M' : 'L'} ${xScale(point.timestamp).toFixed(2)} ${yScale(point.value).toFixed(2)}`)
-    .join(' ');
-  const hovered = hoveredIndex !== null ? points[hoveredIndex] : null;
-
-  function svgX(event: MouseEvent<SVGSVGElement>) {
-    const rect = svgRef.current?.getBoundingClientRect();
-    if (!rect) return null;
-    return ((event.clientX - rect.left) / rect.width) * width;
-  }
-
-  function timestampAtX(x: number) {
-    const ratio = Math.max(0, Math.min(1, (x - margin.left) / innerWidth));
-    return minTime + ratio * Math.max(1, maxTime - minTime);
-  }
-
-  function onMouseMove(event: MouseEvent<SVGSVGElement>) {
-    const x = svgX(event);
-    if (x === null) return;
-    if (dragRange) {
-      setDragRange((current) => (current ? { ...current, currentX: x } : current));
-    }
-    let bestIndex = 0;
-    let bestDistance = Infinity;
-    points.forEach((point, index) => {
-      const distance = Math.abs(xScale(point.timestamp) - x);
-      if (distance < bestDistance) {
-        bestDistance = distance;
-        bestIndex = index;
-      }
-    });
-    setHoveredIndex(bestIndex);
   }
 
   return (
     <Stack gap="xs">
-      <ScrollArea style={{ maxWidth: plot.plotSize ?? 560 }}>
-        <svg
-          ref={svgRef}
-          className="analysis-timeseries"
-          viewBox={`0 0 ${width} ${height}`}
-          onMouseDown={(event) => {
-            const x = svgX(event);
-            if (x !== null && x >= margin.left && x <= width - margin.right) {
-              setDragRange({ startX: x, currentX: x });
-            }
-          }}
-          onMouseMove={onMouseMove}
-          onMouseUp={() => {
-            if (!dragRange) return;
-            const x1 = Math.min(dragRange.startX, dragRange.currentX);
-            const x2 = Math.max(dragRange.startX, dragRange.currentX);
-            if (x2 - x1 > 12) {
-              setZoomRange([timestampAtX(x1), timestampAtX(x2)]);
-            }
-            setDragRange(null);
-          }}
-          onMouseLeave={() => {
-            setHoveredIndex(null);
-            setDragRange(null);
-          }}
-        >
-          <rect x={0} y={0} width={width} height={height} rx={8} className="analysis-chart-bg" />
-          {[0, 0.25, 0.5, 0.75, 1].map((tick) => {
-            const y = margin.top + tick * innerHeight;
-            const value = yMax - tick * (yMax - yMin);
-            return (
-              <g key={tick}>
-                <line x1={margin.left} x2={width - margin.right} y1={y} y2={y} className="analysis-grid-line" />
-                <text x={margin.left - 10} y={y + 4} textAnchor="end" className="analysis-axis-label">
-                  {formatMetric(value)}
-                </text>
-              </g>
-            );
-          })}
-          <line x1={margin.left} x2={width - margin.right} y1={height - margin.bottom} y2={height - margin.bottom} className="analysis-axis" />
-          <line x1={margin.left} x2={margin.left} y1={margin.top} y2={height - margin.bottom} className="analysis-axis" />
-          <path d={path} className="analysis-line" />
-          {dragRange && (
-            <rect
-              x={Math.min(dragRange.startX, dragRange.currentX)}
-              y={margin.top}
-              width={Math.abs(dragRange.currentX - dragRange.startX)}
-              height={innerHeight}
-              className="analysis-zoom-selection"
-            />
-          )}
-          {hovered && (
-            <g>
-              <line
-                x1={xScale(hovered.timestamp)}
-                x2={xScale(hovered.timestamp)}
-                y1={margin.top}
-                y2={height - margin.bottom}
-                className="analysis-hover-line"
-              />
-              <circle cx={xScale(hovered.timestamp)} cy={yScale(hovered.value)} r={5} className="analysis-hover-point" />
-              <rect
-                x={Math.min(width - 282, xScale(hovered.timestamp) + 10)}
-                y={Math.max(12, yScale(hovered.value) - 48)}
-                width={270}
-                height={58}
-                rx={6}
-                className="analysis-tooltip-box"
-              />
-              <text
-                x={Math.min(width - 268, xScale(hovered.timestamp) + 20)}
-                y={Math.max(34, yScale(hovered.value) - 26)}
-                className="analysis-tooltip-text"
-              >
-                {new Date(hovered.result.timestamp).toLocaleString()}
-              </text>
-              <text
-                x={Math.min(width - 268, xScale(hovered.timestamp) + 20)}
-                y={Math.max(54, yScale(hovered.value) - 6)}
-                className="analysis-tooltip-text"
-              >
-                score {formatMetric(hovered.value)}
-              </text>
-            </g>
-          )}
-          <text x={margin.left} y={height - 16} className="analysis-axis-label">
-            {new Date(minTime).toLocaleString()}
-          </text>
-          <text x={width - margin.right} y={height - 16} textAnchor="end" className="analysis-axis-label">
-            {new Date(maxTime).toLocaleString()}
-          </text>
-        </svg>
-      </ScrollArea>
+      <PlotlyChart data={traces} layout={layout} height={420} />
       <Group gap="xs">
-        <Badge variant="light">{points.length} points</Badge>
-        {zoomRange && (
-          <Button size="compact-xs" variant="subtle" onClick={() => setZoomRange(null)}>
-            Reset zoom
-          </Button>
-        )}
+        <Badge variant="light">{results.length} points</Badge>
         {plot.movingAverage > 1 && <Badge variant="light" color="blue">moving avg {plot.movingAverage}</Badge>}
         {plot.sampling > 1 && <Badge variant="light" color="gray">sample every {plot.sampling}</Badge>}
       </Group>
     </Stack>
   );
 }
+
+const HEATMAP_ERROR_LAYOUT: Partial<Layout> = {
+  margin: { l: 40, r: 12, t: 8, b: 36 },
+  xaxis: { scaleanchor: 'y', constrain: 'domain', showgrid: false, zeroline: false },
+  yaxis: { autorange: 'reversed', showgrid: false, zeroline: false },
+};
 
 function HeatmapPlot({
   plot,
@@ -576,104 +454,73 @@ function HeatmapPlot({
   heatmapErrors: Record<string, string>;
   ensureHeatmap: (frame: CombinedResult, options?: { force?: boolean }) => Promise<void>;
 }) {
-  const [frameIndex, setFrameIndex] = useState(0);
-  const [playing, setPlaying] = useState(false);
-  const frames = useMemo(() => {
-    if (plot.heatmapMode === 'single') return results.slice(0, Math.max(1, results.length));
-    return results;
-  }, [plot.heatmapMode, results]);
-
-  useEffect(() => {
-    setFrameIndex(0);
-  }, [plot.id, plot.start, plot.end, plot.sampling, plot.timestamp, plot.heatmapMode]);
-
-  useEffect(() => {
-    if (frameIndex >= frames.length) setFrameIndex(Math.max(0, frames.length - 1));
-  }, [frameIndex, frames.length]);
-
-  const current = frames[frameIndex] ?? null;
+  const current = results[0] ?? null;
   const currentKey = current ? `${current.testingRunId}:${current.heatmapTimestampOnly ? current.timestamp : current.id}` : '';
   useEffect(() => {
     if (!current) return;
     ensureHeatmap(current);
   }, [current, ensureHeatmap]);
 
-  useEffect(() => {
-    if (!playing || frames.length <= 1) return undefined;
-    const timer = window.setInterval(() => {
-      setFrameIndex((currentFrame) => (currentFrame + 1) % frames.length);
-    }, 800);
-    return () => window.clearInterval(timer);
-  }, [frames.length, playing]);
+  const heatmap = currentKey ? heatmapCache[currentKey] : undefined;
+  const loading = loadingHeatmaps[currentKey] === true;
+  const error = heatmapErrors[currentKey];
+
+  const errorTrace = useMemo<Data[]>(() => {
+    if (!heatmap?.error_matrix) return [];
+    return [
+      {
+        type: 'heatmap',
+        z: heatmap.error_matrix,
+        colorscale: 'Jet',
+        zsmooth: false,
+        hoverinfo: 'skip',
+        colorbar: { title: { text: 'Recon. error', side: 'right' }, thickness: 12, len: 0.9 },
+      } as Data,
+    ];
+  }, [heatmap]);
+
+  const errorPanel = heatmap ? (
+    <div className="analysis-heatmap-panel">
+      <Text size="sm" fw={500} c="dimmed" ta="center">
+        Reconstruction error
+      </Text>
+      {heatmap.error_matrix ? (
+        <PlotlyChart data={errorTrace} layout={HEATMAP_ERROR_LAYOUT} height={280} />
+      ) : (
+        <div className="analysis-heatmap-image-frame">
+          <img src={heatmap.source_image_data_url} alt="Original with heatmap overlay" className="analysis-heatmap-image" />
+          <img src={heatmap.heatmap_image_data_url} alt="Reconstruction error heatmap overlay" className="analysis-heatmap-overlay-image" />
+        </div>
+      )}
+    </div>
+  ) : null;
 
   if (!current) {
     return <Alert color="yellow">No result image matches this selection.</Alert>;
   }
 
-  const heatmap = heatmapCache[currentKey];
-  const loading = loadingHeatmaps[currentKey] === true;
-  const error = heatmapErrors[currentKey];
-  const overlayPanel = heatmap ? (
-    <div className="analysis-heatmap-panel">
-      <Text fw={800} ta="center" className="analysis-heatmap-title">
-        Anomaly Score Heatmap
-      </Text>
-      <div className="analysis-heatmap-image-frame">
-        <img src={heatmap.source_image_data_url} alt="Original with heatmap overlay" className="analysis-heatmap-image" />
-        <img src={heatmap.heatmap_image_data_url} alt="Transparent pixel reconstruction error heatmap" className="analysis-heatmap-overlay-image" />
-      </div>
-    </div>
-  ) : null;
-
   return (
     <Stack gap="sm">
-      <Group justify="space-between" align="center">
-        <Group gap="xs">
-          <Badge variant="light">{resultLabel(current)}</Badge>
-          <Badge variant="light" color="red">score {formatMetric(scoreValue(current))}</Badge>
-          <Badge variant="light" color="gray">{current.testingRunName}</Badge>
-        </Group>
-        {plot.heatmapMode === 'range' && frames.length > 1 && (
-          <Group gap="xs">
-            <Button
-              size="compact-sm"
-              variant="light"
-              leftSection={playing ? <Pause size={14} /> : <Play size={14} />}
-              onClick={() => setPlaying((currentState) => !currentState)}
-            >
-              {playing ? 'Pause' : 'Play'}
-            </Button>
-            <Text size="xs" c="dimmed">
-              Frame {frameIndex + 1}/{frames.length}
-            </Text>
-          </Group>
-        )}
+      <Group gap="xs">
+        <Badge variant="light">{resultLabel(current)}</Badge>
+        <Badge variant="light" color="red">score {formatMetric(scoreValue(current))}</Badge>
+        <Badge variant="light" color="gray">{current.testingRunName}</Badge>
       </Group>
-      {plot.heatmapMode === 'range' && frames.length > 1 && (
-        <input
-          type="range"
-          min={0}
-          max={frames.length - 1}
-          value={frameIndex}
-          className="analysis-frame-slider"
-          onChange={(event) => setFrameIndex(Number(event.currentTarget.value))}
-        />
-      )}
-      <div className="analysis-heatmap-wrap" style={{ maxWidth: plot.plotSize ?? 560 }}>
+      <div className="analysis-heatmap-wrap">
         {heatmap ? (
           (plot.includeReference ?? true) ? (
-            <div className="analysis-heatmap-reference-grid">
+            <SimpleGrid cols={{ base: 1, md: 3 }} spacing="md">
               <div className="analysis-heatmap-panel">
-                <Text fw={800} ta="center" className="analysis-heatmap-title">
-                  Original Image
+                <Text size="sm" fw={500} c="dimmed" ta="center">
+                  Original
                 </Text>
                 <div className="analysis-heatmap-image-frame">
                   <img src={heatmap.source_image_data_url} alt="Original source" className="analysis-heatmap-image" />
                 </div>
               </div>
               <div className="analysis-heatmap-panel">
-                <Text fw={800} ta="center" className="analysis-heatmap-title">
-                  Reconstructed Image
+                <Text size="sm" fw={500} c="dimmed" ta="center">
+                  Reconstructed
                 </Text>
                 <div className="analysis-heatmap-image-frame">
                   <img
@@ -683,17 +530,17 @@ function HeatmapPlot({
                   />
                 </div>
               </div>
-              {overlayPanel}
-            </div>
+              {errorPanel}
+            </SimpleGrid>
           ) : (
-            overlayPanel
+            errorPanel
           )
         ) : (
           <div className="analysis-heatmap-loading">
             {loading ? (
               <Stack gap="xs" align="center">
                 <Loader size="sm" />
-                <Text size="sm">Computing CPU pixel heatmap…</Text>
+                <Text size="sm">Computing pixel heatmap…</Text>
               </Stack>
             ) : error ? (
               <Stack gap="xs" align="center">
@@ -714,8 +561,209 @@ function HeatmapPlot({
         )}
       </div>
       <Text size="xs" c="dimmed">
-        CPU heatmap · max pixel ({heatmap?.max_x ?? '—'}, {heatmap?.max_y ?? '—'}) · max {formatMetric(heatmap?.max_error)} · mean {formatMetric(heatmap?.mean_error)}
+        Pixel heatmap · max pixel ({heatmap?.max_x ?? '—'}, {heatmap?.max_y ?? '—'}) · max {formatMetric(heatmap?.max_error)} · mean {formatMetric(heatmap?.mean_error)}
       </Text>
+    </Stack>
+  );
+}
+
+// Jet-style gradient matching the backend overlay, for the static video legend.
+const JET_GRADIENT = 'linear-gradient(to right, #00008f, #0000ff, #00ffff, #ffff00, #ff0000, #800000)';
+
+function HeatmapVideo({ plot, results }: { plot: AnalysisPlot; results: CombinedResult[] }) {
+  const params = useMemo(() => {
+    const source = plot.sources[0];
+    if (!source || results.length === 0) return null;
+    const startIso = source.start || results[0].timestamp;
+    const endIso = source.end || results[results.length - 1].timestamp;
+    return {
+      testing_run_id: Number(source.testingRunId),
+      start_timestamp: startIso,
+      end_timestamp: endIso,
+      stride: Math.max(1, Math.floor(source.sampling || 1)),
+      testingRunName: results[0].testingRunName,
+    };
+  }, [plot.sources, results]);
+
+  const [scaleMode, setScaleMode] = useState<'per_frame' | 'shared'>('per_frame');
+  const [job, setJob] = useState<HeatmapRangeRun | null>(null);
+  const [starting, setStarting] = useState(false);
+  const [videoError, setVideoError] = useState<string | null>(null);
+  const [frameIndex, setFrameIndex] = useState(0);
+  const [playing, setPlaying] = useState(false);
+  const [fps, setFps] = useState(8);
+
+  // Reset whenever the plot's range/source changes.
+  useEffect(() => {
+    setJob(null);
+    setVideoError(null);
+    setFrameIndex(0);
+    setPlaying(false);
+  }, [plot.id, params?.testing_run_id, params?.start_timestamp, params?.end_timestamp, params?.stride, scaleMode]);
+
+  const polling = job != null && (job.status === 'queued' || job.status === 'running');
+  useEffect(() => {
+    if (!polling || !job) return undefined;
+    const timer = window.setInterval(async () => {
+      try {
+        setJob(await getHeatmapRange(job.id));
+      } catch {
+        /* transient; keep last state */
+      }
+    }, 1000);
+    return () => window.clearInterval(timer);
+  }, [polling, job?.id]);
+
+  const frameCount = job?.frame_count ?? 0;
+  const ready = job?.status === 'finished' && frameCount > 0;
+
+  useEffect(() => {
+    if (!ready || !playing || frameCount <= 1) return undefined;
+    const timer = window.setInterval(() => {
+      setFrameIndex((current) => (current + 1) % frameCount);
+    }, Math.max(33, 1000 / Math.max(1, fps)));
+    return () => window.clearInterval(timer);
+  }, [ready, playing, frameCount, fps]);
+
+  async function startJob() {
+    if (!params) return;
+    setStarting(true);
+    setVideoError(null);
+    try {
+      const created = await createHeatmapRange({
+        testing_run_id: params.testing_run_id,
+        start_timestamp: params.start_timestamp,
+        end_timestamp: params.end_timestamp,
+        stride: params.stride,
+        scale_mode: scaleMode,
+      });
+      setJob(created);
+      setFrameIndex(0);
+    } catch (error) {
+      setVideoError(errorMessage(error));
+    } finally {
+      setStarting(false);
+    }
+  }
+
+  async function abortJob() {
+    if (!job) return;
+    try {
+      setJob(await abortHeatmapRange(job.id));
+    } catch (error) {
+      setVideoError(errorMessage(error));
+    }
+  }
+
+  if (!params) {
+    return <Alert color="yellow">Select one inference source with a time range to render a heatmap video.</Alert>;
+  }
+
+  return (
+    <Stack gap="sm">
+      <Group gap="xs" align="flex-end">
+        <Select
+          label="Color scale"
+          size="xs"
+          w={170}
+          data={[
+            { value: 'per_frame', label: 'Per-frame (auto)' },
+            { value: 'shared', label: 'Shared (comparable)' },
+          ]}
+          value={scaleMode}
+          disabled={polling}
+          onChange={(value) => value && setScaleMode(value as 'per_frame' | 'shared')}
+        />
+        <Badge variant="light" color="gray">{params.testingRunName}</Badge>
+        <Badge variant="light">stride {params.stride}</Badge>
+        {!ready && (
+          <Button size="compact-sm" onClick={startJob} loading={starting || polling} disabled={polling}>
+            {polling ? 'Rendering…' : 'Render heatmap video'}
+          </Button>
+        )}
+        {ready && (
+          <Button size="compact-sm" variant="light" onClick={startJob} loading={starting}>
+            Re-render
+          </Button>
+        )}
+      </Group>
+
+      {videoError && <Alert color="red">{videoError}</Alert>}
+
+      {polling && job && (
+        <Stack gap={6}>
+          <Group gap="xs">
+            <Loader size="sm" />
+            <Text size="sm">
+              Rendering frame {job.done_count}
+              {job.frame_count ? ` / ${job.frame_count}` : ''}…
+            </Text>
+            <Button size="compact-xs" color="red" variant="light" onClick={abortJob}>
+              Abort
+            </Button>
+          </Group>
+          {job.frame_count ? (
+            <Progress value={(job.done_count / job.frame_count) * 100} size="sm" />
+          ) : null}
+        </Stack>
+      )}
+
+      {job && (job.status === 'failed' || job.status === 'aborted') && (
+        <Alert color={job.status === 'failed' ? 'red' : 'yellow'}>
+          Heatmap video {job.status}{job.error_message ? `: ${job.error_message}` : '.'}
+        </Alert>
+      )}
+
+      {ready && job && (
+        <Stack gap="xs">
+          <Group justify="space-between" align="center">
+            <Group gap="xs">
+              <Button
+                size="compact-sm"
+                variant="light"
+                leftSection={playing ? <Pause size={14} /> : <Play size={14} />}
+                onClick={() => setPlaying((current) => !current)}
+              >
+                {playing ? 'Pause' : 'Play'}
+              </Button>
+              <Text size="xs" c="dimmed">Frame {frameIndex + 1}/{frameCount}</Text>
+            </Group>
+            <NumberInput
+              label="fps"
+              size="xs"
+              w={90}
+              min={1}
+              max={60}
+              value={fps}
+              onChange={(value) => setFps(Math.max(1, Math.min(60, Number(value) || 1)))}
+            />
+          </Group>
+          <div className="analysis-heatmap-image-frame">
+            <img
+              src={heatmapRangeFrameUrl(job.id, frameIndex)}
+              alt={`Heatmap frame ${frameIndex + 1}`}
+              className="analysis-heatmap-image"
+            />
+          </div>
+          <input
+            type="range"
+            min={0}
+            max={frameCount - 1}
+            value={frameIndex}
+            className="analysis-frame-slider"
+            onChange={(event) => setFrameIndex(Number(event.currentTarget.value))}
+          />
+          <Group gap="xs" align="center">
+            <Text size="xs" c="dimmed">
+              {job.scale_mode === 'shared' ? 'Shared scale' : 'Per-frame scale'}
+            </Text>
+            <div style={{ flex: 1, height: 10, borderRadius: 3, background: JET_GRADIENT }} />
+            <Text size="xs" c="dimmed">
+              {job.scale_mode === 'shared' && job.global_vmax != null ? `max ${formatMetric(job.global_vmax)}` : 'max (per frame)'}
+            </Text>
+          </Group>
+        </Stack>
+      )}
     </Stack>
   );
 }
@@ -745,7 +793,7 @@ function AnalysisPlotCard({
         <Group justify="space-between" align="flex-start">
           <div>
             <Group gap="xs">
-              <Title order={3}>{plot.title}</Title>
+              <Title order={4} fw={500}>{plot.title}</Title>
               <Badge variant="light" color={plot.plotType === 'heatmap' ? 'red' : 'blue'}>
                 {plot.plotType === 'heatmap' ? 'Heatmap' : 'Time series'}
               </Badge>
@@ -774,6 +822,8 @@ function AnalysisPlotCard({
         </Group>
         {plot.plotType === 'timeseries' ? (
           <TimeSeriesPlot plot={plot} results={results} />
+        ) : plot.heatmapMode === 'range' ? (
+          <HeatmapVideo plot={plot} results={results} />
         ) : (
           <HeatmapPlot
             plot={plot}
@@ -801,7 +851,6 @@ function defaultDraft(): PlotDraft {
     heatmapMode: 'single',
     timestamp: null,
     includeReference: true,
-    plotSize: 560,
   };
 }
 
@@ -1509,23 +1558,6 @@ export function AnalysisPage({ active = true }: { active?: boolean }) {
                   />
                 </SimpleGrid>
               )}
-              <Paper withBorder p="sm" radius="sm">
-                <Text size="sm" fw={600}>
-                  Plot size: {draft.plotSize}px
-                </Text>
-                <Slider
-                  min={360}
-                  max={1200}
-                  step={20}
-                  value={draft.plotSize}
-                  onChange={(value) => setDraft((current) => ({ ...current, plotSize: value }))}
-                  marks={[
-                    { value: 360, label: 'small' },
-                    { value: 760, label: 'medium' },
-                    { value: 1200, label: 'large' },
-                  ]}
-                />
-              </Paper>
               {finishedRuns.length === 0 && <Alert color="blue">No finished testing runs with images are available yet.</Alert>}
               <Group justify="space-between" align="center">
                 <Text size="sm" c="dimmed">

@@ -1,6 +1,7 @@
 import type {
   Dataset,
   DatasetConnectionTest,
+  HeatmapRangeRun,
   HeatmapRun,
   MethodConfiguration,
   MethodConfigurationPayload,
@@ -474,6 +475,44 @@ export function createHeatmap(payload: { testing_run_id: number; testing_result_
 
 export async function clearHeatmaps(): Promise<void> {
   await request<void>('/api/heatmaps', { method: 'DELETE' });
+}
+
+export function listHeatmapRanges(): Promise<HeatmapRangeRun[]> {
+  return request<HeatmapRangeRun[]>('/api/heatmap-ranges');
+}
+
+export function createHeatmapRange(payload: {
+  testing_run_id: number;
+  start_timestamp: string;
+  end_timestamp: string;
+  stride?: number;
+  scale_mode?: 'per_frame' | 'shared';
+}): Promise<HeatmapRangeRun> {
+  return request<HeatmapRangeRun>('/api/heatmap-ranges', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
+}
+
+export function getHeatmapRange(runId: number): Promise<HeatmapRangeRun> {
+  return request<HeatmapRangeRun>(`/api/heatmap-ranges/${runId}`);
+}
+
+export function abortHeatmapRange(runId: number): Promise<HeatmapRangeRun> {
+  return request<HeatmapRangeRun>(`/api/heatmap-ranges/${runId}/abort`, { method: 'POST' });
+}
+
+export async function deleteHeatmapRange(runId: number): Promise<void> {
+  await request<void>(`/api/heatmap-ranges/${runId}`, { method: 'DELETE' });
+}
+
+export function getHeatmapRangeLog(runId: number): Promise<{ log: string }> {
+  return request<{ log: string }>(`/api/heatmap-ranges/${runId}/log`);
+}
+
+/** URL for one rendered overlay frame PNG (served directly, not via fetch). */
+export function heatmapRangeFrameUrl(runId: number, index: number): string {
+  return `${API_BASE_URL}/api/heatmap-ranges/${runId}/frames/${index}.png`;
 }
 
 export function getSchedulerSettings(): Promise<SchedulerSettings> {

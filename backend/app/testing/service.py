@@ -373,6 +373,43 @@ class ArtifactEvaluator:
             reconstruction, _ = self.model(x)
         return _as_image(reconstruction.squeeze(0).cpu().numpy())
 
+    def reconstruct_batch(self, images: list[np.ndarray]) -> list[np.ndarray]:
+        """Reconstruct several images in one forward pass. Uses CUDA when
+        available (the scheduler pins one GPU via CUDA_VISIBLE_DEVICES); falls
+        back to CPU. The model is moved to the chosen device once and reused."""
+        if not images:
+            return []
+        if self.mean_image is not None:
+            for image in images:
+                if image.shape != self.mean_image.shape:
+                    raise ValueError(
+                        f"Mean image shape {self.mean_image.shape} does not match test image shape {image.shape}."
+                    )
+            return [self.mean_image for _ in images]
+
+        self._ensure_torch_model(images[0])
+        device = self._batch_device()
+        batch = np.stack([_to_nchw(image) for image in images], axis=0)
+        x = self.torch.from_numpy(batch).to(device)
+        with self.torch.no_grad():
+            reconstruction, _ = self.model(x)
+        arr = reconstruction.cpu().numpy()
+        return [_as_image(arr[index]) for index in range(arr.shape[0])]
+
+    def _batch_device(self):
+        cached = getattr(self, "_device", None)
+        if cached is not None:
+            return cached
+        device = "cpu"
+        try:
+            if self.torch.cuda.is_available():
+                device = "cuda"
+                self.model.to(device)
+        except Exception:  # noqa: BLE001 - GPU optional; CPU fallback is always valid
+            device = "cpu"
+        self._device = device
+        return device
+
     def score(
         self, image: np.ndarray, roi: models.RoiDefinition | None
     ) -> tuple[float, float | None, int, int, list[dict] | None]:
@@ -627,12 +664,15 @@ def _pixel_error_map(source: np.ndarray, reconstruction: np.ndarray) -> np.ndarr
     return squared
 
 
-def _heatmap_overlay(error_map: np.ndarray) -> np.ndarray:
-    max_error = float(np.max(error_map)) if error_map.size else 0.0
-    if max_error <= 0:
+def _heatmap_overlay(error_map: np.ndarray, vmax: float | None = None) -> np.ndarray:
+    """Render a transparent Jet-style error overlay. ``vmax`` fixes the
+    normalization ceiling (shared scale across a video); when None each frame is
+    normalized to its own maximum."""
+    ceiling = float(vmax) if vmax is not None else (float(np.max(error_map)) if error_map.size else 0.0)
+    if ceiling <= 0:
         normalized = np.zeros_like(error_map, dtype=np.float64)
     else:
-        normalized = np.clip(error_map / max_error, 0.0, 1.0)
+        normalized = np.clip(error_map / ceiling, 0.0, 1.0)
 
     # Jet-style transparent error map: low error stays blue and subtle, high error
     # becomes yellow/red and more opaque for anomaly-style inspection overlays.
@@ -647,6 +687,16 @@ def _heatmap_overlay(error_map: np.ndarray) -> np.ndarray:
     overlay[..., 2] = np.asarray(blue * 255.0, dtype=np.uint8)
     overlay[..., 3] = np.asarray(alpha, dtype=np.uint8)
     return overlay
+
+
+def _error_matrix(error_map: np.ndarray) -> list[list[float]]:
+    """Per-pixel error grid for the frontend Plotly heatmap (z-matrix), at the
+    image's native resolution (pixel-exact, no downsampling). Rounded to bound
+    the JSON payload while preserving color/structure."""
+    grid = error_map.astype(np.float64)
+    if grid.ndim != 2:
+        grid = grid.reshape(grid.shape[0], -1)
+    return np.round(grid, 6).tolist()
 
 
 def compute_heatmap_run(db: Session, payload: HeatmapRunCreate) -> HeatmapRunRead:
@@ -763,6 +813,7 @@ def compute_heatmap_run(db: Session, payload: HeatmapRunCreate) -> HeatmapRunRea
     row.source_image_data_url = ""
     row.reconstruction_image_data_url = ""
     row.heatmap_image_data_url = ""
+    row.error_matrix = None
     row.updated_at = _utcnow()
     db.commit()
 
@@ -789,6 +840,7 @@ def compute_heatmap_run(db: Session, payload: HeatmapRunCreate) -> HeatmapRunRea
         row.source_image_data_url = encode_png_data_url(source)
         row.reconstruction_image_data_url = encode_png_data_url(reconstruction)
         row.heatmap_image_data_url = encode_png_data_url(_heatmap_overlay(error_map))
+        row.error_matrix = _error_matrix(error_map)
         row.updated_at = _utcnow()
         db.commit()
         db.refresh(row)
