@@ -45,6 +45,35 @@ class OrderedNode:
     position: dict | None = None
 
 
+@dataclass(frozen=True)
+class CompiledPreprocessingNode:
+    """Runtime-ready node used by training/inference hot paths.
+
+    The public graph stays flexible JSON, but hot paths should not repeatedly
+    validate graph topology or resolve registry entries for every image.
+    """
+
+    ordered: OrderedNode
+    step: object
+
+
+class CompiledPreprocessingPipeline:
+    """Validated, ordered preprocessing pipeline for repeated image execution."""
+
+    def __init__(self, nodes: list[CompiledPreprocessingNode]) -> None:
+        self.nodes = nodes
+
+    def run(self, source_image_path: str) -> np.ndarray:
+        context = {"source_image_path": source_image_path}
+        image: np.ndarray | None = None
+        for index, node in enumerate(self.nodes):
+            image = node.step.apply(image, node.ordered.config, context)
+            if index == 0:
+                context["source_shape"] = image.shape
+        assert image is not None
+        return image
+
+
 def validate_linear_graph(graph: PreprocessingGraph, active_registry: PreprocessingRegistry = registry) -> list[OrderedNode]:
     nodes = graph.nodes
     edges = graph.edges
@@ -104,6 +133,19 @@ def validate_linear_graph(graph: PreprocessingGraph, active_registry: Preprocess
     return ordered
 
 
+def compile_pipeline(
+    graph: PreprocessingGraph,
+    active_registry: PreprocessingRegistry = registry,
+) -> CompiledPreprocessingPipeline:
+    """Validate and resolve a preprocessing graph once for repeated execution."""
+    ordered_nodes = validate_linear_graph(graph, active_registry=active_registry)
+    compiled = [
+        CompiledPreprocessingNode(ordered=node, step=active_registry.get(node.type))
+        for node in ordered_nodes
+    ]
+    return CompiledPreprocessingPipeline(compiled)
+
+
 def image_metadata(image: np.ndarray) -> tuple[int, int, int, str, float, float]:
     height, width = image.shape[:2]
     channels = 1 if image.ndim == 2 else int(image.shape[2])
@@ -136,23 +178,22 @@ def execute_with_previews(
     The final numpy array is what downstream consumers (e.g. a model forward
     pass) operate on; the previews are display-normalized PNG snapshots.
     """
-    ordered_nodes = validate_linear_graph(graph)
+    compiled = compile_pipeline(graph)
     context = {"source_image_path": source_image_path}
     image: np.ndarray | None = None
     previews: list[PreprocessingPreviewImage] = []
 
-    for index, node in enumerate(ordered_nodes):
-        step = registry.get(node.type)
-        image = step.apply(image, node.config, context)
+    for index, node in enumerate(compiled.nodes):
+        image = node.step.apply(image, node.ordered.config, context)
         if index == 0:
             # Remember the original image size for steps that interpolate back to it (crop "source").
             context["source_shape"] = image.shape
         width, height, channels, dtype, value_min, value_max = image_metadata(image)
         previews.append(
             PreprocessingPreviewImage(
-                node_id=node.id,
-                step_type=node.type,
-                label=step.label,
+                node_id=node.ordered.id,
+                step_type=node.ordered.type,
+                label=node.step.label,
                 width=width,
                 height=height,
                 channels=channels,
@@ -178,13 +219,4 @@ def run_pipeline_array(graph: PreprocessingGraph, source_image_path: str) -> np.
     Used by training (which processes many images): unlike execute_with_previews
     it skips the per-step PNG encoding, so it is much cheaper in a loop.
     """
-    ordered_nodes = validate_linear_graph(graph)
-    context = {"source_image_path": source_image_path}
-    image: np.ndarray | None = None
-    for index, node in enumerate(ordered_nodes):
-        step = registry.get(node.type)
-        image = step.apply(image, node.config, context)
-        if index == 0:
-            context["source_shape"] = image.shape
-    assert image is not None  # validate_linear_graph guarantees the load_image node
-    return image
+    return compile_pipeline(graph).run(source_image_path)

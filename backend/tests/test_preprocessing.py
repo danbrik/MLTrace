@@ -5,7 +5,7 @@ import pytest
 from PIL import Image
 
 from app.preprocessing.base import BasePreprocessingStep, ImageSpec
-from app.preprocessing.pipeline import execute_preview, validate_linear_graph
+from app.preprocessing.pipeline import compile_pipeline, execute_preview, run_pipeline_array, validate_linear_graph
 from app.preprocessing.registry import PreprocessingRegistry, registry
 from app.preprocessing.steps.crop import CropStep
 from app.preprocessing.steps.gaussian_blur import GaussianBlurStep
@@ -92,6 +92,22 @@ def test_execute_preview_returns_one_preview_per_node(tmp_path: Path) -> None:
     assert preview[1].width == 8
     assert preview[1].height == 4
     assert preview[1].image_data_url.startswith("data:image/png;base64,")
+
+
+def test_compiled_pipeline_matches_array_runner(tmp_path: Path) -> None:
+    image_path = tmp_path / "sample.tif"
+    Image.new("L", (20, 10), color=128).save(image_path)
+    pipeline_graph = graph(
+        [
+            {"id": "load", "type": "load_image", "config": {}},
+            {"id": "resize", "type": "resize", "config": {"width": 8, "height": 4}},
+        ],
+        [{"source": "load", "target": "resize"}],
+    )
+
+    compiled = compile_pipeline(pipeline_graph)
+
+    np.testing.assert_array_equal(compiled.run(str(image_path)), run_pipeline_array(pipeline_graph, str(image_path)))
 
 
 def test_load_image_size_lock_accepts_matching_size(tmp_path: Path) -> None:

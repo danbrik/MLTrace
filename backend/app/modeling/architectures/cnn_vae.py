@@ -54,6 +54,11 @@ class CnnVaeArchitecture(BaseModelArchitecture):
         "batch_size": 16,
         "learning_rate": 0.001,
         "reconstruction_loss": "mse",
+        "num_workers": 16,
+        "prefetch_factor": 2,
+        "validation_fraction": 0.0,
+        "amp_enabled": True,
+        "log_interval_batches": 50,
     }
     training_schema = {
         "type": "object",
@@ -67,6 +72,41 @@ class CnnVaeArchitecture(BaseModelArchitecture):
                 "label": "Reconstruction loss",
                 "enum": ["mse", "l1", "smooth_l1"],
                 "default": "mse",
+            },
+            "num_workers": {
+                "type": "integer",
+                "label": "DataLoader workers",
+                "minimum": 0,
+                "default": 16,
+                "description": "Parallel worker processes used for image loading and preprocessing. Legacy CUDA runs used 16.",
+            },
+            "prefetch_factor": {
+                "type": "integer",
+                "label": "Prefetch factor",
+                "minimum": 1,
+                "default": 2,
+                "description": "Number of batches each worker preloads. Only used when DataLoader workers are enabled.",
+            },
+            "validation_fraction": {
+                "type": "number",
+                "label": "Validation fraction",
+                "minimum": 0,
+                "maximum": 0.9,
+                "default": 0.0,
+                "description": "Fraction held out for validation per epoch. Use 0.0 to match the legacy training path.",
+            },
+            "amp_enabled": {
+                "type": "boolean",
+                "label": "AMP mixed precision",
+                "default": True,
+                "description": "Use automatic mixed precision on CUDA. Disable it for strict legacy comparisons.",
+            },
+            "log_interval_batches": {
+                "type": "integer",
+                "label": "Log interval batches",
+                "minimum": 1,
+                "default": 50,
+                "description": "How often training logs batch throughput and timing diagnostics.",
             },
         },
     }

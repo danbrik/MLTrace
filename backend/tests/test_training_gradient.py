@@ -1,14 +1,28 @@
 import threading
 from pathlib import Path
 
+import numpy as np
+
 from app import models
 from app.schemas import PreprocessingGraph
-from app.training.engine import _guard_large_cpu_gradient_training, train_gradient
+from app.training.engine import _guard_large_cpu_gradient_training, _to_nchw, train_gradient
 
 from tests.test_modeling import autoencoder_payload
 from tests.test_testing_service import make_db, write_tiff
 
 LOAD_ONLY_GRAPH = {"nodes": [{"id": "load", "type": "load_image", "config": {}}], "edges": []}
+
+
+def test_training_hot_path_scales_uint16_to_unit_range() -> None:
+    image = np.array([[0, 32768, 65535]], dtype=np.uint16)
+
+    normalized = _to_nchw(image)
+
+    assert normalized.dtype == np.float32
+    assert normalized.shape == (1, 1, 3)
+    assert normalized[0, 0, 0] == 0.0
+    assert 0.49 < normalized[0, 0, 1] < 0.51
+    assert normalized[0, 0, 2] == 1.0
 
 
 def _seed_ae(db, tmp_path: Path, image_count: int = 6):

@@ -14,6 +14,7 @@ validation/dummy-test path; here they are kept as persistent, trainable modules.
 from __future__ import annotations
 
 import logging
+import math
 import threading
 import time
 from datetime import datetime
@@ -25,12 +26,12 @@ from app import models
 from app.database import SessionLocal, data_dir
 from app.logging_setup import log_device_diagnostics
 from app.modeling.forward import build_sequential_modules
-from app.preprocessing.pipeline import run_pipeline_array
+from app.preprocessing.pipeline import CompiledPreprocessingPipeline, compile_pipeline
 from app.schemas import PreprocessingGraph
 
 logger = logging.getLogger("mltrace.training")
 
-VAL_HOLDOUT_FRACTION = 0.1
+DEFAULT_VALIDATION_FRACTION = 0.0
 SPLIT_SEED = 42
 CPU_GRADIENT_MAX_IMAGES = 5000
 CPU_GRADIENT_MAX_PIXELS = 512 * 512
@@ -47,7 +48,7 @@ def _run_artifact_dir(run_id: int) -> Path:
 
 
 def _to_nchw(image: np.ndarray) -> np.ndarray:
-    """Normalize a preprocessed image to a float32 CHW array in a sane range."""
+    """Normalize a preprocessed image to contiguous float32 CHW in [0, 1] when integer-backed."""
     if image.ndim == 2:
         array = image[np.newaxis, :, :]
     elif image.ndim == 3:
@@ -55,8 +56,38 @@ def _to_nchw(image: np.ndarray) -> np.ndarray:
     else:
         raise ValueError(f"Preprocessed image must be 2D or 3D, got shape {tuple(image.shape)}.")
     if array.dtype == np.uint8:
-        return array.astype(np.float32) / 255.0
-    return array.astype(np.float32)
+        array = array.astype(np.float32) / 255.0
+    elif array.dtype == np.uint16:
+        array = array.astype(np.float32) / 65535.0
+    else:
+        array = array.astype(np.float32)
+    return np.ascontiguousarray(array)
+
+
+def _coerce_float(value, default: float, *, minimum: float | None = None, maximum: float | None = None) -> float:
+    try:
+        coerced = float(value)
+    except (TypeError, ValueError):
+        coerced = default
+    if not math.isfinite(coerced):
+        coerced = default
+    if minimum is not None:
+        coerced = max(minimum, coerced)
+    if maximum is not None:
+        coerced = min(maximum, coerced)
+    return coerced
+
+
+def _coerce_bool(value, default: bool) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"1", "true", "yes", "on"}:
+            return True
+        if normalized in {"0", "false", "no", "off"}:
+            return False
+    return default
 
 
 def fit_mean_image(
@@ -68,6 +99,7 @@ def fit_mean_image(
 ) -> int:
     """Accumulate the pixel-wise mean across all preprocessed images."""
     acc_dtype = np.float64 if method_config.get("accumulator_dtype") == "float64" else np.float32
+    compiled = compile_pipeline(graph)
     accumulator: np.ndarray | None = None
     source_dtype: np.dtype | None = None
     count = 0
@@ -75,7 +107,7 @@ def fit_mean_image(
     for path in image_paths:
         if abort_event.is_set():
             raise AbortedError()
-        array = run_pipeline_array(graph, path)
+        array = compiled.run(path)
         if accumulator is None:
             accumulator = np.zeros(array.shape, dtype=acc_dtype)
             source_dtype = array.dtype
@@ -203,12 +235,22 @@ class _PreprocessedImageDataset:
     def __init__(self, image_paths: list[str], graph: PreprocessingGraph) -> None:
         self.image_paths = image_paths
         self.graph = graph
+        self._compiled: CompiledPreprocessingPipeline | None = None
+
+    def _pipeline(self) -> CompiledPreprocessingPipeline:
+        # Compiled lazily so each DataLoader worker owns its resolved step chain.
+        if self._compiled is None:
+            self._compiled = compile_pipeline(self.graph)
+        return self._compiled
 
     def __len__(self) -> int:
         return len(self.image_paths)
 
-    def __getitem__(self, index: int) -> np.ndarray:
-        return _to_nchw(run_pipeline_array(self.graph, self.image_paths[index]))
+    def __getitem__(self, index: int):
+        import torch
+
+        array = _to_nchw(self._pipeline().run(self.image_paths[index]))
+        return torch.from_numpy(array)
 
 
 def train_gradient(
@@ -228,8 +270,6 @@ def train_gradient(
     large images without materializing the whole set in host memory. Mixed
     precision (AMP) is used on CUDA.
     """
-    import os
-
     import torch
     from torch.utils.data import DataLoader, Subset
 
@@ -243,10 +283,19 @@ def train_gradient(
     epochs = int(training_parameters.get("epochs", 1))
     batch_size = max(1, int(training_parameters.get("batch_size", 16)))
     learning_rate = float(training_parameters.get("learning_rate", 0.001))
-    default_workers = min(8, os.cpu_count() or 1)
-    num_workers = max(0, int(training_parameters.get("num_workers", default_workers)))
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    default_workers = 16 if device.type == "cuda" else 0
+    num_workers = max(0, int(training_parameters.get("num_workers", default_workers)))
+    prefetch_factor = max(1, int(training_parameters.get("prefetch_factor", 2)))
+    validation_fraction = _coerce_float(
+        training_parameters.get("validation_fraction", DEFAULT_VALIDATION_FRACTION),
+        DEFAULT_VALIDATION_FRACTION,
+        minimum=0.0,
+        maximum=0.9,
+    )
+    log_interval_batches = max(1, int(training_parameters.get("log_interval_batches", 50)))
+    use_amp = device.type == "cuda" and _coerce_bool(training_parameters.get("amp_enabled", True), True)
     if device.type != "cuda" and "num_workers" not in training_parameters:
         logger.info("CUDA unavailable; using num_workers=0 for CPU fallback stability.")
         num_workers = 0
@@ -259,18 +308,23 @@ def train_gradient(
     log_device_diagnostics(logger, run.gpu_index)
     _guard_large_cpu_gradient_training(configuration, sample_count=sample_count, device_type=device.type)
 
+    compile_started = time.perf_counter()
+    compiled_probe = compile_pipeline(graph)
+    logger.info("Training run %s preprocessing pipeline compiled in %.3fs", run.id, time.perf_counter() - compile_started)
+
     # Deterministic train/val split over indices (data itself is loaded lazily).
     rng = np.random.default_rng(SPLIT_SEED)
     order = [int(i) for i in rng.permutation(sample_count)]
-    val_count = max(1, int(sample_count * VAL_HOLDOUT_FRACTION)) if sample_count > 1 else 0
+    val_count = max(1, int(sample_count * validation_fraction)) if sample_count > 1 and validation_fraction > 0 else 0
     val_idx = order[:val_count]
     train_idx = order[val_count:] or order
 
     dataset = _PreprocessedImageDataset(image_paths, graph)
+    dataset._compiled = compiled_probe
     pin = device.type == "cuda"
     loader_kwargs: dict = {"num_workers": num_workers, "pin_memory": pin}
     if num_workers > 0:
-        loader_kwargs.update(persistent_workers=True, prefetch_factor=2)
+        loader_kwargs.update(persistent_workers=True, prefetch_factor=prefetch_factor)
     train_loader = DataLoader(Subset(dataset, train_idx), batch_size=batch_size, shuffle=True, **loader_kwargs)
     val_loader = (
         DataLoader(Subset(dataset, val_idx), batch_size=batch_size, shuffle=False, **loader_kwargs)
@@ -285,19 +339,39 @@ def train_gradient(
         len(val_idx),
         batch_size,
         num_workers,
-        device.type == "cuda",
+        use_amp,
         _input_pixel_count(configuration),
     )
+    logger.info(
+        "Training loader config pin_memory=%s persistent_workers=%s prefetch_factor=%s validation_fraction=%.3f log_interval_batches=%s",
+        pin,
+        num_workers > 0,
+        prefetch_factor if num_workers > 0 else "n/a",
+        validation_fraction,
+        log_interval_batches,
+    )
 
+    first_sample_started = time.perf_counter()
+    first_sample = dataset[train_idx[0]]
+    logger.info(
+        "Training run %s first sample loaded in %.3fs shape=%s dtype=%s",
+        run.id,
+        time.perf_counter() - first_sample_started,
+        tuple(first_sample.shape),
+        first_sample.dtype,
+    )
     model, is_vae = _build_model(torch, configuration)
     model.to(device)
     # Materialize lazy parameters (and VAE heads) with one real sample.
-    sample0 = torch.from_numpy(np.ascontiguousarray(dataset[train_idx[0]]))[None].to(device)
+    first_forward_started = time.perf_counter()
+    sample0 = first_sample[None].to(device, non_blocking=pin)
     with torch.no_grad():
         model(sample0)
+    if device.type == "cuda":
+        torch.cuda.synchronize()
+    logger.info("Training run %s first GPU forward completed in %.3fs", run.id, time.perf_counter() - first_forward_started)
     optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
     recon_loss_fn = _loss_fn(torch, loss_name)
-    use_amp = device.type == "cuda"
     scaler = torch.amp.GradScaler("cuda", enabled=use_amp)
 
     def compute_loss(xb):
@@ -316,24 +390,80 @@ def train_gradient(
         model.train()
         train_total, train_batches = 0.0, 0
         epoch_started = time.perf_counter()
-        for xb in train_loader:
+        data_wait_total = 0.0
+        transfer_total = 0.0
+        compute_total = 0.0
+        batch_total = 0.0
+        pending_transfer_events = []
+        pending_compute_events = []
+        iterator = iter(train_loader)
+        while True:
             if abort_event.is_set():
                 raise AbortedError()
-            xb = xb.to(device, non_blocking=pin)
+            batch_started = time.perf_counter()
+            try:
+                next_started = time.perf_counter()
+                xb = next(iterator)
+                data_wait_total += time.perf_counter() - next_started
+            except StopIteration:
+                break
+
+            transfer_started = time.perf_counter()
+            if device.type == "cuda":
+                transfer_start = torch.cuda.Event(enable_timing=True)
+                transfer_end = torch.cuda.Event(enable_timing=True)
+                transfer_start.record()
+                xb = xb.to(device, non_blocking=pin)
+                transfer_end.record()
+                pending_transfer_events.append((transfer_start, transfer_end))
+            else:
+                xb = xb.to(device, non_blocking=pin)
+                transfer_total += time.perf_counter() - transfer_started
+
+            compute_started = time.perf_counter()
+            if device.type == "cuda":
+                compute_start = torch.cuda.Event(enable_timing=True)
+                compute_end = torch.cuda.Event(enable_timing=True)
+                compute_start.record()
             optimizer.zero_grad(set_to_none=True)
             with torch.amp.autocast(device.type, enabled=use_amp):
                 loss = compute_loss(xb)
             scaler.scale(loss).backward()
             scaler.step(optimizer)
             scaler.update()
+            if device.type == "cuda":
+                compute_end.record()
+                pending_compute_events.append((compute_start, compute_end))
+            else:
+                compute_total += time.perf_counter() - compute_started
+            batch_total += time.perf_counter() - batch_started
             train_total += float(loss.item())
             train_batches += 1
-            if train_batches % 50 == 0:
+            if train_batches == 1:
+                logger.info("epoch %s first batch completed shape=%s dtype=%s", epoch, tuple(xb.shape), xb.dtype)
+            if train_batches % log_interval_batches == 0:
+                if device.type == "cuda":
+                    torch.cuda.synchronize()
+                    transfer_total += sum(start.elapsed_time(end) for start, end in pending_transfer_events) / 1000.0
+                    compute_total += sum(start.elapsed_time(end) for start, end in pending_compute_events) / 1000.0
+                    pending_transfer_events.clear()
+                    pending_compute_events.clear()
                 images_seen = train_batches * batch_size
                 rate = images_seen / max(1e-6, time.perf_counter() - epoch_started)
+                denominator = max(1, train_batches)
                 logger.info(
-                    "epoch %s batch %s avg_loss=%.5f (%.0f img/s)",
-                    epoch, train_batches, train_total / train_batches, rate,
+                    (
+                        "epoch %s batch %s avg_loss=%.5f %.0f img/s "
+                        "data_wait=%.1fms transfer=%.1fms compute=%.1fms batch_total=%.1fms"
+                    ),
+                    epoch,
+                    train_batches,
+                    train_total / train_batches,
+                    rate,
+                    data_wait_total / denominator * 1000,
+                    transfer_total / denominator * 1000,
+                    compute_total / denominator * 1000,
+                    batch_total / denominator * 1000,
                 )
         train_loss = train_total / max(1, train_batches)
 
