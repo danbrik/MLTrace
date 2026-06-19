@@ -295,3 +295,21 @@ Run both before moving a new deployment into regular use.
 - Workers use the wrong SQLite DB: start backend from repository root and keep `DATABASE_URL` stable.
 - Torch check/training fails: confirm Torch is installed in `.venv`, the Python version is supported by the Torch wheel, and CUDA is visible if GPU execution is expected.
 - Queued jobs do not start: check Scheduler settings in the UI, `.mltrace/scheduler_settings.json`, available GPUs, and worker logs under `.mltrace/runs/` or `.mltrace/testing_runs/`.
+
+# Start Backend in Screen Session
+```bash
+screen -S mltrace-backend
+cd /path/to/MLTrace
+source .venv/bin/activate
+PYTHONPATH=backend uvicorn app.main:app --host 0.0.0 --port 8000
+``` 
+
+# Start Frontend in Screen Session
+```bash
+screen -S mltrace-frontend
+cd /path/to/MLTrace/frontend
+source ../.venv/bin/activate
+npm run dev
+```
+
+Detach with `Ctrl+A D`. Reattach with `screen -r mltrace-frontend`. Show sessions with `screen -ls`.
