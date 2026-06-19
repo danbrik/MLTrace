@@ -414,9 +414,19 @@ class ArtifactEvaluator:
         self, image: np.ndarray, roi: models.RoiDefinition | None
     ) -> tuple[float, float | None, int, int, list[dict] | None]:
         reconstruction = self.reconstruct(image)
-        source = image
-        if self.mean_image is None:
-            source = _as_image(_to_nchw(image))
+        return self._score_pair(image, reconstruction, roi)
+
+    def score_batch(
+        self, images: list[np.ndarray], roi: models.RoiDefinition | None
+    ) -> list[tuple[float, float | None, int, int, list[dict] | None]]:
+        """Score several images with one (GPU-)batched reconstruction pass."""
+        reconstructions = self.reconstruct_batch(images)
+        return [self._score_pair(image, rec, roi) for image, rec in zip(images, reconstructions)]
+
+    def _score_pair(
+        self, image: np.ndarray, reconstruction: np.ndarray, roi: models.RoiDefinition | None
+    ) -> tuple[float, float | None, int, int, list[dict] | None]:
+        source = image if self.mean_image is not None else _as_image(_to_nchw(image))
         width, height, _, _, _, _ = image_metadata(source)
         full_mse = _mse(source, reconstruction)
         roi_mse = None

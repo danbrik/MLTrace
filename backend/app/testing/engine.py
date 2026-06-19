@@ -10,28 +10,38 @@ finished/failed, SIGTERM → aborted).
 
 from __future__ import annotations
 
+import csv
+import json
 import logging
+import os
 import threading
 import time
-
-import numpy as np
+from concurrent.futures import ThreadPoolExecutor
 
 from app import models
 from app.database import SessionLocal
+from app.logging_setup import log_device_diagnostics
 from app.preprocessing.pipeline import run_pipeline_array
 from app.schemas import PreprocessingGraph
 from app.testing.service import (
     ArtifactEvaluator,
     _load_training_dataset,
     _load_training_run,
+    _testing_run_dir,
     _utcnow,
-    _write_results_csv,
 )
 from app.training.data import enumerate_training_dataset_image_records
 
 logger = logging.getLogger("mltrace.testing")
 
-_COMMIT_EVERY = 25
+# Images per (GPU-)batched reconstruction. Bounded RAM: only this many images
+# are decoded/preprocessed and held at once.
+_INFER_BATCH = 16
+
+_CSV_HEADER = [
+    "position", "timestamp", "image_path", "score", "full_mse",
+    "roi_mse", "tile_scores_json", "width", "height",
+]
 
 
 class AbortedError(Exception):
@@ -64,6 +74,8 @@ def run_testing(run_id: int, abort_event: threading.Event | None = None) -> None
         run.device = _resolve_device(run.gpu_index)
         run.error_message = None
         db.commit()
+        log_device_diagnostics(logger, run.gpu_index)
+        logger.info("Testing run %s started on %s", run_id, run.device)
 
         try:
             training_run = _load_training_run(db, run.training_run_id)
@@ -83,54 +95,92 @@ def run_testing(run_id: int, abort_event: threading.Event | None = None) -> None
             db.commit()
 
             evaluator = ArtifactEvaluator(training_run)
-            result_rows: list[models.TestingRunResult] = []
-            scores: list[float] = []
-            full_scores: list[float] = []
-            roi_scores: list[float] = []
 
-            for position, record in enumerate(records):
-                if abort_event.is_set():
-                    raise AbortedError()
-                image = run_pipeline_array(graph, record.file_path)
-                full_mse, roi_mse, width, height, tile_scores = evaluator.score(image, roi)
-                score = roi_mse if roi_mse is not None else full_mse
-                scores.append(score)
-                full_scores.append(full_mse)
-                if roi_mse is not None:
-                    roi_scores.append(roi_mse)
-                row = models.TestingRunResult(
-                    testing_run_id=run.id,
-                    position=position,
-                    image_path=record.file_path,
-                    timestamp=record.timestamp_parsed,
-                    score=score,
-                    full_mse=full_mse,
-                    roi_mse=roi_mse,
-                    tile_scores=tile_scores,
-                    width=width,
-                    height=height,
-                )
-                db.add(row)
-                result_rows.append(row)
-                if (position + 1) % _COMMIT_EVERY == 0:
-                    run.image_count = position + 1
-                    db.commit()
+            def _prep(record):
+                return run_pipeline_array(graph, record.file_path)
 
-            db.flush()
-            results_path = _write_results_csv(run, result_rows)
+            # Streaming, batched inference: preprocess a batch (parallel), score it
+            # with one reconstruction pass, write rows via bulk insert + the CSV
+            # incrementally, and keep only running aggregates. Nothing accumulates
+            # in RAM, so this scales to hundreds of thousands of images.
+            results_path = _testing_run_dir(run.id) / "reconstruction_errors.csv"
+            results_path.parent.mkdir(parents=True, exist_ok=True)
+            total = len(records)
+            prep_workers = min(8, os.cpu_count() or 1)
+
+            count = 0
+            score_sum = full_sum = roi_sum = 0.0
+            roi_count = 0
+            score_min: float | None = None
+            score_max: float | None = None
+
+            with open(results_path, "w", encoding="utf-8", newline="") as handle:
+                writer = csv.writer(handle)
+                writer.writerow(_CSV_HEADER)
+                with ThreadPoolExecutor(max_workers=prep_workers) as pool:
+                    for start in range(0, total, _INFER_BATCH):
+                        if abort_event.is_set():
+                            raise AbortedError()
+                        batch = records[start : start + _INFER_BATCH]
+                        images = list(pool.map(_prep, batch))
+                        scored = evaluator.score_batch(images, roi)
+                        mappings = []
+                        for offset, (record, (full_mse, roi_mse, width, height, tile_scores)) in enumerate(
+                            zip(batch, scored)
+                        ):
+                            position = start + offset
+                            score = roi_mse if roi_mse is not None else full_mse
+                            mappings.append({
+                                "testing_run_id": run.id,
+                                "position": position,
+                                "image_path": record.file_path,
+                                "timestamp": record.timestamp_parsed,
+                                "score": score,
+                                "full_mse": full_mse,
+                                "roi_mse": roi_mse,
+                                "tile_scores": tile_scores,
+                                "width": width,
+                                "height": height,
+                            })
+                            writer.writerow([
+                                position,
+                                record.timestamp_parsed.isoformat(),
+                                record.file_path,
+                                score,
+                                full_mse,
+                                "" if roi_mse is None else roi_mse,
+                                "" if tile_scores is None else json.dumps(tile_scores, sort_keys=True),
+                                width,
+                                height,
+                            ])
+                            count += 1
+                            score_sum += score
+                            full_sum += full_mse
+                            score_min = score if score_min is None else min(score_min, score)
+                            score_max = score if score_max is None else max(score_max, score)
+                            if roi_mse is not None:
+                                roi_sum += roi_mse
+                                roi_count += 1
+                        db.bulk_insert_mappings(models.TestingRunResult, mappings)
+                        run.image_count = start + len(batch)
+                        db.commit()
+                        if (start // _INFER_BATCH) % 20 == 0:
+                            rate = count / max(1e-6, time.perf_counter() - started)
+                            logger.info("Testing run %s: %s/%s (%.0f img/s)", run_id, count, total, rate)
+
             run.status = "finished"
             run.ended_at = _utcnow()
             run.duration_seconds = round(time.perf_counter() - started, 3)
-            run.image_count = len(result_rows)
-            run.score_mean = float(np.mean(scores))
-            run.score_min = float(np.min(scores))
-            run.score_max = float(np.max(scores))
-            run.full_mse_mean = float(np.mean(full_scores))
-            run.roi_mse_mean = float(np.mean(roi_scores)) if roi_scores else None
+            run.image_count = count
+            run.score_mean = score_sum / count if count else None
+            run.score_min = score_min
+            run.score_max = score_max
+            run.full_mse_mean = full_sum / count if count else None
+            run.roi_mse_mean = roi_sum / roi_count if roi_count else None
             run.results_path = str(results_path)
             run.results_size_bytes = results_path.stat().st_size
             db.commit()
-            logger.info("Testing run %s finished (%s images)", run_id, len(result_rows))
+            logger.info("Testing run %s finished (%s images)", run_id, count)
         except AbortedError:
             db.rollback()
             run = db.get(models.TestingRun, run_id)

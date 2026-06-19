@@ -17,6 +17,10 @@ def main() -> int:
         return 2
     run_id = int(sys.argv[1])
 
+    from app.logging_setup import configure_worker_logging
+
+    configure_worker_logging()
+
     abort_event = threading.Event()
     signal.signal(signal.SIGTERM, lambda *_: abort_event.set())
     signal.signal(signal.SIGINT, lambda *_: abort_event.set())

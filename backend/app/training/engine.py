@@ -23,6 +23,7 @@ import numpy as np
 
 from app import models
 from app.database import SessionLocal, data_dir
+from app.logging_setup import log_device_diagnostics
 from app.modeling.forward import build_sequential_modules
 from app.preprocessing.pipeline import run_pipeline_array
 from app.schemas import PreprocessingGraph
@@ -156,9 +157,23 @@ def _build_model(torch, configuration: models.MethodConfiguration, *, determinis
     return (VaeModule() if is_vae else AeModule()), is_vae
 
 
-def _iter_batches(indices: list[int], batch_size: int):
-    for start in range(0, len(indices), batch_size):
-        yield indices[start : start + batch_size]
+class _PreprocessedImageDataset:
+    """Lazy map-style dataset: preprocesses one image per access (bounded RAM).
+
+    Defined at module level (picklable) so a torch ``DataLoader`` can parallelize
+    preprocessing across worker processes. ``__getitem__`` returns a float32 CHW
+    numpy array; the default collate turns a batch into a float tensor.
+    """
+
+    def __init__(self, image_paths: list[str], graph: PreprocessingGraph) -> None:
+        self.image_paths = image_paths
+        self.graph = graph
+
+    def __len__(self) -> int:
+        return len(self.image_paths)
+
+    def __getitem__(self, index: int) -> np.ndarray:
+        return _to_nchw(run_pipeline_array(self.graph, self.image_paths[index]))
 
 
 def train_gradient(
@@ -171,22 +186,21 @@ def train_gradient(
     artifact_path: Path,
     abort_event: threading.Event,
 ) -> int:
-    """Train an autoencoder / VAE and persist per-epoch metrics + final weights."""
+    """Train an autoencoder / VAE and persist per-epoch metrics + final weights.
+
+    Images are streamed lazily through a ``DataLoader`` (preprocessed on the fly,
+    a few batches in RAM at a time) so the run scales to hundreds of thousands of
+    large images without materializing the whole set in host memory. Mixed
+    precision (AMP) is used on CUDA.
+    """
+    import os
+
     import torch
+    from torch.utils.data import DataLoader, Subset
 
-    # Preprocess every image once and stack into a single NCHW tensor.
-    arrays = [_to_nchw(run_pipeline_array(graph, path)) for path in image_paths]
-    if not arrays:
+    if not image_paths:
         raise ValueError("Training set produced no images to train on.")
-    data = torch.from_numpy(np.stack(arrays, axis=0))
-    sample_count = data.shape[0]
-
-    # Deterministic train/val split.
-    rng = np.random.default_rng(SPLIT_SEED)
-    order = list(rng.permutation(sample_count))
-    val_count = max(1, int(sample_count * VAL_HOLDOUT_FRACTION)) if sample_count > 1 else 0
-    val_idx = order[:val_count]
-    train_idx = order[val_count:] or order
+    sample_count = len(image_paths)
 
     is_vae = configuration.builder_kind == "sequential_variational_autoencoder"
     kl_weight = float(configuration.method_config.get("kl_weight", 1.0)) if is_vae else 0.0
@@ -194,21 +208,50 @@ def train_gradient(
     epochs = int(training_parameters.get("epochs", 1))
     batch_size = max(1, int(training_parameters.get("batch_size", 16)))
     learning_rate = float(training_parameters.get("learning_rate", 0.001))
+    default_workers = min(8, os.cpu_count() or 1)
+    num_workers = max(0, int(training_parameters.get("num_workers", default_workers)))
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     # With CUDA_VISIBLE_DEVICES pinned to one GPU, cuda:0 maps to that physical
     # index; fall back to CPU when no CUDA device is available.
     run.device = f"GPU:{run.gpu_index}" if device.type == "cuda" and run.gpu_index is not None else "CPU"
+    run.epochs_total = epochs
     db.commit()
-    logger.info("Training on device=%s, samples=%s (train=%s/val=%s)", run.device, sample_count, len(train_idx), len(val_idx))
+    log_device_diagnostics(logger, run.gpu_index)
+
+    # Deterministic train/val split over indices (data itself is loaded lazily).
+    rng = np.random.default_rng(SPLIT_SEED)
+    order = [int(i) for i in rng.permutation(sample_count)]
+    val_count = max(1, int(sample_count * VAL_HOLDOUT_FRACTION)) if sample_count > 1 else 0
+    val_idx = order[:val_count]
+    train_idx = order[val_count:] or order
+
+    dataset = _PreprocessedImageDataset(image_paths, graph)
+    pin = device.type == "cuda"
+    loader_kwargs: dict = {"num_workers": num_workers, "pin_memory": pin}
+    if num_workers > 0:
+        loader_kwargs.update(persistent_workers=True, prefetch_factor=2)
+    train_loader = DataLoader(Subset(dataset, train_idx), batch_size=batch_size, shuffle=True, **loader_kwargs)
+    val_loader = (
+        DataLoader(Subset(dataset, val_idx), batch_size=batch_size, shuffle=False, **loader_kwargs)
+        if val_idx
+        else None
+    )
+    logger.info(
+        "Training device=%s samples=%s (train=%s/val=%s) batch=%s workers=%s",
+        run.device, sample_count, len(train_idx), len(val_idx), batch_size, num_workers,
+    )
 
     model, is_vae = _build_model(torch, configuration)
     model.to(device)
-    # Materialize lazy parameters (and VAE heads) before building the optimizer.
+    # Materialize lazy parameters (and VAE heads) with one real sample.
+    sample0 = torch.from_numpy(np.ascontiguousarray(dataset[train_idx[0]]))[None].to(device)
     with torch.no_grad():
-        model(data[:1].to(device))
+        model(sample0)
     optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
     recon_loss_fn = _loss_fn(torch, loss_name)
+    use_amp = device.type == "cuda"
+    scaler = torch.amp.GradScaler("cuda", enabled=use_amp)
 
     def compute_loss(xb):
         recon, extra = model(xb)
@@ -219,34 +262,43 @@ def train_gradient(
             loss = loss + kl_weight * kl
         return loss
 
-    run.epochs_total = epochs
-    db.commit()
-
     for epoch in range(1, epochs + 1):
         if abort_event.is_set():
             raise AbortedError()
 
         model.train()
-        rng.shuffle(train_idx)
         train_total, train_batches = 0.0, 0
-        for batch in _iter_batches(train_idx, batch_size):
-            xb = data[batch].to(device)
-            optimizer.zero_grad()
-            loss = compute_loss(xb)
-            loss.backward()
-            optimizer.step()
+        epoch_started = time.perf_counter()
+        for xb in train_loader:
+            if abort_event.is_set():
+                raise AbortedError()
+            xb = xb.to(device, non_blocking=pin)
+            optimizer.zero_grad(set_to_none=True)
+            with torch.amp.autocast(device.type, enabled=use_amp):
+                loss = compute_loss(xb)
+            scaler.scale(loss).backward()
+            scaler.step(optimizer)
+            scaler.update()
             train_total += float(loss.item())
             train_batches += 1
+            if train_batches % 50 == 0:
+                images_seen = train_batches * batch_size
+                rate = images_seen / max(1e-6, time.perf_counter() - epoch_started)
+                logger.info(
+                    "epoch %s batch %s avg_loss=%.5f (%.0f img/s)",
+                    epoch, train_batches, train_total / train_batches, rate,
+                )
         train_loss = train_total / max(1, train_batches)
 
         val_loss: float | None = None
-        if val_idx:
+        if val_loader is not None:
             model.eval()
             with torch.no_grad():
                 val_total, val_batches = 0.0, 0
-                for batch in _iter_batches(val_idx, batch_size):
-                    xb = data[batch].to(device)
-                    val_total += float(compute_loss(xb).item())
+                for xb in val_loader:
+                    xb = xb.to(device, non_blocking=pin)
+                    with torch.amp.autocast(device.type, enabled=use_amp):
+                        val_total += float(compute_loss(xb).item())
                     val_batches += 1
                 val_loss = val_total / max(1, val_batches)
 
@@ -261,6 +313,10 @@ def train_gradient(
         if val_loss is not None and (run.best_val_loss is None or val_loss < run.best_val_loss):
             run.best_val_loss = val_loss
         db.commit()
+        logger.info(
+            "epoch %s/%s train_loss=%.5f val_loss=%s",
+            epoch, epochs, train_loss, f"{val_loss:.5f}" if val_loss is not None else "n/a",
+        )
 
     torch.save(model.state_dict(), artifact_path)
     return sample_count
