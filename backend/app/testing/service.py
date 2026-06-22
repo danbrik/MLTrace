@@ -42,7 +42,7 @@ from app.training.engine import _build_model, _to_nchw
 from app.training.scheduler import scheduler
 
 
-CURRENT_HEATMAP_RENDER_VERSION = 3
+CURRENT_HEATMAP_RENDER_VERSION = 4
 
 
 def _utcnow() -> datetime:
@@ -721,8 +721,11 @@ def _heatmap_overlay(
     normalized to its own maximum."""
     settings = _visualization_config(config)
     magnitude = np.abs(error_map)
-    ceiling = float(vmax) if vmax is not None else (float(np.max(magnitude)) if magnitude.size else 0.0)
-    if settings.max_clip_enabled:
+    if settings.fixed_ceiling_enabled:
+        ceiling = settings.fixed_ceiling
+    else:
+        ceiling = float(vmax) if vmax is not None else (float(np.max(magnitude)) if magnitude.size else 0.0)
+    if settings.max_clip_enabled and not settings.fixed_ceiling_enabled:
         ceiling *= settings.max_clip
     if ceiling <= 0:
         normalized = np.zeros_like(error_map, dtype=np.float64)

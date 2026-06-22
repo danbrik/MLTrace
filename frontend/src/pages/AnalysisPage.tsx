@@ -122,6 +122,8 @@ function defaultHeatmapConfig(): HeatmapVisualizationConfig {
     max_clip_enabled: false,
     max_clip: 0.33,
     max_opacity: 0.55,
+    fixed_ceiling_enabled: false,
+    fixed_ceiling: 1,
     signed_deviations: false,
     positive_weight: 1,
     negative_weight: 1,
@@ -136,6 +138,8 @@ function heatmapConfigKey(config: HeatmapVisualizationConfig): string {
     Number(config.max_clip_enabled),
     config.max_clip,
     config.max_opacity,
+    Number(config.fixed_ceiling_enabled),
+    config.fixed_ceiling,
     Number(config.signed_deviations),
     config.positive_weight,
     config.negative_weight,
@@ -533,7 +537,11 @@ function HeatmapPlot({
     if (!heatmap?.error_matrix) return null;
     const config = heatmap.visualization_config;
     const clipFactor = config.max_clip_enabled ? config.max_clip : 1;
-    const ceiling = heatmap.max_error > 0 ? heatmap.max_error * clipFactor : 1;
+    const ceiling = config.fixed_ceiling_enabled
+      ? config.fixed_ceiling
+      : heatmap.max_error > 0
+        ? heatmap.max_error * clipFactor
+        : 1;
     return heatmap.error_matrix.map((row) =>
       row.map((value) =>
         config.signed_deviations
@@ -654,9 +662,11 @@ function HeatmapPlot({
           </Badge>
         )}
         <Badge variant="light" color="gray">
-          {plot.heatmapConfig.max_clip_enabled
-            ? `max clip ${Math.round(plot.heatmapConfig.max_clip * 100)}%`
-            : `opacity ${Math.round(plot.heatmapConfig.max_opacity * 100)}%`}
+          {plot.heatmapConfig.fixed_ceiling_enabled
+            ? `ceiling ${formatMetric(plot.heatmapConfig.fixed_ceiling)}`
+            : plot.heatmapConfig.max_clip_enabled
+              ? `max clip ${Math.round(plot.heatmapConfig.max_clip * 100)}%`
+              : `opacity ${Math.round(plot.heatmapConfig.max_opacity * 100)}%`}
         </Badge>
       </Group>
       <div className="analysis-heatmap-wrap">
@@ -748,6 +758,8 @@ function HeatmapVideo({ plot, results }: { plot: AnalysisPlot; results: Combined
   const [frameIndex, setFrameIndex] = useState(0);
   const [playing, setPlaying] = useState(false);
   const [fps, setFps] = useState(8);
+  const fixedCeiling = plot.heatmapConfig.fixed_ceiling_enabled;
+  const effectiveScaleMode: 'per_frame' | 'shared' = fixedCeiling ? 'per_frame' : scaleMode;
 
   // Reset whenever the plot's range/source changes.
   useEffect(() => {
@@ -755,7 +767,7 @@ function HeatmapVideo({ plot, results }: { plot: AnalysisPlot; results: Combined
     setVideoError(null);
     setFrameIndex(0);
     setPlaying(false);
-  }, [plot.id, params?.testing_run_id, params?.start_timestamp, params?.end_timestamp, params?.stride, params?.visualizationConfigKey, scaleMode]);
+  }, [plot.id, params?.testing_run_id, params?.start_timestamp, params?.end_timestamp, params?.stride, params?.visualizationConfigKey, effectiveScaleMode]);
 
   const polling = job != null && (job.status === 'queued' || job.status === 'running');
   useEffect(() => {
@@ -791,7 +803,7 @@ function HeatmapVideo({ plot, results }: { plot: AnalysisPlot; results: Combined
         start_timestamp: params.start_timestamp,
         end_timestamp: params.end_timestamp,
         stride: params.stride,
-        scale_mode: scaleMode,
+        scale_mode: effectiveScaleMode,
         visualization_config: params.visualizationConfig,
       });
       setJob(created);
@@ -823,18 +835,21 @@ function HeatmapVideo({ plot, results }: { plot: AnalysisPlot; results: Combined
           label="Color scale"
           size="xs"
           w={170}
-          data={[
-            { value: 'per_frame', label: 'Per-frame (auto)' },
-            { value: 'shared', label: 'Shared (comparable)' },
-          ]}
-          value={scaleMode}
-          disabled={polling}
+          data={fixedCeiling
+            ? [{ value: 'fixed', label: 'Fixed ceiling' }]
+            : [
+                { value: 'per_frame', label: 'Per-frame (auto)' },
+                { value: 'shared', label: 'Shared (comparable)' },
+              ]}
+          value={fixedCeiling ? 'fixed' : scaleMode}
+          disabled={fixedCeiling || polling}
           onChange={(value) => value && setScaleMode(value as 'per_frame' | 'shared')}
         />
         <Badge variant="light" color="gray">{params.testingRunName}</Badge>
         <Badge variant="light">stride {params.stride}</Badge>
         <Badge variant="light" color="blue">{plot.heatmapConfig.error_mode} error</Badge>
         {plot.heatmapConfig.signed_deviations && <Badge variant="light" color="grape">signed</Badge>}
+        {fixedCeiling && <Badge variant="light" color="gray">ceiling {formatMetric(plot.heatmapConfig.fixed_ceiling)}</Badge>}
         {!ready && (
           <Button size="compact-sm" onClick={startJob} loading={starting || polling} disabled={polling}>
             {polling ? 'Rendering…' : 'Render heatmap video'}
@@ -926,8 +941,12 @@ function HeatmapVideo({ plot, results }: { plot: AnalysisPlot; results: Combined
               <Text size="xs" c="dimmed">1</Text>
             </Group>
             <Text size="xs" c="dimmed" ta="center">
-              Relative reconstruction error · {job.scale_mode === 'shared' ? 'shared scale' : 'per-frame scale'} · absolute max{' '}
-              {job.scale_mode === 'shared'
+              Relative reconstruction error · {job.visualization_config.fixed_ceiling_enabled
+                ? `fixed ceiling ${formatMetric(job.visualization_config.fixed_ceiling)}`
+                : job.scale_mode === 'shared'
+                  ? 'shared scale'
+                  : 'per-frame scale'} · absolute max{' '}
+              {job.scale_mode === 'shared' && !job.visualization_config.fixed_ceiling_enabled
                 ? formatMetric(job.global_vmax)
                 : formatMetric(job.frame_max_errors?.[frameIndex])}
             </Text>
@@ -1819,22 +1838,30 @@ export function AnalysisPage({ active = true }: { active?: boolean }) {
                   <Text fw={600} size="sm">Visibility</Text>
                   <SimpleGrid cols={{ base: 1, md: 3 }}>
                     <Switch
+                      label={<InfoLabel label="Fixed ceiling" info="Uses this absolute error value as relative 1.0. Tiny residual errors therefore remain faint instead of being stretched to full visibility. The value uses the selected error metric's units." />}
+                      checked={draft.heatmapConfig.fixed_ceiling_enabled}
+                      onChange={(event) => {
+                        const checked = event.currentTarget.checked;
+                        updateHeatmapConfig({
+                          fixed_ceiling_enabled: checked,
+                          max_clip_enabled: checked ? false : draft.heatmapConfig.max_clip_enabled,
+                        });
+                      }}
+                    />
+                    <Switch
                       label={<InfoLabel label="Max clip" info="When enabled, errors at max clip × the strongest current error already reach full opacity. At 0.33, the strongest third saturates like the legacy visualization." />}
                       checked={draft.heatmapConfig.max_clip_enabled}
-                      onChange={(event) => updateHeatmapConfig({ max_clip_enabled: event.currentTarget.checked })}
+                      onChange={(event) => {
+                        const checked = event.currentTarget.checked;
+                        updateHeatmapConfig({
+                          max_clip_enabled: checked,
+                          fixed_ceiling_enabled: checked ? false : draft.heatmapConfig.fixed_ceiling_enabled,
+                        });
+                      }}
                     />
-                    {draft.heatmapConfig.max_clip_enabled ? (
+                    {!draft.heatmapConfig.max_clip_enabled && (
                       <NumberInput
-                        label={<InfoLabel label="Max clip (%)" info="Relative fraction of the strongest remaining error at which the overlay becomes fully opaque." />}
-                        min={1}
-                        max={100}
-                        step={1}
-                        value={Math.round(draft.heatmapConfig.max_clip * 100)}
-                        onChange={(value) => updateHeatmapConfig({ max_clip: valueAsNumber(value, 33) / 100 })}
-                      />
-                    ) : (
-                      <NumberInput
-                        label={<InfoLabel label="Maximum opacity (%)" info="Maximum overlay coverage when max clip is disabled. The previous MLTrace behavior used 55%." />}
+                        label={<InfoLabel label="Maximum opacity (%)" info="Maximum overlay coverage when max clip is disabled. This remains configurable with fixed ceiling; the previous MLTrace behavior used 55%." />}
                         min={0}
                         max={100}
                         step={5}
@@ -1843,6 +1870,30 @@ export function AnalysisPage({ active = true }: { active?: boolean }) {
                       />
                     )}
                   </SimpleGrid>
+                  {(draft.heatmapConfig.fixed_ceiling_enabled || draft.heatmapConfig.max_clip_enabled) && (
+                    <SimpleGrid cols={{ base: 1, md: 3 }}>
+                      {draft.heatmapConfig.fixed_ceiling_enabled && (
+                        <NumberInput
+                          label={<InfoLabel label="Ceiling value" info="Error magnitude mapped to relative 1.0. For absolute error this is a direct pixel difference; for squared error it is a squared pixel difference." />}
+                          min={Number.EPSILON}
+                          step={0.01}
+                          decimalScale={8}
+                          value={draft.heatmapConfig.fixed_ceiling}
+                          onChange={(value) => updateHeatmapConfig({ fixed_ceiling: valueAsNumber(value, 1) })}
+                        />
+                      )}
+                      {draft.heatmapConfig.max_clip_enabled && (
+                        <NumberInput
+                          label={<InfoLabel label="Max clip (%)" info="Relative fraction of the strongest remaining error at which the overlay becomes fully opaque." />}
+                          min={1}
+                          max={100}
+                          step={1}
+                          value={Math.round(draft.heatmapConfig.max_clip * 100)}
+                          onChange={(value) => updateHeatmapConfig({ max_clip: valueAsNumber(value, 33) / 100 })}
+                        />
+                      )}
+                    </SimpleGrid>
+                  )}
                 </Stack>
               )}
               {finishedRuns.length === 0 && <Alert color="blue">No finished testing runs with images are available yet.</Alert>}

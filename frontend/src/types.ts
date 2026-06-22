@@ -608,6 +608,8 @@ export type HeatmapVisualizationConfig = {
   max_clip_enabled: boolean;
   max_clip: number;
   max_opacity: number;
+  fixed_ceiling_enabled: boolean;
+  fixed_ceiling: number;
   signed_deviations: boolean;
   positive_weight: number;
   negative_weight: number;

@@ -661,9 +661,17 @@ class HeatmapVisualizationConfig(BaseModel):
     max_clip_enabled: bool = False
     max_clip: float = Field(default=0.33, gt=0.0, le=1.0)
     max_opacity: float = Field(default=0.55, ge=0.0, le=1.0)
+    fixed_ceiling_enabled: bool = False
+    fixed_ceiling: float = Field(default=1.0, gt=0.0)
     signed_deviations: bool = False
     positive_weight: float = Field(default=1.0, ge=0.0)
     negative_weight: float = Field(default=1.0, ge=0.0)
+
+    @model_validator(mode="after")
+    def validate_normalization_mode(self):
+        if self.fixed_ceiling_enabled and self.max_clip_enabled:
+            raise ValueError("Fixed ceiling and max clip cannot be enabled at the same time.")
+        return self
 
 
 class HeatmapRunCreate(BaseModel):

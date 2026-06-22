@@ -528,7 +528,7 @@ class HeatmapRun(Base):
     heatmap_image_data_url: Mapped[str] = mapped_column(Text, nullable=False)
     visualization_config: Mapped[dict] = mapped_column(json_type(), nullable=False, default=dict)
     config_signature: Mapped[str] = mapped_column(String(64), nullable=False, default="")
-    render_version: Mapped[int] = mapped_column(Integer, nullable=False, default=3)
+    render_version: Mapped[int] = mapped_column(Integer, nullable=False, default=4)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=False), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=False), server_default=func.now(), onupdate=func.now()
@@ -573,7 +573,7 @@ class HeatmapRangeRun(Base):
     global_vmax: Mapped[float | None] = mapped_column(Float)
     frame_max_errors: Mapped[list | None] = mapped_column(json_type())
     visualization_config: Mapped[dict] = mapped_column(json_type(), nullable=False, default=dict)
-    render_version: Mapped[int] = mapped_column(Integer, nullable=False, default=3)
+    render_version: Mapped[int] = mapped_column(Integer, nullable=False, default=4)
 
     # Progress counter (done_count / frame_count) + output location.
     frame_count: Mapped[int | None] = mapped_column(Integer)

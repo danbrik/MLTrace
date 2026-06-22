@@ -147,7 +147,9 @@ def run_heatmap_range(run_id: int, abort_event: threading.Event | None = None) -
             graph = PreprocessingGraph.model_validate(
                 training_run.training_pipeline.preprocessing_pipeline.graph
             )
-            shared = run.scale_mode == "shared"
+            # A fixed ceiling already provides one stable scale for every frame;
+            # the shared two-pass renderer would only repeat work.
+            shared = run.scale_mode == "shared" and not visualization_config.fixed_ceiling_enabled
             tmp_dir = frames_dir / "_err"
             if shared:
                 tmp_dir.mkdir(exist_ok=True)

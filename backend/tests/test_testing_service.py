@@ -2,6 +2,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 import numpy as np
+import pytest
 from PIL import Image
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import sessionmaker
@@ -97,6 +98,48 @@ def test_heatmap_max_clip_saturates_while_opacity_mode_stays_bounded() -> None:
     assert clipped[0, 1, 3] == 255
     assert clipped[0, 2, 3] == 255
     assert bounded[0, 2, 3] == 51
+
+
+def test_fixed_ceiling_does_not_stretch_tiny_errors() -> None:
+    error = np.array([[-1.0, -0.0001, 0.0001, 0.5, 1.0, 2.0]], dtype=np.float64)
+    config = HeatmapVisualizationConfig(
+        fixed_ceiling_enabled=True,
+        fixed_ceiling=1.0,
+        max_opacity=0.55,
+        signed_deviations=True,
+    )
+    overlay = _heatmap_overlay(error, config=config)
+
+    assert overlay[0, 1, 3] == 0
+    assert overlay[0, 2, 3] == 0
+    assert overlay[0, 0, 3] == overlay[0, 4, 3]
+    assert overlay[0, 3, 3] < overlay[0, 4, 3]
+    assert overlay[0, 4, 3] == overlay[0, 5, 3]
+
+
+def test_fixed_ceiling_uses_selected_error_units() -> None:
+    source = np.array([[0.5]], dtype=np.float32)
+    reconstruction = np.array([[0.0]], dtype=np.float32)
+    absolute_config = HeatmapVisualizationConfig(
+        error_mode="absolute", fixed_ceiling_enabled=True, fixed_ceiling=1.0
+    )
+    squared_config = HeatmapVisualizationConfig(
+        error_mode="squared", fixed_ceiling_enabled=True, fixed_ceiling=1.0
+    )
+
+    absolute_overlay = _heatmap_overlay(
+        _pixel_error_map(source, reconstruction, absolute_config), config=absolute_config
+    )
+    squared_overlay = _heatmap_overlay(
+        _pixel_error_map(source, reconstruction, squared_config), config=squared_config
+    )
+
+    assert absolute_overlay[0, 0, 3] > squared_overlay[0, 0, 3]
+
+
+def test_fixed_ceiling_and_max_clip_are_mutually_exclusive() -> None:
+    with pytest.raises(ValueError, match="Fixed ceiling and max clip"):
+        HeatmapVisualizationConfig(fixed_ceiling_enabled=True, max_clip_enabled=True)
 
 
 def seed_finished_mean_image_run(db, tmp_path: Path):

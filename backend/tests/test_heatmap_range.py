@@ -104,11 +104,20 @@ def test_heatmap_range_renders_frames_and_dedups(tmp_path: Path, monkeypatch) ->
                 end_timestamp=datetime(2026, 4, 1, 12, 0, 20),
                 stride=1,
                 scale_mode="shared",
-                visualization_config=HeatmapVisualizationConfig(error_mode="absolute"),
+                visualization_config=HeatmapVisualizationConfig(
+                    error_mode="absolute",
+                    fixed_ceiling_enabled=True,
+                    fixed_ceiling=20.0,
+                ),
             ),
             wake_scheduler=False,
         )
         assert different_config.id != run.id
+        heatmap_engine.run_heatmap_range(different_config.id)
+        fixed_run = db.get(models.HeatmapRangeRun, different_config.id)
+        db.refresh(fixed_run)
+        assert fixed_run.status == "finished"
+        assert not (data_root / "heatmap_ranges" / str(fixed_run.id) / "_err").exists()
     finally:
         db.close()
 
