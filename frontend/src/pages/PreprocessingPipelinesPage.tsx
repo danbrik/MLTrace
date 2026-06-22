@@ -793,6 +793,13 @@ export function PreprocessingPipelinesPage() {
     const ownedKeys = controlId ? CONTROL_REGISTRY[controlId]?.ownedKeys ?? [] : [];
     const fields = Object.entries(step.config_schema.properties)
       .filter(([key]) => !ownedKeys.includes(key))
+      .filter(([, property]) =>
+        Object.entries(property.visible_when ?? {}).every(([dependency, expected]) => {
+          const dependencyProperty = step.config_schema.properties[dependency];
+          const actual = node.data.config[dependency] ?? dependencyProperty?.default;
+          return actual === expected;
+        }),
+      )
       .map(([key, property]) => renderConfigField(node, key, property))
       .filter(Boolean);
 

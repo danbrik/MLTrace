@@ -84,6 +84,23 @@ sure the frontend has a matching control registered. Existing controls include:
 Avoid relying on UI-only state. A step must work in preview, training, testing,
 and heatmap execution.
 
+## Preview Display Contract
+
+Preprocessing previews use an absolute, dtype-based display scale rather than
+per-image min/max stretching. `uint8` is displayed unchanged, unsigned integers
+use their full dtype range, signed integers map their complete dtype range, and
+floating-point arrays are expected in `[0, 1]` and clipped for display. This
+only affects the PNG shown in the UI; the ndarray passed to the next step is not
+modified. The explicit `normalize_for_preview` step is different: as a graph
+node it changes the real pipeline output and therefore also affects training.
+
+`warp_perspective` supports `output_shape_mode`:
+
+- `preserve_rectangle` derives width and height from the ordered quadrilateral
+  side lengths and avoids forcing non-square regions into a square.
+- `manual` uses configured `output_width` and `output_height` and remains useful
+  for legacy-compatible output geometry.
+
 ## Performance Rules
 
 Training may execute a step millions of times. Keep `apply(...)` lean:

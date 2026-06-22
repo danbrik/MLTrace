@@ -1,12 +1,13 @@
 import { Badge, Group, Stack, Text } from '@mantine/core';
 import { useEffect, useState } from 'react';
 
-import { defaultPoints, pointFromEvent, type Point } from './geometry';
+import { defaultPoints, pointFromEvent, rectifiedQuadSize, type Point } from './geometry';
 import type { StepControl, StepControlProps } from './types';
 
 function PointPickerControl({ inputImage, config, disabled, onChange }: StepControlProps) {
   const [draggingPoint, setDraggingPoint] = useState<number | null>(null);
   const points = (config.source_points as Point[] | undefined) ?? [];
+  const automaticSize = config.output_shape_mode === 'preserve_rectangle' ? rectifiedQuadSize(points) : null;
 
   // Initialise the four source points in the input image's coordinate space once available.
   useEffect(() => {
@@ -79,6 +80,11 @@ function PointPickerControl({ inputImage, config, disabled, onChange }: StepCont
         ))}
       </div>
       <Group gap="xs">
+        {automaticSize && (
+          <Badge color="blue" variant="light">
+            Auto output: {automaticSize.width}x{automaticSize.height}
+          </Badge>
+        )}
         {points.map((point, index) => (
           <Badge key={`${point.x}-${point.y}-${index}`} variant="light">
             {index + 1}: {point.x}, {point.y}

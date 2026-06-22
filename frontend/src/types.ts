@@ -140,6 +140,7 @@ export type PreprocessingStepDefinition = {
         maximum?: number;
         ui_control?: string;
         default_from?: 'input_width' | 'input_height';
+        visible_when?: Record<string, unknown>;
       }
     >;
   };

@@ -170,13 +170,41 @@ def encode_png_data_url(image: np.ndarray) -> str:
     return f"data:image/png;base64,{encoded}"
 
 
+def encode_absolute_preview_png_data_url(image: np.ndarray) -> str:
+    """Encode a preprocessing preview without per-image contrast stretching."""
+    array = np.asarray(image)
+    if array.dtype == np.uint8:
+        display = array
+    elif np.issubdtype(array.dtype, np.bool_):
+        display = array.astype(np.uint8) * 255
+    elif np.issubdtype(array.dtype, np.integer):
+        info = np.iinfo(array.dtype)
+        values = array.astype(np.float64)
+        if info.min < 0:
+            values = (values - info.min) / float(info.max - info.min)
+        else:
+            values = values / float(info.max)
+        display = np.rint(np.clip(values, 0.0, 1.0) * 255.0).astype(np.uint8)
+    elif np.issubdtype(array.dtype, np.floating):
+        values = np.nan_to_num(array.astype(np.float64), nan=0.0, posinf=1.0, neginf=0.0)
+        display = np.rint(np.clip(values, 0.0, 1.0) * 255.0).astype(np.uint8)
+    else:
+        raise ValueError(f"Unsupported preprocessing preview dtype: {array.dtype}.")
+
+    pil_image = Image.fromarray(display)
+    buffer = io.BytesIO()
+    pil_image.save(buffer, format="PNG")
+    encoded = base64.b64encode(buffer.getvalue()).decode("ascii")
+    return f"data:image/png;base64,{encoded}"
+
+
 def execute_with_previews(
     graph: PreprocessingGraph, source_image_path: str
 ) -> tuple[list[PreprocessingPreviewImage], np.ndarray]:
     """Run the pipeline on one image, returning per-step previews and the final array.
 
     The final numpy array is what downstream consumers (e.g. a model forward
-    pass) operate on; the previews are display-normalized PNG snapshots.
+    pass) operate on; preview PNGs use an absolute dtype-based display scale.
     """
     compiled = compile_pipeline(graph)
     context = {"source_image_path": source_image_path}
@@ -200,7 +228,7 @@ def execute_with_previews(
                 dtype=dtype,
                 value_min=value_min,
                 value_max=value_max,
-                image_data_url=encode_png_data_url(image),
+                image_data_url=encode_absolute_preview_png_data_url(image),
             )
         )
 

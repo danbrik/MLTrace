@@ -65,6 +65,23 @@ artifacts. Training/testing later use the same saved graph, but the backend
 compiles it before repeated execution so the UI format remains flexible while
 the hot path stays efficient.
 
+Preview PNGs use an absolute dtype scale. A `uint16` value therefore has the
+same displayed brightness in every image; the browser preview no longer expands
+each image's own minimum and maximum to black and white. Raw min/max metadata is
+still shown alongside the preview.
+
+Schema properties may declare `visible_when`, for example:
+
+```python
+"output_width": {
+    "type": "integer",
+    "visible_when": {"output_shape_mode": "manual"},
+}
+```
+
+The generic field renderer only shows the property while all declared config
+dependencies match. This keeps mode-specific fields out of page-level code.
+
 ## When Frontend Code Is Needed
 
 Backend-only is enough for normal numeric/text/select/switch config fields.

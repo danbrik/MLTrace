@@ -31,6 +31,36 @@ export function defaultPoints(width: number, height: number): Point[] {
   ];
 }
 
+export function orderQuadPoints(points: Point[]): Point[] {
+  if (points.length !== 4) return points;
+  const center = {
+    x: points.reduce((sum, point) => sum + point.x, 0) / 4,
+    y: points.reduce((sum, point) => sum + point.y, 0) / 4,
+  };
+  const ordered = [...points].sort(
+    (a, b) => Math.atan2(a.y - center.y, a.x - center.x) - Math.atan2(b.y - center.y, b.x - center.x),
+  );
+  const start = ordered.reduce((best, point, index) => {
+    const candidate = point.x + point.y;
+    const current = ordered[best].x + ordered[best].y;
+    return candidate < current || (candidate === current && point.y < ordered[best].y) ? index : best;
+  }, 0);
+  return [...ordered.slice(start), ...ordered.slice(0, start)];
+}
+
+export function rectifiedQuadSize(points: Point[]): { width: number; height: number } | null {
+  if (points.length !== 4) return null;
+  const [topLeft, topRight, bottomRight, bottomLeft] = orderQuadPoints(points);
+  if (new Set([topLeft, topRight, bottomRight, bottomLeft].map((point) => `${point.x}:${point.y}`)).size !== 4) {
+    return null;
+  }
+  const distance = (a: Point, b: Point) => Math.hypot(a.x - b.x, a.y - b.y);
+  return {
+    width: Math.max(1, Math.round(Math.max(distance(topLeft, topRight), distance(bottomLeft, bottomRight)))),
+    height: Math.max(1, Math.round(Math.max(distance(topLeft, bottomLeft), distance(topRight, bottomRight)))),
+  };
+}
+
 // Maps a pointer position to integer pixel coordinates in the given image's space.
 export function pointFromEvent(event: PointerEvent<HTMLDivElement>, image: PreprocessingPreviewImage): Point {
   const rect = event.currentTarget.getBoundingClientRect();
