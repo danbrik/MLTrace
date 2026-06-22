@@ -5,6 +5,7 @@ abort/delete, log and frame access. Jobs execute through the shared scheduler
 from __future__ import annotations
 
 import hashlib
+import json
 import shutil
 from datetime import datetime
 from pathlib import Path
@@ -20,11 +21,17 @@ from app.training.scheduler import scheduler
 
 
 def _range_signature(
-    testing_run_id: int, start: datetime, end: datetime, stride: int, scale_mode: str
+    testing_run_id: int,
+    start: datetime,
+    end: datetime,
+    stride: int,
+    scale_mode: str,
+    visualization_config: dict,
 ) -> str:
+    config_json = json.dumps(visualization_config, sort_keys=True, separators=(",", ":"))
     raw = (
         f"{testing_run_id}|{start.isoformat()}|{end.isoformat()}|{stride}|"
-        f"{scale_mode}|render:{CURRENT_HEATMAP_RENDER_VERSION}"
+        f"{scale_mode}|{config_json}|render:{CURRENT_HEATMAP_RENDER_VERSION}"
     )
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
@@ -44,12 +51,14 @@ def enqueue_heatmap_range(
     if payload.end_timestamp < payload.start_timestamp:
         raise ValueError("end_timestamp must not be before start_timestamp.")
 
+    visualization_config = payload.visualization_config.model_dump(mode="json")
     signature = _range_signature(
         payload.testing_run_id,
         payload.start_timestamp,
         payload.end_timestamp,
         payload.stride,
         payload.scale_mode,
+        visualization_config,
     )
     # Dedup: reuse an existing job with the same configuration unless it failed/aborted.
     existing = db.scalar(
@@ -69,6 +78,7 @@ def enqueue_heatmap_range(
         end_timestamp=payload.end_timestamp,
         stride=payload.stride,
         scale_mode=payload.scale_mode,
+        visualization_config=visualization_config,
         render_version=CURRENT_HEATMAP_RENDER_VERSION,
         done_count=0,
         config_signature=signature,

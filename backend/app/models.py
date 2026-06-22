@@ -492,7 +492,12 @@ class HeatmapRun(Base):
 
     __tablename__ = "heatmap_runs"
     __table_args__ = (
-        UniqueConstraint("testing_run_id", "testing_result_id", name="uq_heatmap_result"),
+        UniqueConstraint(
+            "testing_run_id",
+            "testing_result_id",
+            "config_signature",
+            name="uq_heatmap_result_config",
+        ),
         Index("ix_heatmap_runs_testing_run_timestamp", "testing_run_id", "timestamp"),
         Index("ix_heatmap_runs_created_at", "created_at"),
         Index("ix_heatmap_runs_status", "status"),
@@ -517,11 +522,13 @@ class HeatmapRun(Base):
     max_y: Mapped[int] = mapped_column(Integer, nullable=False)
     source_image_data_url: Mapped[str] = mapped_column(Text, nullable=False)
     reconstruction_image_data_url: Mapped[str] = mapped_column(Text, nullable=False, default="")
-    # Full-resolution (pixel-exact) raw per-pixel error grid for the scientific
-    # Plotly heatmap (colorbar, axes). Null for heatmaps computed before 0024.
+    # Full-resolution configured pixel-error grid for the interactive Plotly
+    # overlay. It may be signed when directional deviations are enabled.
     error_matrix: Mapped[list | None] = mapped_column(json_type())
     heatmap_image_data_url: Mapped[str] = mapped_column(Text, nullable=False)
-    render_version: Mapped[int] = mapped_column(Integer, nullable=False, default=2)
+    visualization_config: Mapped[dict] = mapped_column(json_type(), nullable=False, default=dict)
+    config_signature: Mapped[str] = mapped_column(String(64), nullable=False, default="")
+    render_version: Mapped[int] = mapped_column(Integer, nullable=False, default=3)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=False), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=False), server_default=func.now(), onupdate=func.now()
@@ -565,14 +572,16 @@ class HeatmapRangeRun(Base):
     scale_mode: Mapped[str] = mapped_column(String(16), nullable=False, default="per_frame")
     global_vmax: Mapped[float | None] = mapped_column(Float)
     frame_max_errors: Mapped[list | None] = mapped_column(json_type())
-    render_version: Mapped[int] = mapped_column(Integer, nullable=False, default=2)
+    visualization_config: Mapped[dict] = mapped_column(json_type(), nullable=False, default=dict)
+    render_version: Mapped[int] = mapped_column(Integer, nullable=False, default=3)
 
     # Progress counter (done_count / frame_count) + output location.
     frame_count: Mapped[int | None] = mapped_column(Integer)
     done_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     frames_dir: Mapped[str | None] = mapped_column(Text)
 
-    # Dedup signature over (testing_run_id, start, end, stride, scale_mode).
+    # Dedup signature includes source range, scale mode, visualization config,
+    # and render version.
     config_signature: Mapped[str] = mapped_column(String(64), nullable=False)
 
     # Denormalized snapshot for stable display.

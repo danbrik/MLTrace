@@ -654,11 +654,24 @@ class TestingRunResultImageResponse(BaseModel):
     image_data_url: str
 
 
+class HeatmapVisualizationConfig(BaseModel):
+    error_mode: Literal["squared", "absolute"] = "squared"
+    threshold_enabled: bool = False
+    threshold: float = Field(default=0.0, ge=0.0)
+    max_clip_enabled: bool = False
+    max_clip: float = Field(default=0.33, gt=0.0, le=1.0)
+    max_opacity: float = Field(default=0.55, ge=0.0, le=1.0)
+    signed_deviations: bool = False
+    positive_weight: float = Field(default=1.0, ge=0.0)
+    negative_weight: float = Field(default=1.0, ge=0.0)
+
+
 class HeatmapRunCreate(BaseModel):
     testing_run_id: int
     testing_result_id: int | None = None
     timestamp: datetime | None = None
     force_recompute: bool = False
+    visualization_config: HeatmapVisualizationConfig = Field(default_factory=HeatmapVisualizationConfig)
 
     @model_validator(mode="after")
     def validate_result_or_timestamp(self):
@@ -689,6 +702,8 @@ class HeatmapRunRead(BaseModel):
     reconstruction_image_data_url: str = ""
     heatmap_image_data_url: str
     error_matrix: list[list[float]] | None = None
+    visualization_config: HeatmapVisualizationConfig
+    config_signature: str
     render_version: int
     created_at: datetime
     updated_at: datetime
@@ -700,6 +715,7 @@ class HeatmapRangeRunCreate(BaseModel):
     end_timestamp: datetime
     stride: int = Field(default=1, ge=1)
     scale_mode: Literal["per_frame", "shared"] = "per_frame"
+    visualization_config: HeatmapVisualizationConfig = Field(default_factory=HeatmapVisualizationConfig)
 
 
 class HeatmapRangeRunRead(BaseModel):
@@ -722,6 +738,7 @@ class HeatmapRangeRunRead(BaseModel):
     scale_mode: str
     global_vmax: float | None
     frame_max_errors: list[float] | None
+    visualization_config: HeatmapVisualizationConfig
     render_version: int
     frame_count: int | None
     done_count: int

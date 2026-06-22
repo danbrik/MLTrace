@@ -601,6 +601,18 @@ export type TestingRunResultImage = {
   image_data_url: string;
 };
 
+export type HeatmapVisualizationConfig = {
+  error_mode: 'squared' | 'absolute';
+  threshold_enabled: boolean;
+  threshold: number;
+  max_clip_enabled: boolean;
+  max_clip: number;
+  max_opacity: number;
+  signed_deviations: boolean;
+  positive_weight: number;
+  negative_weight: number;
+};
+
 export type HeatmapRun = {
   id: number;
   testing_run_id: number;
@@ -621,6 +633,8 @@ export type HeatmapRun = {
   reconstruction_image_data_url: string;
   heatmap_image_data_url: string;
   error_matrix: number[][] | null;
+  visualization_config: HeatmapVisualizationConfig;
+  config_signature: string;
   render_version: number;
   created_at: string;
   updated_at: string;
@@ -644,6 +658,7 @@ export type HeatmapRangeRun = {
   scale_mode: 'per_frame' | 'shared';
   global_vmax: number | null;
   frame_max_errors: number[] | null;
+  visualization_config: HeatmapVisualizationConfig;
   render_version: number;
   frame_count: number | null;
   done_count: number;

@@ -25,7 +25,7 @@ from sqlalchemy import select
 from app import models
 from app.database import SessionLocal, data_dir
 from app.preprocessing.pipeline import absolute_image_to_uint8, run_pipeline_array
-from app.schemas import PreprocessingGraph
+from app.schemas import HeatmapVisualizationConfig, PreprocessingGraph
 from app.testing.service import (
     ArtifactEvaluator,
     _as_image,
@@ -74,9 +74,17 @@ def _source_to_rgb_uint8(source: np.ndarray) -> np.ndarray:
     return array
 
 
-def _write_frame_png(source: np.ndarray, error_map: np.ndarray, vmax: float | None, path: Path) -> None:
+def _write_frame_png(
+    source: np.ndarray,
+    error_map: np.ndarray,
+    vmax: float | None,
+    path: Path,
+    visualization_config: HeatmapVisualizationConfig,
+) -> None:
     base = Image.fromarray(_source_to_rgb_uint8(source)).convert("RGBA")
-    overlay = Image.fromarray(_heatmap_overlay(error_map, vmax=vmax), mode="RGBA")
+    overlay = Image.fromarray(
+        _heatmap_overlay(error_map, vmax=vmax, config=visualization_config), mode="RGBA"
+    )
     Image.alpha_composite(base, overlay).convert("RGB").save(path, format="PNG")
 
 
@@ -135,6 +143,7 @@ def run_heatmap_range(run_id: int, abort_event: threading.Event | None = None) -
             db.commit()
 
             evaluator = ArtifactEvaluator(training_run)
+            visualization_config = HeatmapVisualizationConfig.model_validate(run.visualization_config or {})
             graph = PreprocessingGraph.model_validate(
                 training_run.training_pipeline.preprocessing_pipeline.graph
             )
@@ -160,8 +169,10 @@ def run_heatmap_range(run_id: int, abort_event: threading.Event | None = None) -
                 ]
                 reconstructions = evaluator.reconstruct_batch(images)
                 for offset, _record in enumerate(batch):
-                    error_map = _pixel_error_map(sources[offset], reconstructions[offset])
-                    frame_max = float(np.max(error_map)) if error_map.size else 0.0
+                    error_map = _pixel_error_map(
+                        sources[offset], reconstructions[offset], visualization_config
+                    )
+                    frame_max = float(np.max(np.abs(error_map))) if error_map.size else 0.0
                     frame_max_errors.append(frame_max)
                     global_vmax = max(global_vmax, frame_max)
                     frame_path = frames_dir / f"frame_{done:05d}.png"
@@ -171,7 +182,9 @@ def run_heatmap_range(run_id: int, abort_event: threading.Event | None = None) -
                             tmp_dir / f"{done:05d}.png", format="PNG"
                         )
                     else:
-                        _write_frame_png(sources[offset], error_map, None, frame_path)
+                        _write_frame_png(
+                            sources[offset], error_map, None, frame_path, visualization_config
+                        )
                     done += 1
                 if batch_index % _COMMIT_EVERY == 0:
                     run.done_count = done
@@ -189,7 +202,13 @@ def run_heatmap_range(run_id: int, abort_event: threading.Event | None = None) -
                         raise AbortedError()
                     error_map = np.load(tmp_dir / f"{index:05d}.npy").astype(np.float64)
                     source = np.asarray(Image.open(tmp_dir / f"{index:05d}.png"))
-                    _write_frame_png(source, error_map, global_vmax, frames_dir / f"frame_{index:05d}.png")
+                    _write_frame_png(
+                        source,
+                        error_map,
+                        global_vmax,
+                        frames_dir / f"frame_{index:05d}.png",
+                        visualization_config,
+                    )
                 shutil.rmtree(tmp_dir, ignore_errors=True)
 
             run.status = "finished"

@@ -3,6 +3,7 @@ import type {
   DatasetConnectionTest,
   HeatmapRangeRun,
   HeatmapRun,
+  HeatmapVisualizationConfig,
   MethodConfiguration,
   MethodConfigurationPayload,
   MethodConfigurationSavePayload,
@@ -471,6 +472,7 @@ export function createHeatmap(payload: {
   testing_result_id?: number | null;
   timestamp?: string | null;
   force_recompute?: boolean;
+  visualization_config?: HeatmapVisualizationConfig;
 }): Promise<HeatmapRun> {
   return request<HeatmapRun>('/api/heatmaps', {
     method: 'POST',
@@ -492,6 +494,7 @@ export function createHeatmapRange(payload: {
   end_timestamp: string;
   stride?: number;
   scale_mode?: 'per_frame' | 'shared';
+  visualization_config?: HeatmapVisualizationConfig;
 }): Promise<HeatmapRangeRun> {
   return request<HeatmapRangeRun>('/api/heatmap-ranges', {
     method: 'POST',

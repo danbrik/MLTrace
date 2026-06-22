@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import hashlib
 import json
 import shutil
 import time
@@ -24,6 +25,7 @@ from app.scanner import filename_timestamp_template
 from app.schemas import (
     HeatmapRunCreate,
     HeatmapRunRead,
+    HeatmapVisualizationConfig,
     PreprocessingGraph,
     RoiDefinitionCreate,
     RoiDefinitionRead,
@@ -40,7 +42,7 @@ from app.training.engine import _build_model, _to_nchw
 from app.training.scheduler import scheduler
 
 
-CURRENT_HEATMAP_RENDER_VERSION = 2
+CURRENT_HEATMAP_RENDER_VERSION = 3
 
 
 def _utcnow() -> datetime:
@@ -672,34 +674,77 @@ def _direct_heatmap_image_path(db: Session, testing_run: models.TestingRun, time
     raise ValueError(f"Timestamp {timestamp.isoformat()} is outside the selected inference dataset ranges.")
 
 
-def _pixel_error_map(source: np.ndarray, reconstruction: np.ndarray) -> np.ndarray:
+def _visualization_config(
+    config: HeatmapVisualizationConfig | dict | None,
+) -> HeatmapVisualizationConfig:
+    if isinstance(config, HeatmapVisualizationConfig):
+        return config
+    return HeatmapVisualizationConfig.model_validate(config or {})
+
+
+def _heatmap_config_signature(config: HeatmapVisualizationConfig | dict | None) -> str:
+    normalized = _visualization_config(config).model_dump(mode="json")
+    raw = json.dumps(normalized, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def _pixel_error_map(
+    source: np.ndarray,
+    reconstruction: np.ndarray,
+    config: HeatmapVisualizationConfig | dict | None = None,
+) -> np.ndarray:
     if source.shape != reconstruction.shape:
         raise ValueError(f"Cannot build heatmap for different shapes: {source.shape} vs {reconstruction.shape}.")
+    settings = _visualization_config(config)
     delta = source.astype(np.float64) - reconstruction.astype(np.float64)
-    squared = delta * delta
-    if squared.ndim == 3:
-        return np.mean(squared, axis=2)
-    return squared
+    absolute = np.abs(delta)
+    if settings.threshold_enabled:
+        absolute = np.where(absolute >= settings.threshold, absolute, 0.0)
+    magnitude = absolute * absolute if settings.error_mode == "squared" else absolute
+
+    if settings.signed_deviations:
+        positive = np.where(delta > 0, magnitude * settings.positive_weight, 0.0)
+        negative = np.where(delta < 0, magnitude * settings.negative_weight, 0.0)
+        signed = positive - negative
+        return np.mean(signed, axis=2) if signed.ndim == 3 else signed
+
+    return np.mean(magnitude, axis=2) if magnitude.ndim == 3 else magnitude
 
 
-def _heatmap_overlay(error_map: np.ndarray, vmax: float | None = None) -> np.ndarray:
+def _heatmap_overlay(
+    error_map: np.ndarray,
+    vmax: float | None = None,
+    config: HeatmapVisualizationConfig | dict | None = None,
+) -> np.ndarray:
     """Render a transparent Jet-style error overlay. ``vmax`` fixes the
     normalization ceiling (shared scale across a video); when None each frame is
     normalized to its own maximum."""
-    ceiling = float(vmax) if vmax is not None else (float(np.max(error_map)) if error_map.size else 0.0)
+    settings = _visualization_config(config)
+    magnitude = np.abs(error_map)
+    ceiling = float(vmax) if vmax is not None else (float(np.max(magnitude)) if magnitude.size else 0.0)
+    if settings.max_clip_enabled:
+        ceiling *= settings.max_clip
     if ceiling <= 0:
         normalized = np.zeros_like(error_map, dtype=np.float64)
     else:
         normalized = np.clip(error_map / ceiling, 0.0, 1.0)
 
-    # Jet-style transparent error map: low error stays blue and subtle, high error
-    # becomes yellow/red and more opaque for anomaly-style inspection overlays.
-    red = np.clip(1.5 - np.abs(4.0 * normalized - 3.0), 0.0, 1.0)
-    green = np.clip(1.5 - np.abs(4.0 * normalized - 2.0), 0.0, 1.0)
-    blue = np.clip(1.5 - np.abs(4.0 * normalized - 1.0), 0.0, 1.0)
-    # Zero error is invisible. Maximum error remains translucent so the source
-    # image is still inspectable beneath the anomaly colors.
-    alpha = np.clip(normalized * 140.0, 0.0, 140.0)
+    if settings.signed_deviations:
+        normalized = np.clip(error_map / ceiling, -1.0, 1.0) if ceiling > 0 else normalized
+        strength = np.abs(normalized)
+        positive = normalized >= 0
+        red = np.where(positive, 1.0, 0.0)
+        green = 1.0 - strength
+        blue = np.where(positive, 0.0, 1.0)
+    else:
+        strength = normalized
+        # Jet-style error map for unsigned reconstruction differences.
+        red = np.clip(1.5 - np.abs(4.0 * normalized - 3.0), 0.0, 1.0)
+        green = np.clip(1.5 - np.abs(4.0 * normalized - 2.0), 0.0, 1.0)
+        blue = np.clip(1.5 - np.abs(4.0 * normalized - 1.0), 0.0, 1.0)
+
+    max_alpha = 255.0 if settings.max_clip_enabled else settings.max_opacity * 255.0
+    alpha = np.clip(strength * max_alpha, 0.0, max_alpha)
 
     overlay = np.zeros((*error_map.shape, 4), dtype=np.uint8)
     overlay[..., 0] = np.asarray(red * 255.0, dtype=np.uint8)
@@ -724,18 +769,21 @@ def compute_heatmap_run(db: Session, payload: HeatmapRunCreate) -> HeatmapRunRea
     result_id = payload.testing_result_id
     timestamp = payload.timestamp
     direct_image_path: str | None = None
+    config_signature = _heatmap_config_signature(payload.visualization_config)
 
     if timestamp is not None:
         existing_by_timestamp = db.scalar(
             select(models.HeatmapRun).where(
                 models.HeatmapRun.testing_run_id == payload.testing_run_id,
                 models.HeatmapRun.timestamp == timestamp,
+                models.HeatmapRun.config_signature == config_signature,
                 models.HeatmapRun.status == "finished",
             )
         )
         if (
             existing_by_timestamp is not None
             and existing_by_timestamp.render_version == CURRENT_HEATMAP_RENDER_VERSION
+            and existing_by_timestamp.config_signature == config_signature
             and not payload.force_recompute
         ):
             return HeatmapRunRead.model_validate(existing_by_timestamp)
@@ -773,12 +821,14 @@ def compute_heatmap_run(db: Session, payload: HeatmapRunCreate) -> HeatmapRunRea
             select(models.HeatmapRun).where(
                 models.HeatmapRun.testing_run_id == payload.testing_run_id,
                 models.HeatmapRun.testing_result_id == result_id,
+                models.HeatmapRun.config_signature == config_signature,
                 models.HeatmapRun.status == "finished",
             )
         )
         if (
             existing is not None
             and existing.render_version == CURRENT_HEATMAP_RENDER_VERSION
+            and existing.config_signature == config_signature
             and not payload.force_recompute
         ):
             return HeatmapRunRead.model_validate(existing)
@@ -813,11 +863,7 @@ def compute_heatmap_run(db: Session, payload: HeatmapRunCreate) -> HeatmapRunRea
     row_query = select(models.HeatmapRun).where(
         models.HeatmapRun.testing_run_id == payload.testing_run_id,
         models.HeatmapRun.timestamp == timestamp,
-    )
-    row_query = (
-        row_query.where(models.HeatmapRun.testing_result_id == result_id)
-        if result_id is not None
-        else row_query.where(models.HeatmapRun.testing_result_id.is_(None))
+        models.HeatmapRun.config_signature == config_signature,
     )
     row = db.scalar(row_query)
     if row is None:
@@ -826,6 +872,7 @@ def compute_heatmap_run(db: Session, payload: HeatmapRunCreate) -> HeatmapRunRea
             testing_result_id=result_id,
         )
         db.add(row)
+    row.testing_result_id = result_id
     row.image_path = image_path
     row.timestamp = timestamp
     row.status = "running"
@@ -842,6 +889,8 @@ def compute_heatmap_run(db: Session, payload: HeatmapRunCreate) -> HeatmapRunRea
     row.reconstruction_image_data_url = ""
     row.heatmap_image_data_url = ""
     row.error_matrix = None
+    row.visualization_config = payload.visualization_config.model_dump(mode="json")
+    row.config_signature = config_signature
     row.render_version = CURRENT_HEATMAP_RENDER_VERSION
     row.updated_at = _utcnow()
     db.commit()
@@ -852,8 +901,9 @@ def compute_heatmap_run(db: Session, payload: HeatmapRunCreate) -> HeatmapRunRea
         evaluator = ArtifactEvaluator(training_run)
         reconstruction = evaluator.reconstruct(image)
         source = image if evaluator.mean_image is not None else _as_image(_to_nchw(image))
-        error_map = _pixel_error_map(source, reconstruction)
-        max_y, max_x = np.unravel_index(int(np.argmax(error_map)), error_map.shape)
+        error_map = _pixel_error_map(source, reconstruction, payload.visualization_config)
+        error_magnitude = np.abs(error_map)
+        max_y, max_x = np.unravel_index(int(np.argmax(error_magnitude)), error_map.shape)
         width, height, channels, dtype, _, _ = image_metadata(source)
 
         row.status = "finished"
@@ -862,13 +912,15 @@ def compute_heatmap_run(db: Session, payload: HeatmapRunCreate) -> HeatmapRunRea
         row.height = height
         row.channels = channels
         row.dtype = dtype
-        row.max_error = float(np.max(error_map))
-        row.mean_error = float(np.mean(error_map))
+        row.max_error = float(np.max(error_magnitude))
+        row.mean_error = float(np.mean(error_magnitude))
         row.max_x = int(max_x)
         row.max_y = int(max_y)
         row.source_image_data_url = encode_absolute_image_data_url(source)
         row.reconstruction_image_data_url = encode_absolute_image_data_url(reconstruction)
-        row.heatmap_image_data_url = encode_png_data_url(_heatmap_overlay(error_map))
+        row.heatmap_image_data_url = encode_png_data_url(
+            _heatmap_overlay(error_map, config=payload.visualization_config)
+        )
         row.error_matrix = _error_matrix(error_map)
         row.updated_at = _utcnow()
         db.commit()
@@ -880,6 +932,7 @@ def compute_heatmap_run(db: Session, payload: HeatmapRunCreate) -> HeatmapRunRea
             select(models.HeatmapRun).where(
                 models.HeatmapRun.testing_run_id == payload.testing_run_id,
                 models.HeatmapRun.timestamp == timestamp,
+                models.HeatmapRun.config_signature == config_signature,
             )
         )
         if row is not None:

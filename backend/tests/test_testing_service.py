@@ -9,11 +9,18 @@ from sqlalchemy.pool import StaticPool
 
 from app import models
 from app.database import Base
-from app.schemas import HeatmapRunCreate, RoiDefinitionCreate, RoiPreviewRequest, TestingRunCreate as TestingRunCreatePayload
+from app.schemas import (
+    HeatmapRunCreate,
+    HeatmapVisualizationConfig,
+    RoiDefinitionCreate,
+    RoiPreviewRequest,
+    TestingRunCreate as TestingRunCreatePayload,
+)
 from app.testing import service as testing_service
 from app.testing.service import (
     CURRENT_HEATMAP_RENDER_VERSION,
     _heatmap_overlay,
+    _pixel_error_map,
     compute_heatmap_run,
     create_roi,
     create_testing_run,
@@ -43,6 +50,53 @@ def test_heatmap_overlay_uses_bounded_error_dependent_alpha() -> None:
     assert overlay[0, 0, 3] == 0
     assert 0 < overlay[0, 1, 3] < overlay[0, 2, 3]
     assert overlay[0, 2, 3] <= 140
+
+
+def test_heatmap_error_modes_threshold_and_signed_weights() -> None:
+    source = np.array([[0.0, 0.2, 0.8]], dtype=np.float32)
+    reconstruction = np.array([[0.1, 0.1, 0.5]], dtype=np.float32)
+
+    thresholded = _pixel_error_map(
+        source,
+        reconstruction,
+        HeatmapVisualizationConfig(
+            error_mode="absolute",
+            threshold_enabled=True,
+            threshold=0.15,
+        ),
+    )
+    signed = _pixel_error_map(
+        source,
+        reconstruction,
+        HeatmapVisualizationConfig(
+            error_mode="absolute",
+            signed_deviations=True,
+            positive_weight=2.0,
+            negative_weight=3.0,
+        ),
+    )
+
+    assert np.allclose(thresholded, [[0.0, 0.0, 0.3]])
+    assert np.allclose(signed, [[-0.3, 0.2, 0.6]])
+
+
+def test_heatmap_max_clip_saturates_while_opacity_mode_stays_bounded() -> None:
+    error = np.array([[0.0, 0.33, 1.0]], dtype=np.float32)
+    clipped = _heatmap_overlay(
+        error,
+        vmax=1.0,
+        config=HeatmapVisualizationConfig(max_clip_enabled=True, max_clip=0.33),
+    )
+    bounded = _heatmap_overlay(
+        error,
+        vmax=1.0,
+        config=HeatmapVisualizationConfig(max_opacity=0.2),
+    )
+
+    assert clipped[0, 0, 3] == 0
+    assert clipped[0, 1, 3] == 255
+    assert clipped[0, 2, 3] == 255
+    assert bounded[0, 2, 3] == 51
 
 
 def seed_finished_mean_image_run(db, tmp_path: Path):
@@ -229,5 +283,17 @@ def test_roi_preview_and_mean_image_testing_run(tmp_path: Path, monkeypatch) -> 
         )
         assert recomputed.id == heatmap.id
         assert recomputed.render_version == CURRENT_HEATMAP_RENDER_VERSION
+
+        absolute = compute_heatmap_run(
+            db,
+            HeatmapRunCreate(
+                testing_run_id=testing_run.id,
+                timestamp=datetime(2026, 4, 1, 12, 0, 10),
+                visualization_config=HeatmapVisualizationConfig(error_mode="absolute"),
+            ),
+        )
+        assert absolute.id != heatmap.id
+        assert absolute.max_error == 10.0
+        assert absolute.config_signature != heatmap.config_signature
     finally:
         db.close()

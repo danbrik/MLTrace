@@ -50,6 +50,7 @@ import { datasetResolutions, formatResolution, orderedGraphNodes, stepDetail } f
 import type {
   HeatmapRangeRun,
   HeatmapRun,
+  HeatmapVisualizationConfig,
   MethodConfiguration,
   PreprocessingPipeline,
   TestingRun,
@@ -74,6 +75,7 @@ type PlotDraft = {
   heatmapMode: HeatmapMode;
   timestamp: string | null;
   includeReference: boolean;
+  heatmapConfig: HeatmapVisualizationConfig;
 };
 
 type AnalysisPlot = PlotDraft & {
@@ -110,6 +112,50 @@ function errorMessage(error: unknown): string {
 
 function valueAsNumber(value: string | number, fallback: number): number {
   return typeof value === 'number' && Number.isFinite(value) ? value : fallback;
+}
+
+function defaultHeatmapConfig(): HeatmapVisualizationConfig {
+  return {
+    error_mode: 'squared',
+    threshold_enabled: false,
+    threshold: 0,
+    max_clip_enabled: false,
+    max_clip: 0.33,
+    max_opacity: 0.55,
+    signed_deviations: false,
+    positive_weight: 1,
+    negative_weight: 1,
+  };
+}
+
+function heatmapConfigKey(config: HeatmapVisualizationConfig): string {
+  return [
+    config.error_mode,
+    Number(config.threshold_enabled),
+    config.threshold,
+    Number(config.max_clip_enabled),
+    config.max_clip,
+    config.max_opacity,
+    Number(config.signed_deviations),
+    config.positive_weight,
+    config.negative_weight,
+  ].join(':');
+}
+
+function heatmapCacheKey(frame: CombinedResult, config: HeatmapVisualizationConfig): string {
+  const source = frame.heatmapTimestampOnly ? frame.timestamp : frame.id;
+  return `${frame.testingRunId}:${source}:${heatmapConfigKey(config)}`;
+}
+
+function InfoLabel({ label, info }: { label: string; info: string }) {
+  return (
+    <Group gap={5} wrap="nowrap">
+      <Text size="sm">{label}</Text>
+      <Tooltip label={info} multiline w={320} withArrow>
+        <Info size={14} aria-label={`${label} information`} tabIndex={0} />
+      </Tooltip>
+    </Group>
+  );
 }
 
 function scoreValue(result: TestingRunResult): number {
@@ -433,13 +479,25 @@ function TimeSeriesPlot({ plot, results }: { plot: AnalysisPlot; results: Combin
   );
 }
 
-const TRANSPARENT_JET_SCALE = [
-  [0, 'rgba(0,0,143,0)'],
-  [0.25, 'rgba(0,0,255,0.14)'],
-  [0.5, 'rgba(0,255,255,0.28)'],
-  [0.75, 'rgba(255,255,0,0.42)'],
-  [1, 'rgba(255,0,0,0.55)'],
-];
+function transparentHeatmapScale(config: HeatmapVisualizationConfig) {
+  const maxAlpha = config.max_clip_enabled ? 1 : config.max_opacity;
+  if (config.signed_deviations) {
+    return [
+      [0, `rgba(0,0,255,${maxAlpha})`],
+      [0.25, `rgba(0,255,255,${maxAlpha / 2})`],
+      [0.5, 'rgba(255,255,255,0)'],
+      [0.75, `rgba(255,255,0,${maxAlpha / 2})`],
+      [1, `rgba(255,0,0,${maxAlpha})`],
+    ];
+  }
+  return [
+    [0, 'rgba(0,0,143,0)'],
+    [0.25, `rgba(0,0,255,${maxAlpha * 0.25})`],
+    [0.5, `rgba(0,255,255,${maxAlpha * 0.5})`],
+    [0.75, `rgba(255,255,0,${maxAlpha * 0.75})`],
+    [1, `rgba(255,0,0,${maxAlpha})`],
+  ];
+}
 
 function HeatmapPlot({
   plot,
@@ -454,14 +512,18 @@ function HeatmapPlot({
   heatmapCache: Record<string, HeatmapRun>;
   loadingHeatmaps: Record<string, boolean>;
   heatmapErrors: Record<string, string>;
-  ensureHeatmap: (frame: CombinedResult, options?: { force?: boolean }) => Promise<void>;
+  ensureHeatmap: (
+    frame: CombinedResult,
+    config: HeatmapVisualizationConfig,
+    options?: { force?: boolean },
+  ) => Promise<void>;
 }) {
   const current = results[0] ?? null;
-  const currentKey = current ? `${current.testingRunId}:${current.heatmapTimestampOnly ? current.timestamp : current.id}` : '';
+  const currentKey = current ? heatmapCacheKey(current, plot.heatmapConfig) : '';
   useEffect(() => {
     if (!current) return;
-    ensureHeatmap(current);
-  }, [current, ensureHeatmap]);
+    ensureHeatmap(current, plot.heatmapConfig);
+  }, [current, ensureHeatmap, plot.heatmapConfig]);
 
   const heatmap = currentKey ? heatmapCache[currentKey] : undefined;
   const loading = loadingHeatmaps[currentKey] === true;
@@ -469,8 +531,16 @@ function HeatmapPlot({
 
   const relativeErrorMatrix = useMemo(() => {
     if (!heatmap?.error_matrix) return null;
-    const ceiling = heatmap.max_error > 0 ? heatmap.max_error : 1;
-    return heatmap.error_matrix.map((row) => row.map((value) => Math.max(0, Math.min(1, value / ceiling))));
+    const config = heatmap.visualization_config;
+    const clipFactor = config.max_clip_enabled ? config.max_clip : 1;
+    const ceiling = heatmap.max_error > 0 ? heatmap.max_error * clipFactor : 1;
+    return heatmap.error_matrix.map((row) =>
+      row.map((value) =>
+        config.signed_deviations
+          ? Math.max(-1, Math.min(1, value / ceiling))
+          : Math.max(0, Math.min(1, value / ceiling)),
+      ),
+    );
   }, [heatmap]);
 
   const errorTrace = useMemo<Data[]>(() => {
@@ -480,12 +550,12 @@ function HeatmapPlot({
         type: 'heatmap',
         z: relativeErrorMatrix,
         customdata: heatmap.error_matrix,
-        colorscale: TRANSPARENT_JET_SCALE,
-        zmin: 0,
+        colorscale: transparentHeatmapScale(heatmap.visualization_config),
+        zmin: heatmap.visualization_config.signed_deviations ? -1 : 0,
         zmax: 1,
         zsmooth: false,
         showscale: false,
-        hovertemplate: 'x %{x}<br>y %{y}<br>Relative error %{z:.4f}<br>Absolute MSE %{customdata:.6g}<extra></extra>',
+        hovertemplate: `x %{x}<br>y %{y}<br>${heatmap.visualization_config.signed_deviations ? 'Signed relative error' : 'Relative error'} %{z:.4f}<br>Configured pixel error %{customdata:.6g}<extra></extra>`,
       } as Data,
     ];
   }, [heatmap, relativeErrorMatrix]);
@@ -543,11 +613,16 @@ function HeatmapPlot({
           </div>
           <div className="analysis-relative-colorbar" aria-label="Relative reconstruction error scale from zero to one">
             <Group justify="space-between" gap="xs">
-              <Text size="xs" c="dimmed">0</Text>
-              <Text size="xs" c="dimmed">Relative reconstruction error</Text>
+              <Text size="xs" c="dimmed">{heatmap.visualization_config.signed_deviations ? '-1' : '0'}</Text>
+              <Text size="xs" c="dimmed">{heatmap.visualization_config.signed_deviations ? 'Signed relative error' : 'Relative reconstruction error'}</Text>
               <Text size="xs" c="dimmed">1</Text>
             </Group>
-            <div className="analysis-relative-colorbar-gradient" />
+            <div
+              className="analysis-relative-colorbar-gradient"
+              style={{
+                background: heatmap.visualization_config.signed_deviations ? SIGNED_GRADIENT : JET_GRADIENT,
+              }}
+            />
           </div>
         </>
       ) : (
@@ -569,6 +644,20 @@ function HeatmapPlot({
         <Badge variant="light">{resultLabel(current)}</Badge>
         <Badge variant="light" color="red">score {formatMetric(scoreValue(current))}</Badge>
         <Badge variant="light" color="gray">{current.testingRunName}</Badge>
+        <Badge variant="light" color="blue">{plot.heatmapConfig.error_mode} error</Badge>
+        {plot.heatmapConfig.threshold_enabled && (
+          <Badge variant="light" color="yellow">threshold {formatMetric(plot.heatmapConfig.threshold)}</Badge>
+        )}
+        {plot.heatmapConfig.signed_deviations && (
+          <Badge variant="light" color="grape">
+            signed +{formatMetric(plot.heatmapConfig.positive_weight)} / -{formatMetric(plot.heatmapConfig.negative_weight)}
+          </Badge>
+        )}
+        <Badge variant="light" color="gray">
+          {plot.heatmapConfig.max_clip_enabled
+            ? `max clip ${Math.round(plot.heatmapConfig.max_clip * 100)}%`
+            : `opacity ${Math.round(plot.heatmapConfig.max_opacity * 100)}%`}
+        </Badge>
       </Group>
       <div className="analysis-heatmap-wrap">
         {heatmap ? (
@@ -614,7 +703,7 @@ function HeatmapPlot({
                 <Text size="sm" ta="center">
                   {error}
                 </Text>
-                <Button size="compact-sm" variant="light" onClick={() => ensureHeatmap(current, { force: true })}>
+                <Button size="compact-sm" variant="light" onClick={() => ensureHeatmap(current, plot.heatmapConfig, { force: true })}>
                   Retry heatmap
                 </Button>
               </Stack>
@@ -625,7 +714,7 @@ function HeatmapPlot({
         )}
       </div>
       <Text size="xs" c="dimmed">
-        Pixel heatmap · max pixel ({heatmap?.max_x ?? '—'}, {heatmap?.max_y ?? '—'}) · max {formatMetric(heatmap?.max_error)} · mean {formatMetric(heatmap?.mean_error)}
+        Pixel heatmap · {heatmap?.visualization_config.error_mode ?? plot.heatmapConfig.error_mode} error · max pixel ({heatmap?.max_x ?? '—'}, {heatmap?.max_y ?? '—'}) · max magnitude {formatMetric(heatmap?.max_error)} · mean magnitude {formatMetric(heatmap?.mean_error)}
       </Text>
     </Stack>
   );
@@ -633,6 +722,7 @@ function HeatmapPlot({
 
 // Jet-style gradient matching the backend overlay, for the static video legend.
 const JET_GRADIENT = 'linear-gradient(to right, #00008f, #0000ff, #00ffff, #ffff00, #ff0000, #800000)';
+const SIGNED_GRADIENT = 'linear-gradient(to right, #0000ff, #00ffff, transparent, #ffff00, #ff0000)';
 
 function HeatmapVideo({ plot, results }: { plot: AnalysisPlot; results: CombinedResult[] }) {
   const params = useMemo(() => {
@@ -646,8 +736,10 @@ function HeatmapVideo({ plot, results }: { plot: AnalysisPlot; results: Combined
       end_timestamp: endIso,
       stride: Math.max(1, Math.floor(source.sampling || 1)),
       testingRunName: results[0].testingRunName,
+      visualizationConfig: plot.heatmapConfig,
+      visualizationConfigKey: heatmapConfigKey(plot.heatmapConfig),
     };
-  }, [plot.sources, results]);
+  }, [plot.heatmapConfig, plot.sources, results]);
 
   const [scaleMode, setScaleMode] = useState<'per_frame' | 'shared'>('per_frame');
   const [job, setJob] = useState<HeatmapRangeRun | null>(null);
@@ -663,7 +755,7 @@ function HeatmapVideo({ plot, results }: { plot: AnalysisPlot; results: Combined
     setVideoError(null);
     setFrameIndex(0);
     setPlaying(false);
-  }, [plot.id, params?.testing_run_id, params?.start_timestamp, params?.end_timestamp, params?.stride, scaleMode]);
+  }, [plot.id, params?.testing_run_id, params?.start_timestamp, params?.end_timestamp, params?.stride, params?.visualizationConfigKey, scaleMode]);
 
   const polling = job != null && (job.status === 'queued' || job.status === 'running');
   useEffect(() => {
@@ -700,6 +792,7 @@ function HeatmapVideo({ plot, results }: { plot: AnalysisPlot; results: Combined
         end_timestamp: params.end_timestamp,
         stride: params.stride,
         scale_mode: scaleMode,
+        visualization_config: params.visualizationConfig,
       });
       setJob(created);
       setFrameIndex(0);
@@ -740,6 +833,8 @@ function HeatmapVideo({ plot, results }: { plot: AnalysisPlot; results: Combined
         />
         <Badge variant="light" color="gray">{params.testingRunName}</Badge>
         <Badge variant="light">stride {params.stride}</Badge>
+        <Badge variant="light" color="blue">{plot.heatmapConfig.error_mode} error</Badge>
+        {plot.heatmapConfig.signed_deviations && <Badge variant="light" color="grape">signed</Badge>}
         {!ready && (
           <Button size="compact-sm" onClick={startJob} loading={starting || polling} disabled={polling}>
             {polling ? 'Rendering…' : 'Render heatmap video'}
@@ -819,8 +914,15 @@ function HeatmapVideo({ plot, results }: { plot: AnalysisPlot; results: Combined
           />
           <Stack gap={3}>
             <Group gap="xs" align="center">
-              <Text size="xs" c="dimmed">0</Text>
-              <div style={{ flex: 1, height: 10, borderRadius: 3, background: JET_GRADIENT }} />
+              <Text size="xs" c="dimmed">{job.visualization_config.signed_deviations ? '-1' : '0'}</Text>
+              <div
+                style={{
+                  flex: 1,
+                  height: 10,
+                  borderRadius: 3,
+                  background: job.visualization_config.signed_deviations ? SIGNED_GRADIENT : JET_GRADIENT,
+                }}
+              />
               <Text size="xs" c="dimmed">1</Text>
             </Group>
             <Text size="xs" c="dimmed" ta="center">
@@ -851,7 +953,11 @@ function AnalysisPlotCard({
   heatmapCache: Record<string, HeatmapRun>;
   loadingHeatmaps: Record<string, boolean>;
   heatmapErrors: Record<string, string>;
-  ensureHeatmap: (frame: CombinedResult, options?: { force?: boolean }) => Promise<void>;
+  ensureHeatmap: (
+    frame: CombinedResult,
+    config: HeatmapVisualizationConfig,
+    options?: { force?: boolean },
+  ) => Promise<void>;
   onMove: (direction: -1 | 1) => void;
   onRemove: () => void;
 }) {
@@ -919,6 +1025,7 @@ function defaultDraft(): PlotDraft {
     heatmapMode: 'single',
     timestamp: null,
     includeReference: true,
+    heatmapConfig: defaultHeatmapConfig(),
   };
 }
 
@@ -1022,8 +1129,12 @@ export function AnalysisPage({ active = true }: { active?: boolean }) {
   );
 
   const ensureHeatmap = useCallback(
-    async (frame: CombinedResult, options?: { force?: boolean }) => {
-      const key = `${frame.testingRunId}:${frame.heatmapTimestampOnly ? frame.timestamp : frame.id}`;
+    async (
+      frame: CombinedResult,
+      config: HeatmapVisualizationConfig,
+      options?: { force?: boolean },
+    ) => {
+      const key = heatmapCacheKey(frame, config);
       if (!options?.force && (heatmapCache[key] || loadingHeatmaps[key] || heatmapErrors[key])) return;
       if (options?.force) {
         setHeatmapErrors((current) => {
@@ -1040,11 +1151,13 @@ export function AnalysisPage({ active = true }: { active?: boolean }) {
                 testing_run_id: frame.testingRunId,
                 timestamp: frame.timestamp,
                 force_recompute: options?.force ?? false,
+                visualization_config: config,
               }
             : {
                 testing_run_id: frame.testingRunId,
                 testing_result_id: frame.id,
                 force_recompute: options?.force ?? false,
+                visualization_config: config,
               },
         );
         setHeatmapCache((current) => ({ ...current, [key]: heatmap }));
@@ -1246,6 +1359,13 @@ export function AnalysisPage({ active = true }: { active?: boolean }) {
     setSelectedSources((current) =>
       current.map((source) => (source.testingRunId === runId ? { ...source, ...patch } : source)),
     );
+  }
+
+  function updateHeatmapConfig(patch: Partial<HeatmapVisualizationConfig>) {
+    setDraft((current) => ({
+      ...current,
+      heatmapConfig: { ...current.heatmapConfig, ...patch },
+    }));
   }
 
   // Pipelines that have at least one finished testing run can be analysed.
@@ -1606,33 +1726,124 @@ export function AnalysisPage({ active = true }: { active?: boolean }) {
                   <TextInput label="X-axis" value="Time" disabled />
                 </SimpleGrid>
               ) : (
-                <SimpleGrid cols={{ base: 1, md: 3 }}>
-                  <Select
-                    label="Heatmap mode"
-                    data={[
-                      { value: 'single', label: 'Single timestamp' },
-                      { value: 'range', label: 'Date range video' },
-                    ]}
-                    value={draft.heatmapMode}
-                    onChange={(value) =>
-                      setDraft((current) => ({
-                        ...current,
-                        heatmapMode: (value ?? 'single') as HeatmapMode,
-                        timestamp: value === 'range' ? null : current.timestamp,
-                      }))
-                    }
-                  />
-                  <TextInput label="Frames" value={`${combinedDraftResults.length} deduplicated frames`} disabled />
-                  <Switch
-                    label="Include reference"
-                    description="Show original, reconstruction, and transparent error overlay."
-                    checked={draft.includeReference}
-                    onChange={(event) => {
-                      const checked = event.currentTarget.checked;
-                      setDraft((current) => ({ ...current, includeReference: checked }));
-                    }}
-                  />
-                </SimpleGrid>
+                <Stack gap="md">
+                  <SimpleGrid cols={{ base: 1, md: 3 }}>
+                    <Select
+                      label={<InfoLabel label="Heatmap mode" info="Single timestamp computes one interactive heatmap. Date range renders a sampled heatmap video." />}
+                      data={[
+                        { value: 'single', label: 'Single timestamp' },
+                        { value: 'range', label: 'Date range video' },
+                      ]}
+                      value={draft.heatmapMode}
+                      onChange={(value) =>
+                        setDraft((current) => ({
+                          ...current,
+                          heatmapMode: (value ?? 'single') as HeatmapMode,
+                          timestamp: value === 'range' ? null : current.timestamp,
+                        }))
+                      }
+                    />
+                    <TextInput
+                      label={<InfoLabel label="Frames" info="Number of deduplicated source timestamps before the selected sampling rate is applied." />}
+                      value={`${combinedDraftResults.length} deduplicated frames`}
+                      disabled
+                    />
+                    <Switch
+                      label={<InfoLabel label="Include reference" info="Shows original and reconstructed images next to the transparent error overlay." />}
+                      checked={draft.includeReference}
+                      onChange={(event) => {
+                        const checked = event.currentTarget.checked;
+                        setDraft((current) => ({ ...current, includeReference: checked }));
+                      }}
+                    />
+                  </SimpleGrid>
+
+                  <Text fw={600} size="sm">Error calculation</Text>
+                  <SimpleGrid cols={{ base: 1, md: 3 }}>
+                    <Select
+                      label={<InfoLabel label="Pixel error" info="Absolute uses |input - reconstruction|. Squared uses (input - reconstruction)² and emphasizes large deviations more strongly." />}
+                      data={[
+                        { value: 'squared', label: 'Squared error' },
+                        { value: 'absolute', label: 'Absolute error' },
+                      ]}
+                      value={draft.heatmapConfig.error_mode}
+                      onChange={(value) => updateHeatmapConfig({ error_mode: (value ?? 'squared') as 'squared' | 'absolute' })}
+                    />
+                    <Switch
+                      label={<InfoLabel label="Signed deviations" info="Off treats only deviation magnitude. On preserves direction: input brighter than reconstruction is positive; input darker is negative." />}
+                      checked={draft.heatmapConfig.signed_deviations}
+                      onChange={(event) => updateHeatmapConfig({ signed_deviations: event.currentTarget.checked })}
+                    />
+                    <Switch
+                      label={<InfoLabel label="Threshold" info="Suppresses pixels whose absolute input/reconstruction difference is below the specified value. The value uses preprocessed pixel units." />}
+                      checked={draft.heatmapConfig.threshold_enabled}
+                      onChange={(event) => updateHeatmapConfig({ threshold_enabled: event.currentTarget.checked })}
+                    />
+                  </SimpleGrid>
+
+                  {(draft.heatmapConfig.signed_deviations || draft.heatmapConfig.threshold_enabled) && (
+                    <SimpleGrid cols={{ base: 1, md: 3 }}>
+                      {draft.heatmapConfig.signed_deviations && (
+                        <>
+                          <NumberInput
+                            label={<InfoLabel label="Positive weight" info="Multiplier for pixels where input is brighter than reconstruction. Zero suppresses positive deviations." />}
+                            min={0}
+                            step={0.1}
+                            decimalScale={3}
+                            value={draft.heatmapConfig.positive_weight}
+                            onChange={(value) => updateHeatmapConfig({ positive_weight: valueAsNumber(value, 1) })}
+                          />
+                          <NumberInput
+                            label={<InfoLabel label="Negative weight" info="Multiplier for pixels where input is darker than reconstruction. Zero suppresses negative deviations." />}
+                            min={0}
+                            step={0.1}
+                            decimalScale={3}
+                            value={draft.heatmapConfig.negative_weight}
+                            onChange={(value) => updateHeatmapConfig({ negative_weight: valueAsNumber(value, 1) })}
+                          />
+                        </>
+                      )}
+                      {draft.heatmapConfig.threshold_enabled && (
+                        <NumberInput
+                          label={<InfoLabel label="Threshold value" info="Absolute difference below this value becomes zero before absolute/squared error and sign weighting are applied." />}
+                          min={0}
+                          step={0.01}
+                          decimalScale={6}
+                          value={draft.heatmapConfig.threshold}
+                          onChange={(value) => updateHeatmapConfig({ threshold: valueAsNumber(value, 0) })}
+                        />
+                      )}
+                    </SimpleGrid>
+                  )}
+
+                  <Text fw={600} size="sm">Visibility</Text>
+                  <SimpleGrid cols={{ base: 1, md: 3 }}>
+                    <Switch
+                      label={<InfoLabel label="Max clip" info="When enabled, errors at max clip × the strongest current error already reach full opacity. At 0.33, the strongest third saturates like the legacy visualization." />}
+                      checked={draft.heatmapConfig.max_clip_enabled}
+                      onChange={(event) => updateHeatmapConfig({ max_clip_enabled: event.currentTarget.checked })}
+                    />
+                    {draft.heatmapConfig.max_clip_enabled ? (
+                      <NumberInput
+                        label={<InfoLabel label="Max clip (%)" info="Relative fraction of the strongest remaining error at which the overlay becomes fully opaque." />}
+                        min={1}
+                        max={100}
+                        step={1}
+                        value={Math.round(draft.heatmapConfig.max_clip * 100)}
+                        onChange={(value) => updateHeatmapConfig({ max_clip: valueAsNumber(value, 33) / 100 })}
+                      />
+                    ) : (
+                      <NumberInput
+                        label={<InfoLabel label="Maximum opacity (%)" info="Maximum overlay coverage when max clip is disabled. The previous MLTrace behavior used 55%." />}
+                        min={0}
+                        max={100}
+                        step={5}
+                        value={Math.round(draft.heatmapConfig.max_opacity * 100)}
+                        onChange={(value) => updateHeatmapConfig({ max_opacity: valueAsNumber(value, 55) / 100 })}
+                      />
+                    )}
+                  </SimpleGrid>
+                </Stack>
               )}
               {finishedRuns.length === 0 && <Alert color="blue">No finished testing runs with images are available yet.</Alert>}
               <Group justify="space-between" align="center">

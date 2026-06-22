@@ -9,7 +9,11 @@ from app import models
 from app.database import Base
 from app.heatmap import engine as heatmap_engine
 from app.heatmap import service as heatmap_service
-from app.schemas import HeatmapRangeRunCreate, TestingRunCreate as TestingRunCreatePayload
+from app.schemas import (
+    HeatmapRangeRunCreate,
+    HeatmapVisualizationConfig,
+    TestingRunCreate as TestingRunCreatePayload,
+)
 from app.testing.service import create_testing_run
 from app.testing.service import CURRENT_HEATMAP_RENDER_VERSION
 
@@ -91,6 +95,20 @@ def test_heatmap_range_renders_frames_and_dedups(tmp_path: Path, monkeypatch) ->
         )
         assert again.id == run.id
         assert db.scalar(select(models.HeatmapRangeRun).where(models.HeatmapRangeRun.id != run.id)) is None
+
+        different_config = heatmap_service.enqueue_heatmap_range(
+            db,
+            HeatmapRangeRunCreate(
+                testing_run_id=testing_run.id,
+                start_timestamp=datetime(2026, 4, 1, 12, 0, 0),
+                end_timestamp=datetime(2026, 4, 1, 12, 0, 20),
+                stride=1,
+                scale_mode="shared",
+                visualization_config=HeatmapVisualizationConfig(error_mode="absolute"),
+            ),
+            wake_scheduler=False,
+        )
+        assert different_config.id != run.id
     finally:
         db.close()
 
