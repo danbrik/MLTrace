@@ -16,7 +16,7 @@ from app.modeling.layers import list_layer_definitions
 from app.modeling.registry import registry as model_registry
 from app.modeling.validation import run_cnn_torch_dummy_forward, validate_cnn_tensor_contract
 from app.preprocessing.pipeline import (
-    encode_png_data_url,
+    encode_absolute_image_data_url,
     execute_preview,
     execute_with_previews,
     image_metadata,
@@ -1812,7 +1812,7 @@ def dry_run_training_pipeline(db: Session, payload: TrainingPipelineDryRunReques
             dtype=dtype,
             value_min=value_min,
             value_max=value_max,
-            image_data_url=encode_png_data_url(output_image),
+            image_data_url=encode_absolute_image_data_url(output_image),
             elapsed_ms=result["elapsed_ms"],
         ),
         **base_response,

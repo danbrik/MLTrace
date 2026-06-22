@@ -621,6 +621,7 @@ export type HeatmapRun = {
   reconstruction_image_data_url: string;
   heatmap_image_data_url: string;
   error_matrix: number[][] | null;
+  render_version: number;
   created_at: string;
   updated_at: string;
 };
@@ -642,6 +643,8 @@ export type HeatmapRangeRun = {
   stride: number;
   scale_mode: 'per_frame' | 'shared';
   global_vmax: number | null;
+  frame_max_errors: number[] | null;
+  render_version: number;
   frame_count: number | null;
   done_count: number;
   config_signature: string;

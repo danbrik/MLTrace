@@ -15,14 +15,17 @@ from sqlalchemy.orm import Session
 from app import models
 from app.database import data_dir
 from app.schemas import HeatmapRangeRunCreate, HeatmapRangeRunRead
-from app.testing.service import _load_testing_run_for_heatmap, _utcnow
+from app.testing.service import CURRENT_HEATMAP_RENDER_VERSION, _load_testing_run_for_heatmap, _utcnow
 from app.training.scheduler import scheduler
 
 
 def _range_signature(
     testing_run_id: int, start: datetime, end: datetime, stride: int, scale_mode: str
 ) -> str:
-    raw = f"{testing_run_id}|{start.isoformat()}|{end.isoformat()}|{stride}|{scale_mode}"
+    raw = (
+        f"{testing_run_id}|{start.isoformat()}|{end.isoformat()}|{stride}|"
+        f"{scale_mode}|render:{CURRENT_HEATMAP_RENDER_VERSION}"
+    )
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
@@ -66,6 +69,7 @@ def enqueue_heatmap_range(
         end_timestamp=payload.end_timestamp,
         stride=payload.stride,
         scale_mode=payload.scale_mode,
+        render_version=CURRENT_HEATMAP_RENDER_VERSION,
         done_count=0,
         config_signature=signature,
         testing_run_name=testing_run.name,

@@ -433,11 +433,13 @@ function TimeSeriesPlot({ plot, results }: { plot: AnalysisPlot; results: Combin
   );
 }
 
-const HEATMAP_ERROR_LAYOUT: Partial<Layout> = {
-  margin: { l: 40, r: 12, t: 8, b: 36 },
-  xaxis: { scaleanchor: 'y', constrain: 'domain', showgrid: false, zeroline: false },
-  yaxis: { autorange: 'reversed', showgrid: false, zeroline: false },
-};
+const TRANSPARENT_JET_SCALE = [
+  [0, 'rgba(0,0,143,0)'],
+  [0.25, 'rgba(0,0,255,0.14)'],
+  [0.5, 'rgba(0,255,255,0.28)'],
+  [0.75, 'rgba(255,255,0,0.42)'],
+  [1, 'rgba(255,0,0,0.55)'],
+];
 
 function HeatmapPlot({
   plot,
@@ -465,19 +467,69 @@ function HeatmapPlot({
   const loading = loadingHeatmaps[currentKey] === true;
   const error = heatmapErrors[currentKey];
 
+  const relativeErrorMatrix = useMemo(() => {
+    if (!heatmap?.error_matrix) return null;
+    const ceiling = heatmap.max_error > 0 ? heatmap.max_error : 1;
+    return heatmap.error_matrix.map((row) => row.map((value) => Math.max(0, Math.min(1, value / ceiling))));
+  }, [heatmap]);
+
   const errorTrace = useMemo<Data[]>(() => {
-    if (!heatmap?.error_matrix) return [];
+    if (!heatmap?.error_matrix || !relativeErrorMatrix) return [];
     return [
       {
         type: 'heatmap',
-        z: heatmap.error_matrix,
-        colorscale: 'Jet',
+        z: relativeErrorMatrix,
+        customdata: heatmap.error_matrix,
+        colorscale: TRANSPARENT_JET_SCALE,
+        zmin: 0,
+        zmax: 1,
         zsmooth: false,
-        hoverinfo: 'skip',
-        colorbar: { title: { text: 'Recon. error', side: 'right' }, thickness: 12, len: 0.9 },
+        showscale: false,
+        hovertemplate: 'x %{x}<br>y %{y}<br>Relative error %{z:.4f}<br>Absolute MSE %{customdata:.6g}<extra></extra>',
       } as Data,
     ];
+  }, [heatmap, relativeErrorMatrix]);
+
+  const errorLayout = useMemo<Partial<Layout>>(() => {
+    if (!heatmap) return {};
+    return {
+      // Keep the drawable image area identical to the adjacent image frames.
+      // Pixel coordinates remain available in hover while zoom/pan stay active.
+      margin: { l: 0, r: 0, t: 0, b: 0 },
+      xaxis: {
+        range: [-0.5, heatmap.width - 0.5],
+        scaleanchor: 'y',
+        constrain: 'domain',
+        showgrid: false,
+        zeroline: false,
+        showticklabels: false,
+      },
+      yaxis: {
+        range: [heatmap.height - 0.5, -0.5],
+        showgrid: false,
+        zeroline: false,
+        showticklabels: false,
+      },
+      images: [
+        {
+          source: heatmap.source_image_data_url,
+          xref: 'x',
+          yref: 'y',
+          x: -0.5,
+          y: -0.5,
+          sizex: heatmap.width,
+          sizey: heatmap.height,
+          xanchor: 'left',
+          yanchor: 'top',
+          sizing: 'stretch',
+          layer: 'below',
+          opacity: 1,
+        },
+      ],
+    };
   }, [heatmap]);
+
+  const frameStyle = heatmap ? { aspectRatio: `${heatmap.width} / ${heatmap.height}` } : undefined;
 
   const errorPanel = heatmap ? (
     <div className="analysis-heatmap-panel">
@@ -485,9 +537,21 @@ function HeatmapPlot({
         Reconstruction error
       </Text>
       {heatmap.error_matrix ? (
-        <PlotlyChart data={errorTrace} layout={HEATMAP_ERROR_LAYOUT} height={280} />
+        <>
+          <div className="analysis-heatmap-image-frame analysis-heatmap-plot-frame" style={frameStyle}>
+            <PlotlyChart data={errorTrace} layout={errorLayout} height="100%" />
+          </div>
+          <div className="analysis-relative-colorbar" aria-label="Relative reconstruction error scale from zero to one">
+            <Group justify="space-between" gap="xs">
+              <Text size="xs" c="dimmed">0</Text>
+              <Text size="xs" c="dimmed">Relative reconstruction error</Text>
+              <Text size="xs" c="dimmed">1</Text>
+            </Group>
+            <div className="analysis-relative-colorbar-gradient" />
+          </div>
+        </>
       ) : (
-        <div className="analysis-heatmap-image-frame">
+        <div className="analysis-heatmap-image-frame" style={frameStyle}>
           <img src={heatmap.source_image_data_url} alt="Original with heatmap overlay" className="analysis-heatmap-image" />
           <img src={heatmap.heatmap_image_data_url} alt="Reconstruction error heatmap overlay" className="analysis-heatmap-overlay-image" />
         </div>
@@ -514,7 +578,7 @@ function HeatmapPlot({
                 <Text size="sm" fw={500} c="dimmed" ta="center">
                   Original
                 </Text>
-                <div className="analysis-heatmap-image-frame">
+                <div className="analysis-heatmap-image-frame" style={frameStyle}>
                   <img src={heatmap.source_image_data_url} alt="Original source" className="analysis-heatmap-image" />
                 </div>
               </div>
@@ -522,7 +586,7 @@ function HeatmapPlot({
                 <Text size="sm" fw={500} c="dimmed" ta="center">
                   Reconstructed
                 </Text>
-                <div className="analysis-heatmap-image-frame">
+                <div className="analysis-heatmap-image-frame" style={frameStyle}>
                   <img
                     src={heatmap.reconstruction_image_data_url || heatmap.source_image_data_url}
                     alt="Model reconstruction"
@@ -738,7 +802,7 @@ function HeatmapVideo({ plot, results }: { plot: AnalysisPlot; results: Combined
               onChange={(value) => setFps(Math.max(1, Math.min(60, Number(value) || 1)))}
             />
           </Group>
-          <div className="analysis-heatmap-image-frame">
+          <div className="analysis-heatmap-image-frame analysis-heatmap-video-frame">
             <img
               src={heatmapRangeFrameUrl(job.id, frameIndex)}
               alt={`Heatmap frame ${frameIndex + 1}`}
@@ -753,15 +817,19 @@ function HeatmapVideo({ plot, results }: { plot: AnalysisPlot; results: Combined
             className="analysis-frame-slider"
             onChange={(event) => setFrameIndex(Number(event.currentTarget.value))}
           />
-          <Group gap="xs" align="center">
-            <Text size="xs" c="dimmed">
-              {job.scale_mode === 'shared' ? 'Shared scale' : 'Per-frame scale'}
+          <Stack gap={3}>
+            <Group gap="xs" align="center">
+              <Text size="xs" c="dimmed">0</Text>
+              <div style={{ flex: 1, height: 10, borderRadius: 3, background: JET_GRADIENT }} />
+              <Text size="xs" c="dimmed">1</Text>
+            </Group>
+            <Text size="xs" c="dimmed" ta="center">
+              Relative reconstruction error · {job.scale_mode === 'shared' ? 'shared scale' : 'per-frame scale'} · absolute max{' '}
+              {job.scale_mode === 'shared'
+                ? formatMetric(job.global_vmax)
+                : formatMetric(job.frame_max_errors?.[frameIndex])}
             </Text>
-            <div style={{ flex: 1, height: 10, borderRadius: 3, background: JET_GRADIENT }} />
-            <Text size="xs" c="dimmed">
-              {job.scale_mode === 'shared' && job.global_vmax != null ? `max ${formatMetric(job.global_vmax)}` : 'max (per frame)'}
-            </Text>
-          </Group>
+          </Stack>
         </Stack>
       )}
     </Stack>
@@ -968,8 +1036,16 @@ export function AnalysisPage({ active = true }: { active?: boolean }) {
       try {
         const heatmap = await createHeatmap(
           frame.heatmapTimestampOnly
-            ? { testing_run_id: frame.testingRunId, timestamp: frame.timestamp }
-            : { testing_run_id: frame.testingRunId, testing_result_id: frame.id },
+            ? {
+                testing_run_id: frame.testingRunId,
+                timestamp: frame.timestamp,
+                force_recompute: options?.force ?? false,
+              }
+            : {
+                testing_run_id: frame.testingRunId,
+                testing_result_id: frame.id,
+                force_recompute: options?.force ?? false,
+              },
         );
         setHeatmapCache((current) => ({ ...current, [key]: heatmap }));
         setHeatmapErrors((current) => {

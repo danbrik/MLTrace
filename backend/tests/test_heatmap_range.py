@@ -11,6 +11,7 @@ from app.heatmap import engine as heatmap_engine
 from app.heatmap import service as heatmap_service
 from app.schemas import HeatmapRangeRunCreate, TestingRunCreate as TestingRunCreatePayload
 from app.testing.service import create_testing_run
+from app.testing.service import CURRENT_HEATMAP_RENDER_VERSION
 
 from tests.test_testing_service import seed_finished_mean_image_run
 
@@ -51,6 +52,7 @@ def test_heatmap_range_renders_frames_and_dedups(tmp_path: Path, monkeypatch) ->
             wake_scheduler=False,
         )
         assert queued.status == "queued"
+        assert queued.render_version == CURRENT_HEATMAP_RENDER_VERSION
 
         # The engine opens its own session + writes frames under data_dir().
         data_root = tmp_path / "data"
@@ -65,6 +67,8 @@ def test_heatmap_range_renders_frames_and_dedups(tmp_path: Path, monkeypatch) ->
         assert run.frame_count == 3
         assert run.done_count == 3  # counter reached N
         assert run.global_vmax is not None  # shared scale recorded a ceiling
+        assert run.frame_max_errors is not None
+        assert len(run.frame_max_errors) == 3
 
         frames_dir = data_root / "heatmap_ranges" / str(run.id)
         pngs = sorted(frames_dir.glob("frame_*.png"))
@@ -122,6 +126,8 @@ def test_heatmap_range_per_frame_scale(tmp_path: Path, monkeypatch) -> None:
         db.refresh(run)
         assert run.status == "finished"
         assert run.frame_count == 2
+        assert run.frame_max_errors is not None
+        assert len(run.frame_max_errors) == 2
         frames_dir = data_root / "heatmap_ranges" / str(run.id)
         assert len(sorted(frames_dir.glob("frame_*.png"))) == 2
     finally:

@@ -24,7 +24,7 @@ from sqlalchemy import select
 
 from app import models
 from app.database import SessionLocal, data_dir
-from app.preprocessing.pipeline import run_pipeline_array
+from app.preprocessing.pipeline import absolute_image_to_uint8, run_pipeline_array
 from app.schemas import PreprocessingGraph
 from app.testing.service import (
     ArtifactEvaluator,
@@ -63,16 +63,8 @@ def _chunks(seq: list, size: int):
 
 
 def _source_to_rgb_uint8(source: np.ndarray) -> np.ndarray:
-    """Display-normalize a (preprocessed) source image to HxWx3 uint8."""
-    array = source
-    if array.dtype != np.uint8:
-        array = array.astype(np.float32)
-        minimum = float(np.min(array)) if array.size else 0.0
-        maximum = float(np.max(array)) if array.size else 0.0
-        if maximum > minimum:
-            array = ((array - minimum) / (maximum - minimum) * 255.0).astype(np.uint8)
-        else:
-            array = np.zeros_like(array, dtype=np.uint8)
+    """Convert a real source image to HxWx3 using the shared absolute scale."""
+    array = absolute_image_to_uint8(source)
     if array.ndim == 2:
         array = np.stack([array] * 3, axis=-1)
     elif array.ndim == 3 and array.shape[2] == 1:
@@ -103,6 +95,7 @@ def run_heatmap_range(run_id: int, abort_event: threading.Event | None = None) -
         run.device = _resolve_device(run.gpu_index)
         run.error_message = None
         run.done_count = 0
+        run.frame_max_errors = None
         db.commit()
 
         try:
@@ -151,6 +144,7 @@ def run_heatmap_range(run_id: int, abort_event: threading.Event | None = None) -
                 tmp_dir.mkdir(exist_ok=True)
 
             global_vmax = 0.0
+            frame_max_errors: list[float] = []
             done = 0
 
             # Pass 1: reconstruct (batched) + error map. per_frame renders the PNG
@@ -167,7 +161,9 @@ def run_heatmap_range(run_id: int, abort_event: threading.Event | None = None) -
                 reconstructions = evaluator.reconstruct_batch(images)
                 for offset, _record in enumerate(batch):
                     error_map = _pixel_error_map(sources[offset], reconstructions[offset])
-                    global_vmax = max(global_vmax, float(np.max(error_map)) if error_map.size else 0.0)
+                    frame_max = float(np.max(error_map)) if error_map.size else 0.0
+                    frame_max_errors.append(frame_max)
+                    global_vmax = max(global_vmax, frame_max)
                     frame_path = frames_dir / f"frame_{done:05d}.png"
                     if shared:
                         np.save(tmp_dir / f"{done:05d}.npy", error_map.astype(np.float16))
@@ -183,6 +179,7 @@ def run_heatmap_range(run_id: int, abort_event: threading.Event | None = None) -
 
             run.done_count = done
             run.global_vmax = global_vmax
+            run.frame_max_errors = frame_max_errors
             db.commit()
 
             # Pass 2 (shared only): composite with the global ceiling. Cheap (no model).

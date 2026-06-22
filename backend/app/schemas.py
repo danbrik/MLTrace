@@ -658,6 +658,7 @@ class HeatmapRunCreate(BaseModel):
     testing_run_id: int
     testing_result_id: int | None = None
     timestamp: datetime | None = None
+    force_recompute: bool = False
 
     @model_validator(mode="after")
     def validate_result_or_timestamp(self):
@@ -688,6 +689,7 @@ class HeatmapRunRead(BaseModel):
     reconstruction_image_data_url: str = ""
     heatmap_image_data_url: str
     error_matrix: list[list[float]] | None = None
+    render_version: int
     created_at: datetime
     updated_at: datetime
 
@@ -719,6 +721,8 @@ class HeatmapRangeRunRead(BaseModel):
     stride: int
     scale_mode: str
     global_vmax: float | None
+    frame_max_errors: list[float] | None
+    render_version: int
     frame_count: int | None
     done_count: int
     config_signature: str

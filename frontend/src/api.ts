@@ -466,7 +466,12 @@ export function listHeatmaps(): Promise<HeatmapRun[]> {
   return request<HeatmapRun[]>('/api/heatmaps');
 }
 
-export function createHeatmap(payload: { testing_run_id: number; testing_result_id?: number | null; timestamp?: string | null }): Promise<HeatmapRun> {
+export function createHeatmap(payload: {
+  testing_run_id: number;
+  testing_result_id?: number | null;
+  timestamp?: string | null;
+  force_recompute?: boolean;
+}): Promise<HeatmapRun> {
   return request<HeatmapRun>('/api/heatmaps', {
     method: 'POST',
     body: JSON.stringify(payload),

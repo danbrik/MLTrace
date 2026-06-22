@@ -14,7 +14,12 @@ from sqlalchemy.orm import Session, selectinload
 
 from app import models
 from app.database import data_dir
-from app.preprocessing.pipeline import encode_png_data_url, image_metadata, run_pipeline_array
+from app.preprocessing.pipeline import (
+    encode_absolute_image_data_url,
+    encode_png_data_url,
+    image_metadata,
+    run_pipeline_array,
+)
 from app.scanner import filename_timestamp_template
 from app.schemas import (
     HeatmapRunCreate,
@@ -33,6 +38,9 @@ from app.schemas import (
 from app.training.data import ResolvedDatasetImage, enumerate_training_dataset_image_records
 from app.training.engine import _build_model, _to_nchw
 from app.training.scheduler import scheduler
+
+
+CURRENT_HEATMAP_RENDER_VERSION = 2
 
 
 def _utcnow() -> datetime:
@@ -199,7 +207,7 @@ def preview_roi_image(db: Session, payload: RoiPreviewRequest) -> RoiPreviewResp
         height=height,
         channels=channels,
         dtype=dtype,
-        image_data_url=encode_png_data_url(image),
+        image_data_url=encode_absolute_image_data_url(image),
     )
 
 
@@ -558,7 +566,7 @@ def get_testing_run_result_image(
         height=height,
         channels=channels,
         dtype=dtype,
-        image_data_url=encode_png_data_url(image),
+        image_data_url=encode_absolute_image_data_url(image),
     )
 
 
@@ -689,7 +697,9 @@ def _heatmap_overlay(error_map: np.ndarray, vmax: float | None = None) -> np.nda
     red = np.clip(1.5 - np.abs(4.0 * normalized - 3.0), 0.0, 1.0)
     green = np.clip(1.5 - np.abs(4.0 * normalized - 2.0), 0.0, 1.0)
     blue = np.clip(1.5 - np.abs(4.0 * normalized - 1.0), 0.0, 1.0)
-    alpha = np.clip(35.0 + normalized * 190.0, 0.0, 225.0)
+    # Zero error is invisible. Maximum error remains translucent so the source
+    # image is still inspectable beneath the anomaly colors.
+    alpha = np.clip(normalized * 140.0, 0.0, 140.0)
 
     overlay = np.zeros((*error_map.shape, 4), dtype=np.uint8)
     overlay[..., 0] = np.asarray(red * 255.0, dtype=np.uint8)
@@ -723,7 +733,11 @@ def compute_heatmap_run(db: Session, payload: HeatmapRunCreate) -> HeatmapRunRea
                 models.HeatmapRun.status == "finished",
             )
         )
-        if existing_by_timestamp is not None:
+        if (
+            existing_by_timestamp is not None
+            and existing_by_timestamp.render_version == CURRENT_HEATMAP_RENDER_VERSION
+            and not payload.force_recompute
+        ):
             return HeatmapRunRead.model_validate(existing_by_timestamp)
 
     if result_id is None and timestamp is not None:
@@ -762,7 +776,11 @@ def compute_heatmap_run(db: Session, payload: HeatmapRunCreate) -> HeatmapRunRea
                 models.HeatmapRun.status == "finished",
             )
         )
-        if existing is not None:
+        if (
+            existing is not None
+            and existing.render_version == CURRENT_HEATMAP_RENDER_VERSION
+            and not payload.force_recompute
+        ):
             return HeatmapRunRead.model_validate(existing)
 
     if result_id is not None:
@@ -824,6 +842,7 @@ def compute_heatmap_run(db: Session, payload: HeatmapRunCreate) -> HeatmapRunRea
     row.reconstruction_image_data_url = ""
     row.heatmap_image_data_url = ""
     row.error_matrix = None
+    row.render_version = CURRENT_HEATMAP_RENDER_VERSION
     row.updated_at = _utcnow()
     db.commit()
 
@@ -847,8 +866,8 @@ def compute_heatmap_run(db: Session, payload: HeatmapRunCreate) -> HeatmapRunRea
         row.mean_error = float(np.mean(error_map))
         row.max_x = int(max_x)
         row.max_y = int(max_y)
-        row.source_image_data_url = encode_png_data_url(source)
-        row.reconstruction_image_data_url = encode_png_data_url(reconstruction)
+        row.source_image_data_url = encode_absolute_image_data_url(source)
+        row.reconstruction_image_data_url = encode_absolute_image_data_url(reconstruction)
         row.heatmap_image_data_url = encode_png_data_url(_heatmap_overlay(error_map))
         row.error_matrix = _error_matrix(error_map)
         row.updated_at = _utcnow()

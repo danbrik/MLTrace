@@ -11,7 +11,15 @@ from app import models
 from app.database import Base
 from app.schemas import HeatmapRunCreate, RoiDefinitionCreate, RoiPreviewRequest, TestingRunCreate as TestingRunCreatePayload
 from app.testing import service as testing_service
-from app.testing.service import compute_heatmap_run, create_roi, create_testing_run, get_testing_run_results, preview_roi_image
+from app.testing.service import (
+    CURRENT_HEATMAP_RENDER_VERSION,
+    _heatmap_overlay,
+    compute_heatmap_run,
+    create_roi,
+    create_testing_run,
+    get_testing_run_results,
+    preview_roi_image,
+)
 
 
 def write_tiff(path: Path, value: int, size: tuple[int, int] = (8, 6)) -> None:
@@ -27,6 +35,14 @@ def make_db():
     )
     Base.metadata.create_all(bind=engine)
     return sessionmaker(autocommit=False, autoflush=False, bind=engine)()
+
+
+def test_heatmap_overlay_uses_bounded_error_dependent_alpha() -> None:
+    overlay = _heatmap_overlay(np.array([[0.0, 0.5, 1.0]], dtype=np.float32), vmax=1.0)
+
+    assert overlay[0, 0, 3] == 0
+    assert 0 < overlay[0, 1, 3] < overlay[0, 2, 3]
+    assert overlay[0, 2, 3] <= 140
 
 
 def seed_finished_mean_image_run(db, tmp_path: Path):
@@ -195,11 +211,23 @@ def test_roi_preview_and_mean_image_testing_run(tmp_path: Path, monkeypatch) -> 
         assert heatmap.testing_result_id is None
         assert heatmap.image_path.endswith("frame_20260401_120010.tiff")
         assert heatmap.max_error == 100.0
+        assert heatmap.render_version == CURRENT_HEATMAP_RENDER_VERSION
 
         cached = compute_heatmap_run(
             db,
             HeatmapRunCreate(testing_run_id=testing_run.id, timestamp=datetime(2026, 4, 1, 12, 0, 10)),
         )
         assert cached.id == heatmap.id
+
+        recomputed = compute_heatmap_run(
+            db,
+            HeatmapRunCreate(
+                testing_run_id=testing_run.id,
+                timestamp=datetime(2026, 4, 1, 12, 0, 10),
+                force_recompute=True,
+            ),
+        )
+        assert recomputed.id == heatmap.id
+        assert recomputed.render_version == CURRENT_HEATMAP_RENDER_VERSION
     finally:
         db.close()

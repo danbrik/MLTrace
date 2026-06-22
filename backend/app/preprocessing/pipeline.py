@@ -170,13 +170,18 @@ def encode_png_data_url(image: np.ndarray) -> str:
     return f"data:image/png;base64,{encoded}"
 
 
-def encode_absolute_preview_png_data_url(image: np.ndarray) -> str:
-    """Encode a preprocessing preview without per-image contrast stretching."""
+def absolute_image_to_uint8(image: np.ndarray) -> np.ndarray:
+    """Convert a real image to uint8 using a stable dtype-based display scale.
+
+    This intentionally does not inspect the image minimum/maximum. The same
+    source value therefore has the same brightness across previews, model
+    outputs, ROI images, and heatmap backgrounds.
+    """
     array = np.asarray(image)
     if array.dtype == np.uint8:
-        display = array
+        return array
     elif np.issubdtype(array.dtype, np.bool_):
-        display = array.astype(np.uint8) * 255
+        return array.astype(np.uint8) * 255
     elif np.issubdtype(array.dtype, np.integer):
         info = np.iinfo(array.dtype)
         values = array.astype(np.float64)
@@ -184,18 +189,27 @@ def encode_absolute_preview_png_data_url(image: np.ndarray) -> str:
             values = (values - info.min) / float(info.max - info.min)
         else:
             values = values / float(info.max)
-        display = np.rint(np.clip(values, 0.0, 1.0) * 255.0).astype(np.uint8)
+        return np.rint(np.clip(values, 0.0, 1.0) * 255.0).astype(np.uint8)
     elif np.issubdtype(array.dtype, np.floating):
         values = np.nan_to_num(array.astype(np.float64), nan=0.0, posinf=1.0, neginf=0.0)
-        display = np.rint(np.clip(values, 0.0, 1.0) * 255.0).astype(np.uint8)
+        return np.rint(np.clip(values, 0.0, 1.0) * 255.0).astype(np.uint8)
     else:
-        raise ValueError(f"Unsupported preprocessing preview dtype: {array.dtype}.")
+        raise ValueError(f"Unsupported image display dtype: {array.dtype}.")
+
+
+def encode_absolute_image_data_url(image: np.ndarray) -> str:
+    """Encode a real image without per-image contrast stretching."""
+    display = absolute_image_to_uint8(image)
 
     pil_image = Image.fromarray(display)
     buffer = io.BytesIO()
     pil_image.save(buffer, format="PNG")
     encoded = base64.b64encode(buffer.getvalue()).decode("ascii")
     return f"data:image/png;base64,{encoded}"
+
+
+# Backward-compatible name used by preprocessing tests and API previews.
+encode_absolute_preview_png_data_url = encode_absolute_image_data_url
 
 
 def execute_with_previews(
