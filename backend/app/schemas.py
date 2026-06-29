@@ -235,6 +235,12 @@ class InspectPreviewRequest(BaseModel):
     stride: int = Field(default=1, ge=1)
     content_mode: Literal["final_preprocessed_output"] = "final_preprocessed_output"
 
+    contrast_enabled: bool = False
+    contrast_reference_frames: int = Field(default=100, ge=1)
+    contrast_shift: float = 10000.0
+    contrast_vmax: float = Field(default=12000.0, gt=0)
+    contrast_ma_radius: int = Field(default=3, ge=0)
+
     @field_validator("end_timestamp")
     @classmethod
     def validate_range(cls, value: datetime, info):
@@ -263,6 +269,10 @@ class InspectPreviewResponse(BaseModel):
     image_data_url: str
     preview_frame_count: int = 1
     preview_frames: list[dict] = []
+    contrast_enabled: bool = False
+    contrast_reference_frames_used: int | None = None
+    contrast_diff_min: float | None = None
+    contrast_diff_max: float | None = None
 
 
 class InspectRunCreate(InspectPreviewRequest):
@@ -287,6 +297,11 @@ class InspectRunRead(BaseModel):
     stride: int
     fps: int
     content_mode: str
+    contrast_enabled: bool
+    contrast_reference_frames: int | None
+    contrast_shift: float | None
+    contrast_vmax: float | None
+    contrast_ma_radius: int | None
     frame_count: int | None
     done_count: int
     frames_dir: str | None

@@ -155,3 +155,77 @@ def test_inspect_run_writes_png_frames_and_mp4(tmp_path: Path, monkeypatch) -> N
         assert Path(stored.video_path).stat().st_size > 0
     finally:
         db.close()
+
+
+def test_inspect_contrast_preview_reports_diff_range(tmp_path: Path) -> None:
+    SessionLocal = make_db()
+    db = SessionLocal()
+    try:
+        training_dataset, preprocessing = seed_inspect_fixture(db, tmp_path / "images")
+        preview = inspect_service.preview_inspect(
+            db,
+            InspectPreviewRequest(
+                training_dataset_id=training_dataset.id,
+                preprocessing_pipeline_id=preprocessing.id,
+                start_timestamp=datetime(2026, 2, 4, 15, 30, 0),
+                end_timestamp=datetime(2026, 2, 4, 15, 30, 50),
+                stride=2,
+                contrast_enabled=True,
+                contrast_reference_frames=1,
+                contrast_shift=10000,
+                contrast_vmax=12000,
+                contrast_ma_radius=0,
+            ),
+        )
+        assert preview.contrast_enabled is True
+        assert preview.contrast_reference_frames_used == 1
+        assert preview.dtype == "uint8"
+        assert preview.channels == 1
+        assert preview.contrast_diff_min is not None
+        assert preview.contrast_diff_max is not None
+        assert preview.contrast_diff_max >= preview.contrast_diff_min
+        assert preview.image_data_url.startswith("data:image/png;base64,")
+    finally:
+        db.close()
+
+
+def test_inspect_contrast_run_writes_video(tmp_path: Path, monkeypatch) -> None:
+    SessionLocal = make_db()
+    db = SessionLocal()
+    try:
+        training_dataset, preprocessing = seed_inspect_fixture(db, tmp_path / "images", image_count=4)
+        run = inspect_service.create_inspect_run(
+            db,
+            InspectRunCreate(
+                training_dataset_id=training_dataset.id,
+                preprocessing_pipeline_id=preprocessing.id,
+                start_timestamp=datetime(2026, 2, 4, 15, 30, 0),
+                end_timestamp=datetime(2026, 2, 4, 15, 30, 30),
+                stride=1,
+                fps=4,
+                contrast_enabled=True,
+                contrast_reference_frames=1,
+                contrast_shift=10000,
+                contrast_vmax=12000,
+                contrast_ma_radius=1,
+            ),
+        )
+        assert run.contrast_enabled is True
+        assert run.contrast_ma_radius == 1
+
+        monkeypatch.setattr(inspect_engine, "SessionLocal", SessionLocal)
+        monkeypatch.setattr(inspect_engine, "data_dir", lambda: tmp_path / "artifacts")
+
+        inspect_engine.run_inspect(run.id)
+
+        db.expire_all()
+        stored = db.get(models.InspectRun, run.id)
+        assert stored is not None
+        assert stored.status == "finished"
+        assert stored.frame_count == 2
+        assert stored.done_count == 2
+        assert (Path(stored.frames_dir) / "frame_00000.png").exists()
+        assert Path(stored.video_path).exists()
+        assert Path(stored.video_path).stat().st_size > 0
+    finally:
+        db.close()

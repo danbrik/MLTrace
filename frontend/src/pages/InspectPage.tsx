@@ -10,6 +10,7 @@ import {
   ScrollArea,
   Select,
   Stack,
+  Switch,
   Table,
   Text,
   Title,
@@ -62,6 +63,11 @@ function selectionSignature(values: {
   start: string;
   end: string;
   stride: number;
+  contrastEnabled: boolean;
+  contrastReferenceFrames: number;
+  contrastShift: number;
+  contrastVmax: number;
+  contrastMaRadius: number;
 }): string {
   return JSON.stringify(values);
 }
@@ -213,6 +219,11 @@ export function InspectPage({ active = true }: { active?: boolean }) {
   const [end, setEnd] = useState('');
   const [stride, setStride] = useState(1);
   const [fps, setFps] = useState(12);
+  const [contrastEnabled, setContrastEnabled] = useState(false);
+  const [contrastReferenceFrames, setContrastReferenceFrames] = useState(100);
+  const [contrastShift, setContrastShift] = useState(10000);
+  const [contrastVmax, setContrastVmax] = useState(12000);
+  const [contrastMaRadius, setContrastMaRadius] = useState(3);
   const [preview, setPreview] = useState<InspectPreview | null>(null);
   const [previewSignature, setPreviewSignature] = useState('');
   const [previewLoading, setPreviewLoading] = useState(false);
@@ -261,11 +272,16 @@ export function InspectPage({ active = true }: { active?: boolean }) {
     start,
     end,
     stride,
+    contrastEnabled,
+    contrastReferenceFrames,
+    contrastShift,
+    contrastVmax,
+    contrastMaRadius,
   });
   const previewFresh = Boolean(preview && previewSignature === currentSignature);
   const invalidRange = Boolean(start && end && end < start);
   const canPreview = Boolean(trainingDatasetId && preprocessingPipelineId && start && end && !invalidRange);
-  const canRun = canPreview && !runLoading;
+  const canRun = canPreview && !runLoading && (!contrastEnabled || contrastVmax > 0);
 
   function handleDatasetChange(value: string | null) {
     const id = value ? Number(value) : null;
@@ -291,6 +307,11 @@ export function InspectPage({ active = true }: { active?: boolean }) {
         start_timestamp: start,
         end_timestamp: end,
         stride,
+        contrast_enabled: contrastEnabled,
+        contrast_reference_frames: contrastReferenceFrames,
+        contrast_shift: contrastShift,
+        contrast_vmax: contrastVmax,
+        contrast_ma_radius: contrastMaRadius,
       });
       setPreview(result);
       setPreviewSignature(currentSignature);
@@ -318,6 +339,11 @@ export function InspectPage({ active = true }: { active?: boolean }) {
         end_timestamp: end,
         stride,
         fps,
+        contrast_enabled: contrastEnabled,
+        contrast_reference_frames: contrastReferenceFrames,
+        contrast_shift: contrastShift,
+        contrast_vmax: contrastVmax,
+        contrast_ma_radius: contrastMaRadius,
       });
       setRuns((current) => [created, ...current.filter((run) => run.id !== created.id)]);
       notifications.show({ color: 'green', title: 'Inspect run queued', message: created.training_dataset_name });
@@ -448,6 +474,86 @@ export function InspectPage({ active = true }: { active?: boolean }) {
             />
           </Group>
 
+          <Paper withBorder p="md" radius="sm">
+            <Stack gap="sm">
+              <Group justify="space-between" align="center">
+                <div>
+                  <Text fw={600}>Contrast-enhanced video</Text>
+                  <Text size="xs" c="dimmed">
+                    Subtract a mean reference (first N frames) from every frame, then shift, clip and rescale.
+                  </Text>
+                </div>
+                <Switch
+                  checked={contrastEnabled}
+                  onChange={(event) => {
+                    setContrastEnabled(event.currentTarget.checked);
+                    markPreviewStale();
+                  }}
+                  label={contrastEnabled ? 'Enabled' : 'Disabled'}
+                />
+              </Group>
+
+              {contrastEnabled && (
+                <>
+                  <Group grow align="flex-start">
+                    <NumberInput
+                      label="Reference frames (mean)"
+                      description="First N frames averaged into the reference"
+                      min={1}
+                      value={contrastReferenceFrames}
+                      onChange={(value) => {
+                        setContrastReferenceFrames(Math.max(1, Number(value) || 1));
+                        markPreviewStale();
+                      }}
+                    />
+                    <NumberInput
+                      label="Shift"
+                      description="Added to (frame − reference)"
+                      value={contrastShift}
+                      onChange={(value) => {
+                        setContrastShift(Number(value) || 0);
+                        markPreviewStale();
+                      }}
+                    />
+                    <NumberInput
+                      label="vmax (clip)"
+                      description="Upper clip value mapped to white"
+                      min={1}
+                      value={contrastVmax}
+                      error={contrastVmax > 0 ? undefined : 'Must be > 0'}
+                      onChange={(value) => {
+                        setContrastVmax(Math.max(1, Number(value) || 1));
+                        markPreviewStale();
+                      }}
+                    />
+                    <NumberInput
+                      label="Moving average ±frames"
+                      description="0 disables temporal smoothing"
+                      min={0}
+                      value={contrastMaRadius}
+                      onChange={(value) => {
+                        setContrastMaRadius(Math.max(0, Number(value) || 0));
+                        markPreviewStale();
+                      }}
+                    />
+                  </Group>
+                  <Text size="xs" c="dimmed">
+                    Intensities are normalised to a 0–65535 scale, so shift/vmax match the legacy 16-bit workflow
+                    (e.g. shift 10000, vmax 12000).
+                  </Text>
+                  {previewFresh && preview?.contrast_enabled && preview.contrast_diff_min != null && (
+                    <Alert color="grape" title="Preview diff range">
+                      Frame − reference spans {Math.round(preview.contrast_diff_min)} to{' '}
+                      {Math.round(preview.contrast_diff_max ?? 0)} (reference built from{' '}
+                      {preview.contrast_reference_frames_used} frames). Pick shift/vmax to frame the part you want
+                      to see.
+                    </Alert>
+                  )}
+                </>
+              )}
+            </Stack>
+          </Paper>
+
           <Group justify="flex-end">
             <Button
               leftSection={<Eye size={18} />}
@@ -549,7 +655,16 @@ export function InspectPage({ active = true }: { active?: boolean }) {
                         </Stack>
                       </Table.Td>
                       <Table.Td>{run.training_dataset_name}</Table.Td>
-                      <Table.Td>{run.preprocessing_pipeline_name}</Table.Td>
+                      <Table.Td>
+                        <Group gap={6} wrap="nowrap">
+                          <Text size="sm">{run.preprocessing_pipeline_name}</Text>
+                          {run.contrast_enabled && (
+                            <Badge size="xs" color="grape" variant="light">
+                              contrast
+                            </Badge>
+                          )}
+                        </Group>
+                      </Table.Td>
                       <Table.Td>
                         <Text size="sm">{formatTimestamp(run.start_timestamp)}</Text>
                         <Text size="sm">{formatTimestamp(run.end_timestamp)}</Text>

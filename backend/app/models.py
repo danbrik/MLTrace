@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from sqlalchemy import BigInteger, DateTime, Float, ForeignKey, Index, Integer, String, Text, UniqueConstraint, func
+from sqlalchemy import BigInteger, Boolean, DateTime, Float, ForeignKey, Index, Integer, String, Text, UniqueConstraint, func
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from sqlalchemy.types import JSON
@@ -629,6 +629,12 @@ class InspectRun(Base):
     stride: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     fps: Mapped[int] = mapped_column(Integer, nullable=False, default=12)
     content_mode: Mapped[str] = mapped_column(String(64), nullable=False, default="final_preprocessed_output")
+
+    contrast_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    contrast_reference_frames: Mapped[int | None] = mapped_column(Integer)
+    contrast_shift: Mapped[float | None] = mapped_column(Float)
+    contrast_vmax: Mapped[float | None] = mapped_column(Float)
+    contrast_ma_radius: Mapped[int | None] = mapped_column(Integer)
 
     frame_count: Mapped[int | None] = mapped_column(Integer)
     done_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)

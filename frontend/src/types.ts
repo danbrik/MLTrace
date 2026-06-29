@@ -703,6 +703,10 @@ export type InspectPreview = {
     image_path: string;
     image_data_url: string;
   }>;
+  contrast_enabled?: boolean;
+  contrast_reference_frames_used?: number | null;
+  contrast_diff_min?: number | null;
+  contrast_diff_max?: number | null;
 };
 
 export type InspectRun = {
@@ -721,6 +725,11 @@ export type InspectRun = {
   stride: number;
   fps: number;
   content_mode: string;
+  contrast_enabled: boolean;
+  contrast_reference_frames: number | null;
+  contrast_shift: number | null;
+  contrast_vmax: number | null;
+  contrast_ma_radius: number | null;
   frame_count: number | null;
   done_count: number;
   frames_dir: string | null;

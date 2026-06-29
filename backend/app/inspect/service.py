@@ -10,12 +10,14 @@ import threading
 from datetime import datetime
 from pathlib import Path
 
+import numpy as np
 from sqlalchemy import select
 from sqlalchemy.engine import make_url
 from sqlalchemy.orm import Session, selectinload
 
 from app import models
 from app.database import SessionLocal, data_dir
+from app.inspect.contrast import enhance_to_uint8, to_intensity_16scale
 from app.preprocessing.pipeline import (
     encode_absolute_image_data_url,
     image_metadata,
@@ -89,6 +91,10 @@ def preview_inspect(db: Session, payload: InspectPreviewRequest) -> InspectPrevi
     if not records:
         raise ValueError("No images in selected range.")
     graph = PreprocessingGraph.model_validate(preprocessing_pipeline.graph)
+
+    if payload.contrast_enabled:
+        return _preview_contrast(payload, training_dataset, preprocessing_pipeline, records, graph)
+
     preview_frames = []
     first_image = None
     for index, record in enumerate(records[:_PREVIEW_FRAME_LIMIT]):
@@ -130,6 +136,96 @@ def preview_inspect(db: Session, payload: InspectPreviewRequest) -> InspectPrevi
     )
 
 
+def _preview_contrast(
+    payload: InspectPreviewRequest,
+    training_dataset: models.TrainingDataset,
+    preprocessing_pipeline: models.PreprocessingPipeline,
+    records,
+    graph: PreprocessingGraph,
+) -> InspectPreviewResponse:
+    reference_frames = max(1, int(payload.contrast_reference_frames))
+    shift = float(payload.contrast_shift)
+    vmax = float(payload.contrast_vmax)
+    if vmax <= 0:
+        raise ValueError("Contrast vmax must be greater than zero.")
+
+    reference_used = min(reference_frames, len(records))
+    preview_count = min(_PREVIEW_FRAME_LIMIT, len(records))
+    needed = max(reference_used, preview_count)
+
+    intensities: list[np.ndarray] = []
+    reference_acc: np.ndarray | None = None
+    expected_shape: tuple[int, int] | None = None
+    for index in range(needed):
+        record = records[index]
+        intensity = to_intensity_16scale(run_pipeline_array(graph, record.file_path))
+        if expected_shape is None:
+            expected_shape = intensity.shape
+            reference_acc = np.zeros(expected_shape, dtype=np.float64)
+        elif intensity.shape != expected_shape:
+            raise ValueError(
+                "Preprocessing output size changed within the preview window: "
+                f"expected {expected_shape[1]}x{expected_shape[0]}, got "
+                f"{intensity.shape[1]}x{intensity.shape[0]} for {record.file_name}."
+            )
+        if index < reference_used:
+            reference_acc += intensity
+        if index < preview_count:
+            intensities.append(intensity)
+
+    assert reference_acc is not None
+    reference = (reference_acc / float(reference_used)).astype(np.float32)
+
+    preview_frames = []
+    diff_min = float("inf")
+    diff_max = float("-inf")
+    first_display: np.ndarray | None = None
+    for index in range(preview_count):
+        record = records[index]
+        diff = intensities[index] - reference
+        diff_min = min(diff_min, float(diff.min()))
+        diff_max = max(diff_max, float(diff.max()))
+        display = enhance_to_uint8(intensities[index], reference, shift, vmax)
+        if first_display is None:
+            first_display = display
+        preview_frames.append(
+            {
+                "index": index,
+                "timestamp": record.timestamp_parsed.isoformat(),
+                "image_path": record.file_path,
+                "image_data_url": encode_absolute_image_data_url(display),
+            }
+        )
+
+    first = records[0]
+    assert first_display is not None
+    height, width = first_display.shape[:2]
+    return InspectPreviewResponse(
+        training_dataset_id=training_dataset.id,
+        preprocessing_pipeline_id=preprocessing_pipeline.id,
+        start_timestamp=payload.start_timestamp,
+        end_timestamp=payload.end_timestamp,
+        stride=max(1, payload.stride),
+        matching_images=len(records),
+        selected_images=len(records),
+        first_image_path=first.file_path,
+        first_timestamp=first.timestamp_parsed,
+        width=width,
+        height=height,
+        channels=1,
+        dtype="uint8",
+        value_min=float(first_display.min()),
+        value_max=float(first_display.max()),
+        image_data_url=encode_absolute_image_data_url(first_display),
+        preview_frame_count=len(preview_frames),
+        preview_frames=preview_frames,
+        contrast_enabled=True,
+        contrast_reference_frames_used=reference_used,
+        contrast_diff_min=None if diff_min == float("inf") else diff_min,
+        contrast_diff_max=None if diff_max == float("-inf") else diff_max,
+    )
+
+
 def _serialize(run: models.InspectRun) -> InspectRunRead:
     return InspectRunRead.model_validate(run)
 
@@ -137,6 +233,8 @@ def _serialize(run: models.InspectRun) -> InspectRunRead:
 def create_inspect_run(db: Session, payload: InspectRunCreate) -> InspectRunRead:
     if payload.content_mode != "final_preprocessed_output":
         raise ValueError("Only final_preprocessed_output is supported.")
+    if payload.contrast_enabled and payload.contrast_vmax <= 0:
+        raise ValueError("Contrast vmax must be greater than zero.")
     training_dataset, preprocessing_pipeline, records = _resolve_selected_records(db, payload)
     if not records:
         raise ValueError("No images in selected range.")
@@ -150,6 +248,11 @@ def create_inspect_run(db: Session, payload: InspectRunCreate) -> InspectRunRead
         stride=max(1, payload.stride),
         fps=max(1, min(60, int(payload.fps))),
         content_mode=payload.content_mode,
+        contrast_enabled=bool(payload.contrast_enabled),
+        contrast_reference_frames=max(1, int(payload.contrast_reference_frames)),
+        contrast_shift=float(payload.contrast_shift),
+        contrast_vmax=float(payload.contrast_vmax),
+        contrast_ma_radius=max(0, int(payload.contrast_ma_radius)),
         frame_count=len(records),
         done_count=0,
         device="CPU",

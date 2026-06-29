@@ -573,6 +573,11 @@ export function previewInspect(payload: {
   end_timestamp: string;
   stride: number;
   content_mode?: 'final_preprocessed_output';
+  contrast_enabled?: boolean;
+  contrast_reference_frames?: number;
+  contrast_shift?: number;
+  contrast_vmax?: number;
+  contrast_ma_radius?: number;
 }): Promise<InspectPreview> {
   return request<InspectPreview>('/api/inspect/preview', {
     method: 'POST',
@@ -588,6 +593,11 @@ export function createInspectRun(payload: {
   stride: number;
   fps: number;
   content_mode?: 'final_preprocessed_output';
+  contrast_enabled?: boolean;
+  contrast_reference_frames?: number;
+  contrast_shift?: number;
+  contrast_vmax?: number;
+  contrast_ma_radius?: number;
 }): Promise<InspectRun> {
   return request<InspectRun>('/api/inspect/runs', {
     method: 'POST',
