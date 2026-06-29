@@ -28,6 +28,7 @@ logger = logging.getLogger("mltrace.inspect")
 
 _BACKEND_DIR = Path(__file__).resolve().parents[2]
 _POLL_INTERVAL_SECONDS = 2.0
+_PREVIEW_FRAME_LIMIT = 30
 
 
 def _utcnow() -> datetime:
@@ -88,8 +89,24 @@ def preview_inspect(db: Session, payload: InspectPreviewRequest) -> InspectPrevi
     if not records:
         raise ValueError("No images in selected range.")
     graph = PreprocessingGraph.model_validate(preprocessing_pipeline.graph)
+    preview_frames = []
+    first_image = None
+    for index, record in enumerate(records[:_PREVIEW_FRAME_LIMIT]):
+        image = run_pipeline_array(graph, record.file_path)
+        if first_image is None:
+            first_image = image
+        preview_frames.append(
+            {
+                "index": index,
+                "timestamp": record.timestamp_parsed.isoformat(),
+                "image_path": record.file_path,
+                "image_data_url": encode_absolute_image_data_url(image),
+            }
+        )
     first = records[0]
-    image = run_pipeline_array(graph, first.file_path)
+    image = first_image
+    if image is None:
+        raise ValueError("No images in selected range.")
     width, height, channels, dtype, value_min, value_max = image_metadata(image)
     return InspectPreviewResponse(
         training_dataset_id=training_dataset.id,
@@ -108,6 +125,8 @@ def preview_inspect(db: Session, payload: InspectPreviewRequest) -> InspectPrevi
         value_min=value_min,
         value_max=value_max,
         image_data_url=encode_absolute_image_data_url(image),
+        preview_frame_count=len(preview_frames),
+        preview_frames=preview_frames,
     )
 
 

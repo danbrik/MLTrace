@@ -112,6 +112,9 @@ def test_inspect_preview_uses_clipped_rules_and_extra_stride(tmp_path: Path) -> 
         assert preview.height == 8
         assert preview.dtype == "uint8"
         assert preview.image_data_url.startswith("data:image/png;base64,")
+        assert preview.preview_frame_count == 2
+        assert len(preview.preview_frames) == 2
+        assert preview.preview_frames[0]["image_data_url"].startswith("data:image/png;base64,")
     finally:
         db.close()
 

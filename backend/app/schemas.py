@@ -261,6 +261,8 @@ class InspectPreviewResponse(BaseModel):
     value_min: float
     value_max: float
     image_data_url: str
+    preview_frame_count: int = 1
+    preview_frames: list[dict] = []
 
 
 class InspectRunCreate(InspectPreviewRequest):

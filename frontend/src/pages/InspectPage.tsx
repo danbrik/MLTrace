@@ -18,6 +18,7 @@ import {
 import { notifications } from '@mantine/notifications';
 import { Download, Eye, FileVideo, ImageDown, Pause, Play, RefreshCw, Square, Trash2 } from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
+import type { ReactNode } from 'react';
 
 import {
   abortInspectRun,
@@ -65,67 +66,54 @@ function selectionSignature(values: {
   return JSON.stringify(values);
 }
 
-function InspectRunPlayer({ run }: { run: InspectRun }) {
-  const frameCount = run.frame_count ?? 0;
+type InspectFrameSource = {
+  frameCount: number;
+  fps: number;
+  imageUrl: (index: number) => string;
+  timestamp?: (index: number) => string | null;
+};
+
+function InspectFramePlayer({
+  title,
+  source,
+  meta,
+  actions,
+}: {
+  title: string;
+  source: InspectFrameSource;
+  meta?: ReactNode;
+  actions?: ReactNode;
+}) {
+  const frameCount = source.frameCount;
   const [frameIndex, setFrameIndex] = useState(0);
   const [playing, setPlaying] = useState(false);
 
   useEffect(() => {
+    setFrameIndex(0);
+    setPlaying(false);
+  }, [source]);
+
+  useEffect(() => {
     if (!playing || frameCount <= 1) return;
-    const delay = Math.max(40, 1000 / Math.max(1, run.fps));
+    const delay = Math.max(40, 1000 / Math.max(1, source.fps));
     const timer = window.setInterval(() => {
       setFrameIndex((current) => (current + 1) % frameCount);
     }, delay);
     return () => window.clearInterval(timer);
-  }, [playing, frameCount, run.fps]);
+  }, [playing, frameCount, source.fps]);
 
-  if (run.status !== 'finished' || frameCount <= 0) return null;
+  if (frameCount <= 0) return null;
 
   return (
     <Paper withBorder p="md" radius="sm">
       <Stack gap="sm">
-        <Group justify="space-between" align="center">
+        <Group justify="space-between" align="center" wrap="wrap">
           <Group gap="xs">
-            <Text fw={700}>{run.training_dataset_name}</Text>
-            <Badge variant="light">{run.preprocessing_pipeline_name}</Badge>
-            <Badge variant="light" color="gray">
-              {frameCount} frames · {run.fps} fps
-            </Badge>
+            <Text fw={700}>{title}</Text>
+            {meta}
           </Group>
-          <Group gap="xs">
-            <Button
-              size="compact-sm"
-              component="a"
-              href={inspectRunVideoUrl(run.id)}
-              download={`inspect-run-${run.id}.mp4`}
-              leftSection={<Download size={14} />}
-            >
-              Download MP4
-            </Button>
-            <Button
-              size="compact-sm"
-              variant="light"
-              component="a"
-              href={inspectRunFrameUrl(run.id, frameIndex)}
-              download={`inspect-run-${run.id}-frame-${String(frameIndex + 1).padStart(5, '0')}.png`}
-              leftSection={<ImageDown size={14} />}
-            >
-              Current PNG
-            </Button>
-          </Group>
+          <Group gap="xs">{actions}</Group>
         </Group>
-
-        <video
-          src={inspectRunVideoUrl(run.id)}
-          controls
-          style={{
-            width: '100%',
-            maxHeight: 460,
-            objectFit: 'contain',
-            borderRadius: 6,
-            background: '#111',
-          }}
-        />
 
         <Group gap="xs" align="center">
           <Button
@@ -138,19 +126,23 @@ function InspectRunPlayer({ run }: { run: InspectRun }) {
           </Button>
           <Text size="xs" c="dimmed">
             Frame {frameIndex + 1}/{frameCount}
+            {source.timestamp?.(frameIndex) ? ` · ${formatTimestamp(source.timestamp(frameIndex) ?? null)}` : ''}
           </Text>
         </Group>
-        <img
-          src={inspectRunFrameUrl(run.id, frameIndex)}
-          alt={`Inspect frame ${frameIndex + 1}`}
-          style={{
-            width: '100%',
-            maxHeight: 420,
-            objectFit: 'contain',
-            borderRadius: 6,
-            background: '#111',
-          }}
-        />
+        <div style={{ display: 'flex', justifyContent: 'center', width: '100%' }}>
+          <img
+            src={source.imageUrl(frameIndex)}
+            alt={`Inspect frame ${frameIndex + 1}`}
+            style={{
+              display: 'block',
+              maxWidth: '100%',
+              maxHeight: 'min(70vh, 680px)',
+              width: 'auto',
+              height: 'auto',
+              borderRadius: 6,
+            }}
+          />
+        </div>
         <input
           type="range"
           min={0}
@@ -160,6 +152,54 @@ function InspectRunPlayer({ run }: { run: InspectRun }) {
         />
       </Stack>
     </Paper>
+  );
+}
+
+function InspectRunPlayer({ run }: { run: InspectRun }) {
+  const frameCount = run.frame_count ?? 0;
+
+  if (run.status !== 'finished' || frameCount <= 0) return null;
+
+  return (
+    <InspectFramePlayer
+      title={run.training_dataset_name}
+      source={{
+        frameCount,
+        fps: run.fps,
+        imageUrl: (index) => inspectRunFrameUrl(run.id, index),
+      }}
+      meta={
+        <>
+          <Badge variant="light">{run.preprocessing_pipeline_name}</Badge>
+          <Badge variant="light" color="gray">
+            {frameCount} frames · {run.fps} fps
+          </Badge>
+        </>
+      }
+      actions={
+        <>
+          <Button
+            size="compact-sm"
+            component="a"
+            href={inspectRunVideoUrl(run.id)}
+            download={`inspect-run-${run.id}.mp4`}
+            leftSection={<Download size={14} />}
+          >
+            Download MP4
+          </Button>
+          <Button
+            size="compact-sm"
+            variant="light"
+            component="a"
+            href={inspectRunFrameUrl(run.id, 0)}
+            download={`inspect-run-${run.id}-frame.png`}
+            leftSection={<ImageDown size={14} />}
+          >
+            Download PNG
+          </Button>
+        </>
+      }
+    />
   );
 }
 
@@ -225,7 +265,7 @@ export function InspectPage({ active = true }: { active?: boolean }) {
   const previewFresh = Boolean(preview && previewSignature === currentSignature);
   const invalidRange = Boolean(start && end && end < start);
   const canPreview = Boolean(trainingDatasetId && preprocessingPipelineId && start && end && !invalidRange);
-  const canRun = canPreview && previewFresh && !runLoading;
+  const canRun = canPreview && !runLoading;
 
   function handleDatasetChange(value: string | null) {
     const id = value ? Number(value) : null;
@@ -429,30 +469,41 @@ export function InspectPage({ active = true }: { active?: boolean }) {
           </Group>
 
           {preview && (
-            <Paper withBorder p="md" radius="sm">
-              <Stack gap="sm">
-                <Group gap="xs">
+            <InspectFramePlayer
+              title="Preview"
+              source={{
+                frameCount: preview.preview_frames?.length || 1,
+                fps,
+                imageUrl: (index) => preview.preview_frames?.[index]?.image_data_url ?? preview.image_data_url,
+                timestamp: (index) => preview.preview_frames?.[index]?.timestamp ?? preview.first_timestamp,
+              }}
+              meta={
+                <>
                   <Badge variant="light" color={previewFresh ? 'green' : 'yellow'}>
                     {previewFresh ? 'Preview current' : 'Preview stale'}
                   </Badge>
                   <Badge variant="light">{preview.selected_images} selected images</Badge>
                   <Badge variant="light" color="gray">
-                    {preview.width}x{preview.height}, {preview.channels} ch, {preview.dtype}
+                    {preview.preview_frame_count ?? 1} preview frames
                   </Badge>
                   <Badge variant="light" color="gray">
-                    first {formatTimestamp(preview.first_timestamp)}
+                    {preview.width}x{preview.height}, {preview.channels} ch, {preview.dtype}
                   </Badge>
-                </Group>
-                <Text size="xs" c="dimmed" className="mono">
-                  {preview.first_image_path}
-                </Text>
-                <img
-                  src={preview.image_data_url}
-                  alt="Inspect preview"
-                  style={{ width: '100%', maxHeight: 420, objectFit: 'contain', borderRadius: 6, background: '#111' }}
-                />
-              </Stack>
-            </Paper>
+                </>
+              }
+              actions={
+                <Button
+                  size="compact-sm"
+                  variant="light"
+                  component="a"
+                  href={preview.image_data_url}
+                  download="inspect-preview-frame.png"
+                  leftSection={<ImageDown size={14} />}
+                >
+                  Download PNG
+                </Button>
+              }
+            />
           )}
         </Stack>
       </StepCard>

@@ -696,6 +696,13 @@ export type InspectPreview = {
   value_min: number;
   value_max: number;
   image_data_url: string;
+  preview_frame_count: number;
+  preview_frames: Array<{
+    index: number;
+    timestamp: string;
+    image_path: string;
+    image_data_url: string;
+  }>;
 };
 
 export type InspectRun = {
