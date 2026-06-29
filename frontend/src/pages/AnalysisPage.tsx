@@ -22,23 +22,28 @@ import {
   Tooltip,
 } from '@mantine/core';
 import { notifications } from '@mantine/notifications';
-import { ArrowDown, ArrowUp, Check, ChevronDown, ChevronRight, Info, Pause, Pencil, Play, Plus, RotateCcw, Search, Trash2 } from 'lucide-react';
+import { ArrowDown, ArrowUp, Check, ChevronDown, ChevronRight, Info, Pause, Pencil, Play, Plus, RotateCcw, Save, Search, Trash2, Upload } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import type React from 'react';
 
 import {
   abortHeatmapRange,
+  createAnalysisLayout,
   createHeatmap,
   createHeatmapRange,
+  deleteAnalysisLayout,
+  getAnalysisLayout,
   getHeatmapRange,
   getTestingRunResults,
   heatmapRangeFrameUrl,
+  listAnalysisLayouts,
   listMethodConfigurations,
   listPreprocessingPipelines,
   listTestingRuns,
   listTrainingDatasets,
   listTrainingPipelines,
   listTrainingRuns,
+  updateAnalysisLayout,
 } from '../api';
 import { DateTime24Input } from '../components/DateTime24Input';
 import { PlotlyChart } from '../components/PlotlyChart';
@@ -48,6 +53,7 @@ import { usePendingIds } from '../hooks/usePendingIds';
 import { formatValue } from '../methods/utils';
 import { datasetResolutions, formatResolution, orderedGraphNodes, stepDetail } from '../training/graph';
 import type {
+  AnalysisLayout,
   HeatmapRangeRun,
   HeatmapRun,
   HeatmapVisualizationConfig,
@@ -68,6 +74,7 @@ type PlotDraft = {
   plotType: PlotType;
   testingRunId: string | null;
   title: string;
+  scoreSeries: string;
   start: string;
   end: string;
   sampling: number;
@@ -75,6 +82,8 @@ type PlotDraft = {
   heatmapMode: HeatmapMode;
   timestamp: string | null;
   includeReference: boolean;
+  staeHeatmapView: 'reconstruction' | 'prediction';
+  predictionHorizon: number;
   heatmapConfig: HeatmapVisualizationConfig;
 };
 
@@ -116,6 +125,7 @@ function valueAsNumber(value: string | number, fallback: number): number {
 
 function defaultHeatmapConfig(): HeatmapVisualizationConfig {
   return {
+    residual_source: 'pixel_residual',
     error_mode: 'squared',
     threshold_enabled: false,
     threshold: 0,
@@ -127,11 +137,19 @@ function defaultHeatmapConfig(): HeatmapVisualizationConfig {
     signed_deviations: false,
     positive_weight: 1,
     negative_weight: 1,
+    ssim_window_size: 11,
+    ssim_alpha: 1,
+    ssim_beta: 1,
+    ssim_gamma: 1,
+    ssim_k1: 0.01,
+    ssim_k2: 0.03,
+    ssim_data_range: 1,
   };
 }
 
-function heatmapConfigKey(config: HeatmapVisualizationConfig): string {
+function heatmapConfigKey(config: HeatmapVisualizationConfig, staeView = 'reconstruction', predictionHorizon = 1): string {
   return [
+    config.residual_source,
     config.error_mode,
     Number(config.threshold_enabled),
     config.threshold,
@@ -143,12 +161,21 @@ function heatmapConfigKey(config: HeatmapVisualizationConfig): string {
     Number(config.signed_deviations),
     config.positive_weight,
     config.negative_weight,
+    config.ssim_window_size,
+    config.ssim_alpha,
+    config.ssim_beta,
+    config.ssim_gamma,
+    config.ssim_k1,
+    config.ssim_k2,
+    config.ssim_data_range,
+    staeView,
+    predictionHorizon,
   ].join(':');
 }
 
-function heatmapCacheKey(frame: CombinedResult, config: HeatmapVisualizationConfig): string {
+function heatmapCacheKey(frame: CombinedResult, config: HeatmapVisualizationConfig, staeView = 'reconstruction', predictionHorizon = 1): string {
   const source = frame.heatmapTimestampOnly ? frame.timestamp : frame.id;
-  return `${frame.testingRunId}:${source}:${heatmapConfigKey(config)}`;
+  return `${frame.testingRunId}:${source}:${heatmapConfigKey(config, staeView, predictionHorizon)}`;
 }
 
 function InfoLabel({ label, info }: { label: string; info: string }) {
@@ -162,8 +189,63 @@ function InfoLabel({ label, info }: { label: string; info: string }) {
   );
 }
 
-function scoreValue(result: TestingRunResult): number {
+function scoreValue(result: TestingRunResult, series = 'score'): number {
+  const metadata = result.result_metadata ?? {};
+  const fastAnogan = metadata.fast_anogan;
+  if (typeof fastAnogan === 'object' && fastAnogan !== null) {
+    const values = fastAnogan as { residual_score?: unknown; feature_score?: unknown; combined_score?: unknown };
+    if (series === 'fast_residual' && typeof values.residual_score === 'number') return values.residual_score;
+    if (series === 'fast_feature' && typeof values.feature_score === 'number') return values.feature_score;
+    if (series === 'fast_combined' && typeof values.combined_score === 'number') return values.combined_score;
+  }
+  if (series === 'reconstruction') {
+    const value = metadata.reconstruction_score;
+    return typeof value === 'number' ? value : result.full_mse;
+  }
+  if (series === 'prediction') {
+    const value = metadata.prediction_score;
+    return typeof value === 'number' ? value : (result.roi_mse ?? result.score);
+  }
+  if (series.startsWith('future+')) {
+    const horizon = Number(series.slice('future+'.length));
+    const futureScores = Array.isArray(metadata.future_scores) ? metadata.future_scores : [];
+    const match = futureScores.find((item) => typeof item === 'object' && item !== null && Number((item as { horizon?: unknown }).horizon) === horizon);
+    const value = match && typeof (match as { score?: unknown }).score === 'number' ? (match as { score: number }).score : undefined;
+    return value ?? result.score;
+  }
   return result.score ?? result.roi_mse ?? result.full_mse;
+}
+
+function scoreSeriesOptions(results: CombinedResult[]) {
+  const options = [
+    { value: 'score', label: 'Combined / primary score' },
+    { value: 'reconstruction', label: 'Reconstruction score' },
+  ];
+  if (results.some((result) => typeof result.result_metadata?.prediction_score === 'number')) {
+    options.push({ value: 'prediction', label: 'Prediction score' });
+  }
+  if (results.some((result) => typeof result.result_metadata?.fast_anogan === 'object' && result.result_metadata?.fast_anogan !== null)) {
+    options.push(
+      { value: 'fast_combined', label: 'fastAnoGAN combined score' },
+      { value: 'fast_residual', label: 'fastAnoGAN pixel residual' },
+      { value: 'fast_feature', label: 'fastAnoGAN critic feature score' },
+    );
+  }
+  const horizons = new Set<number>();
+  for (const result of results) {
+    const futureScores = result.result_metadata?.future_scores;
+    if (!Array.isArray(futureScores)) continue;
+    for (const item of futureScores) {
+      if (typeof item === 'object' && item !== null) {
+        const horizon = Number((item as { horizon?: unknown }).horizon);
+        if (Number.isFinite(horizon)) horizons.add(horizon);
+      }
+    }
+  }
+  for (const horizon of [...horizons].sort((left, right) => left - right)) {
+    options.push({ value: `future+${horizon}`, label: `Future +${horizon}` });
+  }
+  return options;
 }
 
 function resultLabel(result: TestingRunResult): string {
@@ -431,7 +513,7 @@ function TimeSeriesPlot({ plot, results }: { plot: AnalysisPlot; results: Combin
       else groups.set(result.testingRunId, { name: result.testingRunName, results: [result] });
     }
     return [...groups.values()].map((group, index) => {
-      const smoothed = movingAverage(group.results.map(scoreValue), plot.movingAverage);
+      const smoothed = movingAverage(group.results.map((result) => scoreValue(result, plot.scoreSeries)), plot.movingAverage);
       return {
         type: 'scatter',
         mode: 'lines',
@@ -442,7 +524,7 @@ function TimeSeriesPlot({ plot, results }: { plot: AnalysisPlot; results: Combin
         hovertemplate: '%{x|%Y-%m-%d %H:%M:%S}<br>error %{y:.5g}<extra>%{fullData.name}</extra>',
       } as Data;
     });
-  }, [plot.movingAverage, results]);
+  }, [plot.movingAverage, plot.scoreSeries, results]);
 
   const layout = useMemo<Partial<Layout>>(
     () => ({
@@ -457,14 +539,14 @@ function TimeSeriesPlot({ plot, results }: { plot: AnalysisPlot; results: Combin
         gridcolor: 'rgba(128,128,128,0.15)',
       },
       yaxis: {
-        title: { text: 'Reconstruction error', font: { size: 12 } },
+        title: { text: plot.scoreSeries === 'score' ? 'Reconstruction / anomaly score' : plot.scoreSeries, font: { size: 12 } },
         showgrid: true,
         gridcolor: 'rgba(128,128,128,0.15)',
         zeroline: false,
       },
       margin: { l: 64, r: 24, t: 12, b: 56 },
     }),
-    [traces.length],
+    [plot.scoreSeries, traces.length],
   );
 
   if (results.length === 0) {
@@ -519,15 +601,17 @@ function HeatmapPlot({
   ensureHeatmap: (
     frame: CombinedResult,
     config: HeatmapVisualizationConfig,
+    staeView: 'reconstruction' | 'prediction',
+    predictionHorizon: number,
     options?: { force?: boolean },
   ) => Promise<void>;
 }) {
   const current = results[0] ?? null;
-  const currentKey = current ? heatmapCacheKey(current, plot.heatmapConfig) : '';
+  const currentKey = current ? heatmapCacheKey(current, plot.heatmapConfig, plot.staeHeatmapView, plot.predictionHorizon) : '';
   useEffect(() => {
     if (!current) return;
-    ensureHeatmap(current, plot.heatmapConfig);
-  }, [current, ensureHeatmap, plot.heatmapConfig]);
+    ensureHeatmap(current, plot.heatmapConfig, plot.staeHeatmapView, plot.predictionHorizon);
+  }, [current, ensureHeatmap, plot.heatmapConfig, plot.predictionHorizon, plot.staeHeatmapView]);
 
   const heatmap = currentKey ? heatmapCache[currentKey] : undefined;
   const loading = loadingHeatmaps[currentKey] === true;
@@ -703,7 +787,7 @@ function HeatmapPlot({
             {loading ? (
               <Stack gap="xs" align="center">
                 <Loader size="sm" />
-                <Text size="sm">Computing pixel heatmap…</Text>
+                <Text size="sm">Computing heatmap…</Text>
               </Stack>
             ) : error ? (
               <Stack gap="xs" align="center">
@@ -713,7 +797,11 @@ function HeatmapPlot({
                 <Text size="sm" ta="center">
                   {error}
                 </Text>
-                <Button size="compact-sm" variant="light" onClick={() => ensureHeatmap(current, plot.heatmapConfig, { force: true })}>
+                <Button
+                  size="compact-sm"
+                  variant="light"
+                  onClick={() => ensureHeatmap(current, plot.heatmapConfig, plot.staeHeatmapView, plot.predictionHorizon, { force: true })}
+                >
                   Retry heatmap
                 </Button>
               </Stack>
@@ -724,7 +812,7 @@ function HeatmapPlot({
         )}
       </div>
       <Text size="xs" c="dimmed">
-        Pixel heatmap · {heatmap?.visualization_config.error_mode ?? plot.heatmapConfig.error_mode} error · max pixel ({heatmap?.max_x ?? '—'}, {heatmap?.max_y ?? '—'}) · max magnitude {formatMetric(heatmap?.max_error)} · mean magnitude {formatMetric(heatmap?.mean_error)}
+        {(heatmap?.visualization_config.residual_source ?? plot.heatmapConfig.residual_source) === 'ssim_residual' ? 'SSIM heatmap' : 'Pixel heatmap'} · {heatmap?.visualization_config.error_mode ?? plot.heatmapConfig.error_mode} error · max pixel ({heatmap?.max_x ?? '—'}, {heatmap?.max_y ?? '—'}) · max magnitude {formatMetric(heatmap?.max_error)} · mean magnitude {formatMetric(heatmap?.mean_error)}
       </Text>
     </Stack>
   );
@@ -975,6 +1063,8 @@ function AnalysisPlotCard({
   ensureHeatmap: (
     frame: CombinedResult,
     config: HeatmapVisualizationConfig,
+    staeView: 'reconstruction' | 'prediction',
+    predictionHorizon: number,
     options?: { force?: boolean },
   ) => Promise<void>;
   onMove: (direction: -1 | 1) => void;
@@ -1037,6 +1127,7 @@ function defaultDraft(): PlotDraft {
     plotType: 'timeseries',
     testingRunId: null,
     title: '',
+    scoreSeries: 'score',
     start: '',
     end: '',
     sampling: 1,
@@ -1044,7 +1135,70 @@ function defaultDraft(): PlotDraft {
     heatmapMode: 'single',
     timestamp: null,
     includeReference: true,
+    staeHeatmapView: 'reconstruction',
+    predictionHorizon: 1,
     heatmapConfig: defaultHeatmapConfig(),
+  };
+}
+
+type AnalysisBoardLayout = {
+  version: 1;
+  draft: PlotDraft;
+  plots: AnalysisPlot[];
+  selectedPipelineId: string | null;
+  selectedRoiKey: string | null;
+  selectedSources: PlotSourceConfig[];
+  addPlotOpen: boolean;
+};
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+function restoreDraft(value: unknown): PlotDraft {
+  if (!isRecord(value)) return defaultDraft();
+  return {
+    ...defaultDraft(),
+    ...(value as Partial<PlotDraft>),
+    heatmapConfig: {
+      ...defaultHeatmapConfig(),
+      ...(isRecord(value.heatmapConfig) ? value.heatmapConfig : {}),
+    },
+  };
+}
+
+function restoreSources(value: unknown): PlotSourceConfig[] {
+  if (!Array.isArray(value)) return [];
+  return value.filter(isRecord).map((source) => ({
+    testingRunId: String(source.testingRunId ?? ''),
+    start: String(source.start ?? ''),
+    end: String(source.end ?? ''),
+    sampling: valueAsNumber(source.sampling as string | number, 1),
+    timestamp: source.timestamp === null || source.timestamp === undefined ? null : String(source.timestamp),
+  })).filter((source) => source.testingRunId);
+}
+
+function restorePlots(value: unknown): AnalysisPlot[] {
+  if (!Array.isArray(value)) return [];
+  return value.filter(isRecord).map((plot) => {
+    const draft = restoreDraft(plot);
+    return {
+      ...draft,
+      id: String(plot.id ?? crypto.randomUUID()),
+      sources: restoreSources(plot.sources),
+    };
+  });
+}
+
+function restoreBoardLayout(value: Record<string, unknown>): AnalysisBoardLayout {
+  return {
+    version: 1,
+    draft: restoreDraft(value.draft),
+    plots: restorePlots(value.plots),
+    selectedPipelineId: value.selectedPipelineId === null || value.selectedPipelineId === undefined ? null : String(value.selectedPipelineId),
+    selectedRoiKey: value.selectedRoiKey === null || value.selectedRoiKey === undefined ? null : String(value.selectedRoiKey),
+    selectedSources: restoreSources(value.selectedSources),
+    addPlotOpen: typeof value.addPlotOpen === 'boolean' ? value.addPlotOpen : true,
   };
 }
 
@@ -1069,9 +1223,16 @@ export function AnalysisPage({ active = true }: { active?: boolean }) {
   const [selectedRoiKey, setSelectedRoiKey] = useState<string | null>(null);
   const [selectedSources, setSelectedSources] = useState<PlotSourceConfig[]>([]);
   const [detailModal, setDetailModal] = useState<DetailModalState>(null);
+  const [analysisLayouts, setAnalysisLayouts] = useState<AnalysisLayout[]>([]);
+  const [selectedLayoutId, setSelectedLayoutId] = useState<string | null>(null);
+  const [layoutName, setLayoutName] = useState('');
+  const [layoutDescription, setLayoutDescription] = useState('');
+  const [layoutSaving, setLayoutSaving] = useState(false);
+  const [layoutLoading, setLayoutLoading] = useState(false);
+  const [layoutDeleting, setLayoutDeleting] = useState(false);
 
   async function refresh() {
-    const [nextTestingRuns, nextTrainingRuns, nextDatasets, nextPipelines, nextPreprocessing, nextMethods] =
+    const [nextTestingRuns, nextTrainingRuns, nextDatasets, nextPipelines, nextPreprocessing, nextMethods, nextLayouts] =
       await Promise.all([
         listTestingRuns(),
         listTrainingRuns(),
@@ -1079,6 +1240,7 @@ export function AnalysisPage({ active = true }: { active?: boolean }) {
         listTrainingPipelines(),
         listPreprocessingPipelines(),
         listMethodConfigurations(),
+        listAnalysisLayouts(),
       ]);
     setTestingRuns(nextTestingRuns);
     setTrainingRuns(nextTrainingRuns);
@@ -1086,6 +1248,7 @@ export function AnalysisPage({ active = true }: { active?: boolean }) {
     setTrainingPipelines(nextPipelines);
     setPreprocessingPipelines(nextPreprocessing);
     setMethodConfigurations(nextMethods);
+    setAnalysisLayouts(nextLayouts);
   }
 
   useEffect(() => {
@@ -1107,6 +1270,14 @@ export function AnalysisPage({ active = true }: { active?: boolean }) {
   const preprocessingById = useMemo(() => new Map(preprocessingPipelines.map((pipeline) => [pipeline.id, pipeline])), [preprocessingPipelines]);
   const methodById = useMemo(() => new Map(methodConfigurations.map((method) => [method.id, method])), [methodConfigurations]);
   const selectedPipeline = selectedPipelineId ? trainingPipelineById.get(Number(selectedPipelineId)) ?? null : null;
+  const selectedLayout = selectedLayoutId ? analysisLayouts.find((layout) => layout.id === Number(selectedLayoutId)) ?? null : null;
+  const layoutNameTrimmed = layoutName.trim();
+  const layoutNameExistsForCreate = analysisLayouts.some(
+    (layout) => layout.name.toLowerCase() === layoutNameTrimmed.toLowerCase(),
+  );
+  const layoutNameExistsForUpdate = analysisLayouts.some(
+    (layout) => layout.id !== Number(selectedLayoutId) && layout.name.toLowerCase() === layoutNameTrimmed.toLowerCase(),
+  );
 
   const finishedRunsForPipeline = useMemo(() => {
     if (!selectedPipelineId) return [];
@@ -1147,13 +1318,150 @@ export function AnalysisPage({ active = true }: { active?: boolean }) {
     [resultsByRunId],
   );
 
+  function buildBoardLayout(): AnalysisBoardLayout {
+    return {
+      version: 1,
+      draft,
+      plots,
+      selectedPipelineId,
+      selectedRoiKey,
+      selectedSources,
+      addPlotOpen,
+    };
+  }
+
+  function runIdsForLayout(layout: AnalysisBoardLayout): number[] {
+    const ids = new Set<number>();
+    for (const source of layout.selectedSources) ids.add(Number(source.testingRunId));
+    for (const plot of layout.plots) {
+      for (const source of plot.sources) ids.add(Number(source.testingRunId));
+    }
+    return [...ids].filter((id) => Number.isFinite(id));
+  }
+
+  async function loadAnalysisLayout(layoutId: number) {
+    if (layoutLoading) return;
+    setLayoutLoading(true);
+    try {
+      const saved = await getAnalysisLayout(layoutId);
+      const restored = restoreBoardLayout(saved.layout);
+      setSelectedLayoutId(String(saved.id));
+      setLayoutName(saved.name);
+      setLayoutDescription(saved.description ?? '');
+      setDraft(restored.draft);
+      setPlots(restored.plots);
+      setSelectedPipelineId(restored.selectedPipelineId);
+      setSelectedRoiKey(restored.selectedRoiKey);
+      setSelectedSources(restored.selectedSources);
+      setAddPlotOpen(restored.addPlotOpen);
+      setHeatmapCache({});
+      setHeatmapErrors({});
+      setLoadingHeatmaps({});
+      await Promise.all(
+        runIdsForLayout(restored).map((runId) =>
+          fetchResults(runId).catch((error) => notifyError(`Could not load testing results for run #${runId}`, error)),
+        ),
+      );
+      notifications.show({ color: 'green', title: 'Analysis board loaded', message: saved.name });
+    } catch (error) {
+      notifyError('Could not load analysis board', error);
+    } finally {
+      setLayoutLoading(false);
+    }
+  }
+
+  async function refreshAnalysisLayouts(selectedId?: number) {
+    const nextLayouts = await listAnalysisLayouts();
+    setAnalysisLayouts(nextLayouts);
+    if (selectedId !== undefined) setSelectedLayoutId(String(selectedId));
+  }
+
+  async function saveAnalysisLayoutAsNew() {
+    if (layoutSaving) return;
+    if (!layoutNameTrimmed) {
+      notifications.show({ color: 'yellow', title: 'Name required', message: 'Enter a board name before saving.' });
+      return;
+    }
+    if (layoutNameExistsForCreate) {
+      notifications.show({ color: 'yellow', title: 'Name already exists', message: 'Choose a unique board name.' });
+      return;
+    }
+    if (plots.length === 0) {
+      notifications.show({ color: 'yellow', title: 'No plots to save', message: 'Add at least one plot before saving a board.' });
+      return;
+    }
+    setLayoutSaving(true);
+    try {
+      const saved = await createAnalysisLayout({
+        name: layoutNameTrimmed,
+        description: layoutDescription.trim() || null,
+        layout: buildBoardLayout() as unknown as Record<string, unknown>,
+      });
+      await refreshAnalysisLayouts(saved.id);
+      notifications.show({ color: 'green', title: 'Analysis board saved', message: saved.name });
+    } catch (error) {
+      notifyError('Could not save analysis board', error);
+    } finally {
+      setLayoutSaving(false);
+    }
+  }
+
+  async function updateSelectedAnalysisLayout() {
+    if (layoutSaving || !selectedLayoutId) return;
+    if (!layoutNameTrimmed) {
+      notifications.show({ color: 'yellow', title: 'Name required', message: 'Enter a board name before updating.' });
+      return;
+    }
+    if (layoutNameExistsForUpdate) {
+      notifications.show({ color: 'yellow', title: 'Name already exists', message: 'Choose a unique board name.' });
+      return;
+    }
+    if (plots.length === 0) {
+      notifications.show({ color: 'yellow', title: 'No plots to save', message: 'Add at least one plot before updating a board.' });
+      return;
+    }
+    setLayoutSaving(true);
+    try {
+      const saved = await updateAnalysisLayout(Number(selectedLayoutId), {
+        name: layoutNameTrimmed,
+        description: layoutDescription.trim() || null,
+        layout: buildBoardLayout() as unknown as Record<string, unknown>,
+      });
+      await refreshAnalysisLayouts(saved.id);
+      notifications.show({ color: 'green', title: 'Analysis board updated', message: saved.name });
+    } catch (error) {
+      notifyError('Could not update analysis board', error);
+    } finally {
+      setLayoutSaving(false);
+    }
+  }
+
+  async function removeSelectedAnalysisLayout() {
+    if (layoutDeleting || !selectedLayoutId) return;
+    setLayoutDeleting(true);
+    try {
+      await deleteAnalysisLayout(Number(selectedLayoutId));
+      setSelectedLayoutId(null);
+      setLayoutName('');
+      setLayoutDescription('');
+      await refreshAnalysisLayouts();
+      notifications.show({ color: 'green', title: 'Analysis board deleted', message: 'Saved board was removed.' });
+    } catch (error) {
+      notifyError('Could not delete analysis board', error);
+    } finally {
+      setLayoutDeleting(false);
+    }
+  }
+
   const ensureHeatmap = useCallback(
     async (
       frame: CombinedResult,
       config: HeatmapVisualizationConfig,
+      staeView: 'reconstruction' | 'prediction',
+      predictionHorizon: number,
       options?: { force?: boolean },
     ) => {
-      const key = heatmapCacheKey(frame, config);
+      const key = heatmapCacheKey(frame, config, staeView, predictionHorizon);
       if (!options?.force && (heatmapCache[key] || loadingHeatmaps[key] || heatmapErrors[key])) return;
       if (options?.force) {
         setHeatmapErrors((current) => {
@@ -1170,12 +1478,16 @@ export function AnalysisPage({ active = true }: { active?: boolean }) {
                 testing_run_id: frame.testingRunId,
                 timestamp: frame.timestamp,
                 force_recompute: options?.force ?? false,
+                stae_view: staeView,
+                prediction_horizon: predictionHorizon,
                 visualization_config: config,
               }
             : {
                 testing_run_id: frame.testingRunId,
                 testing_result_id: frame.id,
                 force_recompute: options?.force ?? false,
+                stae_view: staeView,
+                prediction_horizon: predictionHorizon,
                 visualization_config: config,
               },
         );
@@ -1264,6 +1576,7 @@ export function AnalysisPage({ active = true }: { active?: boolean }) {
             full_mse: Number.NaN,
             roi_mse: null,
             tile_scores: null,
+            result_metadata: null,
             width: 0,
             height: 0,
             testingRunId: Number(source.testingRunId),
@@ -1428,6 +1741,109 @@ export function AnalysisPage({ active = true }: { active?: boolean }) {
           Reset board
         </Button>
       </Group>
+
+      <Paper withBorder p="md" radius="sm">
+        <Stack gap="md">
+          <Group justify="space-between" align="flex-start" wrap="wrap">
+            <div>
+              <Text fw={700}>Saved boards</Text>
+              <Text c="dimmed" size="sm">
+                Save the current plot board and restore it later with the same selected runs, ranges and plot settings.
+              </Text>
+            </div>
+            <Button
+              variant="default"
+              leftSection={<Plus size={16} />}
+              onClick={() => {
+                setSelectedLayoutId(null);
+                setLayoutName('');
+                setLayoutDescription('');
+              }}
+            >
+              New board name
+            </Button>
+          </Group>
+          <SimpleGrid cols={{ base: 1, md: 3 }} spacing="md">
+            <Select
+              label="Saved board"
+              placeholder="Select saved board"
+              data={analysisLayouts.map((layout) => ({ value: String(layout.id), label: layout.name }))}
+              value={selectedLayoutId}
+              onChange={(value) => {
+                setSelectedLayoutId(value);
+                const layout = value ? analysisLayouts.find((item) => item.id === Number(value)) : null;
+                setLayoutName(layout?.name ?? '');
+                setLayoutDescription(layout?.description ?? '');
+              }}
+              searchable
+              clearable
+            />
+            <TextInput
+              label="Board name"
+              placeholder="e.g. AE baseline comparison"
+              value={layoutName}
+              onChange={(event) => setLayoutName(event.currentTarget.value)}
+              error={
+                layoutNameTrimmed && !selectedLayoutId && layoutNameExistsForCreate
+                  ? 'Name already exists'
+                  : selectedLayoutId && layoutNameExistsForUpdate
+                    ? 'Name already exists'
+                    : null
+              }
+            />
+            <TextInput
+              label="Description"
+              placeholder="Optional note"
+              value={layoutDescription}
+              onChange={(event) => setLayoutDescription(event.currentTarget.value)}
+            />
+          </SimpleGrid>
+          <Group justify="space-between" align="center" wrap="wrap">
+            <Text size="sm" c="dimmed">
+              {selectedLayout
+                ? `Selected: ${selectedLayout.name}`
+                : `${analysisLayouts.length} saved board${analysisLayouts.length === 1 ? '' : 's'}`}
+            </Text>
+            <Group gap="sm">
+              <Button
+                variant="default"
+                leftSection={<Upload size={16} />}
+                disabled={!selectedLayoutId}
+                loading={layoutLoading}
+                onClick={() => selectedLayoutId && loadAnalysisLayout(Number(selectedLayoutId))}
+              >
+                Load
+              </Button>
+              <Button
+                leftSection={<Save size={16} />}
+                disabled={!layoutNameTrimmed || layoutNameExistsForCreate || plots.length === 0}
+                loading={layoutSaving}
+                onClick={saveAnalysisLayoutAsNew}
+              >
+                Save as new
+              </Button>
+              <Button
+                variant="light"
+                disabled={!selectedLayoutId || !layoutNameTrimmed || layoutNameExistsForUpdate || plots.length === 0}
+                loading={layoutSaving}
+                onClick={updateSelectedAnalysisLayout}
+              >
+                Update
+              </Button>
+              <Button
+                variant="subtle"
+                color="red"
+                leftSection={<Trash2 size={16} />}
+                disabled={!selectedLayoutId}
+                loading={layoutDeleting}
+                onClick={removeSelectedAnalysisLayout}
+              >
+                Delete
+              </Button>
+            </Group>
+          </Group>
+        </Stack>
+      </Paper>
 
       <Paper withBorder p="md" radius="sm">
         <Stack gap="md">
@@ -1740,8 +2156,13 @@ export function AnalysisPage({ active = true }: { active?: boolean }) {
               />
               {draft.plotType === 'timeseries' ? (
                 <SimpleGrid cols={{ base: 1, md: 3 }}>
+                  <Select
+                    label="Score line"
+                    data={scoreSeriesOptions(combinedDraftResults)}
+                    value={draft.scoreSeries}
+                    onChange={(value) => setDraft((current) => ({ ...current, scoreSeries: value ?? 'score' }))}
+                  />
                   <NumberInput label="Moving average window" min={1} value={draft.movingAverage} onChange={(value) => setDraft((current) => ({ ...current, movingAverage: valueAsNumber(value, 1) }))} />
-                  <TextInput label="Y-axis" value="Reconstruction error" disabled />
                   <TextInput label="X-axis" value="Time" disabled />
                 </SimpleGrid>
               ) : (
@@ -1776,9 +2197,43 @@ export function AnalysisPage({ active = true }: { active?: boolean }) {
                       }}
                     />
                   </SimpleGrid>
+                  {combinedDraftResults.some((result) => result.result_metadata?.sample_kind === 'clip') && (
+                    <SimpleGrid cols={{ base: 1, md: 3 }}>
+                      <Select
+                        label={<InfoLabel label="STAE view" info="Reconstruction compares the last input frame with its reconstruction. Prediction compares a future target frame with the predicted future frame." />}
+                        data={[
+                          { value: 'reconstruction', label: 'Reconstruction' },
+                          { value: 'prediction', label: 'Future prediction' },
+                        ]}
+                        value={draft.staeHeatmapView}
+                        onChange={(value) =>
+                          setDraft((current) => ({
+                            ...current,
+                            staeHeatmapView: (value ?? 'reconstruction') as 'reconstruction' | 'prediction',
+                          }))
+                        }
+                      />
+                      <NumberInput
+                        label={<InfoLabel label="Prediction horizon" info="Future frame index for STAE prediction heatmaps. future+1 means the first predicted future frame." />}
+                        min={1}
+                        value={draft.predictionHorizon}
+                        disabled={draft.staeHeatmapView !== 'prediction'}
+                        onChange={(value) => setDraft((current) => ({ ...current, predictionHorizon: valueAsNumber(value, 1) }))}
+                      />
+                    </SimpleGrid>
+                  )}
 
                   <Text fw={600} size="sm">Error calculation</Text>
                   <SimpleGrid cols={{ base: 1, md: 3 }}>
+                    <Select
+                      label={<InfoLabel label="Residual source" info="Pixel residual compares pixel values directly. SSIM residual uses local 1 - SSIM structure distance with standard K constants." />}
+                      data={[
+                        { value: 'pixel_residual', label: 'Pixel residual' },
+                        { value: 'ssim_residual', label: 'SSIM residual' },
+                      ]}
+                      value={draft.heatmapConfig.residual_source}
+                      onChange={(value) => updateHeatmapConfig({ residual_source: (value ?? 'pixel_residual') as 'pixel_residual' | 'ssim_residual' })}
+                    />
                     <Select
                       label={<InfoLabel label="Pixel error" info="Absolute uses |input - reconstruction|. Squared uses (input - reconstruction)² and emphasizes large deviations more strongly." />}
                       data={[
@@ -1786,11 +2241,13 @@ export function AnalysisPage({ active = true }: { active?: boolean }) {
                         { value: 'absolute', label: 'Absolute error' },
                       ]}
                       value={draft.heatmapConfig.error_mode}
+                      disabled={draft.heatmapConfig.residual_source === 'ssim_residual'}
                       onChange={(value) => updateHeatmapConfig({ error_mode: (value ?? 'squared') as 'squared' | 'absolute' })}
                     />
                     <Switch
                       label={<InfoLabel label="Signed deviations" info="Off treats only deviation magnitude. On preserves direction: input brighter than reconstruction is positive; input darker is negative." />}
                       checked={draft.heatmapConfig.signed_deviations}
+                      disabled={draft.heatmapConfig.residual_source === 'ssim_residual'}
                       onChange={(event) => updateHeatmapConfig({ signed_deviations: event.currentTarget.checked })}
                     />
                     <Switch
@@ -1799,6 +2256,41 @@ export function AnalysisPage({ active = true }: { active?: boolean }) {
                       onChange={(event) => updateHeatmapConfig({ threshold_enabled: event.currentTarget.checked })}
                     />
                   </SimpleGrid>
+                  {draft.heatmapConfig.residual_source === 'ssim_residual' && (
+                    <SimpleGrid cols={{ base: 1, md: 3 }}>
+                      <NumberInput
+                        label={<InfoLabel label="SSIM window" info="Odd local window size used for 1 - SSIM residual maps. 11 is the standard default." />}
+                        min={3}
+                        step={2}
+                        value={draft.heatmapConfig.ssim_window_size}
+                        onChange={(value) => updateHeatmapConfig({ ssim_window_size: valueAsNumber(value, 11) })}
+                      />
+                      <NumberInput
+                        label={<InfoLabel label="SSIM K1" info="Standard SSIM K constant. MLTrace computes C1=(K1*data_range)^2." />}
+                        min={0}
+                        step={0.001}
+                        decimalScale={4}
+                        value={draft.heatmapConfig.ssim_k1}
+                        onChange={(value) => updateHeatmapConfig({ ssim_k1: valueAsNumber(value, 0.01) })}
+                      />
+                      <NumberInput
+                        label={<InfoLabel label="SSIM K2" info="Standard SSIM K constant. MLTrace computes C2=(K2*data_range)^2." />}
+                        min={0}
+                        step={0.001}
+                        decimalScale={4}
+                        value={draft.heatmapConfig.ssim_k2}
+                        onChange={(value) => updateHeatmapConfig({ ssim_k2: valueAsNumber(value, 0.03) })}
+                      />
+                      <NumberInput
+                        label={<InfoLabel label="SSIM data range" info="Expected image value range. Use 1.0 for normalized float model inputs." />}
+                        min={0.000001}
+                        step={0.1}
+                        decimalScale={4}
+                        value={draft.heatmapConfig.ssim_data_range}
+                        onChange={(value) => updateHeatmapConfig({ ssim_data_range: valueAsNumber(value, 1) })}
+                      />
+                    </SimpleGrid>
+                  )}
 
                   {(draft.heatmapConfig.signed_deviations || draft.heatmapConfig.threshold_enabled) && (
                     <SimpleGrid cols={{ base: 1, md: 3 }}>

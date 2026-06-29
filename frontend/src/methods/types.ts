@@ -11,7 +11,7 @@ import type {
 
 export type ModelConfig = Record<string, unknown>;
 
-export type GraphSection = 'encoder' | 'decoder';
+export type GraphSection = 'encoder' | 'decoder' | 'prediction_decoder';
 
 export type MethodBuilderProps = {
   method: MethodDefinition;

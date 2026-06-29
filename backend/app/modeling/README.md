@@ -237,6 +237,74 @@ If Torch dummy-forward support exists for that layer, update the Torch construct
 Do not expose arbitrary Python imports from the UI.
 The catalog is deliberately curated so saved configs remain stable and safe to validate.
 
+## SSIM Losses And Scores
+
+MLTrace supports SSIM as an optional reconstruction loss and scoring metric.
+It does not replace MSE or MAE; method schemas can expose all of these options:
+
+- `mse`
+- `l1` / MAE
+- `smooth_l1`
+- `ssim`
+- `mae_ssim`
+- `mse_ssim`
+
+Combined losses use:
+
+```text
+(1 - ssim_weight) * pixel_loss + ssim_weight * ssim_loss
+```
+
+where `pixel_loss` is either MAE or MSE. `ssim_weight` is only meaningful for
+the combined modes.
+
+For inference and analysis, `error_metric=ssim_distance` means local
+`1 - SSIM`. Heatmaps can also use `residual_source=ssim_residual`.
+
+Important constant convention: `ssim_k1` and `ssim_k2` are standard SSIM
+K constants, not direct C constants. The implementation computes:
+
+```text
+C1 = (ssim_k1 * ssim_data_range)^2
+C2 = (ssim_k2 * ssim_data_range)^2
+```
+
+With the default `ssim_data_range=1.0`, `ssim_k1=0.01` and `ssim_k2=0.03`
+therefore produce `C1=0.0001` and `C2=0.0009`. Do not document these as
+direct `C1=0.01` / `C2=0.03` values.
+
+## fastAnoGAN Method
+
+`fast_anogan` is not a sequential encoder/decoder method. It stores a block graph
+with three sections:
+
+- `generator_blocks`: residual upsampling blocks, `z -> image`.
+- `critic_blocks`: residual downsampling blocks, `image -> critic/features`.
+- `encoder_blocks`: residual downsampling blocks, `image -> z`.
+
+The paper-near default uses `64x64x1` input, `latent_dim=128`, generator
+channels `[512, 256, 128, 64]`, critic channels `[128, 256, 512, 512]`, and
+`kappa=1.0`.
+
+The critic must not use BatchNorm. WGAN-GP applies a per-sample gradient
+penalty, and BatchNorm couples samples in a batch. MLTrace therefore validates
+critic blocks so `normalization=batch_norm` is rejected. Use `layer_norm`
+implemented as `GroupNorm(1, C)` for 2D feature maps, or `none`.
+
+Training writes a `gan_bundle` artifact containing generator, critic, and
+encoder weights. Testing computes:
+
+```text
+z = E(x)
+x_hat = G(z)
+residual_score = mean((x - x_hat)^2)
+feature_score = mean((D_feat(x) - D_feat(x_hat))^2)
+combined_score = residual_score + kappa * feature_score
+```
+
+The feature mean is computed over all non-batch feature elements, matching the
+paper's `1 / n_d` normalization.
+
 ## Persistence Model
 
 Saved methods are stored in a generic table:

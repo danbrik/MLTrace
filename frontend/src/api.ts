@@ -1,9 +1,12 @@
 import type {
   Dataset,
   DatasetConnectionTest,
+  AnalysisLayout,
   HeatmapRangeRun,
   HeatmapRun,
   HeatmapVisualizationConfig,
+  InspectPreview,
+  InspectRun,
   MethodConfiguration,
   MethodConfigurationPayload,
   MethodConfigurationSavePayload,
@@ -448,6 +451,7 @@ export function enqueueTestingRun(payload: {
   training_dataset_id: number;
   roi_id?: number | null;
   name?: string | null;
+  inference_config?: Record<string, unknown> | null;
 }): Promise<TestingRun> {
   return request<TestingRun>('/api/testing-runs', {
     method: 'POST',
@@ -472,6 +476,8 @@ export function createHeatmap(payload: {
   testing_result_id?: number | null;
   timestamp?: string | null;
   force_recompute?: boolean;
+  stae_view?: 'reconstruction' | 'prediction';
+  prediction_horizon?: number;
   visualization_config?: HeatmapVisualizationConfig;
 }): Promise<HeatmapRun> {
   return request<HeatmapRun>('/api/heatmaps', {
@@ -518,9 +524,108 @@ export function getHeatmapRangeLog(runId: number): Promise<{ log: string }> {
   return request<{ log: string }>(`/api/heatmap-ranges/${runId}/log`);
 }
 
+export function listAnalysisLayouts(): Promise<AnalysisLayout[]> {
+  return request<AnalysisLayout[]>('/api/analysis/layouts');
+}
+
+export function getAnalysisLayout(layoutId: number): Promise<AnalysisLayout> {
+  return request<AnalysisLayout>(`/api/analysis/layouts/${layoutId}`);
+}
+
+export function createAnalysisLayout(payload: {
+  name: string;
+  description?: string | null;
+  layout: Record<string, unknown>;
+}): Promise<AnalysisLayout> {
+  return request<AnalysisLayout>('/api/analysis/layouts', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
+}
+
+export function updateAnalysisLayout(
+  layoutId: number,
+  payload: {
+    name: string;
+    description?: string | null;
+    layout: Record<string, unknown>;
+  },
+): Promise<AnalysisLayout> {
+  return request<AnalysisLayout>(`/api/analysis/layouts/${layoutId}`, {
+    method: 'PUT',
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function deleteAnalysisLayout(layoutId: number): Promise<void> {
+  await request<void>(`/api/analysis/layouts/${layoutId}`, { method: 'DELETE' });
+}
+
 /** URL for one rendered overlay frame PNG (served directly, not via fetch). */
 export function heatmapRangeFrameUrl(runId: number, index: number): string {
   return `${API_BASE_URL}/api/heatmap-ranges/${runId}/frames/${index}.png`;
+}
+
+export function previewInspect(payload: {
+  training_dataset_id: number;
+  preprocessing_pipeline_id: number;
+  start_timestamp: string;
+  end_timestamp: string;
+  stride: number;
+  content_mode?: 'final_preprocessed_output';
+}): Promise<InspectPreview> {
+  return request<InspectPreview>('/api/inspect/preview', {
+    method: 'POST',
+    body: JSON.stringify({ content_mode: 'final_preprocessed_output', ...payload }),
+  });
+}
+
+export function createInspectRun(payload: {
+  training_dataset_id: number;
+  preprocessing_pipeline_id: number;
+  start_timestamp: string;
+  end_timestamp: string;
+  stride: number;
+  fps: number;
+  content_mode?: 'final_preprocessed_output';
+}): Promise<InspectRun> {
+  return request<InspectRun>('/api/inspect/runs', {
+    method: 'POST',
+    body: JSON.stringify({ content_mode: 'final_preprocessed_output', ...payload }),
+  });
+}
+
+export function listInspectRuns(): Promise<InspectRun[]> {
+  return request<InspectRun[]>('/api/inspect/runs');
+}
+
+export function getInspectRun(runId: number): Promise<InspectRun> {
+  return request<InspectRun>(`/api/inspect/runs/${runId}`);
+}
+
+export function abortInspectRun(runId: number): Promise<InspectRun> {
+  return request<InspectRun>(`/api/inspect/runs/${runId}/abort`, {
+    method: 'POST',
+    body: JSON.stringify({}),
+  });
+}
+
+export async function deleteInspectRun(runId: number): Promise<void> {
+  await request<void>(`/api/inspect/runs/${runId}`, {
+    method: 'DELETE',
+  });
+}
+
+export function getInspectRunLog(runId: number): Promise<{ log: string }> {
+  return request<{ log: string }>(`/api/inspect/runs/${runId}/log`);
+}
+
+export function inspectRunFrameUrl(runId: number, index: number): string {
+  return `${API_BASE_URL}/api/inspect/runs/${runId}/frames/${index}.png`;
+}
+
+export function inspectRunVideoUrl(runId: number): string {
+  return `${API_BASE_URL}/api/inspect/runs/${runId}/video.mp4`;
 }
 
 export function getSchedulerSettings(): Promise<SchedulerSettings> {

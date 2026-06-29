@@ -1,13 +1,18 @@
 from fastapi.testclient import TestClient
 import pytest
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
+from app import models
 from app.database import Base, get_db
 from app.main import app
 from app.modeling.architectures.cnn_autoencoder import CnnAutoencoderArchitecture
+from app.modeling.defaults import _old_paper_payloads_by_name, default_method_payloads, ensure_default_method_configurations
+from app.modeling.fast_anogan import build_fast_anogan_modules, fast_anogan_forward
 from app.modeling.registry import MethodRegistry, registry
+from app.services import create_method_configuration, validate_method_configuration
+from app.training.engine import _prediction_horizon_weights, _prediction_weight_for_epoch
 
 
 def make_client():
@@ -93,7 +98,7 @@ def mean_image_payload(name: str = "Mean image baseline") -> dict:
 def test_method_registry_discovers_core_methods() -> None:
     method_types = {definition.type for definition in registry.list_definitions()}
 
-    assert {"cnn_autoencoder", "cnn_vae", "mean_image"}.issubset(method_types)
+    assert {"ae_dense", "ae_spatial", "cnn_autoencoder", "cnn_vae", "mean_image"}.issubset(method_types)
 
 
 def test_duplicate_method_registration_rejected() -> None:
@@ -349,6 +354,238 @@ def test_cnn_static_validation_rejects_bad_shapes() -> None:
             next(client_iter)
         except StopIteration:
             pass
+
+
+def test_default_method_bootstrap_is_idempotent() -> None:
+    engine = create_engine(
+        "sqlite+pysqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    TestingSessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+    Base.metadata.create_all(bind=engine)
+    db = TestingSessionLocal()
+    try:
+        assert ensure_default_method_configurations(db) == 9
+        assert ensure_default_method_configurations(db) == 0
+        rows = db.scalars(select(models.MethodConfiguration.name)).all()
+        names = set(rows)
+        assert {
+            "AEDense d64 default",
+            "AEDense d256 default",
+            "AESpatial c16 default",
+            "AESpatial c64 default",
+            "VAE Baur d128 default",
+            "STAE reconstruction prediction default",
+            "STAE Reconstruction paper default",
+            "STAE Reconstruction + Future Prediction paper default",
+            "fastAnoGAN paper default",
+        } == names
+        assert len(rows) == 9
+    finally:
+        db.close()
+
+
+def test_default_method_payloads_validate_statically() -> None:
+    for payload in default_method_payloads():
+        result = validate_method_configuration(payload)
+        assert result.valid is True, payload.name
+        assert result.errors == []
+        if payload.method_type != "fast_anogan":
+            assert payload.training_config["optimizer"] == "adam"
+            assert payload.training_config["learning_rate"] == 0.0001
+            assert payload.training_config["weight_decay"] == 0.00001
+            assert payload.training_config["early_stopping_enabled"] is True
+            assert payload.training_config["early_stopping_patience"] == 10
+        if payload.name == "VAE Baur d128 default":
+            assert payload.method_type == "cnn_vae"
+            assert payload.method_config["latent_dim"] == 128
+            assert payload.method_config["kl_weight"] == 1.0
+            assert payload.training_config["reconstruction_loss"] == "l1"
+            assert "loss" not in payload.training_config
+        if payload.name == "STAE reconstruction prediction default":
+            assert payload.method_type == "spatiotemporal_autoencoder"
+            assert payload.method_config["clip_length"] == 8
+            assert payload.method_config["future_length"] == 1
+            assert payload.training_config["training_objective"] == "reconstruction_prediction"
+        if payload.name == "STAE Reconstruction paper default":
+            assert payload.method_type == "spatiotemporal_autoencoder"
+            assert payload.method_config["clip_length"] == 16
+            assert payload.method_config["future_length"] == 0
+            assert payload.method_config["prediction_branch"] is False
+            assert payload.training_config["training_objective"] == "reconstruction"
+            assert payload.inference_config["score_mode"] == "reconstruction_only"
+        if payload.name == "STAE Reconstruction + Future Prediction paper default":
+            assert payload.method_type == "spatiotemporal_autoencoder"
+            assert payload.method_config["clip_length"] == 16
+            assert payload.method_config["future_length"] == 16
+            assert payload.method_config["prediction_branch"] is True
+            assert payload.training_config["training_objective"] == "reconstruction_prediction"
+            assert payload.training_config["prediction_weight_schedule"] == "linear_decay"
+            assert payload.training_config["prediction_min_weight"] == 0.0
+            assert payload.training_config["prediction_horizon_weight_schedule"] == "linear_decay"
+        if payload.name == "fastAnoGAN paper default":
+            assert payload.method_type == "fast_anogan"
+            assert payload.method_config["input_width"] == 64
+            assert payload.method_config["input_height"] == 64
+            assert payload.method_config["latent_dim"] == 128
+            assert payload.training_config["critic_updates_per_generator"] == 5
+            assert payload.training_config["encoder_training_mode"] == "izif"
+            assert [block["out_channels"] for block in payload.method_graph["generator_blocks"]] == [512, 256, 128, 64]
+            assert [block["normalization"] for block in payload.method_graph["critic_blocks"]] == ["layer_norm"] * 4
+            assert [block["direction"] for block in payload.method_graph["encoder_blocks"]] == ["down"] * 4
+
+
+def test_spatial_autoencoder_rejects_flat_bottleneck() -> None:
+    payload = next(item for item in default_method_payloads() if item.name == "AESpatial c16 default").model_copy(deep=True)
+    payload.method_graph["encoder"].append({"id": "bad-flat", "type": "Flatten", "config": {}})
+    result = validate_method_configuration(payload)
+    assert result.valid is False
+    assert "must remain spatial rank 4" in " ".join(result.errors)
+
+
+def test_fast_anogan_rejects_batch_norm_critic_blocks() -> None:
+    payload = next(item for item in default_method_payloads() if item.name == "fastAnoGAN paper default").model_copy(deep=True)
+    payload.method_graph["critic_blocks"][0]["normalization"] = "batch_norm"
+    result = validate_method_configuration(payload)
+    assert result.valid is False
+    assert "batch_norm" in " ".join(result.errors)
+
+
+def test_fast_anogan_torch_forward_shapes_and_feature_score() -> None:
+    torch = pytest.importorskip("torch")
+    payload = next(item for item in default_method_payloads() if item.name == "fastAnoGAN paper default")
+    generator, critic, encoder = build_fast_anogan_modules(torch, payload.method_graph, payload.method_config)
+    x = torch.zeros((2, 1, 64, 64), dtype=torch.float32)
+    z = torch.zeros((2, 128), dtype=torch.float32)
+
+    generated = generator(z)
+    output = fast_anogan_forward(generator, critic, encoder, x)
+    feature_score = ((output.real_features - output.reconstruction_features) ** 2).flatten(1).mean(dim=1)
+
+    assert tuple(generated.shape) == (2, 1, 64, 64)
+    assert tuple(output.reconstruction.shape) == (2, 1, 64, 64)
+    assert tuple(output.latent.shape) == (2, 128)
+    assert tuple(feature_score.shape) == (2,)
+
+
+def test_spatiotemporal_default_validates_reconstruction_and_prediction() -> None:
+    payload = next(item for item in default_method_payloads() if item.name == "STAE reconstruction prediction default")
+    result = validate_method_configuration(payload)
+    assert result.valid is True
+    sections = {spec["section"] for spec in result.layer_specs}
+    assert {"encoder", "decoder", "prediction_decoder"}.issubset(sections)
+    decoder_outputs = [spec["output_label"] for spec in result.layer_specs if spec["section"] == "decoder"]
+    prediction_outputs = [spec["output_label"] for spec in result.layer_specs if spec["section"] == "prediction_decoder"]
+    assert decoder_outputs[-1] == "N,1,8,256,256"
+    assert prediction_outputs[-1] == "N,1,1,256,256"
+
+
+def test_paper_stae_defaults_validate_expected_shapes() -> None:
+    reconstruction = next(item for item in default_method_payloads() if item.name == "STAE Reconstruction paper default")
+    reconstruction_result = validate_method_configuration(reconstruction)
+    assert reconstruction_result.valid is True
+    reconstruction_sections = {spec["section"] for spec in reconstruction_result.layer_specs}
+    assert "prediction_decoder" not in reconstruction_sections
+    reconstruction_decoder_outputs = [
+        spec["output_label"] for spec in reconstruction_result.layer_specs if spec["section"] == "decoder"
+    ]
+    assert reconstruction_decoder_outputs[-1] == "N,1,16,128,128"
+
+    prediction = next(
+        item for item in default_method_payloads() if item.name == "STAE Reconstruction + Future Prediction paper default"
+    )
+    prediction_result = validate_method_configuration(prediction)
+    assert prediction_result.valid is True
+    prediction_decoder_outputs = [
+        spec["output_label"] for spec in prediction_result.layer_specs if spec["section"] == "prediction_decoder"
+    ]
+    reconstruction_decoder_outputs = [
+        spec["output_label"] for spec in prediction_result.layer_specs if spec["section"] == "decoder"
+    ]
+    assert reconstruction_decoder_outputs[-1] == "N,1,16,128,128"
+    assert prediction_decoder_outputs[-1] == "N,1,16,128,128"
+
+
+def test_paper_stae_defaults_use_zhao_like_encoder_channels() -> None:
+    payload = next(item for item in default_method_payloads() if item.name == "STAE Reconstruction paper default")
+    conv_channels = [
+        layer["config"]["out_channels"]
+        for layer in payload.method_graph["encoder"]
+        if layer["type"] == "Conv3d"
+    ]
+    pool_count = sum(1 for layer in payload.method_graph["encoder"] if layer["type"] == "MaxPool3d")
+    assert conv_channels == [32, 48, 64, 64]
+    assert pool_count == 3
+
+
+def test_paper_stae_prediction_horizon_decay_weights_near_future_more_strongly() -> None:
+    torch = pytest.importorskip("torch")
+    training_parameters = {
+        "prediction_weight": 1.0,
+        "prediction_weight_schedule": "linear_decay",
+        "prediction_min_weight": 0.0,
+        "prediction_horizon_weight_schedule": "linear_decay",
+    }
+    weights = _prediction_horizon_weights(torch, training_parameters, 16, torch.device("cpu"))
+    assert weights[0].item() == pytest.approx(1.0)
+    assert weights[-1].item() == pytest.approx(0.0)
+    assert weights[0].item() > weights[8].item() > weights[-1].item()
+    assert _prediction_weight_for_epoch(training_parameters, epoch=999, epochs=1000) == pytest.approx(1.0)
+
+
+def test_default_bootstrap_repairs_only_unmodified_old_paper_stae_defaults() -> None:
+    engine = create_engine(
+        "sqlite+pysqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    TestingSessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+    Base.metadata.create_all(bind=engine)
+    db = TestingSessionLocal()
+    try:
+        old_payloads = _old_paper_payloads_by_name()
+        create_method_configuration(db, old_payloads["STAE Reconstruction + Future Prediction paper default"])
+        assert ensure_default_method_configurations(db) == 8
+        repaired = db.scalar(
+            select(models.MethodConfiguration).where(
+                models.MethodConfiguration.name == "STAE Reconstruction + Future Prediction paper default"
+            )
+        )
+        assert repaired is not None
+        assert repaired.method_config["future_length"] == 16
+        conv_channels = [
+            layer["config"]["out_channels"]
+            for layer in repaired.method_graph["encoder"]
+            if layer["type"] == "Conv3d"
+        ]
+        assert conv_channels == [32, 48, 64, 64]
+    finally:
+        db.close()
+
+    engine = create_engine(
+        "sqlite+pysqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    TestingSessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+    Base.metadata.create_all(bind=engine)
+    db = TestingSessionLocal()
+    try:
+        modified = _old_paper_payloads_by_name()["STAE Reconstruction + Future Prediction paper default"].model_copy(deep=True)
+        modified.description = "User modified one-step STAE"
+        create_method_configuration(db, modified)
+        assert ensure_default_method_configurations(db) == 8
+        preserved = db.scalar(
+            select(models.MethodConfiguration).where(
+                models.MethodConfiguration.name == "STAE Reconstruction + Future Prediction paper default"
+            )
+        )
+        assert preserved is not None
+        assert preserved.description == "User modified one-step STAE"
+        assert preserved.method_config["future_length"] == 1
+    finally:
+        db.close()
 
 
 def test_valid_cnn_vae_returns_layer_specs() -> None:

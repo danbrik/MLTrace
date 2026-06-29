@@ -29,6 +29,7 @@ import {
 } from '../api';
 import { StepCard } from '../components/StepCard';
 import { usePendingIds } from '../hooks/usePendingIds';
+import { snapshotsEqual } from '../lib/snapshots';
 import { SchemaForm } from '../methods/schema/SchemaForm';
 import type { NumericDraftState } from '../methods/types';
 import { schemaDefaults } from '../methods/utils';
@@ -197,6 +198,11 @@ export function TrainingPipelinesPage({
     if (!trimmed) return false;
     return pipelines.some((pipeline) => pipeline.name.trim().toLowerCase() === trimmed && pipeline.id !== loadedPipelineId);
   }, [name, pipelines, loadedPipelineId]);
+  const createNameClash = useMemo(() => {
+    const trimmed = name.trim().toLowerCase();
+    if (!trimmed) return false;
+    return pipelines.some((pipeline) => pipeline.name.trim().toLowerCase() === trimmed);
+  }, [name, pipelines]);
 
   // Reinitialize training parameters whenever the selected method changes:
   // schema defaults overlaid with the saved configuration's training config.
@@ -368,6 +374,36 @@ export function TrainingPipelinesPage({
   const saveDisabled = !payload || !name.trim() || nameClash || invalidNumericDrafts.length > 0;
   const loadedReadOnly = loadedPipelineId != null && !isEditingLoadedPipeline;
   const loadedPipeline = loadedPipelineId != null ? pipelines.find((pipeline) => pipeline.id === loadedPipelineId) ?? null : null;
+  const loadedPipelineNameChanged = useMemo(() => {
+    if (!loadedPipeline) return false;
+    return name.trim().toLowerCase() !== loadedPipeline.name.trim().toLowerCase();
+  }, [loadedPipeline, name]);
+  const loadedPipelineContentChanged = useMemo(() => {
+    if (!loadedPipeline || !payload) return false;
+    return !snapshotsEqual(
+      {
+        description,
+        ...payload,
+      },
+      {
+        description: loadedPipeline.description ?? '',
+        training_dataset_ids: [...loadedPipeline.training_datasets]
+          .sort((left, right) => left.position - right.position)
+          .map((entry) => entry.training_dataset_id),
+        preprocessing_pipeline_id: loadedPipeline.preprocessing_pipeline_id,
+        method_configuration_id: loadedPipeline.method_configuration_id,
+        shuffle: loadedPipeline.shuffle,
+        training_parameters: loadedPipeline.training_parameters ?? {},
+      },
+    );
+  }, [loadedPipeline, payload, description]);
+  const saveAsNewDisabled =
+    !payload ||
+    !name.trim() ||
+    createNameClash ||
+    invalidNumericDrafts.length > 0 ||
+    (loadedPipelineId != null && (!loadedPipelineNameChanged || !loadedPipelineContentChanged));
+  const updateDisabled = saveDisabled || Boolean(loadedPipeline?.is_update_locked);
 
   return (
     <Stack gap="lg">
@@ -406,12 +442,18 @@ export function TrainingPipelinesPage({
               </Stack>
             </Alert>
           )}
+          {!loadedReadOnly && loadedPipeline?.is_update_locked && (
+            <Alert color="yellow" title="Update locked">
+              This training pipeline already has dependent runs. Update is disabled; choose a new unique name and
+              change the pipeline content to save it as a new training pipeline.
+            </Alert>
+          )}
           <Group justify="flex-end">
             <Button variant="default" leftSection={<RotateCcw size={18} />} onClick={handleReset}>
               Reset
             </Button>
             {loadedReadOnly ? (
-              <Button leftSection={<Pencil size={18} />} onClick={() => setIsEditingLoadedPipeline(true)} disabled={loadedPipeline?.is_update_locked}>
+              <Button leftSection={<Pencil size={18} />} onClick={() => setIsEditingLoadedPipeline(true)}>
                 Edit pipeline
               </Button>
             ) : (
@@ -421,7 +463,7 @@ export function TrainingPipelinesPage({
                     variant="light"
                     leftSection={<Save size={18} />}
                     loading={loading}
-                    disabled={saveDisabled || running}
+                    disabled={saveAsNewDisabled || running}
                     onClick={() => handleSave(true)}
                   >
                     Save as New
@@ -431,7 +473,7 @@ export function TrainingPipelinesPage({
                   variant="light"
                   leftSection={<Save size={18} />}
                   loading={loading}
-                  disabled={saveDisabled || running}
+                  disabled={updateDisabled || running}
                   onClick={() => handleSave(false)}
                 >
                   {loadedPipelineId != null ? 'Update' : 'Save'}

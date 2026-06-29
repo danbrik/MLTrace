@@ -36,6 +36,7 @@ import {
 } from '../api';
 import { DateTime24Input } from '../components/DateTime24Input';
 import { usePendingIds } from '../hooks/usePendingIds';
+import { snapshotsEqual } from '../lib/snapshots';
 import type { Dataset, DatasetFolder, TrainingDataset, TrainingDatasetPreview, TrainingDatasetRuleInput } from '../types';
 
 type RuleRow = TrainingDatasetRuleInput & {
@@ -246,6 +247,44 @@ export function TrainingDatasetsPage() {
     () => trainingDatasets.filter((dataset) => !usageFilter || (dataset.usage_label ?? 'train') === usageFilter),
     [trainingDatasets, usageFilter],
   );
+
+  const nameClash = useMemo(() => {
+    const trimmed = name.trim().toLowerCase();
+    if (!trimmed) return false;
+    return trainingDatasets.some((dataset) => dataset.name.trim().toLowerCase() === trimmed && dataset.id !== loadedDataset?.id);
+  }, [name, trainingDatasets, loadedDataset]);
+
+  const createNameClash = useMemo(() => {
+    const trimmed = name.trim().toLowerCase();
+    if (!trimmed) return false;
+    return trainingDatasets.some((dataset) => dataset.name.trim().toLowerCase() === trimmed);
+  }, [name, trainingDatasets]);
+
+  const loadedDatasetNameChanged = useMemo(() => {
+    if (!loadedDataset) return false;
+    return name.trim().toLowerCase() !== loadedDataset.name.trim().toLowerCase();
+  }, [loadedDataset, name]);
+
+  const loadedDatasetContentChanged = useMemo(() => {
+    if (!loadedDataset) return false;
+    return !snapshotsEqual(
+      {
+        usage_label: usageLabel,
+        notes,
+        rules: rulesPayload(),
+      },
+      {
+        usage_label: loadedDataset.usage_label ?? 'train',
+        notes: loadedDataset.notes ?? '',
+        rules: loadedDataset.rules.map((rule) => ({
+          folder_id: rule.folder_id,
+          start_timestamp: toInputDateTime(rule.start_timestamp),
+          end_timestamp: toInputDateTime(rule.end_timestamp),
+          stride: rule.stride,
+        })),
+      },
+    );
+  }, [loadedDataset, usageLabel, notes, rules]);
 
   useEffect(() => {
     if (!nameEdited && generatedName) {
@@ -494,6 +533,9 @@ export function TrainingDatasetsPage() {
   }
 
   const canSubmit = Boolean(name.trim() && rules.length > 0 && invalidRules.length === 0 && !signatureError);
+  const canUpdateLoaded = canSubmit && !nameClash && !loadedDataset?.is_update_locked;
+  const canSaveLoadedAsNew =
+    canSubmit && !createNameClash && loadedDatasetNameChanged && loadedDatasetContentChanged;
 
   return (
     <Stack gap="lg">
@@ -513,7 +555,12 @@ export function TrainingDatasetsPage() {
             >
               <Stack gap="xs">
                 <Text size="sm">
-                  {loadedDataset.name} is loaded. {isReadOnly ? 'Press Edit to change it or save a copy.' : 'Changes can be updated in place or saved as a new dataset.'}
+                  {loadedDataset.name} is loaded.{' '}
+                  {isReadOnly
+                    ? 'Press Edit to change it or save a changed copy.'
+                    : loadedDataset.is_update_locked
+                      ? 'It is already used, so Update is disabled. Save a changed copy with a new unique name.'
+                      : 'Changes can be updated in place or saved as a new dataset.'}
                 </Text>
                 {loadedDataset.update_lock_reasons.map((reason) => (
                   <Text key={reason} size="sm">
@@ -535,6 +582,7 @@ export function TrainingDatasetsPage() {
               value={name}
               description="Generated from the earliest selected start and latest selected end."
               disabled={isReadOnly}
+              error={loadedDataset ? (nameClash ? 'A train/test dataset with this name already exists.' : undefined) : createNameClash ? 'A train/test dataset with this name already exists.' : undefined}
               onChange={(event) => {
                 setNameEdited(true);
                 setName(event.currentTarget.value);
@@ -703,16 +751,16 @@ export function TrainingDatasetsPage() {
                       leftSection={<Edit3 size={18} />}
                       variant="light"
                       onClick={() => setIsEditingLoaded(true)}
-                      disabled={!isReadOnly || loadedDataset.is_update_locked}
+                      disabled={!isReadOnly}
                     >
                       Edit
                     </Button>
                     {isEditingLoaded && (
-                      <Button leftSection={<Save size={18} />} onClick={handleUpdate} loading={loading} disabled={!canSubmit}>
+                      <Button leftSection={<Save size={18} />} onClick={handleUpdate} loading={loading} disabled={!canUpdateLoaded}>
                         Update
                       </Button>
                     )}
-                    <Button leftSection={<Copy size={18} />} onClick={handleSaveAsNew} loading={loading} disabled={!canSubmit}>
+                    <Button leftSection={<Copy size={18} />} onClick={handleSaveAsNew} loading={loading} disabled={!canSaveLoadedAsNew}>
                       Save as new
                     </Button>
                   </>
@@ -721,7 +769,7 @@ export function TrainingDatasetsPage() {
                     leftSection={<Save size={18} />}
                     onClick={handleSave}
                     loading={loading}
-                    disabled={!canSubmit}
+                    disabled={!canSubmit || createNameClash}
                   >
                     Save train/test dataset
                   </Button>

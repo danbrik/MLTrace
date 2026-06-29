@@ -1,5 +1,6 @@
 from datetime import datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -19,6 +20,7 @@ from app.schemas import (
 )
 from app.testing import service as testing_service
 from app.testing.service import (
+    ArtifactEvaluator,
     CURRENT_HEATMAP_RENDER_VERSION,
     _heatmap_overlay,
     _pixel_error_map,
@@ -340,3 +342,35 @@ def test_roi_preview_and_mean_image_testing_run(tmp_path: Path, monkeypatch) -> 
         assert absolute.config_signature != heatmap.config_signature
     finally:
         db.close()
+
+
+def test_vae_sample_count_averages_monte_carlo_reconstructions() -> None:
+    torch = pytest.importorskip("torch")
+
+    class DummyVae:
+        def __init__(self) -> None:
+            self.deterministic_vae = True
+            self.calls = 0
+
+        def to(self, _device):
+            return self
+
+        def __call__(self, x):
+            self.calls += 1
+            offset = 1.0 if self.deterministic_vae else float(self.calls)
+            return x + offset, None
+
+    evaluator = ArtifactEvaluator.__new__(ArtifactEvaluator)
+    evaluator.mean_image = None
+    evaluator.configuration = SimpleNamespace(
+        builder_kind="sequential_variational_autoencoder",
+        inference_config={"sample_count": 3},
+    )
+    evaluator.model = DummyVae()
+    evaluator.torch = torch
+
+    reconstruction = evaluator.reconstruct_batch([np.zeros((2, 2), dtype=np.float32)])[0]
+
+    assert evaluator.model.calls == 3
+    assert evaluator.model.deterministic_vae is True
+    assert np.allclose(reconstruction, 2.0)

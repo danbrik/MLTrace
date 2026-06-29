@@ -7,16 +7,22 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.config import get_settings
-from app.database import get_db
+from app.database import SessionLocal, get_db
 from app.schemas import (
     DatasetConnectionTestRequest,
     DatasetConnectionTestResponse,
     DatasetCreate,
     DatasetRead,
+    AnalysisLayoutCreate,
+    AnalysisLayoutRead,
     HeatmapRangeRunCreate,
     HeatmapRangeRunRead,
     HeatmapRunCreate,
     HeatmapRunRead,
+    InspectPreviewRequest,
+    InspectPreviewResponse,
+    InspectRunCreate,
+    InspectRunRead,
     MethodConfigurationCreate,
     MethodConfigurationPayload,
     MethodConfigurationRead,
@@ -54,7 +60,9 @@ from app.schemas import (
     TrainingRunLogResponse,
     TrainingRunRead,
 )
+from app.analysis import service as analysis_service
 from app.heatmap import service as heatmap_service
+from app.inspect import service as inspect_service
 from app.testing import service as testing_service
 from app.testing.service import TestingConflict
 from app.training import service as training_service
@@ -115,10 +123,19 @@ def _value_error_status(exc: ValueError) -> int:
 async def lifespan(app: FastAPI):
     # Start the background training scheduler with the API process. Detached
     # worker subprocesses survive an API restart and are reconciled on startup.
+    from app.modeling.defaults import ensure_default_method_configurations
+
+    db = SessionLocal()
+    try:
+        ensure_default_method_configurations(db)
+    finally:
+        db.close()
     scheduler.start()
+    inspect_service.inspect_queue.start()
     try:
         yield
     finally:
+        inspect_service.inspect_queue.stop()
         scheduler.stop()
 
 
@@ -136,6 +153,40 @@ def create_app() -> FastAPI:
     @app.get("/api/health")
     def health() -> dict[str, str]:
         return {"status": "ok"}
+
+    @app.get("/api/analysis/layouts", response_model=list[AnalysisLayoutRead])
+    def api_list_analysis_layouts(db: Session = Depends(get_db)):
+        return analysis_service.list_analysis_layouts(db)
+
+    @app.post("/api/analysis/layouts", response_model=AnalysisLayoutRead)
+    def api_create_analysis_layout(payload: AnalysisLayoutCreate, db: Session = Depends(get_db)):
+        try:
+            return analysis_service.create_analysis_layout(db, payload)
+        except ValueError as exc:
+            raise HTTPException(status_code=409 if "already exists" in str(exc) else 400, detail=str(exc)) from exc
+
+    @app.get("/api/analysis/layouts/{layout_id}", response_model=AnalysisLayoutRead)
+    def api_get_analysis_layout(layout_id: int, db: Session = Depends(get_db)):
+        layout = analysis_service.get_analysis_layout(db, layout_id)
+        if layout is None:
+            raise HTTPException(status_code=404, detail="Analysis layout not found.")
+        return layout
+
+    @app.put("/api/analysis/layouts/{layout_id}", response_model=AnalysisLayoutRead)
+    def api_update_analysis_layout(layout_id: int, payload: AnalysisLayoutCreate, db: Session = Depends(get_db)):
+        try:
+            layout = analysis_service.update_analysis_layout(db, layout_id, payload)
+        except ValueError as exc:
+            raise HTTPException(status_code=409 if "already exists" in str(exc) else 400, detail=str(exc)) from exc
+        if layout is None:
+            raise HTTPException(status_code=404, detail="Analysis layout not found.")
+        return layout
+
+    @app.delete("/api/analysis/layouts/{layout_id}", status_code=204)
+    def api_delete_analysis_layout(layout_id: int, db: Session = Depends(get_db)):
+        if not analysis_service.delete_analysis_layout(db, layout_id):
+            raise HTTPException(status_code=404, detail="Analysis layout not found.")
+        return None
 
     @app.post("/api/datasets", response_model=DatasetRead)
     def api_create_dataset(payload: DatasetCreate, db: Session = Depends(get_db)):
@@ -691,6 +742,72 @@ def create_app() -> FastAPI:
         if not deleted:
             raise HTTPException(status_code=404, detail="Heatmap range run not found.")
         return None
+
+    @app.post("/api/inspect/preview", response_model=InspectPreviewResponse)
+    def api_preview_inspect(payload: InspectPreviewRequest, db: Session = Depends(get_db)):
+        try:
+            return inspect_service.preview_inspect(db, payload)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.post("/api/inspect/runs", response_model=InspectRunRead)
+    def api_create_inspect_run(payload: InspectRunCreate, db: Session = Depends(get_db)):
+        try:
+            return inspect_service.create_inspect_run(db, payload)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.get("/api/inspect/runs", response_model=list[InspectRunRead])
+    def api_list_inspect_runs(db: Session = Depends(get_db)):
+        return inspect_service.list_inspect_runs(db)
+
+    @app.get("/api/inspect/runs/{run_id}", response_model=InspectRunRead)
+    def api_get_inspect_run(run_id: int, db: Session = Depends(get_db)):
+        run = inspect_service.get_inspect_run(db, run_id)
+        if run is None:
+            raise HTTPException(status_code=404, detail="Inspect run not found.")
+        return run
+
+    @app.post("/api/inspect/runs/{run_id}/abort", response_model=InspectRunRead)
+    def api_abort_inspect_run(run_id: int, db: Session = Depends(get_db)):
+        try:
+            run = inspect_service.abort_inspect_run(db, run_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        if run is None:
+            raise HTTPException(status_code=404, detail="Inspect run not found.")
+        return run
+
+    @app.delete("/api/inspect/runs/{run_id}", status_code=204)
+    def api_delete_inspect_run(run_id: int, db: Session = Depends(get_db)):
+        try:
+            deleted = inspect_service.delete_inspect_run(db, run_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        if not deleted:
+            raise HTTPException(status_code=404, detail="Inspect run not found.")
+        return None
+
+    @app.get("/api/inspect/runs/{run_id}/frames/{index}.png")
+    def api_get_inspect_frame(run_id: int, index: int, db: Session = Depends(get_db)):
+        path = inspect_service.inspect_frame_path(db, run_id, index)
+        if path is None:
+            raise HTTPException(status_code=404, detail="Frame not found.")
+        return FileResponse(path, media_type="image/png")
+
+    @app.get("/api/inspect/runs/{run_id}/video.mp4")
+    def api_get_inspect_video(run_id: int, db: Session = Depends(get_db)):
+        path = inspect_service.inspect_video_path(db, run_id)
+        if path is None:
+            raise HTTPException(status_code=404, detail="Video not found.")
+        return FileResponse(path, media_type="video/mp4", filename=f"inspect-run-{run_id}.mp4")
+
+    @app.get("/api/inspect/runs/{run_id}/log", response_model=TrainingRunLogResponse)
+    def api_get_inspect_log(run_id: int, db: Session = Depends(get_db)):
+        log = inspect_service.read_inspect_log(db, run_id)
+        if log is None:
+            raise HTTPException(status_code=404, detail="Inspect run not found.")
+        return TrainingRunLogResponse(log=log)
 
     @app.get("/api/scheduler/settings", response_model=SchedulerSettingsRead)
     def api_get_scheduler_settings():

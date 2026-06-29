@@ -142,7 +142,7 @@ def run_heatmap_range(run_id: int, abort_event: threading.Event | None = None) -
             run.frames_dir = str(frames_dir)
             db.commit()
 
-            evaluator = ArtifactEvaluator(training_run)
+            evaluator = ArtifactEvaluator(training_run, testing_run.inference_config)
             visualization_config = HeatmapVisualizationConfig.model_validate(run.visualization_config or {})
             graph = PreprocessingGraph.model_validate(
                 training_run.training_pipeline.preprocessing_pipeline.graph

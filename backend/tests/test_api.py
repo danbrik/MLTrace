@@ -452,3 +452,51 @@ def test_preprocessing_pipeline_update_and_unique_name() -> None:
             next(client_iter)
         except StopIteration:
             pass
+
+
+def test_analysis_layout_crud_and_duplicate_name() -> None:
+    client_iter = make_client()
+    client = next(client_iter)
+    try:
+        payload = {
+            "name": "Baseline board",
+            "description": "AE comparison",
+            "layout": {
+                "version": 1,
+                "plots": [{"id": "plot-1", "plotType": "timeseries", "sources": []}],
+                "selectedPipelineId": "1",
+            },
+        }
+        created = client.post("/api/analysis/layouts", json=payload)
+        assert created.status_code == 200
+        layout = created.json()
+        assert layout["name"] == "Baseline board"
+        assert layout["layout"]["plots"][0]["id"] == "plot-1"
+
+        duplicate = client.post("/api/analysis/layouts", json={**payload, "name": "baseline BOARD"})
+        assert duplicate.status_code == 409
+
+        listed = client.get("/api/analysis/layouts")
+        assert listed.status_code == 200
+        assert [item["name"] for item in listed.json()] == ["Baseline board"]
+
+        fetched = client.get(f"/api/analysis/layouts/{layout['id']}")
+        assert fetched.status_code == 200
+        assert fetched.json()["description"] == "AE comparison"
+
+        updated = client.put(
+            f"/api/analysis/layouts/{layout['id']}",
+            json={"name": "Updated board", "description": None, "layout": {"version": 1, "plots": []}},
+        )
+        assert updated.status_code == 200
+        assert updated.json()["name"] == "Updated board"
+        assert updated.json()["layout"]["plots"] == []
+
+        deleted = client.delete(f"/api/analysis/layouts/{layout['id']}")
+        assert deleted.status_code == 204
+        assert client.get(f"/api/analysis/layouts/{layout['id']}").status_code == 404
+    finally:
+        try:
+            next(client_iter)
+        except StopIteration:
+            pass

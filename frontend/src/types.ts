@@ -567,6 +567,7 @@ export type TestingRun = {
   artifact_path: string;
   roi_name: string | null;
   roi_geometry: Record<string, unknown> | null;
+  inference_config: Record<string, unknown> | null;
   created_at: string;
   updated_at: string;
 };
@@ -580,6 +581,7 @@ export type TestingRunResult = {
   full_mse: number;
   roi_mse: number | null;
   tile_scores: Array<Record<string, unknown>> | null;
+  result_metadata: Record<string, unknown> | null;
   width: number;
   height: number;
 };
@@ -602,6 +604,7 @@ export type TestingRunResultImage = {
 };
 
 export type HeatmapVisualizationConfig = {
+  residual_source: 'pixel_residual' | 'ssim_residual';
   error_mode: 'squared' | 'absolute';
   threshold_enabled: boolean;
   threshold: number;
@@ -613,6 +616,13 @@ export type HeatmapVisualizationConfig = {
   signed_deviations: boolean;
   positive_weight: number;
   negative_weight: number;
+  ssim_window_size: number;
+  ssim_alpha: number;
+  ssim_beta: number;
+  ssim_gamma: number;
+  ssim_k1: number;
+  ssim_k2: number;
+  ssim_data_range: number;
 };
 
 export type HeatmapRun = {
@@ -665,6 +675,60 @@ export type HeatmapRangeRun = {
   frame_count: number | null;
   done_count: number;
   config_signature: string;
+  created_at: string;
+  updated_at: string;
+};
+
+export type InspectPreview = {
+  training_dataset_id: number;
+  preprocessing_pipeline_id: number;
+  start_timestamp: string;
+  end_timestamp: string;
+  stride: number;
+  matching_images: number;
+  selected_images: number;
+  first_image_path: string;
+  first_timestamp: string;
+  width: number;
+  height: number;
+  channels: number;
+  dtype: string;
+  value_min: number;
+  value_max: number;
+  image_data_url: string;
+};
+
+export type InspectRun = {
+  id: number;
+  training_dataset_id: number;
+  preprocessing_pipeline_id: number;
+  status: string;
+  enqueued_at: string | null;
+  started_at: string | null;
+  ended_at: string | null;
+  duration_seconds: number | null;
+  error_message: string | null;
+  device: string | null;
+  start_timestamp: string;
+  end_timestamp: string;
+  stride: number;
+  fps: number;
+  content_mode: string;
+  frame_count: number | null;
+  done_count: number;
+  frames_dir: string | null;
+  video_path: string | null;
+  training_dataset_name: string;
+  preprocessing_pipeline_name: string;
+  created_at: string;
+  updated_at: string;
+};
+
+export type AnalysisLayout = {
+  id: number;
+  name: string;
+  description: string | null;
+  layout: Record<string, unknown>;
   created_at: string;
   updated_at: string;
 };

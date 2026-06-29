@@ -1,7 +1,7 @@
-import { Alert, Badge, Button, Group, Paper, Select, Stack, Text, Textarea, TextInput, Title } from '@mantine/core';
+import { Alert, Badge, Button, Group, Paper, Select, Stack, Text, Textarea, TextInput, Title, Tooltip } from '@mantine/core';
 import { useDebouncedValue } from '@mantine/hooks';
 import { notifications } from '@mantine/notifications';
-import { BrainCircuit, Pencil, RotateCcw, Save } from 'lucide-react';
+import { BrainCircuit, Info, Pencil, RotateCcw, Save } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 
 import {
@@ -17,6 +17,7 @@ import {
 } from '../api';
 import { StepCard } from '../components/StepCard';
 import { usePendingIds } from '../hooks/usePendingIds';
+import { snapshotsEqual } from '../lib/snapshots';
 import { ArchitectureCheckPanel } from '../methods/panels/ArchitectureCheckPanel';
 import { MethodDiagramPanel } from '../methods/panels/MethodDiagramPanel';
 import { SavedMethodsTable } from '../methods/panels/SavedMethodsTable';
@@ -37,6 +38,19 @@ import type {
   ModelGraph,
   ModelLayerDefinition,
 } from '../types';
+
+function InfoLabel({ label, info }: { label: string; info: string }) {
+  return (
+    <Group component="span" gap={5} wrap="nowrap">
+      <span>{label}</span>
+      <Tooltip label={info} multiline w={320} withArrow>
+        <span className="schema-info-button" aria-label={`${label} information`} role="img">
+          <Info size={13} />
+        </span>
+      </Tooltip>
+    </Group>
+  );
+}
 
 export function MethodsPage() {
   const [methodDefinitions, setMethodDefinitions] = useState<MethodDefinition[]>([]);
@@ -115,6 +129,36 @@ export function MethodsPage() {
     if (!trimmed) return false;
     return methods.some((method) => method.name.trim().toLowerCase() === trimmed && method.id !== loadedMethodId);
   }, [name, methods, loadedMethodId]);
+  const createNameClash = useMemo(() => {
+    const trimmed = name.trim().toLowerCase();
+    if (!trimmed) return false;
+    return methods.some((method) => method.name.trim().toLowerCase() === trimmed);
+  }, [name, methods]);
+
+  const loadedMethodContentChanged = useMemo(() => {
+    if (!loadedMethod) return false;
+    const payload = buildPayload();
+    if (!payload) return false;
+    return !snapshotsEqual(
+      {
+        description,
+        ...payload,
+      },
+      {
+        description: loadedMethod.description ?? '',
+        method_type: loadedMethod.method_type,
+        method_graph: loadedMethod.method_graph ?? loadedMethod.model_graph ?? {},
+        method_config: loadedMethod.method_config ?? loadedMethod.model_config,
+        training_config: loadedMethod.training_config,
+        inference_config: loadedMethod.inference_config,
+      },
+    );
+  }, [loadedMethod, selectedMethod, modelGraph, modelConfig, trainingConfig, inferenceConfig, description]);
+
+  const loadedMethodNameChanged = useMemo(() => {
+    if (!loadedMethod) return false;
+    return name.trim().toLowerCase() !== loadedMethod.name.trim().toLowerCase();
+  }, [loadedMethod, name]);
 
   function resetForMethod(method: MethodDefinition) {
     const nextModelConfig = { ...schemaDefaults(method.method_schema), ...method.default_method_config };
@@ -312,7 +356,18 @@ export function MethodsPage() {
     });
   }
 
-  const saveDisabled = !name.trim() || nameClash || invalidNumericDrafts.length > 0 || architectureCheck?.valid !== true;
+  const updateDisabled =
+    !name.trim() ||
+    nameClash ||
+    invalidNumericDrafts.length > 0 ||
+    architectureCheck?.valid !== true ||
+    Boolean(loadedMethod?.is_update_locked);
+  const saveNewDisabled =
+    !name.trim() ||
+    createNameClash ||
+    invalidNumericDrafts.length > 0 ||
+    architectureCheck?.valid !== true ||
+    (loadedMethodId != null && (!loadedMethodNameChanged || !loadedMethodContentChanged));
 
   function renderSaveActions(showReset = false) {
     if (loadedReadOnly) {
@@ -323,7 +378,7 @@ export function MethodsPage() {
               {resetLabel}
             </Button>
           )}
-          <Button leftSection={<Pencil size={18} />} onClick={() => setIsEditingLoadedMethod(true)} disabled={loadedMethod?.is_update_locked}>
+          <Button leftSection={<Pencil size={18} />} onClick={() => setIsEditingLoadedMethod(true)}>
             Edit {isTrainableArchitecture ? 'Architecture' : 'Method'}
           </Button>
         </Group>
@@ -338,11 +393,11 @@ export function MethodsPage() {
           </Button>
         )}
         {loadedMethodId != null && (
-          <Button variant="light" leftSection={<Save size={18} />} loading={loading} disabled={saveDisabled} onClick={() => handleSave(true)}>
+          <Button variant="light" leftSection={<Save size={18} />} loading={loading} disabled={saveNewDisabled} onClick={() => handleSave(true)}>
             {saveAsNewLabel}
           </Button>
         )}
-        <Button leftSection={<Save size={18} />} loading={loading} disabled={saveDisabled} onClick={() => handleSave(false)}>
+        <Button leftSection={<Save size={18} />} loading={loading} disabled={updateDisabled} onClick={() => handleSave(false)}>
           {loadedMethodId != null ? updateLabel : saveLabel}
         </Button>
       </Group>
@@ -387,6 +442,12 @@ export function MethodsPage() {
             </Stack>
           </Alert>
         )}
+        {!loadedReadOnly && loadedMethod?.is_update_locked && (
+          <Alert color="yellow" title="Update locked">
+            This saved {isTrainableArchitecture ? 'architecture' : 'method'} is already used. Update is disabled; choose a
+            new unique name and change the content to save it as a new {isTrainableArchitecture ? 'architecture' : 'method'}.
+          </Alert>
+        )}
         {nameClash && (
           <Alert color="red" title="Name already exists">
             Choose a unique name before saving.
@@ -413,7 +474,12 @@ export function MethodsPage() {
 
       <StepCard index={1} title="Method type" color="violet">
         <Select
-          label="Method type"
+          label={
+            <InfoLabel
+              label="Method type"
+              info="Selects the technical method family. cnn_vae is the generic VAE implementation; presets such as VAE Baur d128 default are saved configurations with specific parameters."
+            />
+          }
           placeholder="Select a method type"
           data={methodDefinitions.map((method) => ({ value: method.type, label: method.label }))}
           value={methodType}

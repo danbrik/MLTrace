@@ -159,8 +159,10 @@ export function SequentialMethodBuilder({
   const [expandedLayers, setExpandedLayers] = useState<Record<string, boolean>>({});
   const [encoderAddCategory, setEncoderAddCategory] = useState<string | null>('Convolution');
   const [decoderAddCategory, setDecoderAddCategory] = useState<string | null>('Convolution');
+  const [predictionAddCategory, setPredictionAddCategory] = useState<string | null>('Convolution 3D');
   const [encoderAddType, setEncoderAddType] = useState<string | null>('Conv2d');
   const [decoderAddType, setDecoderAddType] = useState<string | null>('ConvTranspose2d');
+  const [predictionAddType, setPredictionAddType] = useState<string | null>('ConvTranspose3d');
 
   const layerByType = useMemo(() => new Map(layers.map((layer) => [layer.type, layer])), [layers]);
   const layerOptions = useMemo(
@@ -242,16 +244,16 @@ export function SequentialMethodBuilder({
 
   function renderLayerList(section: GraphSection) {
     const sectionLayers = ((modelGraph[section] as NonNullable<typeof modelGraph.encoder> | undefined) ?? []);
-    const addCategory = section === 'encoder' ? encoderAddCategory : decoderAddCategory;
-    const setAddCategory = section === 'encoder' ? setEncoderAddCategory : setDecoderAddCategory;
-    const addType = section === 'encoder' ? encoderAddType : decoderAddType;
-    const setAddType = section === 'encoder' ? setEncoderAddType : setDecoderAddType;
+    const addCategory = section === 'encoder' ? encoderAddCategory : section === 'decoder' ? decoderAddCategory : predictionAddCategory;
+    const setAddCategory = section === 'encoder' ? setEncoderAddCategory : section === 'decoder' ? setDecoderAddCategory : setPredictionAddCategory;
+    const addType = section === 'encoder' ? encoderAddType : section === 'decoder' ? decoderAddType : predictionAddType;
+    const setAddType = section === 'encoder' ? setEncoderAddType : section === 'decoder' ? setDecoderAddType : setPredictionAddType;
     const exactLayerOptions = addCategory ? (layerOptionsByCategory.get(addCategory) ?? []) : [];
 
     return (
       <CollapsibleMethodSection
         blockId={section}
-        title={section === 'encoder' ? 'Encoder' : 'Decoder'}
+        title={section === 'encoder' ? 'Encoder' : section === 'decoder' ? 'Decoder' : 'Prediction decoder'}
         subtitle="Ordered layer stack"
         rightSection={<Badge variant="light">{sectionLayers.length} layer(s)</Badge>}
         expandedBlocks={expandedBlocks}
@@ -365,7 +367,7 @@ export function SequentialMethodBuilder({
       <CollapsibleMethodSection
         blockId="input"
         title="Input"
-        subtitle="Source tensor shape"
+        subtitle={method.builder_kind === 'spatiotemporal_autoencoder' ? 'Source clip tensor shape' : 'Source tensor shape'}
         expandedBlocks={expandedBlocks}
         toggleBlock={toggleBlock}
       >
@@ -379,30 +381,67 @@ export function SequentialMethodBuilder({
           onNumberDraftChange={onNumberDraftChange}
         />
       </CollapsibleMethodSection>
+      {method.builder_kind === 'spatiotemporal_autoencoder' && (
+        <CollapsibleMethodSection
+          blockId="sequence"
+          title="Sequence"
+          subtitle="Clip and future-frame sampling"
+          expandedBlocks={expandedBlocks}
+          toggleBlock={toggleBlock}
+        >
+          <SchemaForm
+            schema={method.method_schema}
+            config={modelConfig as ModelConfig}
+            keys={[
+              'clip_length',
+              'future_length',
+              'temporal_stride',
+              'future_stride',
+              'missing_frame_policy',
+              'score_timestamp_mode',
+              'prediction_branch',
+            ]}
+            disabled={disabled}
+            fieldPrefix="method.sequence"
+            onChange={onConfigChange}
+            onNumberDraftChange={onNumberDraftChange}
+          />
+        </CollapsibleMethodSection>
+      )}
       {renderLayerList('encoder')}
-      <CollapsibleMethodSection
-        blockId="latent"
-        title="Latent"
-        subtitle="Implicit flatten and projection bridge"
-        expandedBlocks={expandedBlocks}
-        toggleBlock={toggleBlock}
-      >
-        <SchemaForm
-          schema={method.method_schema}
-          config={modelConfig as ModelConfig}
-          keys={['latent_dim', 'kl_weight']}
-          disabled={disabled}
-          fieldPrefix="method.latent"
-          onChange={onConfigChange}
-          onNumberDraftChange={onNumberDraftChange}
-        />
-      </CollapsibleMethodSection>
+      {method.builder_kind !== 'spatiotemporal_autoencoder' ? (
+        <CollapsibleMethodSection
+          blockId="latent"
+          title="Latent"
+          subtitle="Implicit flatten and projection bridge"
+          expandedBlocks={expandedBlocks}
+          toggleBlock={toggleBlock}
+        >
+          <SchemaForm
+            schema={method.method_schema}
+            config={modelConfig as ModelConfig}
+            keys={['latent_dim', 'kl_weight', 'bottleneck_channels']}
+            disabled={disabled}
+            fieldPrefix="method.latent"
+            onChange={onConfigChange}
+            onNumberDraftChange={onNumberDraftChange}
+          />
+        </CollapsibleMethodSection>
+      ) : (
+        <Alert color="blue" title="Spatio-temporal bottleneck">
+          The encoder keeps a 5D tensor N,C,T,H,W. The reconstruction decoder rebuilds the input clip; the optional prediction
+          decoder predicts the configured future frames from the same bottleneck.
+        </Alert>
+      )}
       {method.builder_kind === 'sequential_variational_autoencoder' && (
         <Alert color="violet" title="VAE latent block">
-          The latent bridge stores mu/logvar metadata. Static validation always runs; the optional Torch check runs only when Torch is installed.
+          The encoder predicts mu and logvar instead of one fixed z. mu is the latent mean, logvar is the log variance
+          used to derive a positive sigma via exp(0.5 * logvar), and z is sampled as mu + sigma * epsilon before decoding.
+          sample_count controls whether inference uses one fast deterministic reconstruction or multiple Monte Carlo samples.
         </Alert>
       )}
       {renderLayerList('decoder')}
+      {method.builder_kind === 'spatiotemporal_autoencoder' && modelConfig.prediction_branch !== false && renderLayerList('prediction_decoder')}
       <CollapsibleMethodSection
         blockId="output"
         title="Output"

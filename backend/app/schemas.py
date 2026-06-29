@@ -227,6 +227,91 @@ class PreprocessingPreviewResponse(BaseModel):
     previews: list[PreprocessingPreviewImage]
 
 
+class InspectPreviewRequest(BaseModel):
+    training_dataset_id: int
+    preprocessing_pipeline_id: int
+    start_timestamp: datetime
+    end_timestamp: datetime
+    stride: int = Field(default=1, ge=1)
+    content_mode: Literal["final_preprocessed_output"] = "final_preprocessed_output"
+
+    @field_validator("end_timestamp")
+    @classmethod
+    def validate_range(cls, value: datetime, info):
+        start = info.data.get("start_timestamp")
+        if start and value < start:
+            raise ValueError("end_timestamp must be after start_timestamp")
+        return value
+
+
+class InspectPreviewResponse(BaseModel):
+    training_dataset_id: int
+    preprocessing_pipeline_id: int
+    start_timestamp: datetime
+    end_timestamp: datetime
+    stride: int
+    matching_images: int
+    selected_images: int
+    first_image_path: str
+    first_timestamp: datetime
+    width: int
+    height: int
+    channels: int
+    dtype: str
+    value_min: float
+    value_max: float
+    image_data_url: str
+
+
+class InspectRunCreate(InspectPreviewRequest):
+    fps: int = Field(default=12, ge=1, le=60)
+
+
+class InspectRunRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    training_dataset_id: int
+    preprocessing_pipeline_id: int
+    status: str
+    enqueued_at: datetime | None
+    started_at: datetime | None
+    ended_at: datetime | None
+    duration_seconds: float | None
+    error_message: str | None
+    device: str | None
+    start_timestamp: datetime
+    end_timestamp: datetime
+    stride: int
+    fps: int
+    content_mode: str
+    frame_count: int | None
+    done_count: int
+    frames_dir: str | None
+    video_path: str | None
+    training_dataset_name: str
+    preprocessing_pipeline_name: str
+    created_at: datetime
+    updated_at: datetime
+
+
+class AnalysisLayoutCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=255)
+    description: str | None = None
+    layout: dict = Field(default_factory=dict)
+
+
+class AnalysisLayoutRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    name: str
+    description: str | None
+    layout: dict
+    created_at: datetime
+    updated_at: datetime
+
+
 class MethodDefinitionRead(BaseModel):
     type: str
     label: str
@@ -576,6 +661,7 @@ class TestingRunCreate(BaseModel):
     training_dataset_id: int
     roi_id: int | None = None
     name: str | None = Field(default=None, max_length=255)
+    inference_config: dict | None = None
 
 
 class TestingRunResultRead(BaseModel):
@@ -589,6 +675,7 @@ class TestingRunResultRead(BaseModel):
     full_mse: float
     roi_mse: float | None
     tile_scores: list[dict] | None = None
+    result_metadata: dict | None = None
     width: int
     height: int
 
@@ -629,6 +716,7 @@ class TestingRunRead(BaseModel):
     artifact_path: str
     roi_name: str | None
     roi_geometry: dict | None
+    inference_config: dict | None = None
     created_at: datetime
     updated_at: datetime
 
@@ -655,6 +743,7 @@ class TestingRunResultImageResponse(BaseModel):
 
 
 class HeatmapVisualizationConfig(BaseModel):
+    residual_source: Literal["pixel_residual", "ssim_residual"] = "pixel_residual"
     error_mode: Literal["squared", "absolute"] = "squared"
     threshold_enabled: bool = False
     threshold: float = Field(default=0.0, ge=0.0)
@@ -666,6 +755,13 @@ class HeatmapVisualizationConfig(BaseModel):
     signed_deviations: bool = False
     positive_weight: float = Field(default=1.0, ge=0.0)
     negative_weight: float = Field(default=1.0, ge=0.0)
+    ssim_window_size: int = Field(default=11, ge=3)
+    ssim_alpha: float = Field(default=1.0, ge=0.0)
+    ssim_beta: float = Field(default=1.0, ge=0.0)
+    ssim_gamma: float = Field(default=1.0, ge=0.0)
+    ssim_k1: float = Field(default=0.01, ge=0.0)
+    ssim_k2: float = Field(default=0.03, ge=0.0)
+    ssim_data_range: float = Field(default=1.0, gt=0.0)
 
     @model_validator(mode="after")
     def validate_normalization_mode(self):
@@ -679,6 +775,8 @@ class HeatmapRunCreate(BaseModel):
     testing_result_id: int | None = None
     timestamp: datetime | None = None
     force_recompute: bool = False
+    stae_view: Literal["reconstruction", "prediction"] = "reconstruction"
+    prediction_horizon: int = Field(default=1, ge=1)
     visualization_config: HeatmapVisualizationConfig = Field(default_factory=HeatmapVisualizationConfig)
 
     @model_validator(mode="after")

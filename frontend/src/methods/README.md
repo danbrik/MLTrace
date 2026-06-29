@@ -67,6 +67,19 @@ Static validation is automatic and save-blocking. Torch dummy forward is manual 
 - Layer definitions come from the backend layer catalog.
 - Layer cards are collapsed by default to keep dense architectures readable.
 
+## fastAnoGAN Builder
+
+`fast_anogan` uses `FastAnoganBuilder` instead of the sequential layer builder.
+It edits block sections rather than arbitrary Torch layers:
+
+- Generator blocks are residual upsampling blocks.
+- Critic blocks are residual downsampling blocks and must use `layer_norm` or `none`.
+- Encoder blocks are residual downsampling blocks from image to latent vector.
+
+Do not model the encoder as an upsampling generator path. In fastAnoGAN the
+encoder direction is always image -> z. The frontend shows block direction as a
+disabled field and the backend validates it again before saving.
+
 ## Code Style Rules
 
 - Keep `ModelsPage.tsx` as orchestration only. Do not add method-specific JSX there.

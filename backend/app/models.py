@@ -445,6 +445,7 @@ class TestingRun(Base):
     artifact_path: Mapped[str] = mapped_column(Text, nullable=False)
     roi_name: Mapped[str | None] = mapped_column(String(255))
     roi_geometry: Mapped[dict | None] = mapped_column(json_type())
+    inference_config: Mapped[dict | None] = mapped_column(json_type())
 
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=False), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
@@ -480,6 +481,7 @@ class TestingRunResult(Base):
     full_mse: Mapped[float] = mapped_column(Float, nullable=False)
     roi_mse: Mapped[float | None] = mapped_column(Float)
     tile_scores: Mapped[list | None] = mapped_column(json_type())
+    result_metadata: Mapped[dict | None] = mapped_column(json_type())
     width: Mapped[int] = mapped_column(Integer, nullable=False)
     height: Mapped[int] = mapped_column(Integer, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=False), server_default=func.now())
@@ -593,6 +595,77 @@ class HeatmapRangeRun(Base):
     )
 
     testing_run: Mapped[TestingRun] = relationship()
+
+
+class InspectRun(Base):
+    """CPU-only preprocessing inspection video over a selected train/test range."""
+
+    __tablename__ = "inspect_runs"
+    __table_args__ = (
+        Index("ix_inspect_runs_status", "status"),
+        Index("ix_inspect_runs_created_at", "created_at"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    training_dataset_id: Mapped[int] = mapped_column(
+        ForeignKey("training_datasets.id", ondelete="RESTRICT"), nullable=False
+    )
+    preprocessing_pipeline_id: Mapped[int] = mapped_column(
+        ForeignKey("preprocessing_pipelines.id", ondelete="RESTRICT"), nullable=False
+    )
+
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="queued")
+    enqueued_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=False))
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=False))
+    ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=False))
+    duration_seconds: Mapped[float | None] = mapped_column(Float)
+    error_message: Mapped[str | None] = mapped_column(Text)
+    device: Mapped[str | None] = mapped_column(String(32))
+    pid: Mapped[int | None] = mapped_column(Integer)
+    log_path: Mapped[str | None] = mapped_column(Text)
+
+    start_timestamp: Mapped[datetime] = mapped_column(DateTime(timezone=False), nullable=False)
+    end_timestamp: Mapped[datetime] = mapped_column(DateTime(timezone=False), nullable=False)
+    stride: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    fps: Mapped[int] = mapped_column(Integer, nullable=False, default=12)
+    content_mode: Mapped[str] = mapped_column(String(64), nullable=False, default="final_preprocessed_output")
+
+    frame_count: Mapped[int | None] = mapped_column(Integer)
+    done_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    frames_dir: Mapped[str | None] = mapped_column(Text)
+    video_path: Mapped[str | None] = mapped_column(Text)
+
+    training_dataset_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    preprocessing_pipeline_name: Mapped[str] = mapped_column(String(255), nullable=False)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=False), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=False), server_default=func.now(), onupdate=func.now()
+    )
+
+    training_dataset: Mapped[TrainingDataset] = relationship()
+    preprocessing_pipeline: Mapped[PreprocessingPipeline] = relationship()
+
+
+class AnalysisLayout(Base):
+    """Named, reusable Analysis board state.
+
+    The JSON payload stores UI configuration only: plot definitions, selected
+    pipeline/ROI/source filters, and the current draft. Result rows and heatmap
+    caches are intentionally reloaded from their source APIs when a layout is
+    opened again.
+    """
+
+    __tablename__ = "analysis_layouts"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    name: Mapped[str] = mapped_column(String(255), nullable=False, unique=True)
+    description: Mapped[str | None] = mapped_column(Text)
+    layout: Mapped[dict] = mapped_column(json_type(), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=False), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=False), server_default=func.now(), onupdate=func.now()
+    )
 
 
 ModelConfiguration = MethodConfiguration

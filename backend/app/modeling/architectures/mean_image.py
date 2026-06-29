@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from app.modeling.architectures.ssim_schema import SSIM_ERROR_METRIC_OPTIONS, SSIM_INFERENCE_PROPERTIES
 from app.modeling.base import BaseModelArchitecture
 
 
@@ -66,7 +67,8 @@ class MeanImageArchitecture(BaseModelArchitecture):
     inference_schema = {
         "type": "object",
         "properties": {
-            "error_metric": {"type": "string", "label": "Error metric", "enum": ["mse", "mae"], "default": "mse"},
+            "error_metric": {"type": "string", "label": "Error metric", "enum": SSIM_ERROR_METRIC_OPTIONS, "default": "mse"},
+            **SSIM_INFERENCE_PROPERTIES,
         },
     }
 

@@ -57,6 +57,11 @@ type Rect = { x: number; y: number; width: number; height: number };
 type RoiPoint = { x: number; y: number };
 
 const TILE_OPTIONS = [1, 2, 3, 4, 5].map((value) => ({ value: String(value), label: String(value) }));
+const SCORE_METRIC_OPTIONS = [
+  { value: 'mse', label: 'MSE' },
+  { value: 'mae', label: 'MAE' },
+  { value: 'ssim_distance', label: 'SSIM distance' },
+];
 
 function notifyError(title: string, error: unknown) {
   notifications.show({ color: 'red', title, message: error instanceof Error ? error.message : 'Unknown error' });
@@ -397,6 +402,7 @@ export function TestingRunsPage({ active = true, onRunQueued }: { active?: boole
   const [selectedRoiId, setSelectedRoiId] = useState<string | null>(null);
   const [runName, setRunName] = useState('');
   const [runNameTouched, setRunNameTouched] = useState(false);
+  const [scoreMetric, setScoreMetric] = useState('mse');
   const [roiName, setRoiName] = useState('');
   const [preview, setPreview] = useState<RoiPreview | null>(null);
   const [points, setPoints] = useState<RoiPoint[] | null>(null);
@@ -503,6 +509,16 @@ export function TestingRunsPage({ active = true, onRunQueued }: { active?: boole
   const selectedMethodConfiguration = selectedTrainingPipeline
     ? methodConfigById.get(selectedTrainingPipeline.method_configuration_id) ?? null
     : null;
+  const selectedVaeSampleCount =
+    selectedMethodConfiguration?.method_type === 'cnn_vae'
+      ? Number(selectedMethodConfiguration.inference_config?.sample_count ?? 1)
+      : null;
+
+  useEffect(() => {
+    const defaultMetric = selectedMethodConfiguration?.inference_config?.error_metric;
+    setScoreMetric(typeof defaultMetric === 'string' ? defaultMetric : 'mse');
+  }, [selectedMethodConfiguration?.id]);
+
   const suggestedRunName = useMemo(() => {
     if (!confirmedModel || !selectedDataset) return '';
     const roiPart = roiEnabled && selectedRoi ? selectedRoi.name : 'full image';
@@ -592,6 +608,7 @@ export function TestingRunsPage({ active = true, onRunQueued }: { active?: boole
         training_dataset_id: selectedDatasetId,
         roi_id: roiEnabled && selectedRoiId ? Number(selectedRoiId) : null,
         name: runName.trim() || null,
+        inference_config: { error_metric: scoreMetric },
       });
       setRunName('');
       setRunNameTouched(false);
@@ -656,6 +673,18 @@ export function TestingRunsPage({ active = true, onRunQueued }: { active?: boole
                     {methodLabel(methodByType.get(confirmedModel.method_type), confirmedModel.method_type)} ·{' '}
                     {confirmedModel.artifact_kind} · expects input {requiredInputResolution ?? 'n/a'}
                   </Text>
+                  {selectedVaeSampleCount != null && (
+                    <Tooltip
+                      label="VAE sample_count controls reconstruction sampling. 1 uses the deterministic mu reconstruction and is fast; 100 averages Monte Carlo samples like Baur-style evaluation."
+                      multiline
+                      w={320}
+                      withArrow
+                    >
+                      <Badge variant="light" color={selectedVaeSampleCount > 1 ? 'violet' : 'gray'}>
+                        VAE samples {selectedVaeSampleCount}
+                      </Badge>
+                    </Tooltip>
+                  )}
                 </Group>
                 <Group gap={4}>
                   <Tooltip label="Inspect trainsets">
@@ -845,6 +874,26 @@ export function TestingRunsPage({ active = true, onRunQueued }: { active?: boole
                   setRunName(event.currentTarget.value);
                 }}
                 style={{ flex: 1 }}
+              />
+              <Select
+                label={
+                  <Group gap={4}>
+                    <Text span>Score metric</Text>
+                    <Tooltip
+                      label="MSE and MAE score pixel-wise residuals. SSIM distance scores local structural dissimilarity as 1 - SSIM using standard K constants."
+                      multiline
+                      w={320}
+                      withArrow
+                    >
+                      <Info size={14} />
+                    </Tooltip>
+                  </Group>
+                }
+                data={SCORE_METRIC_OPTIONS}
+                value={scoreMetric}
+                onChange={(value) => setScoreMetric(value ?? 'mse')}
+                allowDeselect={false}
+                w={190}
               />
               <Button
                 leftSection={<Play size={16} />}

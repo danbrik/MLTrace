@@ -41,6 +41,7 @@ import {
 } from '../api';
 import { CONTROL_REGISTRY } from '../preprocessing/controls';
 import { usePendingIds } from '../hooks/usePendingIds';
+import { snapshotsEqual } from '../lib/snapshots';
 import type {
   Dataset,
   DatasetFolder,
@@ -123,6 +124,22 @@ function firstResolution(folder: DatasetFolder): { width: number; height: number
   const match = resolution?.match(/^(\d+)x(\d+)$/);
   if (!match) return null;
   return { width: Number(match[1]), height: Number(match[2]) };
+}
+
+function normalizedLinearGraph(graph: PreprocessingGraph): PreprocessingGraph {
+  return {
+    nodes: graph.nodes.map((node, index) => ({
+      id: node.id,
+      type: node.type,
+      config: node.config ?? {},
+      position: { x: index * 220, y: 0 },
+    })),
+    edges: graph.nodes.slice(0, -1).map((node, index) => ({
+      id: `${node.id}-${graph.nodes[index + 1].id}`,
+      source: node.id,
+      target: graph.nodes[index + 1].id,
+    })),
+  };
 }
 
 function folderImageMetadataValue(folder: DatasetFolder, key: string): string | number | null {
@@ -245,6 +262,11 @@ export function PreprocessingPipelinesPage() {
 
   const loadedReadOnly = loadedPipelineId != null && !isEditingLoadedPipeline;
   const loadedPipeline = loadedPipelineId != null ? pipelines.find((pipeline) => pipeline.id === loadedPipelineId) ?? null : null;
+
+  const loadedPipelineNameChanged = useMemo(() => {
+    if (!loadedPipeline) return false;
+    return name.trim().toLowerCase() !== loadedPipeline.name.trim().toLowerCase();
+  }, [loadedPipeline, name]);
 
   // The image that flows INTO a step is the output of the preceding step. For the
   // first real step (index 1) the loaded source image is that output and is always
@@ -388,6 +410,29 @@ export function PreprocessingPipelinesPage() {
       output_height: last.height,
     };
   }
+
+  const currentDesignResolution = designResolutionFromPreview() ?? designResolution;
+
+  const loadedPipelineContentChanged = useMemo(() => {
+    if (!loadedPipeline) return false;
+    return !snapshotsEqual(
+      {
+        description,
+        graph: backendGraph(),
+        preview_folder_id: selectedFolderId ? Number(selectedFolderId) : null,
+        ...currentDesignResolution,
+      },
+      {
+        description: loadedPipeline.description ?? '',
+        graph: normalizedLinearGraph(loadedPipeline.graph),
+        preview_folder_id: loadedPipeline.preview_folder_id,
+        input_width: loadedPipeline.input_width,
+        input_height: loadedPipeline.input_height,
+        output_width: loadedPipeline.output_width,
+        output_height: loadedPipeline.output_height,
+      },
+    );
+  }, [loadedPipeline, description, nodes, selectedFolderId, currentDesignResolution]);
 
   function buildPipelinePayload() {
     const nextDesignResolution = designResolutionFromPreview();
@@ -815,13 +860,15 @@ export function PreprocessingPipelinesPage() {
   function renderSaveButtons() {
     if (loadedReadOnly) {
       return (
-        <Button leftSection={<Pencil size={18} />} onClick={() => setIsEditingLoadedPipeline(true)} disabled={loadedPipeline?.is_update_locked}>
+        <Button leftSection={<Pencil size={18} />} onClick={() => setIsEditingLoadedPipeline(true)}>
           Edit pipeline
         </Button>
       );
     }
 
     const createDisabled = !name.trim() || createNameClash || !canStoreDesignResolution;
+    const saveAsNewDisabled =
+      createDisabled || (loadedPipelineId != null && (!loadedPipelineNameChanged || !loadedPipelineContentChanged));
     if (loadedPipelineId != null) {
       return (
         <>
@@ -829,11 +876,11 @@ export function PreprocessingPipelinesPage() {
             leftSection={<Save size={18} />}
             onClick={handleUpdate}
             loading={loading}
-            disabled={!name.trim() || nameClash || !canStoreDesignResolution}
+            disabled={!name.trim() || nameClash || !canStoreDesignResolution || Boolean(loadedPipeline?.is_update_locked)}
           >
             Update pipeline
           </Button>
-          <Button variant="light" leftSection={<Save size={18} />} onClick={handleCreate} loading={loading} disabled={createDisabled}>
+          <Button variant="light" leftSection={<Save size={18} />} onClick={handleCreate} loading={loading} disabled={saveAsNewDisabled}>
             Save as new
           </Button>
         </>
@@ -884,6 +931,12 @@ export function PreprocessingPipelinesPage() {
                   </Text>
                 ))}
               </Stack>
+            </Alert>
+          )}
+          {!loadedReadOnly && loadedPipeline?.is_update_locked && (
+            <Alert color="yellow" title="Update locked">
+              This preprocessing pipeline is already used. Update is disabled; choose a new unique name and change the
+              pipeline content to save it as a new pipeline.
             </Alert>
           )}
           {nameClash && (

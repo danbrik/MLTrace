@@ -15,6 +15,8 @@ from sqlalchemy.orm import Session, selectinload
 
 from app import models
 from app.database import data_dir
+from app.metrics.ssim import ssim_distance_map_np, ssim_settings_from_config
+from app.modeling.fast_anogan import build_fast_anogan_modules, fast_anogan_forward
 from app.preprocessing.pipeline import (
     encode_absolute_image_data_url,
     encode_png_data_url,
@@ -42,7 +44,7 @@ from app.training.engine import _build_model, _to_nchw
 from app.training.scheduler import scheduler
 
 
-CURRENT_HEATMAP_RENDER_VERSION = 4
+CURRENT_HEATMAP_RENDER_VERSION = 5
 
 
 def _utcnow() -> datetime:
@@ -228,6 +230,23 @@ def _mse(left: np.ndarray, right: np.ndarray) -> float:
     return float(np.mean(delta * delta))
 
 
+def _score_map(left: np.ndarray, right: np.ndarray, metric: str, config: dict | None = None) -> tuple[np.ndarray, dict]:
+    if metric == "ssim_distance":
+        return ssim_distance_map_np(left, right, config)
+    if left.shape != right.shape:
+        raise ValueError(f"Cannot score arrays with different shapes: {left.shape} vs {right.shape}.")
+    delta = left.astype(np.float64) - right.astype(np.float64)
+    values = np.abs(delta) if metric == "mae" else delta * delta
+    if values.ndim == 3:
+        values = np.mean(values, axis=2)
+    return values, {}
+
+
+def _score_array(left: np.ndarray, right: np.ndarray, metric: str, config: dict | None = None) -> tuple[float, dict]:
+    values, metadata = _score_map(left, right, metric, config)
+    return float(np.mean(values)), metadata
+
+
 def _mse_masked(left: np.ndarray, right: np.ndarray, mask: np.ndarray) -> float:
     if left.shape != right.shape:
         raise ValueError(f"Cannot score arrays with different shapes: {left.shape} vs {right.shape}.")
@@ -238,6 +257,29 @@ def _mse_masked(left: np.ndarray, right: np.ndarray, mask: np.ndarray) -> float:
     if values.size == 0:
         raise ValueError("ROI mask contains no pixels.")
     return float(np.mean(values * values))
+
+
+def _score_masked(
+    left: np.ndarray,
+    right: np.ndarray,
+    mask: np.ndarray,
+    metric: str,
+    config: dict | None = None,
+) -> tuple[float | None, dict | None, str | None]:
+    if mask.shape != left.shape[:2]:
+        raise ValueError(f"ROI mask shape {mask.shape} does not match image shape {left.shape[:2]}.")
+    if int(mask.sum()) == 0:
+        return None, None, "ROI/tile mask contains no pixels."
+    if metric == "ssim_distance":
+        settings = ssim_settings_from_config(config)
+        ys, xs = np.where(mask)
+        if (ys.max() - ys.min() + 1) < settings.window_size or (xs.max() - xs.min() + 1) < settings.window_size:
+            return None, settings.metadata(), f"ROI/tile is smaller than SSIM window size {settings.window_size}."
+    values, metadata = _score_map(left, right, metric, config)
+    selected = values[mask]
+    if selected.size == 0:
+        return None, metadata, "ROI/tile mask contains no pixels."
+    return float(np.mean(selected)), metadata, None
 
 
 def _validate_roi_size(image: np.ndarray, roi: models.RoiDefinition) -> tuple[int, int]:
@@ -295,27 +337,38 @@ def _tile_polygons(points: list[dict], rows: int, cols: int) -> list[dict]:
 
 
 def _roi_scores(
-    source: np.ndarray, reconstruction: np.ndarray, roi: models.RoiDefinition
-) -> tuple[float, list[dict]]:
+    source: np.ndarray, reconstruction: np.ndarray, roi: models.RoiDefinition, metric: str, config: dict | None = None
+) -> tuple[float | None, list[dict], list[str]]:
     width, height = _validate_roi_size(source, roi)
     points = _roi_points(roi)
     roi_mask = _polygon_mask(width, height, points)
-    roi_mse = _mse_masked(source, reconstruction, roi_mask)
+    roi_score, _, roi_warning = _score_masked(source, reconstruction, roi_mask, metric, config)
+    warnings = [roi_warning] if roi_warning else []
     tile_scores: list[dict] = []
     rows = max(1, int(roi.tile_rows or 1))
     cols = max(1, int(roi.tile_cols or 1))
     for tile in _tile_polygons(points, rows, cols):
         mask = _polygon_mask(width, height, tile["points"])
         pixel_count = int(mask.sum())
+        tile_score, _, tile_warning = (
+            _score_masked(source, reconstruction, mask, metric, config)
+            if pixel_count
+            else (None, None, "ROI/tile mask contains no pixels.")
+        )
+        if tile_warning:
+            warnings.append(f"tile {tile['row']},{tile['col']}: {tile_warning}")
         tile_scores.append(
             {
                 "row": tile["row"],
                 "col": tile["col"],
-                "mse": None if pixel_count == 0 else _mse_masked(source, reconstruction, mask),
+                "mse": tile_score if metric == "mse" else None,
+                "score": tile_score,
+                "score_metric": metric,
+                "warning": tile_warning,
                 "pixels": pixel_count,
             }
         )
-    return roi_mse, tile_scores
+    return roi_score, tile_scores, warnings
 
 
 class ArtifactEvaluator:
@@ -325,7 +378,7 @@ class ArtifactEvaluator:
     into a CPU torch module and reused across all test images.
     """
 
-    def __init__(self, training_run: models.TrainingRun) -> None:
+    def __init__(self, training_run: models.TrainingRun, inference_config: dict | None = None) -> None:
         self.training_run = training_run
         self.pipeline = training_run.training_pipeline
         self.configuration = self.pipeline.method_configuration
@@ -333,12 +386,25 @@ class ArtifactEvaluator:
         self.mean_image: np.ndarray | None = None
         self.torch = None
         self.model = None
+        self.fast_anogan_modules = None
+        self.fast_anogan_last_metadata: list[dict] = []
+        self.inference_config = {**(self.configuration.inference_config or {}), **(inference_config or {})}
+        if self.configuration.builder_kind == "fast_anogan" and "error_metric" in self.inference_config:
+            self.inference_config["residual_metric"] = self.inference_config.get("error_metric")
+        self.score_metric = str(self.inference_config.get("error_metric", "mse"))
         if not self.artifact_path.exists():
             raise ValueError(f"Training artifact does not exist: {self.artifact_path}")
         if training_run.artifact_kind == "mean_image":
             self.mean_image = np.load(self.artifact_path)
 
+    def _is_fast_anogan(self) -> bool:
+        training_run = getattr(self, "training_run", None)
+        return self.configuration.builder_kind == "fast_anogan" or getattr(training_run, "artifact_kind", None) == "gan_bundle"
+
     def _ensure_torch_model(self, image: np.ndarray) -> None:
+        if self._is_fast_anogan():
+            self._ensure_fast_anogan_model(image)
+            return
         if self.model is not None:
             return
         try:
@@ -370,18 +436,63 @@ class ArtifactEvaluator:
         self.torch = torch
         self.model = model
 
+    def _ensure_fast_anogan_model(self, image: np.ndarray) -> None:
+        if self.fast_anogan_modules is not None:
+            return
+        try:
+            import torch
+        except Exception as exc:
+            raise ValueError("Torch is required to test fastAnoGAN methods.") from exc
+        input_chw = _to_nchw(image)
+        expected = (
+            int(self.configuration.method_config["input_channels"]),
+            int(self.configuration.method_config["input_height"]),
+            int(self.configuration.method_config["input_width"]),
+        )
+        actual = (int(input_chw.shape[0]), int(input_chw.shape[1]), int(input_chw.shape[2]))
+        if actual != expected:
+            raise ValueError(
+                f"Preprocessing output is {actual[0]}x{actual[1]}x{actual[2]} (CxHxW), "
+                f"but the trained fastAnoGAN method expects {expected[0]}x{expected[1]}x{expected[2]}."
+            )
+        generator, critic, encoder = build_fast_anogan_modules(torch, self.configuration.method_graph, self.configuration.method_config)
+        dummy = torch.from_numpy(input_chw[np.newaxis])
+        with torch.no_grad():
+            generator(torch.randn((1, int(self.configuration.method_config["latent_dim"]))))
+            critic(dummy)
+            encoder(dummy)
+        bundle = torch.load(self.artifact_path, map_location="cpu")
+        generator.load_state_dict(bundle["generator_state_dict"])
+        critic.load_state_dict(bundle["critic_state_dict"])
+        encoder.load_state_dict(bundle["encoder_state_dict"])
+        generator.eval()
+        critic.eval()
+        encoder.eval()
+        self.torch = torch
+        self.fast_anogan_modules = (generator, critic, encoder)
+        self.model = generator
+
+    def _is_vae(self) -> bool:
+        return self.configuration.builder_kind == "sequential_variational_autoencoder"
+
+    def _is_stae(self) -> bool:
+        return self.configuration.builder_kind == "spatiotemporal_autoencoder"
+
+    def _sample_count(self) -> int:
+        raw = (self.configuration.inference_config or {}).get("sample_count", 1)
+        try:
+            count = int(raw)
+        except (TypeError, ValueError):
+            count = 1
+        return max(1, min(100, count))
+
     def reconstruct(self, image: np.ndarray) -> np.ndarray:
         if self.mean_image is not None:
             if image.shape != self.mean_image.shape:
                 raise ValueError(f"Mean image shape {self.mean_image.shape} does not match test image shape {image.shape}.")
             return self.mean_image
 
-        self._ensure_torch_model(image)
-        input_chw = _to_nchw(image)
-        x = self.torch.from_numpy(input_chw[np.newaxis])
-        with self.torch.no_grad():
-            reconstruction, _ = self.model(x)
-        return _as_image(reconstruction.squeeze(0).cpu().numpy())
+        return self.reconstruct_batch([image])[0]
 
     def reconstruct_batch(self, images: list[np.ndarray]) -> list[np.ndarray]:
         """Reconstruct several images in one forward pass. Uses CUDA when
@@ -402,9 +513,110 @@ class ArtifactEvaluator:
         batch = np.stack([_to_nchw(image) for image in images], axis=0)
         x = self.torch.from_numpy(batch).to(device)
         with self.torch.no_grad():
-            reconstruction, _ = self.model(x)
+            if self._is_fast_anogan():
+                generator, critic, encoder = self.fast_anogan_modules
+                output = fast_anogan_forward(generator, critic, encoder, x)
+                reconstruction = output.reconstruction
+                residual = (x - reconstruction).detach()
+                residual_metric = str(self.inference_config.get("residual_metric", "mse"))
+                if residual_metric == "mae":
+                    residual_scores = residual.abs().flatten(1).mean(dim=1)
+                else:
+                    residual_scores = (residual * residual).flatten(1).mean(dim=1)
+                feature_scores = ((output.real_features - output.reconstruction_features) ** 2).flatten(1).mean(dim=1)
+                kappa = float(self.inference_config.get("kappa", self.configuration.method_config.get("kappa", 1.0)))
+                score_mode = str(self.inference_config.get("score_mode", "combined"))
+                if score_mode == "residual_only":
+                    combined_scores = residual_scores
+                elif score_mode == "feature_only":
+                    combined_scores = feature_scores
+                else:
+                    combined_scores = residual_scores + kappa * feature_scores
+                self.fast_anogan_last_metadata = [
+                    {
+                        "fast_anogan": {
+                            "residual_score": float(residual_scores[index].detach().cpu()),
+                            "feature_score": float(feature_scores[index].detach().cpu()),
+                            "combined_score": float(combined_scores[index].detach().cpu()),
+                            "kappa": kappa,
+                            "latent_norm": float(output.latent[index].detach().norm().cpu()),
+                            "feature_layer": self.configuration.method_graph.get("feature_layer", "critic_blocks"),
+                            "score_mode": score_mode,
+                            "residual_metric": residual_metric,
+                        }
+                    }
+                    for index in range(x.shape[0])
+                ]
+            elif self._is_vae() and self._sample_count() > 1:
+                previous_mode = getattr(self.model, "deterministic_vae", True)
+                try:
+                    self.model.deterministic_vae = False
+                    reconstruction_sum = None
+                    for _ in range(self._sample_count()):
+                        reconstruction, _ = self.model(x)
+                        reconstruction_sum = reconstruction if reconstruction_sum is None else reconstruction_sum + reconstruction
+                    reconstruction = reconstruction_sum / self._sample_count()
+                finally:
+                    self.model.deterministic_vae = previous_mode
+            else:
+                reconstruction, _ = self.model(x)
         arr = reconstruction.cpu().numpy()
         return [_as_image(arr[index]) for index in range(arr.shape[0])]
+
+    def _ensure_torch_clip_model(self, clip: np.ndarray) -> None:
+        if self.model is not None:
+            return
+        try:
+            import torch
+        except Exception as exc:
+            raise ValueError("Torch is required to test gradient-trained methods.") from exc
+        expected = (
+            int(self.configuration.method_config["input_channels"]),
+            int(self.configuration.method_config["clip_length"]),
+            int(self.configuration.method_config["input_height"]),
+            int(self.configuration.method_config["input_width"]),
+        )
+        actual = tuple(int(dim) for dim in clip.shape)
+        if actual != expected:
+            raise ValueError(
+                f"Preprocessing clip output is {actual} (C,T,H,W), but the trained method expects {expected}."
+            )
+        model, _ = _build_model(torch, self.configuration, deterministic_vae=True)
+        model.eval()
+        dummy = torch.from_numpy(clip[np.newaxis])
+        with torch.no_grad():
+            model(dummy)
+        state = torch.load(self.artifact_path, map_location="cpu")
+        model.load_state_dict(state)
+        model.eval()
+        self.torch = torch
+        self.model = model
+
+    def reconstruct_clip_batch(self, clips: list[np.ndarray]) -> list[dict]:
+        """Run STAE reconstruction/prediction over C,T,H,W clip tensors."""
+        if not clips:
+            return []
+        if not self._is_stae():
+            raise ValueError("Clip reconstruction is only available for spatiotemporal methods.")
+        self._ensure_torch_clip_model(clips[0])
+        device = self._batch_device()
+        batch = np.stack(clips, axis=0)
+        x = self.torch.from_numpy(batch).to(device)
+        with self.torch.no_grad():
+            reconstruction, extra = self.model(x)
+        rec = reconstruction.cpu().numpy()
+        prediction = None
+        if isinstance(extra, dict) and extra.get("prediction") is not None:
+            prediction = extra["prediction"].cpu().numpy()
+        outputs = []
+        for index in range(rec.shape[0]):
+            outputs.append(
+                {
+                    "reconstruction": rec[index],
+                    "prediction": None if prediction is None else prediction[index],
+                }
+            )
+        return outputs
 
     def _batch_device(self):
         cached = getattr(self, "_device", None)
@@ -415,6 +627,9 @@ class ArtifactEvaluator:
             if self.torch.cuda.is_available():
                 device = "cuda"
                 self.model.to(device)
+                if self.fast_anogan_modules is not None:
+                    for module in self.fast_anogan_modules:
+                        module.to(device)
         except Exception:  # noqa: BLE001 - GPU optional; CPU fallback is always valid
             device = "cpu"
         self._device = device
@@ -422,28 +637,44 @@ class ArtifactEvaluator:
 
     def score(
         self, image: np.ndarray, roi: models.RoiDefinition | None
-    ) -> tuple[float, float | None, int, int, list[dict] | None]:
+    ) -> tuple[float, float | None, int, int, list[dict] | None, dict]:
         reconstruction = self.reconstruct(image)
         return self._score_pair(image, reconstruction, roi)
 
     def score_batch(
         self, images: list[np.ndarray], roi: models.RoiDefinition | None
-    ) -> list[tuple[float, float | None, int, int, list[dict] | None]]:
+    ) -> list[tuple[float, float | None, int, int, list[dict] | None, dict]]:
         """Score several images with one (GPU-)batched reconstruction pass."""
         reconstructions = self.reconstruct_batch(images)
-        return [self._score_pair(image, rec, roi) for image, rec in zip(images, reconstructions)]
+        return [
+            self._score_pair(image, rec, roi, self.fast_anogan_last_metadata[index] if self._is_fast_anogan() else None)
+            for index, (image, rec) in enumerate(zip(images, reconstructions))
+        ]
 
     def _score_pair(
-        self, image: np.ndarray, reconstruction: np.ndarray, roi: models.RoiDefinition | None
-    ) -> tuple[float, float | None, int, int, list[dict] | None]:
+        self, image: np.ndarray, reconstruction: np.ndarray, roi: models.RoiDefinition | None, extra_metadata: dict | None = None
+    ) -> tuple[float, float | None, int, int, list[dict] | None, dict]:
         source = image if self.mean_image is not None else _as_image(_to_nchw(image))
         width, height, _, _, _, _ = image_metadata(source)
-        full_mse = _mse(source, reconstruction)
-        roi_mse = None
+        if extra_metadata and "fast_anogan" in extra_metadata:
+            fast_meta = extra_metadata["fast_anogan"]
+            full_score = float(fast_meta["residual_score"])
+            ssim_metadata = {}
+        else:
+            full_score, ssim_metadata = _score_array(source, reconstruction, self.score_metric, self.inference_config)
+        roi_score = None
         tile_scores = None
+        warnings: list[str] = []
         if roi is not None:
-            roi_mse, tile_scores = _roi_scores(source, reconstruction, roi)
-        return full_mse, roi_mse, width, height, tile_scores
+            roi_score, tile_scores, warnings = _roi_scores(source, reconstruction, roi, self.score_metric, self.inference_config)
+        metadata = {
+            "score_metric": self.score_metric,
+            "ssim_parameters": ssim_metadata or None,
+            "warnings": warnings,
+        }
+        if extra_metadata:
+            metadata.update(extra_metadata)
+        return full_score, roi_score, width, height, tile_scores, metadata
 
 
 def _snapshot_name(training_run: models.TrainingRun) -> str:
@@ -485,6 +716,7 @@ def _serialize_testing_run(run: models.TestingRun) -> TestingRunRead:
         artifact_path=run.artifact_path,
         roi_name=run.roi_name,
         roi_geometry=run.roi_geometry,
+        inference_config=run.inference_config,
         created_at=run.created_at,
         updated_at=run.updated_at,
     )
@@ -500,6 +732,7 @@ def _serialize_result(result: models.TestingRunResult) -> TestingRunResultRead:
         full_mse=result.full_mse,
         roi_mse=result.roi_mse,
         tile_scores=result.tile_scores,
+        result_metadata=result.result_metadata,
         width=result.width,
         height=result.height,
     )
@@ -682,8 +915,15 @@ def _visualization_config(
     return HeatmapVisualizationConfig.model_validate(config or {})
 
 
-def _heatmap_config_signature(config: HeatmapVisualizationConfig | dict | None) -> str:
+def _heatmap_config_signature(
+    config: HeatmapVisualizationConfig | dict | None,
+    *,
+    stae_view: str = "reconstruction",
+    prediction_horizon: int = 1,
+) -> str:
     normalized = _visualization_config(config).model_dump(mode="json")
+    normalized["stae_view"] = stae_view
+    normalized["prediction_horizon"] = prediction_horizon
     raw = json.dumps(normalized, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
@@ -696,6 +936,11 @@ def _pixel_error_map(
     if source.shape != reconstruction.shape:
         raise ValueError(f"Cannot build heatmap for different shapes: {source.shape} vs {reconstruction.shape}.")
     settings = _visualization_config(config)
+    if settings.residual_source == "ssim_residual":
+        error_map, _metadata = ssim_distance_map_np(source, reconstruction, settings.model_dump(mode="json"))
+        if settings.threshold_enabled:
+            error_map = np.where(error_map >= settings.threshold, error_map, 0.0)
+        return error_map
     delta = source.astype(np.float64) - reconstruction.astype(np.float64)
     absolute = np.abs(delta)
     if settings.threshold_enabled:
@@ -772,7 +1017,11 @@ def compute_heatmap_run(db: Session, payload: HeatmapRunCreate) -> HeatmapRunRea
     result_id = payload.testing_result_id
     timestamp = payload.timestamp
     direct_image_path: str | None = None
-    config_signature = _heatmap_config_signature(payload.visualization_config)
+    config_signature = _heatmap_config_signature(
+        payload.visualization_config,
+        stae_view=payload.stae_view,
+        prediction_horizon=payload.prediction_horizon,
+    )
 
     if timestamp is not None:
         existing_by_timestamp = db.scalar(
@@ -900,10 +1149,41 @@ def compute_heatmap_run(db: Session, payload: HeatmapRunCreate) -> HeatmapRunRea
 
     try:
         preprocessing = training_run.training_pipeline.preprocessing_pipeline
-        image = run_pipeline_array(PreprocessingGraph.model_validate(preprocessing.graph), image_path)
-        evaluator = ArtifactEvaluator(training_run)
-        reconstruction = evaluator.reconstruct(image)
-        source = image if evaluator.mean_image is not None else _as_image(_to_nchw(image))
+        evaluator = ArtifactEvaluator(training_run, testing_run.inference_config)
+        graph = PreprocessingGraph.model_validate(preprocessing.graph)
+        if (
+            result is not None
+            and (result.result_metadata or {}).get("sample_kind") == "clip"
+            and training_run.training_pipeline.method_configuration.builder_kind == "spatiotemporal_autoencoder"
+        ):
+            input_frames = (result.result_metadata or {}).get("input_frames") or []
+            paths = [str(frame.get("path")) for frame in input_frames if isinstance(frame, dict) and frame.get("path")]
+            if not paths:
+                raise ValueError("STAE heatmap result has no stored input frame paths.")
+            clip = np.stack([_to_nchw(run_pipeline_array(graph, path)) for path in paths], axis=1)
+            output = evaluator.reconstruct_clip_batch([clip])[0]
+            if payload.stae_view == "prediction":
+                future_frames = (result.result_metadata or {}).get("future_frames") or []
+                future_paths = [
+                    str(frame.get("path"))
+                    for frame in future_frames
+                    if isinstance(frame, dict) and frame.get("path")
+                ]
+                prediction = output.get("prediction")
+                if prediction is None or not future_paths:
+                    raise ValueError("This STAE result has no stored future prediction frames.")
+                horizon_index = min(max(1, payload.prediction_horizon), len(future_paths), int(prediction.shape[1])) - 1
+                future_clip = np.stack([_to_nchw(run_pipeline_array(graph, path)) for path in future_paths], axis=1)
+                source = _as_image(future_clip[:, horizon_index])
+                reconstruction = _as_image(prediction[:, horizon_index])
+                image_path = future_paths[horizon_index]
+            else:
+                source = _as_image(clip[:, -1])
+                reconstruction = _as_image(output["reconstruction"][:, -1])
+        else:
+            image = run_pipeline_array(graph, image_path)
+            reconstruction = evaluator.reconstruct(image)
+            source = image if evaluator.mean_image is not None else _as_image(_to_nchw(image))
         error_map = _pixel_error_map(source, reconstruction, payload.visualization_config)
         error_magnitude = np.abs(error_map)
         max_y, max_x = np.unravel_index(int(np.argmax(error_magnitude)), error_map.shape)
@@ -1011,7 +1291,11 @@ class TestingConflict(Exception):
 
 
 def _find_duplicate_testing_run(
-    db: Session, training_run_id: int, training_dataset_id: int, roi_id: int | None
+    db: Session,
+    training_run_id: int,
+    training_dataset_id: int,
+    roi_id: int | None,
+    inference_config: dict | None,
 ) -> models.TestingRun | None:
     query = select(models.TestingRun).where(
         models.TestingRun.training_run_id == training_run_id,
@@ -1020,7 +1304,11 @@ def _find_duplicate_testing_run(
     query = query.where(
         models.TestingRun.roi_id.is_(None) if roi_id is None else models.TestingRun.roi_id == roi_id
     )
-    return db.scalar(query)
+    target_config = inference_config or None
+    for run in db.scalars(query).all():
+        if (run.inference_config or None) == target_config:
+            return run
+    return None
 
 
 def _reset_testing_run_for_queue(run: models.TestingRun) -> None:
@@ -1063,7 +1351,14 @@ def enqueue_testing_run(db: Session, payload: TestingRunCreate, *, wake_schedule
     if payload.roi_id is not None and roi is None:
         raise ValueError(f"ROI does not exist: {payload.roi_id}")
 
-    existing = _find_duplicate_testing_run(db, training_run.id, training_dataset.id, roi.id if roi else None)
+    inference_config = payload.inference_config or None
+    existing = _find_duplicate_testing_run(
+        db,
+        training_run.id,
+        training_dataset.id,
+        roi.id if roi else None,
+        inference_config,
+    )
     if existing is not None:
         raise TestingConflict(existing)
 
@@ -1089,6 +1384,7 @@ def enqueue_testing_run(db: Session, payload: TestingRunCreate, *, wake_schedule
         roi_name=roi.name if roi else None,
         roi_geometry=_roi_geometry(roi),
         expected_image_count=expected_image_count,
+        inference_config=inference_config,
     )
     db.add(testing_run)
     db.commit()
@@ -1126,15 +1422,20 @@ def create_testing_run(db: Session, payload: TestingRunCreate) -> TestingRunRead
     graph = PreprocessingGraph.model_validate(training_run.training_pipeline.preprocessing_pipeline.graph)
     records = enumerate_training_dataset_image_records(training_dataset)
     run.expected_image_count = len(records)
-    evaluator = ArtifactEvaluator(training_run)
+    evaluator = ArtifactEvaluator(training_run, run.inference_config)
     rows: list[models.TestingRunResult] = []
     scores: list[float] = []
     full_scores: list[float] = []
     roi_scores: list[float] = []
     for position, record in enumerate(records):
         image = run_pipeline_array(graph, record.file_path)
-        full_mse, roi_mse, width, height, tile_scores = evaluator.score(image, roi)
-        score = roi_mse if roi_mse is not None else full_mse
+        full_mse, roi_mse, width, height, tile_scores, score_metadata = evaluator.score(image, roi)
+        fast_meta = score_metadata.get("fast_anogan") if isinstance(score_metadata, dict) else None
+        score = (
+            float(fast_meta["combined_score"])
+            if isinstance(fast_meta, dict) and "combined_score" in fast_meta
+            else (roi_mse if roi_mse is not None else full_mse)
+        )
         row = models.TestingRunResult(
             testing_run_id=run.id,
             position=position,
@@ -1144,6 +1445,7 @@ def create_testing_run(db: Session, payload: TestingRunCreate) -> TestingRunRead
             full_mse=full_mse,
             roi_mse=roi_mse,
             tile_scores=tile_scores,
+            result_metadata={"sample_kind": "image", **score_metadata},
             width=width,
             height=height,
         )

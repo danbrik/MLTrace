@@ -35,6 +35,23 @@ class RuleImageCount:
     selected_images: int
 
 
+@dataclass(frozen=True)
+class ResolvedClipSample:
+    input_frames: tuple[ResolvedDatasetImage, ...]
+    future_frames: tuple[ResolvedDatasetImage, ...]
+    score_timestamp: datetime
+    clip_start: datetime
+    clip_end: datetime
+    dataset_name: str
+    folder_id: int
+
+
+@dataclass(frozen=True)
+class ClipEnumerationSummary:
+    clips: tuple[ResolvedClipSample, ...]
+    skipped_missing: int
+
+
 TimestampIndexEntry = tuple[datetime, str, str]
 FolderTimestampCache = dict[int, list[TimestampIndexEntry]]
 _HIGH_SORT_SENTINEL = chr(0x10FFFF)
@@ -152,6 +169,37 @@ def enumerate_rule_images(rule: models.TrainingDatasetRule) -> list[ResolvedData
     return selected[:: max(1, rule.stride)]
 
 
+def enumerate_training_dataset_image_records_for_range(
+    training_dataset: models.TrainingDataset,
+    start_timestamp: datetime,
+    end_timestamp: datetime,
+    *,
+    extra_stride: int = 1,
+) -> list[ResolvedDatasetImage]:
+    """Resolve a clipped, globally stride-sampled selection for inspection.
+
+    The saved rule stride is applied inside each rule first. The additional
+    ``extra_stride`` is then applied after de-duplication and global timestamp
+    ordering, matching the Inspect page's "make this dataset smaller" behavior.
+    """
+    records: list[ResolvedDatasetImage] = []
+    seen: set[str] = set()
+    for rule in _sorted_rules(training_dataset):
+        clipped_start = max(rule.start_timestamp, start_timestamp)
+        clipped_end = min(rule.end_timestamp, end_timestamp)
+        if clipped_end < clipped_start:
+            continue
+        selected = _matching_folder_images(rule.folder, clipped_start, clipped_end)
+        for image in selected[:: max(1, rule.stride)]:
+            if image.file_path in seen:
+                continue
+            seen.add(image.file_path)
+            records.append(image)
+
+    records.sort(key=lambda image: (image.timestamp_parsed, image.file_path))
+    return records[:: max(1, extra_stride)]
+
+
 def enumerate_training_dataset_image_records(
     training_dataset: models.TrainingDataset,
 ) -> list[ResolvedDatasetImage]:
@@ -186,3 +234,163 @@ def enumerate_training_pipeline_image_records(
 def enumerate_training_pipeline_images(_db, pipeline: models.TrainingPipeline) -> list[str]:
     """Compatibility wrapper returning only file paths for the training engine."""
     return [image.file_path for image in enumerate_training_pipeline_image_records(pipeline)]
+
+
+def _folder_cadence_seconds(folder: models.DatasetFolder) -> float | None:
+    summary = folder.cadence_summary or {}
+    for key in ("mean_seconds", "median_seconds"):
+        value = summary.get(key)
+        if value is not None:
+            try:
+                parsed = float(value)
+            except (TypeError, ValueError):
+                continue
+            if parsed > 0:
+                return parsed
+    return None
+
+
+def _timestamps_match_stride(
+    first: datetime,
+    second: datetime,
+    *,
+    expected_steps: int,
+    cadence_seconds: float | None,
+) -> bool:
+    if cadence_seconds is None:
+        return True
+    expected = cadence_seconds * expected_steps
+    actual = abs((second - first).total_seconds())
+    tolerance = max(0.5, cadence_seconds * 0.25)
+    return abs(actual - expected) <= tolerance
+
+
+def _clip_score_timestamp(
+    input_frames: list[ResolvedDatasetImage],
+    future_frames: list[ResolvedDatasetImage],
+    mode: str,
+) -> datetime:
+    if mode == "first_future" and future_frames:
+        return future_frames[0].timestamp_parsed
+    if mode == "center_input":
+        return input_frames[len(input_frames) // 2].timestamp_parsed
+    return input_frames[-1].timestamp_parsed
+
+
+def enumerate_rule_clip_samples(
+    rule: models.TrainingDatasetRule,
+    *,
+    clip_length: int,
+    future_length: int,
+    temporal_stride: int = 1,
+    future_stride: int = 1,
+    missing_frame_policy: str = "skip",
+    score_timestamp_mode: str = "last_input",
+) -> ClipEnumerationSummary:
+    """Build clip samples from one rule without opening image pixels.
+
+    Clips are formed from the same selected images that ordinary image
+    inference would use. Cadence metadata is used to detect gaps introduced by
+    missing files; ``skip`` drops those clips while ``fail`` raises.
+    """
+    records = enumerate_rule_images(rule)
+    clip_length = max(1, int(clip_length))
+    future_length = max(0, int(future_length))
+    temporal_stride = max(1, int(temporal_stride))
+    future_stride = max(1, int(future_stride))
+    needed_span = (clip_length - 1) * temporal_stride + future_length * future_stride
+    if len(records) <= needed_span:
+        return ClipEnumerationSummary(clips=(), skipped_missing=0)
+
+    cadence = _folder_cadence_seconds(rule.folder)
+    clips: list[ResolvedClipSample] = []
+    skipped = 0
+    for start in range(0, len(records) - needed_span):
+        input_indices = [start + index * temporal_stride for index in range(clip_length)]
+        last_input_index = input_indices[-1]
+        future_indices = [last_input_index + (index + 1) * future_stride for index in range(future_length)]
+        indices = input_indices + future_indices
+        input_frames = [records[index] for index in input_indices]
+        future_frames = [records[index] for index in future_indices]
+        valid = True
+        for left_index, right_index in zip(indices, indices[1:]):
+            if not _timestamps_match_stride(
+                records[left_index].timestamp_parsed,
+                records[right_index].timestamp_parsed,
+                expected_steps=right_index - left_index,
+                cadence_seconds=cadence,
+            ):
+                valid = False
+                break
+        if not valid:
+            skipped += 1
+            if missing_frame_policy == "fail":
+                raise ValueError(
+                    "Missing frame detected while building sequence clips. "
+                    f"Rule folder '{rule.folder.relative_path}' around {records[start].timestamp_parsed.isoformat()}."
+                )
+            continue
+        all_frames = input_frames + future_frames
+        clips.append(
+            ResolvedClipSample(
+                input_frames=tuple(input_frames),
+                future_frames=tuple(future_frames),
+                score_timestamp=_clip_score_timestamp(input_frames, future_frames, score_timestamp_mode),
+                clip_start=all_frames[0].timestamp_parsed,
+                clip_end=all_frames[-1].timestamp_parsed,
+                dataset_name=rule.folder.dataset.name,
+                folder_id=rule.folder_id,
+            )
+        )
+    return ClipEnumerationSummary(clips=tuple(clips), skipped_missing=skipped)
+
+
+def enumerate_training_dataset_clip_samples(
+    training_dataset: models.TrainingDataset,
+    *,
+    clip_length: int,
+    future_length: int,
+    temporal_stride: int = 1,
+    future_stride: int = 1,
+    missing_frame_policy: str = "skip",
+    score_timestamp_mode: str = "last_input",
+) -> ClipEnumerationSummary:
+    clips: list[ResolvedClipSample] = []
+    skipped = 0
+    for rule in _sorted_rules(training_dataset):
+        summary = enumerate_rule_clip_samples(
+            rule,
+            clip_length=clip_length,
+            future_length=future_length,
+            temporal_stride=temporal_stride,
+            future_stride=future_stride,
+            missing_frame_policy=missing_frame_policy,
+            score_timestamp_mode=score_timestamp_mode,
+        )
+        clips.extend(summary.clips)
+        skipped += summary.skipped_missing
+    clips.sort(key=lambda clip: (clip.score_timestamp, clip.dataset_name, clip.folder_id, clip.clip_start))
+    return ClipEnumerationSummary(clips=tuple(clips), skipped_missing=skipped)
+
+
+def enumerate_training_pipeline_clip_samples(
+    pipeline: models.TrainingPipeline,
+    method_config: dict,
+) -> ClipEnumerationSummary:
+    clips: list[ResolvedClipSample] = []
+    skipped = 0
+    future_length = int(method_config.get("future_length") or 0) if method_config.get("prediction_branch") else 0
+    for entry in sorted(pipeline.entries, key=lambda item: item.position):
+        summary = enumerate_training_dataset_clip_samples(
+            entry.training_dataset,
+            clip_length=int(method_config.get("clip_length") or 1),
+            future_length=future_length,
+            temporal_stride=int(method_config.get("temporal_stride") or 1),
+            future_stride=int(method_config.get("future_stride") or method_config.get("temporal_stride") or 1),
+            missing_frame_policy=str(method_config.get("missing_frame_policy") or "skip"),
+            score_timestamp_mode=str(method_config.get("score_timestamp_mode") or "last_input"),
+        )
+        clips.extend(summary.clips)
+        skipped += summary.skipped_missing
+    clips.sort(key=lambda clip: (clip.score_timestamp, clip.dataset_name, clip.folder_id, clip.clip_start))
+    return ClipEnumerationSummary(clips=tuple(clips), skipped_missing=skipped)

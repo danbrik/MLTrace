@@ -12,6 +12,28 @@ from time import perf_counter
 
 import numpy as np
 
+from app.modeling.fast_anogan import build_fast_anogan_modules, fast_anogan_forward
+
+
+def _kernel_t_xy(cfg: dict) -> tuple[int, int]:
+    base = int(cfg.get("kernel_size", 1))
+    return int(cfg.get("kernel_size_t", base)), int(cfg.get("kernel_size_xy", base))
+
+
+def _stride_t_xy(cfg: dict) -> tuple[int, int]:
+    base = int(cfg.get("stride", 1))
+    return int(cfg.get("stride_t", base)), int(cfg.get("stride_xy", base))
+
+
+def _padding_t_xy(cfg: dict) -> tuple[int, int]:
+    base = int(cfg.get("padding", 0))
+    return int(cfg.get("padding_t", base)), int(cfg.get("padding_xy", base))
+
+
+def _output_padding_t_xy(cfg: dict) -> tuple[int, int]:
+    base = int(cfg.get("output_padding", 0))
+    return int(cfg.get("output_padding_t", base)), int(cfg.get("output_padding_xy", base))
+
 
 def torch_layer_from_node(nn, layer: dict):
     """Instantiate a torch module from a stored method-graph layer node.
@@ -29,6 +51,20 @@ def torch_layer_from_node(nn, layer: dict):
             padding=int(cfg.get("padding", 0)),
             bias=bool(cfg.get("bias", True)),
         )
+    if layer_type == "Conv3d":
+        lazy_conv3d = getattr(nn, "LazyConv3d", None)
+        if lazy_conv3d is None:
+            raise ValueError("torch.nn.LazyConv3d is unavailable.")
+        kernel_t, kernel_xy = _kernel_t_xy(cfg)
+        stride_t, stride_xy = _stride_t_xy(cfg)
+        padding_t, padding_xy = _padding_t_xy(cfg)
+        return lazy_conv3d(
+            out_channels=int(cfg["out_channels"]),
+            kernel_size=(kernel_t, kernel_xy, kernel_xy),
+            stride=(stride_t, stride_xy, stride_xy),
+            padding=(padding_t, padding_xy, padding_xy),
+            bias=bool(cfg.get("bias", True)),
+        )
     if layer_type == "ConvTranspose2d":
         lazy_conv_transpose = getattr(nn, "LazyConvTranspose2d", None)
         if lazy_conv_transpose is None:
@@ -41,14 +77,36 @@ def torch_layer_from_node(nn, layer: dict):
             output_padding=int(cfg.get("output_padding", 0)),
             bias=bool(cfg.get("bias", True)),
         )
+    if layer_type == "ConvTranspose3d":
+        lazy_conv_transpose3d = getattr(nn, "LazyConvTranspose3d", None)
+        if lazy_conv_transpose3d is None:
+            raise ValueError("torch.nn.LazyConvTranspose3d is unavailable.")
+        kernel_t, kernel_xy = _kernel_t_xy(cfg)
+        stride_t, stride_xy = _stride_t_xy(cfg)
+        padding_t, padding_xy = _padding_t_xy(cfg)
+        output_padding_t, output_padding_xy = _output_padding_t_xy(cfg)
+        return lazy_conv_transpose3d(
+            out_channels=int(cfg["out_channels"]),
+            kernel_size=(kernel_t, kernel_xy, kernel_xy),
+            stride=(stride_t, stride_xy, stride_xy),
+            padding=(padding_t, padding_xy, padding_xy),
+            output_padding=(output_padding_t, output_padding_xy, output_padding_xy),
+            bias=bool(cfg.get("bias", True)),
+        )
     if layer_type == "BatchNorm2d":
         return nn.BatchNorm2d(num_features=int(cfg["num_features"]), eps=float(cfg.get("eps", 0.00001)), momentum=float(cfg.get("momentum", 0.1)))
+    if layer_type == "BatchNorm3d":
+        return nn.BatchNorm3d(num_features=int(cfg["num_features"]), eps=float(cfg.get("eps", 0.00001)), momentum=float(cfg.get("momentum", 0.1)))
     if layer_type == "MaxPool2d":
         return nn.MaxPool2d(kernel_size=int(cfg["kernel_size"]), stride=int(cfg.get("stride") or cfg["kernel_size"]), padding=int(cfg.get("padding", 0)))
+    if layer_type == "MaxPool3d":
+        return nn.MaxPool3d(kernel_size=int(cfg["kernel_size"]), stride=int(cfg.get("stride") or cfg["kernel_size"]), padding=int(cfg.get("padding", 0)))
     if layer_type == "Upsample":
         return nn.Upsample(scale_factor=float(cfg["scale_factor"]), mode=str(cfg["mode"]))
     if layer_type == "Dropout2d":
         return nn.Dropout2d(p=float(cfg.get("p", 0.1)))
+    if layer_type == "Dropout3d":
+        return nn.Dropout3d(p=float(cfg.get("p", 0.1)))
     if layer_type == "Flatten":
         return nn.Flatten(start_dim=int(cfg.get("start_dim", 1)), end_dim=int(cfg.get("end_dim", -1)))
     if layer_type == "Unflatten":
@@ -76,6 +134,17 @@ def build_sequential_modules(torch, method_graph: dict):
     return encoder, decoder
 
 
+def build_spatiotemporal_modules(torch, method_graph: dict):
+    """Build encoder plus reconstruction/prediction decoders for STAE graphs."""
+    nn = torch.nn
+    encoder = nn.Sequential(*[torch_layer_from_node(nn, layer) for layer in method_graph.get("encoder", [])])
+    decoder = nn.Sequential(*[torch_layer_from_node(nn, layer) for layer in method_graph.get("decoder", [])])
+    prediction_decoder = nn.Sequential(
+        *[torch_layer_from_node(nn, layer) for layer in method_graph.get("prediction_decoder", [])]
+    )
+    return encoder, decoder, prediction_decoder
+
+
 def forward_through_graph(torch, method_graph: dict, method_config: dict, x, logs: list[str]):
     """Run an input batch through encoder -> latent bridge -> decoder.
 
@@ -84,6 +153,33 @@ def forward_through_graph(torch, method_graph: dict, method_config: dict, x, log
     stochastic sampling is skipped, so z is the deterministic mu.
     """
     nn = torch.nn
+    if method_graph.get("builder_kind") == "fast_anogan":
+        generator, critic, encoder = build_fast_anogan_modules(torch, method_graph, method_config)
+        generator.eval()
+        critic.eval()
+        encoder.eval()
+        with torch.no_grad():
+            logs.append("Running fastAnoGAN encoder image -> z")
+            output = fast_anogan_forward(generator, critic, encoder, x)
+            logs.append("Running generator z -> reconstruction")
+            logs.append("Running critic feature residual")
+        return output.reconstruction
+
+    if method_graph.get("builder_kind") == "spatiotemporal_autoencoder":
+        encoder, decoder, prediction_decoder = build_spatiotemporal_modules(torch, method_graph)
+        encoder.eval()
+        decoder.eval()
+        prediction_decoder.eval()
+        with torch.no_grad():
+            logs.append("Running 3D encoder")
+            encoded = encoder(x)
+            logs.append("Running reconstruction decoder")
+            output = decoder(encoded)
+            if method_config.get("prediction_branch"):
+                logs.append("Running prediction decoder")
+                prediction_decoder(encoded)
+        return output
+
     encoder, decoder = build_sequential_modules(torch, method_graph)
     encoder.eval()
     decoder.eval()

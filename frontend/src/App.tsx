@@ -4,6 +4,7 @@ import {
   BrainCircuit,
   CalendarClock,
   Database,
+  Eye,
   FlaskConical,
   ListChecks,
   PanelLeftClose,
@@ -17,6 +18,7 @@ import type React from 'react';
 import { PageErrorBoundary } from './components/PageErrorBoundary';
 import { AnalysisPage } from './pages/AnalysisPage';
 import { DatasetsPage } from './pages/DatasetsPage';
+import { InspectPage } from './pages/InspectPage';
 import { MethodsPage } from './pages/ModelsPage';
 import { PreprocessingPipelinesPage } from './pages/PreprocessingPipelinesPage';
 import { SchedulerPage } from './pages/SchedulerPage';
@@ -31,6 +33,7 @@ type Page =
   | 'methods'
   | 'training-pipelines'
   | 'testing'
+  | 'inspect'
   | 'analysis'
   | 'scheduler';
 
@@ -45,6 +48,7 @@ export function App() {
     { id: 'methods', label: 'Methods', icon: <BrainCircuit size={18} /> },
     { id: 'training-pipelines', label: 'Training Pipelines', icon: <Route size={18} /> },
     { id: 'testing', label: 'Inference', icon: <FlaskConical size={18} /> },
+    { id: 'inspect', label: 'Inspect', icon: <Eye size={18} /> },
     { id: 'analysis', label: 'Analysis', icon: <BarChart3 size={18} /> },
     { id: 'scheduler', label: 'Scheduler', icon: <CalendarClock size={18} /> },
   ];
@@ -130,6 +134,11 @@ export function App() {
         </Box>
         <Box display={page === 'testing' ? 'block' : 'none'}>
           <TestingRunsPage active={page === 'testing'} onRunQueued={() => setPage('scheduler')} />
+        </Box>
+        <Box display={page === 'inspect' ? 'block' : 'none'}>
+          <PageErrorBoundary label="Inspect">
+            <InspectPage active={page === 'inspect'} />
+          </PageErrorBoundary>
         </Box>
         <Box display={page === 'analysis' ? 'block' : 'none'}>
           <PageErrorBoundary label="Analysis">

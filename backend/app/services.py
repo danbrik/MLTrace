@@ -9,7 +9,11 @@ from sqlalchemy.orm import Session, selectinload
 
 from app import models
 import app.modeling  # noqa: F401 ensures core model architectures are registered
-from app.modeling.architectures.common import validate_sequential_model_graph
+from app.modeling.architectures.common import (
+    validate_fast_anogan_model_graph,
+    validate_sequential_model_graph,
+    validate_spatiotemporal_model_graph,
+)
 from app.modeling.base import validate_schema_values
 from app.modeling.forward import run_image_forward_pass
 from app.modeling.layers import list_layer_definitions
@@ -992,7 +996,12 @@ def _normalize_method_payload(payload: MethodConfigurationPayload, reject_invali
 
     validation = {"valid": True, "errors": [], "warnings": [], "layer_specs": [], "torch_check": None}
     if method.builder_kind != "form":
-        method_graph = validate_sequential_model_graph(method_graph, method.builder_kind)
+        if method.builder_kind == "spatiotemporal_autoencoder":
+            method_graph = validate_spatiotemporal_model_graph(method_graph, method.builder_kind, method_config)
+        elif method.builder_kind == "fast_anogan":
+            method_graph = validate_fast_anogan_model_graph(method_graph, method.builder_kind)
+        else:
+            method_graph = validate_sequential_model_graph(method_graph, method.builder_kind)
         validation = validate_cnn_tensor_contract(method_graph, method_config)
         if validation["errors"] and reject_invalid:
             raise ValueError("; ".join(validation["errors"]))
@@ -1040,6 +1049,65 @@ def build_method_diagram(
             "edges": [{"source": "input", "target": "aggregate"}, {"source": "aggregate", "target": "reference"}],
         }
 
+    if builder_kind == "fast_anogan":
+        nodes = [
+            {"id": "latent", "label": "Latent z", "section": "latent", "detail": f"dim {method_config.get('latent_dim', '?')}"},
+            {
+                "id": "generator",
+                "label": "Generator ResNet",
+                "section": "generator",
+                "detail": " -> ".join(str(block.get("out_channels", "?")) for block in method_graph.get("generator_blocks", [])),
+            },
+            {
+                "id": "reconstruction",
+                "label": "Generated reconstruction",
+                "section": "output",
+                "detail": f"{method_config.get('input_channels', '?')}x{method_config.get('input_height', '?')}x{method_config.get('input_width', '?')}",
+            },
+            {
+                "id": "input",
+                "label": "Input image",
+                "section": "input",
+                "detail": f"{method_config.get('input_channels', '?')}x{method_config.get('input_height', '?')}x{method_config.get('input_width', '?')}",
+            },
+            {"id": "encoder", "label": "Encoder ResNet", "section": "encoder", "detail": "image -> latent z"},
+            {
+                "id": "critic-real",
+                "label": "Critic features (real)",
+                "section": "critic",
+                "detail": f"LayerNorm, feature layer {method_graph.get('feature_layer', 'critic_blocks')}",
+            },
+            {
+                "id": "critic-recon",
+                "label": "Critic features (reconstruction)",
+                "section": "critic",
+                "detail": "feature residual",
+            },
+            {
+                "id": "score",
+                "label": "Anomaly score",
+                "section": "output",
+                "detail": f"residual + {method_config.get('kappa', '?')} * feature",
+            },
+        ]
+        return {
+            "method_type": method_type,
+            "architecture_type": method_type,
+            "builder_kind": builder_kind,
+            "nodes": nodes,
+            "edges": [
+                {"source": "latent", "target": "generator"},
+                {"source": "generator", "target": "reconstruction"},
+                {"source": "input", "target": "encoder"},
+                {"source": "encoder", "target": "generator"},
+                {"source": "input", "target": "critic-real"},
+                {"source": "reconstruction", "target": "critic-recon"},
+                {"source": "critic-real", "target": "score"},
+                {"source": "critic-recon", "target": "score"},
+                {"source": "reconstruction", "target": "score"},
+            ],
+        }
+
     shape_by_node = {
         item["layer_id"]: item["output_label"]
         for item in (validation or {}).get("layer_specs", [])
@@ -1051,8 +1119,15 @@ def build_method_diagram(
             "label": "Input",
             "section": "input",
             "detail": (
-                f"{method_config.get('input_channels', '?')}x"
-                f"{method_config.get('input_height', '?')}x{method_config.get('input_width', '?')}"
+                (
+                    f"{method_config.get('input_channels', '?')}x{method_config.get('clip_length', '?')}x"
+                    f"{method_config.get('input_height', '?')}x{method_config.get('input_width', '?')}"
+                )
+                if builder_kind == "spatiotemporal_autoencoder"
+                else (
+                    f"{method_config.get('input_channels', '?')}x"
+                    f"{method_config.get('input_height', '?')}x{method_config.get('input_width', '?')}"
+                )
             ),
         }
     ]
@@ -1071,7 +1146,19 @@ def build_method_diagram(
             detail = f"{detail} -> {shape_by_node[layer.get('id')]}"
         add_node(f"encoder-{index}", layer["type"], "encoder", detail)
 
-    if builder_kind == "sequential_variational_autoencoder":
+    if builder_kind == "spatiotemporal_autoencoder":
+        encoder_shapes = [
+            item["output_label"]
+            for item in (validation or {}).get("layer_specs", [])
+            if item.get("section") == "encoder"
+        ]
+        add_node(
+            "latent",
+            "Spatio-temporal bottleneck",
+            "latent",
+            encoder_shapes[-1] if encoder_shapes else "N,C,T,H,W",
+        )
+    elif builder_kind == "sequential_variational_autoencoder":
         latent_dim = method_config.get("latent_dim", "?")
         add_node(
             "vae-mu-logvar",
@@ -1086,6 +1173,19 @@ def build_method_diagram(
             f"dim {latent_dim}, KL {method_config.get('kl_weight', '?')}, reparameterization",
         )
         add_node("vae-seed", "Decoder seed projection", "latent", "z -> encoder output shape")
+    elif builder_kind == "sequential_spatial_autoencoder":
+        encoder_shapes = [
+            item["output_label"]
+            for item in (validation or {}).get("layer_specs", [])
+            if item.get("section") == "encoder"
+        ]
+        bottleneck_shape = encoder_shapes[-1] if encoder_shapes else f"N,{method_config.get('bottleneck_channels', '?')},?,?"
+        add_node(
+            "latent",
+            "Spatial bottleneck",
+            "latent",
+            f"{bottleneck_shape}, channels {method_config.get('bottleneck_channels', '?')}",
+        )
     else:
         add_node("latent", "Latent", "latent", f"dim {method_config.get('latent_dim', '?')}")
 
@@ -1101,6 +1201,20 @@ def build_method_diagram(
         "output",
         f"activation {method_config.get('output_activation', 'none')}",
     )
+
+    if builder_kind == "spatiotemporal_autoencoder" and method_config.get("prediction_branch"):
+        previous_id = "latent"
+        for index, layer in enumerate(method_graph.get("prediction_decoder", []), start=1):
+            detail = _layer_summary(layer)
+            if shape_by_node.get(layer.get("id")):
+                detail = f"{detail} -> {shape_by_node[layer.get('id')]}"
+            add_node(f"prediction-decoder-{index}", layer["type"], "prediction", detail)
+        add_node(
+            "prediction-output",
+            "Future prediction",
+            "output",
+            f"{method_config.get('future_length', '?')} future frame(s)",
+        )
 
     return {
         "method_type": method_type,
@@ -1118,13 +1232,20 @@ def _layer_summary(layer: dict) -> str:
         "out_features",
         "kernel_size",
         "stride",
+        "stride_t",
+        "stride_xy",
         "padding",
+        "padding_t",
+        "padding_xy",
         "scale_factor",
         "mode",
         "p",
         "channels",
         "height",
         "width",
+        "output_padding",
+        "output_padding_t",
+        "output_padding_xy",
     ]
     parts = [f"{key}={config[key]}" for key in interesting_keys if key in config]
     return ", ".join(parts) if parts else "default config"
@@ -1725,6 +1846,69 @@ def dry_run_training_pipeline(db: Session, payload: TrainingPipelineDryRunReques
     logs.append(f"Training parameters: {training_parameters}")
 
     first_dataset = training_datasets[0]
+    if configuration.builder_kind == "spatiotemporal_autoencoder":
+        from app.training.data import enumerate_training_dataset_clip_samples
+
+        method_config = configuration.method_config or {}
+        future_length = int(method_config.get("future_length") or 0) if method_config.get("prediction_branch") else 0
+        try:
+            clip_summary = enumerate_training_dataset_clip_samples(
+                first_dataset,
+                clip_length=int(method_config.get("clip_length") or 1),
+                future_length=future_length,
+                temporal_stride=int(method_config.get("temporal_stride") or 1),
+                future_stride=int(method_config.get("future_stride") or method_config.get("temporal_stride") or 1),
+                missing_frame_policy=str(method_config.get("missing_frame_policy") or "skip"),
+                score_timestamp_mode=str(method_config.get("score_timestamp_mode") or "last_input"),
+            )
+        except ValueError as exc:
+            return TrainingPipelineDryRunResponse(valid=False, mode="failed", errors=[str(exc)], logs=logs, training_dataset_name=first_dataset.name)
+        if not clip_summary.clips:
+            return TrainingPipelineDryRunResponse(
+                valid=False,
+                mode="failed",
+                errors=["No valid sequence clips found for the selected dataset and STAE sequence parameters."],
+                warnings=[f"Skipped clips because of missing frames: {clip_summary.skipped_missing}"] if clip_summary.skipped_missing else [],
+                logs=logs,
+                training_dataset_name=first_dataset.name,
+            )
+        clip = clip_summary.clips[0]
+        source_image = clip.input_frames[0]
+        logs.append(
+            f"Resolved {len(clip_summary.clips)} sequence clip(s), skipped {clip_summary.skipped_missing}. "
+            f"Example input timestamps: {[frame.timestamp_parsed.isoformat() for frame in clip.input_frames]}"
+        )
+        if clip.future_frames:
+            logs.append(f"Example future timestamps: {[frame.timestamp_parsed.isoformat() for frame in clip.future_frames]}")
+        graph = PreprocessingGraph.model_validate(preprocessing_pipeline.graph)
+        try:
+            previews, _ = execute_with_previews(graph, source_image.file_path)
+        except (ValueError, FileNotFoundError) as exc:
+            return TrainingPipelineDryRunResponse(
+                valid=False,
+                mode="failed",
+                errors=[f"Preprocessing failed: {exc}"],
+                logs=logs,
+                training_dataset_name=first_dataset.name,
+                source_image_path=source_image.file_path,
+                source_timestamp=source_image.timestamp_parsed,
+            )
+        return TrainingPipelineDryRunResponse(
+            valid=True,
+            mode="forward_pass",
+            errors=[],
+            warnings=[f"Skipped clips because of missing frames: {clip_summary.skipped_missing}"] if clip_summary.skipped_missing else [],
+            logs=logs,
+            training_dataset_name=first_dataset.name,
+            source_image_path=source_image.file_path,
+            source_timestamp=source_image.timestamp_parsed,
+            preprocessing_previews=previews,
+            note=(
+                "STAE dry-run resolved sequence clips and previewed the first input frame. "
+                "Full 3D forward validation is available through the Methods Torch check."
+            ),
+        )
+
     try:
         source_image, resolve_warnings = resolve_first_training_image(db, first_dataset)
     except ValueError as exc:
