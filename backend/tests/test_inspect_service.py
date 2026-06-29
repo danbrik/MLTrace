@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 from pathlib import Path
 
+import numpy as np
 from PIL import Image
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
@@ -10,6 +11,7 @@ from sqlalchemy.pool import StaticPool
 
 from app import models
 from app.database import Base
+from app.inspect.contrast import StreamingMovingAverage, moving_average_uint8
 from app.inspect import engine as inspect_engine
 from app.inspect import service as inspect_service
 from app.schemas import InspectPreviewRequest, InspectRunCreate
@@ -90,6 +92,25 @@ def seed_inspect_fixture(db, root: Path, image_count: int = 6):
     return training_dataset, preprocessing
 
 
+def test_streaming_moving_average_matches_reference_list_implementation() -> None:
+    frames = [
+        np.full((3, 4), value, dtype=np.uint8)
+        for value in (0, 10, 20, 40, 80, 160)
+    ]
+    smoother = StreamingMovingAverage(radius=2)
+    streamed = []
+    for frame in frames:
+        output = smoother.push(frame)
+        if output is not None:
+            streamed.append(output)
+    streamed.extend(smoother.flush())
+
+    expected = [moving_average_uint8(frames, index, 2) for index in range(len(frames))]
+    assert len(streamed) == len(expected)
+    for actual, reference in zip(streamed, expected, strict=True):
+        np.testing.assert_array_equal(actual, reference)
+
+
 def test_inspect_preview_uses_clipped_rules_and_extra_stride(tmp_path: Path) -> None:
     SessionLocal = make_db()
     db = SessionLocal()
@@ -115,6 +136,35 @@ def test_inspect_preview_uses_clipped_rules_and_extra_stride(tmp_path: Path) -> 
         assert preview.preview_frame_count == 2
         assert len(preview.preview_frames) == 2
         assert preview.preview_frames[0]["image_data_url"].startswith("data:image/png;base64,")
+    finally:
+        db.close()
+
+
+def test_inspect_preview_compiles_pipeline_once(tmp_path: Path, monkeypatch) -> None:
+    SessionLocal = make_db()
+    db = SessionLocal()
+    calls = 0
+    original_compile = inspect_service.compile_pipeline
+
+    def counted_compile(graph):
+        nonlocal calls
+        calls += 1
+        return original_compile(graph)
+
+    monkeypatch.setattr(inspect_service, "compile_pipeline", counted_compile)
+    try:
+        training_dataset, preprocessing = seed_inspect_fixture(db, tmp_path / "images")
+        inspect_service.preview_inspect(
+            db,
+            InspectPreviewRequest(
+                training_dataset_id=training_dataset.id,
+                preprocessing_pipeline_id=preprocessing.id,
+                start_timestamp=datetime(2026, 2, 4, 15, 30, 0),
+                end_timestamp=datetime(2026, 2, 4, 15, 30, 50),
+                stride=1,
+            ),
+        )
+        assert calls == 1
     finally:
         db.close()
 

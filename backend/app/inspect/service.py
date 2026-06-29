@@ -21,7 +21,7 @@ from app.inspect.contrast import enhance_to_uint8, to_intensity_16scale
 from app.preprocessing.pipeline import (
     encode_absolute_image_data_url,
     image_metadata,
-    run_pipeline_array,
+    compile_pipeline,
 )
 from app.schemas import InspectPreviewRequest, InspectPreviewResponse, InspectRunCreate, InspectRunRead, PreprocessingGraph
 from app.training.data import enumerate_training_dataset_image_records_for_range
@@ -91,14 +91,15 @@ def preview_inspect(db: Session, payload: InspectPreviewRequest) -> InspectPrevi
     if not records:
         raise ValueError("No images in selected range.")
     graph = PreprocessingGraph.model_validate(preprocessing_pipeline.graph)
+    compiled = compile_pipeline(graph)
 
     if payload.contrast_enabled:
-        return _preview_contrast(payload, training_dataset, preprocessing_pipeline, records, graph)
+        return _preview_contrast(payload, training_dataset, preprocessing_pipeline, records, compiled)
 
     preview_frames = []
     first_image = None
     for index, record in enumerate(records[:_PREVIEW_FRAME_LIMIT]):
-        image = run_pipeline_array(graph, record.file_path)
+        image = compiled.run(record.file_path)
         if first_image is None:
             first_image = image
         preview_frames.append(
@@ -141,7 +142,7 @@ def _preview_contrast(
     training_dataset: models.TrainingDataset,
     preprocessing_pipeline: models.PreprocessingPipeline,
     records,
-    graph: PreprocessingGraph,
+    compiled,
 ) -> InspectPreviewResponse:
     reference_frames = max(1, int(payload.contrast_reference_frames))
     shift = float(payload.contrast_shift)
@@ -158,7 +159,7 @@ def _preview_contrast(
     expected_shape: tuple[int, int] | None = None
     for index in range(needed):
         record = records[index]
-        intensity = to_intensity_16scale(run_pipeline_array(graph, record.file_path))
+        intensity = to_intensity_16scale(compiled.run(record.file_path))
         if expected_shape is None:
             expected_shape = intensity.shape
             reference_acc = np.zeros(expected_shape, dtype=np.float64)

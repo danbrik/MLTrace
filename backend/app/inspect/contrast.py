@@ -83,3 +83,65 @@ def moving_average_uint8(frames: list[np.ndarray], index: int, radius: int) -> n
         return window[0]
     avg = np.mean(np.stack(window, axis=0).astype(np.float32), axis=0)
     return np.round(avg).astype(np.uint8)
+
+
+class StreamingMovingAverage:
+    """Centered moving average that only buffers ``2 * radius + 1`` frames.
+
+    ``push`` returns zero or one finalized output frame. ``flush`` returns the
+    tail frames whose right-side context is no longer available at end of stream.
+    """
+
+    def __init__(self, radius: int) -> None:
+        self.radius = max(0, int(radius))
+        self._buffer: list[np.ndarray] = []
+        self._buffer_start_index = 0
+        self._input_count = 0
+        self._output_count = 0
+
+    def _window_average(self, center_input_index: int) -> np.ndarray:
+        start = max(0, center_input_index - self.radius)
+        end = min(self._input_count, center_input_index + self.radius + 1)
+        offset_start = start - self._buffer_start_index
+        offset_end = end - self._buffer_start_index
+        window = self._buffer[offset_start:offset_end]
+        if len(window) == 1:
+            return window[0]
+        avg = np.mean(np.stack(window, axis=0).astype(np.float32), axis=0)
+        return np.round(avg).astype(np.uint8)
+
+    def _drop_unneeded_prefix(self) -> None:
+        if self.radius <= 0:
+            return
+        next_center = self._output_count
+        earliest_needed = max(0, next_center - self.radius)
+        drop_count = max(0, earliest_needed - self._buffer_start_index)
+        if drop_count:
+            del self._buffer[:drop_count]
+            self._buffer_start_index += drop_count
+
+    def push(self, frame: np.ndarray) -> np.ndarray | None:
+        if self.radius <= 0:
+            self._input_count += 1
+            self._output_count += 1
+            return frame
+
+        self._buffer.append(frame)
+        self._input_count += 1
+        center = self._input_count - self.radius - 1
+        if center < 0:
+            return None
+
+        output = self._window_average(center)
+        self._output_count += 1
+        self._drop_unneeded_prefix()
+        return output
+
+    def flush(self) -> list[np.ndarray]:
+        outputs: list[np.ndarray] = []
+        while self._output_count < self._input_count:
+            output = self._window_average(self._output_count)
+            outputs.append(output)
+            self._output_count += 1
+            self._drop_unneeded_prefix()
+        return outputs

@@ -12,7 +12,7 @@ from PIL import Image
 
 from app import models
 from app.database import SessionLocal, data_dir
-from app.inspect.contrast import enhance_to_uint8, moving_average_uint8, to_intensity_16scale
+from app.inspect.contrast import StreamingMovingAverage, enhance_to_uint8, to_intensity_16scale
 from app.preprocessing.pipeline import absolute_image_to_uint8, compile_pipeline
 from app.schemas import PreprocessingGraph
 from app.training.data import enumerate_training_dataset_image_records_for_range
@@ -99,7 +99,7 @@ def _render_contrast(
     frames_dir: Path,
     video_path: Path,
 ) -> "cv2.VideoWriter | None":
-    """Build a mean reference from the first N frames, then render diff-enhanced frames."""
+    """Build a mean reference, then stream diff-enhanced frames to disk/video."""
     reference_frames = max(1, int(run.contrast_reference_frames or 1))
     shift = float(run.contrast_shift or 0.0)
     vmax = float(run.contrast_vmax or 0.0)
@@ -107,13 +107,12 @@ def _render_contrast(
     if vmax <= 0:
         raise ValueError("Contrast vmax must be greater than zero.")
 
-    # Pass 1: run the pipeline once per frame, keep single-channel intensities and
-    # accumulate the mean reference image from the first N frames.
-    intensities: list[np.ndarray] = []
+    # Pass 1: only the first N frames are needed for the mean reference. This
+    # keeps memory proportional to one image, not the total frame count.
     reference_acc: np.ndarray | None = None
     reference_used = 0
     expected_shape: tuple[int, int] | None = None
-    for index, record in enumerate(records):
+    for index, record in enumerate(records[:reference_frames]):
         if abort_event.is_set():
             raise AbortedError()
         processed = compiled.run(record.file_path)
@@ -127,12 +126,8 @@ def _render_contrast(
                 f"expected {expected_shape[1]}x{expected_shape[0]}, got "
                 f"{intensity.shape[1]}x{intensity.shape[0]} for {record.file_name}."
             )
-        intensities.append(intensity)
-        if index < reference_frames:
-            reference_acc += intensity
-            reference_used = index + 1
-        # Pass 1 covers half of the work (read+pipeline); report partial progress.
-        run.done_count = (index + 1) // 2
+        reference_acc += intensity
+        reference_used = index + 1
         if index == 0 or (index + 1) % 10 == 0:
             db.commit()
 
@@ -140,32 +135,51 @@ def _render_contrast(
         raise ValueError("No images available to build the contrast reference.")
     reference = (reference_acc / float(reference_used)).astype(np.float32)
 
-    # Pass 2: diff -> shift -> clip -> scale to 8-bit grayscale for each frame.
-    diff_frames: list[np.ndarray] = [
-        enhance_to_uint8(intensity, reference, shift, vmax) for intensity in intensities
-    ]
-    intensities.clear()
-
-    # Pass 3: optional centered moving average, then write PNG frames + video.
     writer = None
     fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-    height, width = diff_frames[0].shape[:2]
+    height, width = reference.shape[:2]
     writer = cv2.VideoWriter(str(video_path), fourcc, float(run.fps), (width, height))
     if not writer.isOpened():
         raise ValueError("Could not open MP4 video writer.")
 
-    total = len(diff_frames)
-    for index in range(total):
+    smoother = StreamingMovingAverage(ma_radius)
+    written = 0
+
+    def write_output(gray_frame: np.ndarray) -> None:
+        nonlocal written
+        rgb = _gray_to_rgb(gray_frame)
+        _write_frame(frames_dir / f"frame_{written:05d}.png", rgb)
+        writer.write(cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR))
+        written += 1
+        run.done_count = written
+
+    # Pass 2: stream all frames through diff -> shift -> clip -> smoothing.
+    for index, record in enumerate(records):
         if abort_event.is_set():
             raise AbortedError()
-        gray = moving_average_uint8(diff_frames, index, ma_radius)
-        rgb = _gray_to_rgb(gray)
-        _write_frame(frames_dir / f"frame_{index:05d}.png", rgb)
-        writer.write(cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR))
-        run.done_count = (total // 2) + ((index + 1) * (total - total // 2)) // total
-        if index == 0 or (index + 1) % 10 == 0:
+        processed = compiled.run(record.file_path)
+        intensity = to_intensity_16scale(processed)
+        if intensity.shape != expected_shape:
+            raise ValueError(
+                "Preprocessing output size changed during Inspect run: "
+                f"expected {expected_shape[1]}x{expected_shape[0]}, got "
+                f"{intensity.shape[1]}x{intensity.shape[0]} for {record.file_name}."
+            )
+        gray = enhance_to_uint8(intensity, reference, shift, vmax)
+        output = smoother.push(gray)
+        if output is not None:
+            write_output(output)
+        if written == 1 or written % 10 == 0:
             db.commit()
-    run.done_count = total
+
+    for output in smoother.flush():
+        if abort_event.is_set():
+            raise AbortedError()
+        write_output(output)
+        if written % 10 == 0:
+            db.commit()
+
+    run.done_count = written
     db.commit()
     return writer
 
