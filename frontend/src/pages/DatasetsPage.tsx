@@ -80,7 +80,7 @@ function formatMeanSpacing(folder: Dataset['folders'][number] | undefined): stri
   return seconds == null ? 'n/a' : `${seconds}s`;
 }
 
-export function DatasetsPage() {
+export function DatasetsPage({ active = true }: { active?: boolean }) {
   const [datasets, setDatasets] = useState<Dataset[]>([]);
   const [datasetName, setDatasetName] = useState('');
   const [rootPath, setRootPath] = useState('');
@@ -116,10 +116,11 @@ export function DatasetsPage() {
   }
 
   useEffect(() => {
+    if (!active) return;
     refreshDatasets().catch((error) => {
       notifications.show({ color: 'red', title: 'Could not load datasets', message: error.message });
     });
-  }, []);
+  }, [active]);
 
   useEffect(() => {
     if (!runningOperation) return undefined;

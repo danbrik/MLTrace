@@ -315,8 +315,20 @@ def scan_dataset(db: Session, dataset: models.Dataset, timestamp_regex: str, tim
     return get_dataset_or_404(db, dataset.id) or dataset
 
 
-def serialize_dataset(db: Session, dataset: models.Dataset) -> DatasetRead:
-    reasons = dataset_update_lock_reasons(db, dataset.id)
+def _dataset_lock_reason_map(db: Session) -> dict[int, list[str]]:
+    rows = db.execute(
+        select(models.DatasetFolder.dataset_id)
+        .join(models.TrainingDatasetRule, models.TrainingDatasetRule.folder_id == models.DatasetFolder.id)
+        .group_by(models.DatasetFolder.dataset_id)
+    ).all()
+    return {
+        dataset_id: ["Dataset parser/rescan is locked because its folders are used by Train/Test Datasets."]
+        for (dataset_id,) in rows
+    }
+
+
+def serialize_dataset(db: Session, dataset: models.Dataset, lock_reasons: list[str] | None = None) -> DatasetRead:
+    reasons = dataset_update_lock_reasons(db, dataset.id) if lock_reasons is None else lock_reasons
     return DatasetRead.model_validate(dataset).model_copy(
         update={"is_update_locked": bool(reasons), "update_lock_reasons": reasons}
     )
@@ -330,7 +342,8 @@ def list_datasets(db: Session) -> list[DatasetRead]:
             .options(selectinload(models.Dataset.folders))
         )
     )
-    return [serialize_dataset(db, dataset) for dataset in datasets]
+    lock_map = _dataset_lock_reason_map(db)
+    return [serialize_dataset(db, dataset, lock_map.get(dataset.id, [])) for dataset in datasets]
 
 
 def delete_dataset(db: Session, dataset_id: int) -> bool:
@@ -496,7 +509,11 @@ def list_training_datasets(db: Session) -> list[TrainingDatasetRead]:
             )
         )
     )
-    return [serialize_training_dataset(db, training_dataset) for training_dataset in training_datasets]
+    lock_map = _training_dataset_lock_reason_map(db)
+    return [
+        serialize_training_dataset(db, training_dataset, lock_map.get(training_dataset.id, []))
+        for training_dataset in training_datasets
+    ]
 
 
 def get_training_dataset(db: Session, training_dataset_id: int) -> TrainingDatasetRead | None:
@@ -631,6 +648,26 @@ def count_rule_images(
     return rule.matching_images, rule.selected_images
 
 
+def _training_dataset_lock_reason_map(db: Session) -> dict[int, list[str]]:
+    reasons: dict[int, list[str]] = {}
+    pipeline_rows = db.execute(
+        select(models.TrainingPipelineDataset.training_dataset_id)
+        .group_by(models.TrainingPipelineDataset.training_dataset_id)
+    ).all()
+    for (training_dataset_id,) in pipeline_rows:
+        reasons.setdefault(training_dataset_id, []).append(
+            "Train/Test Dataset not editable, because already used in other Pipelines."
+        )
+    testing_rows = db.execute(
+        select(models.TestingRun.training_dataset_id).group_by(models.TestingRun.training_dataset_id)
+    ).all()
+    for (training_dataset_id,) in testing_rows:
+        reasons.setdefault(training_dataset_id, []).append(
+            "Train/Test Dataset not editable, because already used in Testing Runs."
+        )
+    return reasons
+
+
 def count_images_in_folder_range(
     folder: models.DatasetFolder,
     start_timestamp,
@@ -656,7 +693,11 @@ def folder_image_signature(folder: models.DatasetFolder) -> str | None:
     return f"{resolutions} | {extensions} | {dtype} | {channels_text} | {mode}"
 
 
-def serialize_training_dataset(db: Session, training_dataset: models.TrainingDataset) -> TrainingDatasetRead:
+def serialize_training_dataset(
+    db: Session,
+    training_dataset: models.TrainingDataset,
+    lock_reasons: list[str] | None = None,
+) -> TrainingDatasetRead:
     rule_reads: list[TrainingDatasetRuleRead] = []
     dataset_names: set[str] = set()
     resolutions: set[str] = set()
@@ -676,7 +717,9 @@ def serialize_training_dataset(db: Session, training_dataset: models.TrainingDat
         integrity_warnings.append(
             f"{len(invalid_rules)} invalid Train/Test rule(s) reference a missing dataset folder and were skipped."
         )
-    lock_reasons = training_dataset_update_lock_reasons(db, training_dataset.id)
+    resolved_lock_reasons = (
+        training_dataset_update_lock_reasons(db, training_dataset.id) if lock_reasons is None else lock_reasons
+    )
 
     for rule in sorted(
         [
@@ -749,8 +792,8 @@ def serialize_training_dataset(db: Session, training_dataset: models.TrainingDat
         total_matching_images=total_matching,
         total_selected_images=total_selected,
         rules=rule_reads,
-        is_update_locked=bool(lock_reasons),
-        update_lock_reasons=lock_reasons,
+        is_update_locked=bool(resolved_lock_reasons),
+        update_lock_reasons=resolved_lock_reasons,
         invalid_rule_count=len(invalid_rules),
         integrity_warnings=integrity_warnings,
         counts_missing=missing_count_rules > 0,
@@ -829,10 +872,23 @@ def update_preprocessing_pipeline(
     return serialize_preprocessing_pipeline(db, pipeline)
 
 
+def _preprocessing_pipeline_lock_reason_map(db: Session) -> dict[int, list[str]]:
+    rows = db.execute(
+        select(models.TrainingPipeline.preprocessing_pipeline_id)
+        .group_by(models.TrainingPipeline.preprocessing_pipeline_id)
+    ).all()
+    return {
+        pipeline_id: ["Preprocessing Pipeline not editable, because already used in Training Pipelines."]
+        for (pipeline_id,) in rows
+    }
+
+
 def serialize_preprocessing_pipeline(
-    db: Session, pipeline: models.PreprocessingPipeline
+    db: Session,
+    pipeline: models.PreprocessingPipeline,
+    lock_reasons: list[str] | None = None,
 ) -> PreprocessingPipelineRead:
-    reasons = preprocessing_pipeline_update_lock_reasons(db, pipeline.id)
+    reasons = preprocessing_pipeline_update_lock_reasons(db, pipeline.id) if lock_reasons is None else lock_reasons
     return PreprocessingPipelineRead.model_validate(pipeline).model_copy(
         update={"is_update_locked": bool(reasons), "update_lock_reasons": reasons}
     )
@@ -840,7 +896,8 @@ def serialize_preprocessing_pipeline(
 
 def list_preprocessing_pipelines(db: Session) -> list[PreprocessingPipelineRead]:
     pipelines = list(db.scalars(select(models.PreprocessingPipeline).order_by(models.PreprocessingPipeline.created_at.desc())))
-    return [serialize_preprocessing_pipeline(db, pipeline) for pipeline in pipelines]
+    lock_map = _preprocessing_pipeline_lock_reason_map(db)
+    return [serialize_preprocessing_pipeline(db, pipeline, lock_map.get(pipeline.id, [])) for pipeline in pipelines]
 
 
 def get_preprocessing_pipeline(db: Session, pipeline_id: int) -> PreprocessingPipelineRead | None:
@@ -1339,7 +1396,11 @@ def list_method_configurations(db: Session) -> list[MethodConfigurationRead]:
             .options(selectinload(models.MethodConfiguration.parameters))
         )
     )
-    return [serialize_method_configuration(configuration, db) for configuration in configurations]
+    lock_map = _method_configuration_lock_reason_map(db)
+    return [
+        serialize_method_configuration(configuration, db, lock_map.get(configuration.id, []))
+        for configuration in configurations
+    ]
 
 
 def get_method_configuration(db: Session, configuration_id: int) -> MethodConfigurationRead | None:
@@ -1401,8 +1462,21 @@ def delete_method_configuration(db: Session, configuration_id: int) -> bool:
     return True
 
 
+def _method_configuration_lock_reason_map(db: Session) -> dict[int, list[str]]:
+    rows = db.execute(
+        select(models.TrainingPipeline.method_configuration_id)
+        .group_by(models.TrainingPipeline.method_configuration_id)
+    ).all()
+    return {
+        configuration_id: ["Method/Architecture not editable, because already used in Training Pipelines."]
+        for (configuration_id,) in rows
+    }
+
+
 def serialize_method_configuration(
-    configuration: models.MethodConfiguration, db: Session | None = None
+    configuration: models.MethodConfiguration,
+    db: Session | None = None,
+    lock_reasons: list[str] | None = None,
 ) -> MethodConfigurationRead:
     parameters = [
         MethodConfigurationParameterRead(
@@ -1414,7 +1488,11 @@ def serialize_method_configuration(
         )
         for parameter in sorted(configuration.parameters, key=lambda item: item.path)
     ]
-    lock_reasons = method_configuration_update_lock_reasons(db, configuration.id) if db is not None else []
+    resolved_lock_reasons = (
+        method_configuration_update_lock_reasons(db, configuration.id)
+        if db is not None and lock_reasons is None
+        else lock_reasons or []
+    )
     return MethodConfigurationRead(
         id=configuration.id,
         name=configuration.name,
@@ -1440,8 +1518,8 @@ def serialize_method_configuration(
         updated_at=configuration.updated_at,
         validation=configuration.validation,
         parameters=parameters,
-        is_update_locked=bool(lock_reasons),
-        update_lock_reasons=lock_reasons,
+        is_update_locked=bool(resolved_lock_reasons),
+        update_lock_reasons=resolved_lock_reasons,
     )
 
 

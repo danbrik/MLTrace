@@ -799,6 +799,49 @@ def _configuration_matches_payload(configuration: models.MethodConfiguration, pa
     )
 
 
+def _configuration_raw_matches_payload(configuration: models.MethodConfiguration, payload: MethodConfigurationCreate) -> bool:
+    """Cheap exact match for old bundled payloads already stored in the DB.
+
+    This avoids normalizing/validating old and new model graphs on every API
+    start while still allowing one-time repair of defaults that are known to be
+    unmodified copies of a previous MLTrace release.
+    """
+    return (
+        configuration.description == payload.description
+        and configuration.method_type == payload.method_type
+        and configuration.method_graph == payload.method_graph
+        and configuration.method_config == payload.method_config
+        and configuration.training_config == payload.training_config
+        and configuration.inference_config == payload.inference_config
+    )
+
+
+def _looks_like_old_paper_stae_default(
+    configuration: models.MethodConfiguration,
+    old_payload: MethodConfigurationCreate,
+) -> bool:
+    if configuration.method_type != "spatiotemporal_autoencoder":
+        return False
+    if configuration.description != old_payload.description:
+        return False
+    if configuration.name not in {
+        "STAE Reconstruction paper default",
+        "STAE Reconstruction + Future Prediction paper default",
+    }:
+        return False
+    encoder = configuration.method_graph.get("encoder", []) if isinstance(configuration.method_graph, dict) else []
+    conv_channels = [
+        layer.get("config", {}).get("out_channels")
+        for layer in encoder
+        if isinstance(layer, dict) and layer.get("type") == "Conv3d"
+    ]
+    if conv_channels[:3] != [16, 32, 64]:
+        return False
+    if configuration.name == "STAE Reconstruction + Future Prediction paper default":
+        return configuration.method_config.get("future_length") == 1
+    return configuration.method_config.get("future_length") in {0, None}
+
+
 def _apply_method_payload(db: Session, configuration: models.MethodConfiguration, payload: MethodConfigurationCreate) -> None:
     method, method_graph, method_config, training_config, inference_config, diagram, validation = _normalize_method_payload(payload)
     configuration.description = payload.description
@@ -821,22 +864,27 @@ def _apply_method_payload(db: Session, configuration: models.MethodConfiguration
 
 
 def ensure_default_method_configurations(db: Session) -> int:
-    """Create built-in deployment defaults once without overwriting user edits."""
+    """Create missing built-in defaults without doing expensive startup checks.
+
+    Existing defaults are only repaired when they are an exact raw copy of a
+    known old bundled payload. We intentionally avoid normalizing historical and
+    current payloads for every existing row because that validates large model
+    graphs during API startup.
+    """
     created = 0
     old_payloads = _old_paper_payloads_by_name()
     new_payloads = {payload.name: payload for payload in default_method_payloads()}
-    for payload in default_method_payloads():
+    payloads = default_method_payloads()
+    for payload in payloads:
         existing = db.scalar(
             select(models.MethodConfiguration).where(func.lower(models.MethodConfiguration.name) == payload.name.lower())
         )
         if existing is not None:
             old_payload = old_payloads.get(payload.name)
-            if old_payload is not None and _configuration_matches_payload(existing, old_payload):
+            if old_payload is not None and _looks_like_old_paper_stae_default(existing, old_payload):
                 _apply_method_payload(db, existing, new_payloads[payload.name])
                 db.commit()
                 logger.info("Updated bundled method configuration '%s' to current paper-near default", payload.name)
-            elif old_payload is not None and not _configuration_matches_payload(existing, new_payloads[payload.name]):
-                logger.info("Bundled method configuration '%s' differs from shipped defaults; leaving user version unchanged", payload.name)
             continue
         create_method_configuration(db, payload)
         created += 1

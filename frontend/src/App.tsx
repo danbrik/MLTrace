@@ -118,16 +118,16 @@ export function App() {
 
       <AppShell.Main>
         <Box display={page === 'datasets' ? 'block' : 'none'}>
-          <DatasetsPage />
+          <DatasetsPage active={page === 'datasets'} />
         </Box>
         <Box display={page === 'training-datasets' ? 'block' : 'none'}>
-          <TrainingDatasetsPage />
+          <TrainingDatasetsPage active={page === 'training-datasets'} />
         </Box>
         <Box display={page === 'preprocessing' ? 'block' : 'none'}>
-          <PreprocessingPipelinesPage />
+          <PreprocessingPipelinesPage active={page === 'preprocessing'} />
         </Box>
         <Box display={page === 'methods' ? 'block' : 'none'}>
-          <MethodsPage />
+          <MethodsPage active={page === 'methods'} />
         </Box>
         <Box display={page === 'training-pipelines' ? 'block' : 'none'}>
           <TrainingPipelinesPage active={page === 'training-pipelines'} onRunQueued={() => setPage('scheduler')} />

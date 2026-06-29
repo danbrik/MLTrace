@@ -171,7 +171,7 @@ function nextAvailablePipelineName(pipelines: PreprocessingPipeline[]): string {
   return `${base} ${Date.now()}`;
 }
 
-export function PreprocessingPipelinesPage() {
+export function PreprocessingPipelinesPage({ active = true }: { active?: boolean }) {
   const [steps, setSteps] = useState<PreprocessingStepDefinition[]>([]);
   const [datasets, setDatasets] = useState<Dataset[]>([]);
   const [pipelines, setPipelines] = useState<PreprocessingPipeline[]>([]);
@@ -210,6 +210,7 @@ export function PreprocessingPipelinesPage() {
   }
 
   useEffect(() => {
+    if (!active) return;
     refresh().catch((error) => {
       notifications.show({
         color: 'red',
@@ -217,7 +218,7 @@ export function PreprocessingPipelinesPage() {
         message: error instanceof Error ? error.message : 'Unknown error',
       });
     });
-  }, []);
+  }, [active]);
 
   useEffect(() => {
     if (loadedPipelineId == null && !nameTouched) {

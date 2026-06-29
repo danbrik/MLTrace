@@ -52,7 +52,7 @@ function InfoLabel({ label, info }: { label: string; info: string }) {
   );
 }
 
-export function MethodsPage() {
+export function MethodsPage({ active = true }: { active?: boolean }) {
   const [methodDefinitions, setMethodDefinitions] = useState<MethodDefinition[]>([]);
   const [layers, setLayers] = useState<ModelLayerDefinition[]>([]);
   const [methods, setMethods] = useState<MethodConfiguration[]>([]);
@@ -88,6 +88,7 @@ export function MethodsPage() {
   }
 
   useEffect(() => {
+    if (!active) return;
     refresh().catch((error) => {
       notifications.show({
         color: 'red',
@@ -95,7 +96,7 @@ export function MethodsPage() {
         message: error instanceof Error ? error.message : 'Unknown error',
       });
     });
-  }, []);
+  }, [active]);
 
   useEffect(() => {
     if (loadedMethodId == null && !nameTouched) {

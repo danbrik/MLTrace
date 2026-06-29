@@ -138,7 +138,7 @@ function countText(selected: number | null, matching?: number | null): string {
   return matching === undefined ? String(selected) : `${selected} / ${matching}`;
 }
 
-export function TrainingDatasetsPage() {
+export function TrainingDatasetsPage({ active = true }: { active?: boolean }) {
   const [datasets, setDatasets] = useState<Dataset[]>([]);
   const [trainingDatasets, setTrainingDatasets] = useState<TrainingDataset[]>([]);
   const [inspectedDataset, setInspectedDataset] = useState<TrainingDataset | null>(null);
@@ -165,10 +165,11 @@ export function TrainingDatasetsPage() {
   }
 
   useEffect(() => {
+    if (!active) return;
     refresh().catch((error) => {
       notifications.show({ color: 'red', title: 'Could not load train/test datasets', message: error.message });
     });
-  }, []);
+  }, [active]);
 
   const folderChoices = useMemo<FolderChoice[]>(
     () =>
