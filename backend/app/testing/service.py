@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import csv
 import hashlib
 import json
@@ -10,7 +11,7 @@ from pathlib import Path
 
 import numpy as np
 from PIL import Image, ImageDraw
-from sqlalchemy import delete, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session, selectinload
 
 from app import models
@@ -18,6 +19,7 @@ from app.database import data_dir
 from app.metrics.ssim import ssim_distance_map_np, ssim_settings_from_config
 from app.modeling.fast_anogan import build_fast_anogan_modules, fast_anogan_forward
 from app.preprocessing.pipeline import (
+    absolute_image_to_uint8,
     encode_absolute_image_data_url,
     encode_png_data_url,
     image_metadata,
@@ -27,6 +29,7 @@ from app.scanner import filename_timestamp_template
 from app.schemas import (
     HeatmapRunCreate,
     HeatmapRunRead,
+    HeatmapRunSummary,
     HeatmapVisualizationConfig,
     PreprocessingGraph,
     RoiDefinitionCreate,
@@ -748,17 +751,42 @@ def get_testing_run(db: Session, run_id: int) -> TestingRunRead | None:
     return _serialize_testing_run(run) if run else None
 
 
-def get_testing_run_results(db: Session, run_id: int) -> TestingRunResultsResponse | None:
-    run = db.scalar(
-        select(models.TestingRun)
-        .where(models.TestingRun.id == run_id)
-        .options(selectinload(models.TestingRun.results))
-    )
+def get_testing_run_results(
+    db: Session, run_id: int, *, max_points: int | None = None
+) -> TestingRunResultsResponse | None:
+    """Return a run's per-image results. When ``max_points`` is given and the run
+    has more rows, the result set is decimated (every k-th by position, plus the
+    last row) so charts stay bounded regardless of run size. ``total`` reports the
+    true stored count. Rows are streamed via a query (no full ``selectinload``)."""
+    run = db.get(models.TestingRun, run_id)
     if run is None:
         return None
+    total = db.scalar(
+        select(func.count()).select_from(models.TestingRunResult).where(
+            models.TestingRunResult.testing_run_id == run_id
+        )
+    ) or 0
+
+    query = (
+        select(models.TestingRunResult)
+        .where(models.TestingRunResult.testing_run_id == run_id)
+        .order_by(models.TestingRunResult.position)
+    )
+    decimated = False
+    if max_points and total > max_points:
+        step = (total + max_points - 1) // max_points
+        query = query.where(
+            (models.TestingRunResult.position % step == 0)
+            | (models.TestingRunResult.position == total - 1)
+        )
+        decimated = True
+
+    rows = db.scalars(query).all()
     return TestingRunResultsResponse(
         testing_run=_serialize_testing_run(run),
-        results=[_serialize_result(result) for result in run.results],
+        results=[_serialize_result(result) for result in rows],
+        total=total,
+        decimated=decimated,
     )
 
 
@@ -1012,6 +1040,51 @@ def _error_matrix(error_map: np.ndarray) -> list[list[float]]:
     return np.round(grid, 6).tolist()
 
 
+def _heatmap_artifacts_dir(run_id: int) -> Path:
+    return data_dir() / "heatmaps" / str(run_id)
+
+
+def _write_heatmap_artifacts(
+    run_id: int,
+    source: np.ndarray,
+    reconstruction: np.ndarray,
+    overlay_rgba: np.ndarray,
+    error_map: np.ndarray,
+) -> Path:
+    """Persist the heavy heatmap artifacts (PNGs + error matrix) to disk so the
+    DB row stays tiny. Mirrors the on-disk pattern of heatmap-video frames."""
+    artifacts_dir = _heatmap_artifacts_dir(run_id)
+    if artifacts_dir.exists():
+        shutil.rmtree(artifacts_dir, ignore_errors=True)
+    artifacts_dir.mkdir(parents=True, exist_ok=True)
+    Image.fromarray(absolute_image_to_uint8(source)).save(artifacts_dir / "source.png", format="PNG")
+    Image.fromarray(absolute_image_to_uint8(reconstruction)).save(artifacts_dir / "reconstruction.png", format="PNG")
+    Image.fromarray(overlay_rgba).save(artifacts_dir / "overlay.png", format="PNG")
+    np.save(artifacts_dir / "error_matrix.npy", error_map.astype(np.float32))
+    return artifacts_dir
+
+
+def _read_png_data_url(path: Path) -> str:
+    return f"data:image/png;base64,{base64.b64encode(path.read_bytes()).decode('ascii')}"
+
+
+def _serialize_heatmap(row: models.HeatmapRun) -> HeatmapRunRead:
+    """Build the full read model, loading heavy fields from disk when the row
+    has been migrated to ``artifacts_dir``; falls back to the inline columns for
+    older rows."""
+    read = HeatmapRunRead.model_validate(row)
+    if row.artifacts_dir:
+        directory = Path(row.artifacts_dir)
+        try:
+            read.source_image_data_url = _read_png_data_url(directory / "source.png")
+            read.reconstruction_image_data_url = _read_png_data_url(directory / "reconstruction.png")
+            read.heatmap_image_data_url = _read_png_data_url(directory / "overlay.png")
+            read.error_matrix = _error_matrix(np.load(directory / "error_matrix.npy"))
+        except (OSError, ValueError):
+            pass
+    return read
+
+
 def compute_heatmap_run(db: Session, payload: HeatmapRunCreate) -> HeatmapRunRead:
     """Compute or return a cached CPU pixel-level reconstruction-error heatmap."""
     result_id = payload.testing_result_id
@@ -1038,7 +1111,7 @@ def compute_heatmap_run(db: Session, payload: HeatmapRunCreate) -> HeatmapRunRea
             and existing_by_timestamp.config_signature == config_signature
             and not payload.force_recompute
         ):
-            return HeatmapRunRead.model_validate(existing_by_timestamp)
+            return _serialize_heatmap(existing_by_timestamp)
 
     if result_id is None and timestamp is not None:
         result = db.scalar(
@@ -1083,7 +1156,7 @@ def compute_heatmap_run(db: Session, payload: HeatmapRunCreate) -> HeatmapRunRea
             and existing.config_signature == config_signature
             and not payload.force_recompute
         ):
-            return HeatmapRunRead.model_validate(existing)
+            return _serialize_heatmap(existing)
 
     if result_id is not None:
         result = _load_testing_result_for_heatmap(db, payload.testing_run_id, result_id)
@@ -1199,16 +1272,18 @@ def compute_heatmap_run(db: Session, payload: HeatmapRunCreate) -> HeatmapRunRea
         row.mean_error = float(np.mean(error_magnitude))
         row.max_x = int(max_x)
         row.max_y = int(max_y)
-        row.source_image_data_url = encode_absolute_image_data_url(source)
-        row.reconstruction_image_data_url = encode_absolute_image_data_url(reconstruction)
-        row.heatmap_image_data_url = encode_png_data_url(
-            _heatmap_overlay(error_map, config=payload.visualization_config)
-        )
-        row.error_matrix = _error_matrix(error_map)
+        overlay = _heatmap_overlay(error_map, config=payload.visualization_config)
+        artifacts_dir = _write_heatmap_artifacts(row.id, source, reconstruction, overlay, error_map)
+        row.artifacts_dir = str(artifacts_dir)
+        # Heavy payloads now live on disk; keep the inline columns empty.
+        row.source_image_data_url = ""
+        row.reconstruction_image_data_url = ""
+        row.heatmap_image_data_url = ""
+        row.error_matrix = None
         row.updated_at = _utcnow()
         db.commit()
         db.refresh(row)
-        return HeatmapRunRead.model_validate(row)
+        return _serialize_heatmap(row)
     except Exception as exc:
         db.rollback()
         row = db.scalar(
@@ -1226,15 +1301,23 @@ def compute_heatmap_run(db: Session, payload: HeatmapRunCreate) -> HeatmapRunRea
         raise
 
 
-def list_heatmap_runs(db: Session) -> list[HeatmapRunRead]:
+def list_heatmap_runs(db: Session) -> list[HeatmapRunSummary]:
+    # Metadata only — image data URLs / error matrix stay on disk and are fetched
+    # per heatmap, so the list stays light regardless of how many heatmaps exist.
     rows = db.scalars(select(models.HeatmapRun).order_by(models.HeatmapRun.created_at.desc())).all()
-    return [HeatmapRunRead.model_validate(row) for row in rows]
+    return [HeatmapRunSummary.model_validate(row) for row in rows]
+
+
+def get_heatmap_run(db: Session, run_id: int) -> HeatmapRunRead | None:
+    row = db.get(models.HeatmapRun, run_id)
+    return _serialize_heatmap(row) if row is not None else None
 
 
 def clear_heatmap_runs(db: Session) -> int:
-    count = len(db.scalars(select(models.HeatmapRun.id)).all())
+    count = db.scalar(select(func.count()).select_from(models.HeatmapRun)) or 0
     db.execute(delete(models.HeatmapRun))
     db.commit()
+    shutil.rmtree(data_dir() / "heatmaps", ignore_errors=True)
     return count
 
 

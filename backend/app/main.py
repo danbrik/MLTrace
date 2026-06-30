@@ -7,7 +7,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.config import get_settings
-from app.database import SessionLocal, get_db
+from app.database import SessionLocal, get_db, vacuum_database
 from app.schemas import (
     DatasetConnectionTestRequest,
     DatasetConnectionTestResponse,
@@ -19,6 +19,7 @@ from app.schemas import (
     HeatmapRangeRunRead,
     HeatmapRunCreate,
     HeatmapRunRead,
+    HeatmapRunSummary,
     InspectPreviewRequest,
     InspectPreviewResponse,
     InspectRunCreate,
@@ -656,8 +657,10 @@ def create_app() -> FastAPI:
         return run
 
     @app.get("/api/testing-runs/{run_id}/results", response_model=TestingRunResultsResponse)
-    def api_get_testing_run_results(run_id: int, db: Session = Depends(get_db)):
-        response = testing_service.get_testing_run_results(db, run_id)
+    def api_get_testing_run_results(
+        run_id: int, max_points: int | None = None, db: Session = Depends(get_db)
+    ):
+        response = testing_service.get_testing_run_results(db, run_id, max_points=max_points)
         if response is None:
             raise HTTPException(status_code=404, detail="Testing run not found.")
         return response
@@ -675,9 +678,16 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=404, detail="Testing result not found.")
         return response
 
-    @app.get("/api/heatmaps", response_model=list[HeatmapRunRead])
+    @app.get("/api/heatmaps", response_model=list[HeatmapRunSummary])
     def api_list_heatmaps(db: Session = Depends(get_db)):
         return testing_service.list_heatmap_runs(db)
+
+    @app.get("/api/heatmaps/{run_id}", response_model=HeatmapRunRead)
+    def api_get_heatmap(run_id: int, db: Session = Depends(get_db)):
+        heatmap = testing_service.get_heatmap_run(db, run_id)
+        if heatmap is None:
+            raise HTTPException(status_code=404, detail="Heatmap not found.")
+        return heatmap
 
     @app.post("/api/heatmaps", response_model=HeatmapRunRead)
     def api_create_heatmap(payload: HeatmapRunCreate, db: Session = Depends(get_db)):
@@ -689,6 +699,11 @@ def create_app() -> FastAPI:
     @app.delete("/api/heatmaps", status_code=204)
     def api_clear_heatmaps(db: Session = Depends(get_db)):
         testing_service.clear_heatmap_runs(db)
+        return None
+
+    @app.post("/api/maintenance/vacuum", status_code=204)
+    def api_vacuum_database():
+        vacuum_database()
         return None
 
     @app.get("/api/heatmap-ranges", response_model=list[HeatmapRangeRunRead])

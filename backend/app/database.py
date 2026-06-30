@@ -68,3 +68,13 @@ def get_db() -> Generator[Session, None, None]:
 
 def create_database_schema() -> None:
     Base.metadata.create_all(bind=engine)
+
+
+def vacuum_database() -> None:
+    """Reclaim space and truncate the WAL. Useful after deleting large rows
+    (e.g. cleared heatmaps). VACUUM must run outside a transaction."""
+    is_sqlite = make_url(settings.database_url).drivername.startswith("sqlite")
+    with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
+        conn.exec_driver_sql("VACUUM")
+        if is_sqlite:
+            conn.exec_driver_sql("PRAGMA wal_checkpoint(TRUNCATE)")

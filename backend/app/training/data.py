@@ -9,13 +9,18 @@ returns deterministic records without loading image pixels.
 
 from __future__ import annotations
 
+import json
+import logging
 from bisect import bisect_left, bisect_right
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
 from app import models
+from app.database import data_dir
 from app.scanner import direct_tiff_files, extract_timestamp
+
+logger = logging.getLogger("mltrace.training.data")
 
 
 @dataclass(frozen=True)
@@ -78,11 +83,68 @@ def _folder_path(folder: models.DatasetFolder) -> Path:
     return root / folder.relative_path
 
 
+def _folder_index_cache_path(folder_id: int) -> Path:
+    return data_dir() / "folder_index" / f"{folder_id}.json"
+
+
+def _folder_dir_signature(folder_path: Path, file_count: int) -> str:
+    """Cheap fingerprint that changes when files are added/removed. Combines the
+    directory mtime with the file count; avoids ``stat`` on every file."""
+    try:
+        mtime_ns = folder_path.stat().st_mtime_ns
+    except OSError:
+        mtime_ns = 0
+    return f"{file_count}:{mtime_ns}"
+
+
+def _load_folder_index_cache(
+    folder_id: int, signature: str, folder_path: Path
+) -> list[TimestampIndexEntry] | None:
+    path = _folder_index_cache_path(folder_id)
+    try:
+        with open(path, encoding="utf-8") as handle:
+            payload = json.load(handle)
+    except (OSError, ValueError):
+        return None
+    if payload.get("signature") != signature:
+        return None
+    try:
+        # Stored compactly as [iso, name]; reconstruct the absolute path on load.
+        return [
+            (datetime.fromisoformat(iso), name, str(folder_path / name))
+            for iso, name in payload["entries"]
+        ]
+    except (KeyError, ValueError, TypeError):
+        return None
+
+
+def _save_folder_index_cache(folder_id: int, signature: str, entries: list[TimestampIndexEntry]) -> None:
+    path = _folder_index_cache_path(folder_id)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(".json.tmp")
+        with open(tmp, "w", encoding="utf-8") as handle:
+            json.dump(
+                {"signature": signature, "entries": [[ts.isoformat(), name] for ts, name, _ in entries]},
+                handle,
+            )
+        tmp.replace(path)
+    except OSError as exc:  # noqa: BLE001 - caching is best effort; never fail enumeration
+        logger.warning("Could not write folder index cache for folder %s: %s", folder_id, exc)
+
+
 def _folder_timestamp_index(
     folder: models.DatasetFolder,
     cache: FolderTimestampCache | None = None,
 ) -> list[TimestampIndexEntry]:
-    """Parse and sort a folder's filename timestamps once per request."""
+    """Parse and sort a folder's filename timestamps, cached on disk.
+
+    The expensive part is parsing a timestamp out of every filename (regex) and
+    sorting — for 150k+ files that recurs on every training/inference/count.
+    Results are persisted under ``data_dir()/folder_index/<id>.json`` keyed by a
+    cheap directory signature (file count + dir mtime), so subsequent
+    enumerations just load the prebuilt index instead of re-parsing.
+    """
     if cache is not None and folder.id in cache:
         return cache[folder.id]
 
@@ -90,17 +152,24 @@ def _folder_timestamp_index(
     if not dataset.timestamp_regex or not dataset.timestamp_format:
         raise ValueError(f"Dataset '{dataset.name}' has no confirmed timestamp parser.")
 
-    entries: list[TimestampIndexEntry] = []
-    for path in direct_tiff_files(_folder_path(folder)):
-        try:
-            _, timestamp = extract_timestamp(path.name, dataset.timestamp_regex, dataset.timestamp_format)
-        except ValueError as exc:
-            raise ValueError(
-                f"File '{path.name}' in dataset '{dataset.name}' does not match the confirmed timestamp parser."
-            ) from exc
-        entries.append((timestamp, path.name, str(path)))
+    folder_path = _folder_path(folder)
+    files = direct_tiff_files(folder_path)
+    signature = _folder_dir_signature(folder_path, len(files))
 
-    entries.sort()
+    entries = _load_folder_index_cache(folder.id, signature, folder_path)
+    if entries is None:
+        entries = []
+        for path in files:
+            try:
+                _, timestamp = extract_timestamp(path.name, dataset.timestamp_regex, dataset.timestamp_format)
+            except ValueError as exc:
+                raise ValueError(
+                    f"File '{path.name}' in dataset '{dataset.name}' does not match the confirmed timestamp parser."
+                ) from exc
+            entries.append((timestamp, path.name, str(path)))
+        entries.sort()
+        _save_folder_index_cache(folder.id, signature, entries)
+
     if cache is not None:
         cache[folder.id] = entries
     return entries

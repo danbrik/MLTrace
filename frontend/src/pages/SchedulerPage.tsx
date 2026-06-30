@@ -56,7 +56,7 @@ import type {
   HeatmapRangeRun,
   MethodConfiguration,
   MethodDefinition,
-  HeatmapRun,
+  HeatmapRunSummary,
   PreprocessingPipeline,
   SchedulerSettings,
   TestingRun,
@@ -75,7 +75,7 @@ type HeatmapGroup = {
   startTimestamp: string;
   endTimestamp: string;
   status: string;
-  maxHeatmap: HeatmapRun;
+  maxHeatmap: HeatmapRunSummary;
   meanError: number;
 };
 
@@ -97,8 +97,8 @@ function jobMethodType(job: SchedulerJob): string {
   return job.kind === 'heatmap' ? 'heatmap video' : job.run.method_type;
 }
 
-function summarizeHeatmaps(heatmaps: HeatmapRun[]): HeatmapGroup[] {
-  const byRun = new Map<number, HeatmapRun[]>();
+function summarizeHeatmaps(heatmaps: HeatmapRunSummary[]): HeatmapGroup[] {
+  const byRun = new Map<number, HeatmapRunSummary[]>();
   for (const heatmap of heatmaps) {
     const entries = byRun.get(heatmap.testing_run_id) ?? [];
     entries.push(heatmap);
@@ -215,7 +215,7 @@ export function SchedulerPage({ active = true }: { active?: boolean }) {
   const [preprocessing, setPreprocessing] = useState<PreprocessingPipeline[]>([]);
   const [methods, setMethods] = useState<MethodConfiguration[]>([]);
   const [methodDefs, setMethodDefs] = useState<MethodDefinition[]>([]);
-  const [heatmaps, setHeatmaps] = useState<HeatmapRun[]>([]);
+  const [heatmaps, setHeatmaps] = useState<HeatmapRunSummary[]>([]);
   const [heatmapRanges, setHeatmapRanges] = useState<HeatmapRangeRun[]>([]);
   const [schedulerSettings, setSchedulerSettings] = useState<SchedulerSettings | null>(null);
   const [settingsDraft, setSettingsDraft] = useState<{ max_gpu_slots: number; only_gpu: boolean } | null>(null);

@@ -24,7 +24,10 @@ from app.preprocessing.pipeline import (
     compile_pipeline,
 )
 from app.schemas import InspectPreviewRequest, InspectPreviewResponse, InspectRunCreate, InspectRunRead, PreprocessingGraph
-from app.training.data import enumerate_training_dataset_image_records_for_range
+from app.training.data import (
+    count_folder_range_images,
+    enumerate_training_dataset_image_records_for_range,
+)
 
 logger = logging.getLogger("mltrace.inspect")
 
@@ -231,13 +234,52 @@ def _serialize(run: models.InspectRun) -> InspectRunRead:
     return InspectRunRead.model_validate(run)
 
 
+def _estimate_frame_count(
+    training_dataset: models.TrainingDataset,
+    start_timestamp: datetime,
+    end_timestamp: datetime,
+    extra_stride: int,
+) -> int:
+    """Cheap selected-image estimate without building record objects.
+
+    Sums each rule's selected count (folder ``image_count`` fast path, else the
+    cached timestamp index), then applies the extra stride. Cross-rule overlaps
+    may slightly overcount; the worker computes the exact value when it runs."""
+    selected = 0
+    for rule in training_dataset.rules:
+        if rule.folder is None:
+            continue
+        clipped_start = max(rule.start_timestamp, start_timestamp)
+        clipped_end = min(rule.end_timestamp, end_timestamp)
+        if clipped_end < clipped_start:
+            continue
+        selected += count_folder_range_images(
+            rule.folder, clipped_start, clipped_end, rule.stride
+        ).selected_images
+    stride = max(1, extra_stride)
+    return (selected + stride - 1) // stride if selected else 0
+
+
 def create_inspect_run(db: Session, payload: InspectRunCreate) -> InspectRunRead:
     if payload.content_mode != "final_preprocessed_output":
         raise ValueError("Only final_preprocessed_output is supported.")
     if payload.contrast_enabled and payload.contrast_vmax <= 0:
         raise ValueError("Contrast vmax must be greater than zero.")
-    training_dataset, preprocessing_pipeline, records = _resolve_selected_records(db, payload)
-    if not records:
+    if payload.end_timestamp < payload.start_timestamp:
+        raise ValueError("end_timestamp must not be before start_timestamp.")
+    training_dataset = _load_training_dataset(db, int(payload.training_dataset_id))
+    if training_dataset is None:
+        raise ValueError(f"Train/Test Dataset does not exist: {payload.training_dataset_id}")
+    preprocessing_pipeline = _load_preprocessing_pipeline(db, int(payload.preprocessing_pipeline_id))
+    if preprocessing_pipeline is None:
+        raise ValueError(f"Preprocessing pipeline does not exist: {payload.preprocessing_pipeline_id}")
+
+    # Cheap count only — the worker enumerates the authoritative frame list. This
+    # keeps "Run" instant instead of blocking on a full filesystem enumeration.
+    estimated_frames = _estimate_frame_count(
+        training_dataset, payload.start_timestamp, payload.end_timestamp, max(1, payload.stride)
+    )
+    if estimated_frames == 0:
         raise ValueError("No images in selected range.")
     run = models.InspectRun(
         training_dataset_id=training_dataset.id,
@@ -254,7 +296,7 @@ def create_inspect_run(db: Session, payload: InspectRunCreate) -> InspectRunRead
         contrast_shift=float(payload.contrast_shift),
         contrast_vmax=float(payload.contrast_vmax),
         contrast_ma_radius=max(0, int(payload.contrast_ma_radius)),
-        frame_count=len(records),
+        frame_count=estimated_frames,
         done_count=0,
         device="CPU",
         training_dataset_name=training_dataset.name,

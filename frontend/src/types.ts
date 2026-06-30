@@ -589,6 +589,8 @@ export type TestingRunResult = {
 export type TestingRunResults = {
   testing_run: TestingRun;
   results: TestingRunResult[];
+  total: number;
+  decimated: boolean;
 };
 
 export type TestingRunResultImage = {
@@ -646,6 +648,28 @@ export type HeatmapRun = {
   heatmap_image_data_url: string;
   error_matrix: number[][] | null;
   visualization_config: HeatmapVisualizationConfig;
+  config_signature: string;
+  render_version: number;
+  created_at: string;
+  updated_at: string;
+};
+
+/** Lightweight heatmap metadata from the list endpoint (no image data URLs or
+ *  error matrix — those are fetched per heatmap). */
+export type HeatmapRunSummary = {
+  id: number;
+  testing_run_id: number;
+  testing_result_id: number | null;
+  status: string;
+  error_message: string | null;
+  image_path: string;
+  timestamp: string;
+  width: number;
+  height: number;
+  max_error: number;
+  mean_error: number;
+  max_x: number;
+  max_y: number;
   config_signature: string;
   render_version: number;
   created_at: string;

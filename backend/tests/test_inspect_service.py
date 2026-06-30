@@ -239,6 +239,58 @@ def test_inspect_contrast_preview_reports_diff_range(tmp_path: Path) -> None:
         db.close()
 
 
+def test_create_inspect_run_enqueues_without_full_enumeration(tmp_path: Path, monkeypatch) -> None:
+    SessionLocal = make_db()
+    db = SessionLocal()
+    try:
+        training_dataset, preprocessing = seed_inspect_fixture(db, tmp_path / "images", image_count=6)
+
+        def boom(*_args, **_kwargs):
+            raise AssertionError("create_inspect_run must not enumerate the full range")
+
+        monkeypatch.setattr(inspect_service, "enumerate_training_dataset_image_records_for_range", boom)
+
+        run = inspect_service.create_inspect_run(
+            db,
+            InspectRunCreate(
+                training_dataset_id=training_dataset.id,
+                preprocessing_pipeline_id=preprocessing.id,
+                start_timestamp=datetime(2026, 2, 4, 15, 30, 0),
+                end_timestamp=datetime(2026, 2, 4, 15, 30, 50),
+                stride=1,
+                fps=4,
+            ),
+        )
+        assert run.status == "queued"
+        assert run.frame_count and run.frame_count > 0  # cheap estimate, no enumeration
+    finally:
+        db.close()
+
+
+def test_create_inspect_run_empty_range_raises(tmp_path: Path) -> None:
+    SessionLocal = make_db()
+    db = SessionLocal()
+    try:
+        training_dataset, preprocessing = seed_inspect_fixture(db, tmp_path / "images", image_count=6)
+        try:
+            inspect_service.create_inspect_run(
+                db,
+                InspectRunCreate(
+                    training_dataset_id=training_dataset.id,
+                    preprocessing_pipeline_id=preprocessing.id,
+                    start_timestamp=datetime(2000, 1, 1, 0, 0, 0),
+                    end_timestamp=datetime(2000, 1, 1, 1, 0, 0),
+                    stride=1,
+                    fps=4,
+                ),
+            )
+            raise AssertionError("Expected ValueError for an empty range")
+        except ValueError as exc:
+            assert "No images in selected range" in str(exc)
+    finally:
+        db.close()
+
+
 def test_inspect_contrast_run_writes_video(tmp_path: Path, monkeypatch) -> None:
     SessionLocal = make_db()
     db = SessionLocal()

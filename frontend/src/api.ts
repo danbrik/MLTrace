@@ -4,6 +4,7 @@ import type {
   AnalysisLayout,
   HeatmapRangeRun,
   HeatmapRun,
+  HeatmapRunSummary,
   HeatmapVisualizationConfig,
   InspectPreview,
   InspectRun,
@@ -459,16 +460,23 @@ export function enqueueTestingRun(payload: {
   });
 }
 
-export function getTestingRunResults(runId: number): Promise<TestingRunResults> {
-  return request<TestingRunResults>(`/api/testing-runs/${runId}/results`);
+/** Fetch a run's per-image results. ``maxPoints`` decimates large runs server-side
+ *  so charts stay bounded (the full set is always available in the CSV export). */
+export function getTestingRunResults(runId: number, maxPoints?: number): Promise<TestingRunResults> {
+  const query = maxPoints ? `?max_points=${maxPoints}` : '';
+  return request<TestingRunResults>(`/api/testing-runs/${runId}/results${query}`);
 }
 
 export function getTestingRunResultImage(runId: number, resultId: number): Promise<TestingRunResultImage> {
   return request<TestingRunResultImage>(`/api/testing-runs/${runId}/results/${resultId}/image`, undefined, 120_000);
 }
 
-export function listHeatmaps(): Promise<HeatmapRun[]> {
-  return request<HeatmapRun[]>('/api/heatmaps');
+export function listHeatmaps(): Promise<HeatmapRunSummary[]> {
+  return request<HeatmapRunSummary[]>('/api/heatmaps');
+}
+
+export function getHeatmap(runId: number): Promise<HeatmapRun> {
+  return request<HeatmapRun>(`/api/heatmaps/${runId}`);
 }
 
 export function createHeatmap(payload: {

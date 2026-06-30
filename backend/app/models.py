@@ -522,12 +522,16 @@ class HeatmapRun(Base):
     mean_error: Mapped[float] = mapped_column(Float, nullable=False)
     max_x: Mapped[int] = mapped_column(Integer, nullable=False)
     max_y: Mapped[int] = mapped_column(Integer, nullable=False)
-    source_image_data_url: Mapped[str] = mapped_column(Text, nullable=False)
+    # Heavy artifacts (source/reconstruction/overlay PNG + error matrix) live on
+    # disk under ``artifacts_dir`` to keep the DB small; these inline columns stay
+    # empty for new rows and are only read as a fallback for pre-disk rows.
+    artifacts_dir: Mapped[str | None] = mapped_column(Text)
+    source_image_data_url: Mapped[str] = mapped_column(Text, nullable=False, default="")
     reconstruction_image_data_url: Mapped[str] = mapped_column(Text, nullable=False, default="")
     # Full-resolution configured pixel-error grid for the interactive Plotly
     # overlay. It may be signed when directional deviations are enabled.
     error_matrix: Mapped[list | None] = mapped_column(json_type())
-    heatmap_image_data_url: Mapped[str] = mapped_column(Text, nullable=False)
+    heatmap_image_data_url: Mapped[str] = mapped_column(Text, nullable=False, default="")
     visualization_config: Mapped[dict] = mapped_column(json_type(), nullable=False, default=dict)
     config_signature: Mapped[str] = mapped_column(String(64), nullable=False, default="")
     render_version: Mapped[int] = mapped_column(Integer, nullable=False, default=4)

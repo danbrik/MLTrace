@@ -67,6 +67,10 @@ import type {
   TrainingRun,
 } from '../types';
 
+// Cap on result rows fetched per inference run; large runs are decimated
+// server-side so the Analysis page stays responsive regardless of run size.
+const ANALYSIS_MAX_POINTS = 8000;
+
 type PlotType = 'timeseries' | 'heatmap';
 type HeatmapMode = 'single' | 'range';
 
@@ -1308,7 +1312,9 @@ export function AnalysisPage({ active = true }: { active?: boolean }) {
       if (resultsByRunId[runId]) return resultsByRunId[runId];
       setLoadingRunId(runId);
       try {
-        const next = await getTestingRunResults(runId);
+        // Decimate large runs server-side so the page never pulls an unbounded
+        // payload; first/last rows are always included for accurate bounds.
+        const next = await getTestingRunResults(runId, ANALYSIS_MAX_POINTS);
         setResultsByRunId((current) => ({ ...current, [runId]: next }));
         return next;
       } finally {

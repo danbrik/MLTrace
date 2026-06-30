@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import logging
+import os
 import shutil
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import cv2
@@ -107,33 +109,58 @@ def _render_contrast(
     if vmax <= 0:
         raise ValueError("Contrast vmax must be greater than zero.")
 
-    # Pass 1: only the first N frames are needed for the mean reference. This
-    # keeps memory proportional to one image, not the total frame count.
+    # Pass 1: only the first N frames are needed for the mean reference. Decode
+    # them in parallel (chunked) and accumulate — keeps memory ~one chunk while
+    # cutting the otherwise-serial first step. Progress is surfaced through the
+    # run counters so the UI doesn't appear frozen at 0/N during this phase.
+    ref_records = records[:reference_frames]
+    reference_total = len(ref_records)
+    run.frame_count = reference_total
+    run.done_count = 0
+    db.commit()
+
     reference_acc: np.ndarray | None = None
     reference_used = 0
     expected_shape: tuple[int, int] | None = None
-    for index, record in enumerate(records[:reference_frames]):
-        if abort_event.is_set():
-            raise AbortedError()
-        processed = compiled.run(record.file_path)
-        intensity = to_intensity_16scale(processed)
-        if expected_shape is None:
-            expected_shape = intensity.shape
-            reference_acc = np.zeros(expected_shape, dtype=np.float64)
-        elif intensity.shape != expected_shape:
-            raise ValueError(
-                "Preprocessing output size changed during Inspect run: "
-                f"expected {expected_shape[1]}x{expected_shape[0]}, got "
-                f"{intensity.shape[1]}x{intensity.shape[0]} for {record.file_name}."
-            )
-        reference_acc += intensity
-        reference_used = index + 1
-        if index == 0 or (index + 1) % 10 == 0:
+    workers = min(8, os.cpu_count() or 1)
+    phase_started = time.perf_counter()
+
+    def _load_intensity(record):
+        return record, to_intensity_16scale(compiled.run(record.file_path))
+
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        for chunk_start in range(0, reference_total, workers):
+            if abort_event.is_set():
+                raise AbortedError()
+            chunk = ref_records[chunk_start : chunk_start + workers]
+            for record, intensity in pool.map(_load_intensity, chunk):
+                if expected_shape is None:
+                    expected_shape = intensity.shape
+                    reference_acc = np.zeros(expected_shape, dtype=np.float64)
+                elif intensity.shape != expected_shape:
+                    raise ValueError(
+                        "Preprocessing output size changed during Inspect run: "
+                        f"expected {expected_shape[1]}x{expected_shape[0]}, got "
+                        f"{intensity.shape[1]}x{intensity.shape[0]} for {record.file_name}."
+                    )
+                reference_acc += intensity
+                reference_used += 1
+            run.done_count = reference_used
             db.commit()
+            rate = reference_used / max(1e-6, time.perf_counter() - phase_started)
+            logger.info(
+                "Inspect run %s: building reference %s/%s (%.0f img/s)",
+                run.id, reference_used, reference_total, rate,
+            )
 
     if reference_acc is None or reference_used == 0:
         raise ValueError("No images available to build the contrast reference.")
     reference = (reference_acc / float(reference_used)).astype(np.float32)
+
+    # Switch counters to the render phase so the progress bar restarts cleanly.
+    run.frame_count = len(records)
+    run.done_count = 0
+    db.commit()
 
     writer = None
     fourcc = cv2.VideoWriter_fourcc(*"mp4v")

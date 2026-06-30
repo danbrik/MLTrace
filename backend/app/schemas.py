@@ -743,6 +743,9 @@ class TestingRunResultsResponse(BaseModel):
 
     testing_run: TestingRunRead
     results: list[TestingRunResultRead]
+    # Total stored rows; ``results`` may be decimated to <= max_points for charts.
+    total: int = 0
+    decimated: bool = False
 
 
 class TestingRunResultImageResponse(BaseModel):
@@ -825,6 +828,32 @@ class HeatmapRunRead(BaseModel):
     reconstruction_image_data_url: str = ""
     heatmap_image_data_url: str
     error_matrix: list[list[float]] | None = None
+    visualization_config: HeatmapVisualizationConfig
+    config_signature: str
+    render_version: int
+    created_at: datetime
+    updated_at: datetime
+
+
+class HeatmapRunSummary(BaseModel):
+    """Lightweight heatmap row for list endpoints: metadata only, no image data
+    URLs or error matrix (those live on disk and are fetched per heatmap)."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    testing_run_id: int
+    testing_result_id: int | None
+    status: str
+    error_message: str | None
+    image_path: str
+    timestamp: datetime
+    width: int
+    height: int
+    max_error: float
+    mean_error: float
+    max_x: int
+    max_y: int
     visualization_config: HeatmapVisualizationConfig
     config_signature: str
     render_version: int

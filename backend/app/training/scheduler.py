@@ -26,7 +26,7 @@ import threading
 from datetime import datetime
 from pathlib import Path
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.engine import make_url
 
 from app import models
@@ -208,7 +208,7 @@ class JobScheduler:
         total = 0
         for spec in _KINDS.values():
             model = spec["model"]
-            total += len(db.scalars(select(model.id).where(model.status == "running")).all())
+            total += db.scalar(select(func.count()).select_from(model).where(model.status == "running")) or 0
         return total
 
     def _queued_jobs(self, db) -> list[tuple[str, object]]:
