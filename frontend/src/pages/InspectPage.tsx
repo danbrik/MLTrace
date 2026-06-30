@@ -297,6 +297,21 @@ export function InspectPage({ active = true }: { active?: boolean }) {
     setPreviewSignature('');
   }
 
+  function handleAutoFitContrast() {
+    if (
+      !preview?.contrast_enabled ||
+      preview.contrast_diff_min == null ||
+      preview.contrast_diff_max == null
+    ) {
+      return;
+    }
+    const diffMin = preview.contrast_diff_min;
+    const diffMax = preview.contrast_diff_max;
+    setContrastShift(Math.round(-diffMin));
+    setContrastVmax(Math.max(1, Math.round(diffMax - diffMin)));
+    markPreviewStale();
+  }
+
   async function handlePreview() {
     if (!canPreview || trainingDatasetId == null || preprocessingPipelineId == null) return;
     setPreviewLoading(true);
@@ -541,12 +556,22 @@ export function InspectPage({ active = true }: { active?: boolean }) {
                     Intensities are normalised to a 0–65535 scale, so shift/vmax match the legacy 16-bit workflow
                     (e.g. shift 10000, vmax 12000).
                   </Text>
-                  {previewFresh && preview?.contrast_enabled && preview.contrast_diff_min != null && (
+                  {preview?.contrast_enabled && preview.contrast_diff_min != null && (
                     <Alert color="grape" title="Preview diff range">
-                      Frame − reference spans {Math.round(preview.contrast_diff_min)} to{' '}
-                      {Math.round(preview.contrast_diff_max ?? 0)} (reference built from{' '}
-                      {preview.contrast_reference_frames_used} frames). Pick shift/vmax to frame the part you want
-                      to see.
+                      <Stack gap="xs">
+                        <Text size="sm">
+                          Frame − reference spans {Math.round(preview.contrast_diff_min)} to{' '}
+                          {Math.round(preview.contrast_diff_max ?? 0)} (reference built from{' '}
+                          {preview.contrast_reference_frames_used} frames). For full contrast set shift ≈{' '}
+                          {Math.round(-preview.contrast_diff_min)} and vmax ≈{' '}
+                          {Math.max(1, Math.round((preview.contrast_diff_max ?? 0) - preview.contrast_diff_min))}.
+                        </Text>
+                        <Group>
+                          <Button size="compact-sm" variant="light" color="grape" onClick={handleAutoFitContrast}>
+                            Auto-fit shift &amp; vmax
+                          </Button>
+                        </Group>
+                      </Stack>
                     </Alert>
                   )}
                 </>
