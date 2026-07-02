@@ -224,9 +224,10 @@ def _build_model(torch, configuration: models.MethodConfiguration, *, determinis
             if self.to_mu is None:
                 flat = int(encoded.flatten(1).shape[1])
                 self._encoded_shape = tuple(int(dim) for dim in encoded.shape[1:])
-                self.to_mu = nn.Linear(flat, self.latent_dim)
-                self.to_logvar = nn.Linear(flat, self.latent_dim)
-                self.to_seed = nn.Linear(self.latent_dim, flat)
+                device = encoded.device
+                self.to_mu = nn.Linear(flat, self.latent_dim).to(device)
+                self.to_logvar = nn.Linear(flat, self.latent_dim).to(device)
+                self.to_seed = nn.Linear(self.latent_dim, flat).to(device)
 
         def forward(self, x):
             encoded = self.encoder(x)
