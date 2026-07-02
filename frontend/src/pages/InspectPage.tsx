@@ -18,7 +18,7 @@ import {
 } from '@mantine/core';
 import { notifications } from '@mantine/notifications';
 import { Download, Eye, FileVideo, ImageDown, Pause, Play, RefreshCw, Square, Trash2 } from 'lucide-react';
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
 
 import {
@@ -82,30 +82,62 @@ type InspectFrameSource = {
 function InspectFramePlayer({
   title,
   source,
+  resetKey,
   meta,
   actions,
 }: {
   title: string;
   source: InspectFrameSource;
+  resetKey: string;
   meta?: ReactNode;
   actions?: ReactNode;
 }) {
   const frameCount = source.frameCount;
   const [frameIndex, setFrameIndex] = useState(0);
   const [playing, setPlaying] = useState(false);
+  const frameIndexRef = useRef(0);
+  const animationRef = useRef<number | null>(null);
+  const lastFrameTimeRef = useRef<number | null>(null);
 
   useEffect(() => {
     setFrameIndex(0);
+    frameIndexRef.current = 0;
     setPlaying(false);
-  }, [source]);
+  }, [resetKey]);
 
   useEffect(() => {
-    if (!playing || frameCount <= 1) return;
-    const delay = Math.max(40, 1000 / Math.max(1, source.fps));
-    const timer = window.setInterval(() => {
-      setFrameIndex((current) => (current + 1) % frameCount);
-    }, delay);
-    return () => window.clearInterval(timer);
+    if (!playing || frameCount <= 1) {
+      if (animationRef.current !== null) {
+        window.cancelAnimationFrame(animationRef.current);
+        animationRef.current = null;
+      }
+      lastFrameTimeRef.current = null;
+      return undefined;
+    }
+
+    const frameDuration = 1000 / Math.max(1, source.fps);
+    const tick = (now: number) => {
+      const last = lastFrameTimeRef.current;
+      if (last === null) {
+        lastFrameTimeRef.current = now;
+      } else {
+        const elapsedFrames = Math.floor((now - last) / frameDuration);
+        if (elapsedFrames > 0) {
+          frameIndexRef.current = (frameIndexRef.current + elapsedFrames) % frameCount;
+          setFrameIndex(frameIndexRef.current);
+          lastFrameTimeRef.current = last + elapsedFrames * frameDuration;
+        }
+      }
+      animationRef.current = window.requestAnimationFrame(tick);
+    };
+    animationRef.current = window.requestAnimationFrame(tick);
+    return () => {
+      if (animationRef.current !== null) {
+        window.cancelAnimationFrame(animationRef.current);
+        animationRef.current = null;
+      }
+      lastFrameTimeRef.current = null;
+    };
   }, [playing, frameCount, source.fps]);
 
   if (frameCount <= 0) return null;
@@ -154,7 +186,11 @@ function InspectFramePlayer({
           min={0}
           max={Math.max(0, frameCount - 1)}
           value={frameIndex}
-          onChange={(event) => setFrameIndex(Number(event.currentTarget.value))}
+          onChange={(event) => {
+            const next = Number(event.currentTarget.value);
+            frameIndexRef.current = next;
+            setFrameIndex(next);
+          }}
         />
       </Stack>
     </Paper>
@@ -163,49 +199,148 @@ function InspectFramePlayer({
 
 function InspectRunPlayer({ run }: { run: InspectRun }) {
   const frameCount = run.frame_count ?? 0;
+  const [frameIndex, setFrameIndex] = useState(0);
+  const [playing, setPlaying] = useState(false);
+  const videoRef = useRef<HTMLVideoElement | null>(null);
+  const animationRef = useRef<number | null>(null);
+
+  function syncFromVideo() {
+    const video = videoRef.current;
+    if (!video) return;
+    const next = Math.min(frameCount - 1, Math.max(0, Math.floor(video.currentTime * Math.max(1, run.fps))));
+    setFrameIndex(next);
+  }
+
+  async function togglePlayback() {
+    const video = videoRef.current;
+    if (!video) return;
+    if (playing) {
+      video.pause();
+      syncFromVideo();
+      setPlaying(false);
+      return;
+    }
+    await video.play();
+    setPlaying(true);
+  }
+
+  useEffect(() => {
+    if (!playing) {
+      if (animationRef.current !== null) {
+        window.cancelAnimationFrame(animationRef.current);
+        animationRef.current = null;
+      }
+      return undefined;
+    }
+    const tick = () => {
+      syncFromVideo();
+      animationRef.current = window.requestAnimationFrame(tick);
+    };
+    animationRef.current = window.requestAnimationFrame(tick);
+    return () => {
+      if (animationRef.current !== null) {
+        window.cancelAnimationFrame(animationRef.current);
+        animationRef.current = null;
+      }
+    };
+  }, [playing, frameCount, run.fps]);
 
   if (run.status !== 'finished' || frameCount <= 0) return null;
 
   return (
-    <InspectFramePlayer
-      title={run.training_dataset_name}
-      source={{
-        frameCount,
-        fps: run.fps,
-        imageUrl: (index) => inspectRunFrameUrl(run.id, index),
-      }}
-      meta={
-        <>
-          <Badge variant="light">{run.preprocessing_pipeline_name}</Badge>
-          <Badge variant="light" color="gray">
-            {frameCount} frames · {run.fps} fps
-          </Badge>
-        </>
-      }
-      actions={
-        <>
-          <Button
-            size="compact-sm"
-            component="a"
-            href={inspectRunVideoUrl(run.id)}
-            download={`inspect-run-${run.id}.mp4`}
-            leftSection={<Download size={14} />}
-          >
-            Download MP4
-          </Button>
+    <Paper withBorder p="md" radius="sm">
+      <Stack gap="sm">
+        <Group justify="space-between" align="center" wrap="wrap">
+          <Group gap="xs">
+            <Text fw={700}>{run.training_dataset_name}</Text>
+            <Badge variant="light">{run.preprocessing_pipeline_name}</Badge>
+            <Badge variant="light" color="gray">
+              {frameCount} frames · {run.fps} fps
+            </Badge>
+          </Group>
+          <Group gap="xs">
+            <Button
+              size="compact-sm"
+              component="a"
+              href={inspectRunVideoUrl(run.id)}
+              download={`inspect-run-${run.id}.mp4`}
+              leftSection={<Download size={14} />}
+            >
+              Download MP4
+            </Button>
+            <Button
+              size="compact-sm"
+              variant="light"
+              component="a"
+              href={inspectRunFrameUrl(run.id, frameIndex)}
+              download={`inspect-run-${run.id}-frame-${String(frameIndex + 1).padStart(5, '0')}.png`}
+              leftSection={<ImageDown size={14} />}
+            >
+              Download PNG
+            </Button>
+          </Group>
+        </Group>
+
+        <Group gap="xs" align="center">
           <Button
             size="compact-sm"
             variant="light"
-            component="a"
-            href={inspectRunFrameUrl(run.id, 0)}
-            download={`inspect-run-${run.id}-frame.png`}
-            leftSection={<ImageDown size={14} />}
+            leftSection={playing ? <Pause size={14} /> : <Play size={14} />}
+            onClick={() => {
+              togglePlayback().catch((error) => {
+                notifications.show({
+                  color: 'red',
+                  title: 'Playback failed',
+                  message: error instanceof Error ? error.message : 'Unknown error',
+                });
+              });
+            }}
           >
-            Download PNG
+            {playing ? 'Pause' : 'Play'}
           </Button>
-        </>
-      }
-    />
+          <Text size="xs" c="dimmed">
+            Frame {frameIndex + 1}/{frameCount}
+          </Text>
+        </Group>
+        <div style={{ display: 'flex', justifyContent: 'center', width: '100%' }}>
+          <video
+            ref={videoRef}
+            src={inspectRunVideoUrl(run.id)}
+            muted
+            playsInline
+            onEnded={() => {
+              setPlaying(false);
+              syncFromVideo();
+            }}
+            onLoadedMetadata={syncFromVideo}
+            style={{
+              display: 'block',
+              maxWidth: '100%',
+              maxHeight: 'min(70vh, 680px)',
+              width: 'auto',
+              height: 'auto',
+              borderRadius: 6,
+            }}
+          />
+        </div>
+        <input
+          type="range"
+          min={0}
+          max={Math.max(0, frameCount - 1)}
+          value={frameIndex}
+          onChange={(event) => {
+            const next = Number(event.currentTarget.value);
+            const video = videoRef.current;
+            if (video) {
+              video.currentTime = next / Math.max(1, run.fps);
+              video.pause();
+            }
+            setPlaying(false);
+            setFrameIndex(next);
+          }}
+        />
+      </Stack>
+    </Paper>
   );
 }
 
@@ -602,6 +737,7 @@ export function InspectPage({ active = true }: { active?: boolean }) {
           {preview && (
             <InspectFramePlayer
               title="Preview"
+              resetKey={previewSignature || `${trainingDatasetId ?? ''}:${preprocessingPipelineId ?? ''}:${start}:${end}:${stride}`}
               source={{
                 frameCount: preview.preview_frames?.length || 1,
                 fps,
