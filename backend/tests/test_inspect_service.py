@@ -15,6 +15,7 @@ from app.inspect.contrast import StreamingMovingAverage, moving_average_uint8
 from app.inspect import engine as inspect_engine
 from app.inspect import service as inspect_service
 from app.schemas import InspectPreviewRequest, InspectRunCreate
+from app.training import data as inspect_data
 
 
 def write_tiff(path: Path, value: int = 127, size: tuple[int, int] = (12, 8)) -> None:
@@ -248,7 +249,7 @@ def test_create_inspect_run_enqueues_without_full_enumeration(tmp_path: Path, mo
         def boom(*_args, **_kwargs):
             raise AssertionError("create_inspect_run must not enumerate the full range")
 
-        monkeypatch.setattr(inspect_service, "enumerate_training_dataset_image_records_for_range", boom)
+        monkeypatch.setattr(inspect_data, "enumerate_training_dataset_image_records_for_range", boom)
 
         run = inspect_service.create_inspect_run(
             db,
@@ -329,5 +330,43 @@ def test_inspect_contrast_run_writes_video(tmp_path: Path, monkeypatch) -> None:
         assert (Path(stored.frames_dir) / "frame_00000.png").exists()
         assert Path(stored.video_path).exists()
         assert Path(stored.video_path).stat().st_size > 0
+    finally:
+        db.close()
+
+
+def test_preview_uses_head_enumeration_not_full_range(tmp_path: Path, monkeypatch) -> None:
+    SessionLocal = make_db()
+    db = SessionLocal()
+    try:
+        training_dataset, preprocessing = seed_inspect_fixture(db, tmp_path / "images", image_count=6)
+
+        def boom(*_args, **_kwargs):
+            raise AssertionError("preview_inspect must not enumerate the full range")
+
+        monkeypatch.setattr(inspect_data, "enumerate_training_dataset_image_records_for_range", boom)
+
+        preview = inspect_service.preview_inspect(
+            db,
+            InspectPreviewRequest(
+                training_dataset_id=training_dataset.id,
+                preprocessing_pipeline_id=preprocessing.id,
+                start_timestamp=datetime(2026, 2, 4, 15, 30, 0),
+                end_timestamp=datetime(2026, 2, 4, 15, 30, 50),
+                stride=2,
+                contrast_enabled=True,
+                contrast_reference_frames=2,
+                contrast_shift=10000,
+                contrast_vmax=12000,
+                contrast_ma_radius=0,
+            ),
+        )
+        # Saved rule stride selects 00,20,40; extra stride 2 keeps 00,40 → 2 frames.
+        assert preview.selected_images == 2
+        assert preview.matching_images == 2
+        assert preview.contrast_enabled is True
+        assert preview.contrast_reference_frames_used == 2
+        assert preview.preview_frame_count == 2
+        assert preview.image_data_url.startswith("data:image/png;base64,")
+        assert preview.contrast_diff_min is not None and preview.contrast_diff_max is not None
     finally:
         db.close()

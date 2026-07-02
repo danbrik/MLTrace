@@ -269,6 +269,68 @@ def enumerate_training_dataset_image_records_for_range(
     return records[:: max(1, extra_stride)]
 
 
+def enumerate_head_records_for_range(
+    training_dataset: models.TrainingDataset,
+    start_timestamp: datetime,
+    end_timestamp: datetime,
+    *,
+    extra_stride: int = 1,
+    limit: int,
+) -> list[ResolvedDatasetImage]:
+    """Resolve only the first ``limit`` selected records (globally sorted).
+
+    Same selection semantics as :func:`enumerate_training_dataset_image_records_for_range`
+    but bounded: it materializes at most ``limit * extra_stride`` records per rule
+    (indexing directly into the cached timestamp index without copying the whole
+    window), so previews stay fast on huge ranges. The exact total count is not
+    needed here — use ``count_folder_range_images`` for that.
+    """
+    if limit <= 0:
+        return []
+    extra_stride = max(1, extra_stride)
+    per_rule_cap = limit * extra_stride
+
+    candidates: list[ResolvedDatasetImage] = []
+    for rule in _sorted_rules(training_dataset):
+        clipped_start = max(rule.start_timestamp, start_timestamp)
+        clipped_end = min(rule.end_timestamp, end_timestamp)
+        if clipped_end < clipped_start:
+            continue
+        folder = rule.folder
+        dataset = folder.dataset
+        entries = _folder_timestamp_index(folder)
+        left = bisect_left(entries, (clipped_start, "", ""))
+        right = bisect_right(entries, (clipped_end, _HIGH_SORT_SENTINEL, _HIGH_SORT_SENTINEL))
+        step = max(1, rule.stride)
+        index = left
+        picked = 0
+        while index < right and picked < per_rule_cap:
+            timestamp, file_name, file_path = entries[index]
+            candidates.append(
+                ResolvedDatasetImage(
+                    file_path=file_path,
+                    timestamp_parsed=timestamp,
+                    dataset_name=dataset.name,
+                    dataset_root_path=dataset.root_path,
+                    folder_id=folder.id,
+                    folder_relative_path=folder.relative_path,
+                    file_name=file_name,
+                )
+            )
+            picked += 1
+            index += step
+
+    candidates.sort(key=lambda image: (image.timestamp_parsed, image.file_path))
+    seen: set[str] = set()
+    deduped: list[ResolvedDatasetImage] = []
+    for image in candidates:
+        if image.file_path in seen:
+            continue
+        seen.add(image.file_path)
+        deduped.append(image)
+    return deduped[::extra_stride][:limit]
+
+
 def enumerate_training_dataset_image_records(
     training_dataset: models.TrainingDataset,
 ) -> list[ResolvedDatasetImage]:

@@ -7,6 +7,7 @@ import signal
 import subprocess
 import sys
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
 
@@ -26,7 +27,7 @@ from app.preprocessing.pipeline import (
 from app.schemas import InspectPreviewRequest, InspectPreviewResponse, InspectRunCreate, InspectRunRead, PreprocessingGraph
 from app.training.data import (
     count_folder_range_images,
-    enumerate_training_dataset_image_records_for_range,
+    enumerate_head_records_for_range,
 )
 
 logger = logging.getLogger("mltrace.inspect")
@@ -66,57 +67,71 @@ def _load_preprocessing_pipeline(db: Session, preprocessing_pipeline_id: int) ->
     return db.get(models.PreprocessingPipeline, preprocessing_pipeline_id)
 
 
-def _resolve_selected_records(
-    db: Session,
-    payload: InspectPreviewRequest | InspectRunCreate | models.InspectRun,
-):
-    training_dataset_id = int(payload.training_dataset_id)
-    preprocessing_pipeline_id = int(payload.preprocessing_pipeline_id)
-    training_dataset = _load_training_dataset(db, training_dataset_id)
-    if training_dataset is None:
-        raise ValueError(f"Train/Test Dataset does not exist: {training_dataset_id}")
-    preprocessing_pipeline = _load_preprocessing_pipeline(db, preprocessing_pipeline_id)
-    if preprocessing_pipeline is None:
-        raise ValueError(f"Preprocessing pipeline does not exist: {preprocessing_pipeline_id}")
-    if payload.end_timestamp < payload.start_timestamp:
-        raise ValueError("end_timestamp must not be before start_timestamp.")
-    records = enumerate_training_dataset_image_records_for_range(
-        training_dataset,
-        payload.start_timestamp,
-        payload.end_timestamp,
-        extra_stride=max(1, int(payload.stride)),
-    )
-    return training_dataset, preprocessing_pipeline, records
+_PREVIEW_DECODE_WORKERS = min(8, os.cpu_count() or 1)
+
+
+def _parallel_map(fn, items: list):
+    """Apply ``fn`` over items in parallel (ordered results). opencv/decode work
+    releases the GIL, so a thread pool speeds up preview frame decoding."""
+    if len(items) <= 1:
+        return [fn(item) for item in items]
+    with ThreadPoolExecutor(max_workers=min(_PREVIEW_DECODE_WORKERS, len(items))) as pool:
+        return list(pool.map(fn, items))
 
 
 def preview_inspect(db: Session, payload: InspectPreviewRequest) -> InspectPreviewResponse:
-    training_dataset, preprocessing_pipeline, records = _resolve_selected_records(db, payload)
+    training_dataset = _load_training_dataset(db, int(payload.training_dataset_id))
+    if training_dataset is None:
+        raise ValueError(f"Train/Test Dataset does not exist: {payload.training_dataset_id}")
+    preprocessing_pipeline = _load_preprocessing_pipeline(db, int(payload.preprocessing_pipeline_id))
+    if preprocessing_pipeline is None:
+        raise ValueError(f"Preprocessing pipeline does not exist: {payload.preprocessing_pipeline_id}")
+    if payload.end_timestamp < payload.start_timestamp:
+        raise ValueError("end_timestamp must not be before start_timestamp.")
+
+    # Cheap total count for display; only the head of records is actually rendered.
+    total_selected = _estimate_frame_count(
+        training_dataset, payload.start_timestamp, payload.end_timestamp, max(1, payload.stride)
+    )
+    if total_selected == 0:
+        raise ValueError("No images in selected range.")
+
+    limit = (
+        max(max(1, int(payload.contrast_reference_frames)), _PREVIEW_FRAME_LIMIT)
+        if payload.contrast_enabled
+        else _PREVIEW_FRAME_LIMIT
+    )
+    records = enumerate_head_records_for_range(
+        training_dataset,
+        payload.start_timestamp,
+        payload.end_timestamp,
+        extra_stride=max(1, payload.stride),
+        limit=limit,
+    )
     if not records:
         raise ValueError("No images in selected range.")
+
     graph = PreprocessingGraph.model_validate(preprocessing_pipeline.graph)
     compiled = compile_pipeline(graph)
 
     if payload.contrast_enabled:
-        return _preview_contrast(payload, training_dataset, preprocessing_pipeline, records, compiled)
-
-    preview_frames = []
-    first_image = None
-    for index, record in enumerate(records[:_PREVIEW_FRAME_LIMIT]):
-        image = compiled.run(record.file_path)
-        if first_image is None:
-            first_image = image
-        preview_frames.append(
-            {
-                "index": index,
-                "timestamp": record.timestamp_parsed.isoformat(),
-                "image_path": record.file_path,
-                "image_data_url": encode_absolute_image_data_url(image),
-            }
+        return _preview_contrast(
+            payload, training_dataset, preprocessing_pipeline, records, compiled, total_selected
         )
+
+    head = records[:_PREVIEW_FRAME_LIMIT]
+    images = _parallel_map(lambda record: compiled.run(record.file_path), head)
+    preview_frames = [
+        {
+            "index": index,
+            "timestamp": record.timestamp_parsed.isoformat(),
+            "image_path": record.file_path,
+            "image_data_url": encode_absolute_image_data_url(image),
+        }
+        for index, (record, image) in enumerate(zip(head, images))
+    ]
     first = records[0]
-    image = first_image
-    if image is None:
-        raise ValueError("No images in selected range.")
+    image = images[0]
     width, height, channels, dtype, value_min, value_max = image_metadata(image)
     return InspectPreviewResponse(
         training_dataset_id=training_dataset.id,
@@ -124,8 +139,8 @@ def preview_inspect(db: Session, payload: InspectPreviewRequest) -> InspectPrevi
         start_timestamp=payload.start_timestamp,
         end_timestamp=payload.end_timestamp,
         stride=max(1, payload.stride),
-        matching_images=len(records),
-        selected_images=len(records),
+        matching_images=total_selected,
+        selected_images=total_selected,
         first_image_path=first.file_path,
         first_timestamp=first.timestamp_parsed,
         width=width,
@@ -146,6 +161,7 @@ def _preview_contrast(
     preprocessing_pipeline: models.PreprocessingPipeline,
     records,
     compiled,
+    total_selected: int,
 ) -> InspectPreviewResponse:
     reference_frames = max(1, int(payload.contrast_reference_frames))
     shift = float(payload.contrast_shift)
@@ -157,27 +173,24 @@ def _preview_contrast(
     preview_count = min(_PREVIEW_FRAME_LIMIT, len(records))
     needed = max(reference_used, preview_count)
 
-    intensities: list[np.ndarray] = []
-    reference_acc: np.ndarray | None = None
-    expected_shape: tuple[int, int] | None = None
-    for index in range(needed):
-        record = records[index]
-        intensity = to_intensity_16scale(compiled.run(record.file_path))
-        if expected_shape is None:
-            expected_shape = intensity.shape
-            reference_acc = np.zeros(expected_shape, dtype=np.float64)
-        elif intensity.shape != expected_shape:
+    # Decode the needed head frames in parallel, then accumulate the reference serially.
+    all_intensities = _parallel_map(
+        lambda record: to_intensity_16scale(compiled.run(record.file_path)),
+        records[:needed],
+    )
+    expected_shape = all_intensities[0].shape
+    reference_acc = np.zeros(expected_shape, dtype=np.float64)
+    for index, intensity in enumerate(all_intensities):
+        if intensity.shape != expected_shape:
             raise ValueError(
                 "Preprocessing output size changed within the preview window: "
                 f"expected {expected_shape[1]}x{expected_shape[0]}, got "
-                f"{intensity.shape[1]}x{intensity.shape[0]} for {record.file_name}."
+                f"{intensity.shape[1]}x{intensity.shape[0]} for {records[index].file_name}."
             )
         if index < reference_used:
             reference_acc += intensity
-        if index < preview_count:
-            intensities.append(intensity)
 
-    assert reference_acc is not None
+    intensities = all_intensities[:preview_count]
     reference = (reference_acc / float(reference_used)).astype(np.float32)
 
     preview_frames = []
@@ -210,8 +223,8 @@ def _preview_contrast(
         start_timestamp=payload.start_timestamp,
         end_timestamp=payload.end_timestamp,
         stride=max(1, payload.stride),
-        matching_images=len(records),
-        selected_images=len(records),
+        matching_images=total_selected,
+        selected_images=total_selected,
         first_image_path=first.file_path,
         first_timestamp=first.timestamp_parsed,
         width=width,
