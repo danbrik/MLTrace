@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import time
+from datetime import datetime
 from pathlib import Path
 
 from sqlalchemy import delete, func, select
@@ -30,12 +31,14 @@ from app.preprocessing.registry import registry
 from app.scanner import detect_timestamp_pattern, probe_first_direct_tiff, scan_dataset_files
 from app.training.data import FolderTimestampCache, count_folder_range_images
 from app.schemas import (
+    CacheRevisionsRead,
     DatasetConnectionTestResponse,
     DatasetRead,
     MethodConfigurationCreate,
     MethodConfigurationParameterRead,
     MethodConfigurationPayload,
     MethodConfigurationRead,
+    MethodConfigurationSummaryRead,
     MethodTorchCheckResponse,
     MethodConfigurationValidationResponse,
     MethodDefinitionRead,
@@ -43,6 +46,7 @@ from app.schemas import (
     PreprocessingGraph,
     PreprocessingPipelineCreate,
     PreprocessingPipelineRead,
+    PreprocessingPipelineSummaryRead,
     PreprocessingPreviewRequest,
     PreprocessingPreviewResponse,
     PreprocessingStepRead,
@@ -52,6 +56,7 @@ from app.schemas import (
     TrainingDatasetRead,
     TrainingDatasetRulePreview,
     TrainingDatasetRuleRead,
+    TrainingDatasetSummaryRead,
     TrainingPipelineCreate,
     TrainingPipelineDatasetRead,
     TrainingPipelineDryRunRequest,
@@ -59,9 +64,36 @@ from app.schemas import (
     TrainingPipelineModelOutput,
     TrainingPipelinePayload,
     TrainingPipelineRead,
+    TrainingPipelineSummaryRead,
 )
 
 logger = logging.getLogger("mltrace.services")
+
+
+def _revision_for_model(db: Session, model, timestamp_column) -> str:
+    count, newest = db.execute(select(func.count(model.id), func.max(timestamp_column))).one()
+    return f"{int(count or 0)}:{newest.isoformat() if newest else 'none'}"
+
+
+def cache_revisions(db: Session) -> CacheRevisionsRead:
+    revisions = {
+        "datasets": _revision_for_model(db, models.Dataset, models.Dataset.updated_at),
+        "trainingDatasets": _revision_for_model(db, models.TrainingDataset, models.TrainingDataset.updated_at),
+        "preprocessingPipelines": _revision_for_model(db, models.PreprocessingPipeline, models.PreprocessingPipeline.updated_at),
+        "methodConfigurations": _revision_for_model(db, models.MethodConfiguration, models.MethodConfiguration.updated_at),
+        "trainingPipelines": _revision_for_model(db, models.TrainingPipeline, models.TrainingPipeline.updated_at),
+        "trainingRuns": _revision_for_model(db, models.TrainingRun, models.TrainingRun.updated_at),
+        "testingRuns": _revision_for_model(db, models.TestingRun, models.TestingRun.updated_at),
+        "heatmaps": _revision_for_model(db, models.HeatmapRun, models.HeatmapRun.updated_at),
+        "heatmapRanges": _revision_for_model(db, models.HeatmapRangeRun, models.HeatmapRangeRun.updated_at),
+        "inspectRuns": _revision_for_model(db, models.InspectRun, models.InspectRun.updated_at),
+        "analysisLayouts": _revision_for_model(db, models.AnalysisLayout, models.AnalysisLayout.updated_at),
+        "rois": _revision_for_model(db, models.RoiDefinition, models.RoiDefinition.updated_at),
+        "preprocessingSteps": f"static:{len(registry.list_definitions())}",
+        "methodDefinitions": f"static:{len(model_registry.list_definitions())}",
+        "methodLayers": f"static:{len(list_layer_definitions())}",
+    }
+    return CacheRevisionsRead(revisions=revisions)
 
 
 def dataset_update_lock_reasons(db: Session, dataset_id: int) -> list[str]:
@@ -497,7 +529,7 @@ def update_training_dataset(
     return get_training_dataset(db, training_dataset_id)
 
 
-def list_training_datasets(db: Session) -> list[TrainingDatasetRead]:
+def list_training_datasets(db: Session, *, summary: bool = False) -> list[TrainingDatasetRead | TrainingDatasetSummaryRead]:
     training_datasets = list(
         db.scalars(
             select(models.TrainingDataset)
@@ -510,6 +542,11 @@ def list_training_datasets(db: Session) -> list[TrainingDatasetRead]:
         )
     )
     lock_map = _training_dataset_lock_reason_map(db)
+    if summary:
+        return [
+            summarize_training_dataset(db, training_dataset, lock_map.get(training_dataset.id, []))
+            for training_dataset in training_datasets
+        ]
     return [
         serialize_training_dataset(db, training_dataset, lock_map.get(training_dataset.id, []))
         for training_dataset in training_datasets
@@ -569,6 +606,7 @@ def cleanup_invalid_training_dataset_rules(db: Session, training_dataset_id: int
     ]
     if invalid_rule_ids:
         db.execute(delete(models.TrainingDatasetRule).where(models.TrainingDatasetRule.id.in_(invalid_rule_ids)))
+        training_dataset.updated_at = datetime.utcnow()
         db.commit()
     return get_training_dataset(db, training_dataset_id)
 
@@ -599,6 +637,7 @@ def refresh_training_dataset_counts(db: Session, training_dataset_id: int) -> Tr
         )
         rule.matching_images = counts.matching_images
         rule.selected_images = counts.selected_images
+    training_dataset.updated_at = datetime.utcnow()
     db.commit()
     return get_training_dataset(db, training_dataset_id)
 
@@ -784,6 +823,7 @@ def serialize_training_dataset(
         usage_label=training_dataset.usage_label,
         notes=training_dataset.notes,
         created_at=training_dataset.created_at,
+        updated_at=training_dataset.updated_at,
         start_timestamp=aggregate_start,
         end_timestamp=aggregate_end,
         dataset_names=sorted(dataset_names),
@@ -795,6 +835,76 @@ def serialize_training_dataset(
         is_update_locked=bool(resolved_lock_reasons),
         update_lock_reasons=resolved_lock_reasons,
         invalid_rule_count=len(invalid_rules),
+        integrity_warnings=integrity_warnings,
+        counts_missing=missing_count_rules > 0,
+    )
+
+
+def summarize_training_dataset(
+    db: Session,
+    training_dataset: models.TrainingDataset,
+    lock_reasons: list[str] | None = None,
+) -> TrainingDatasetSummaryRead:
+    dataset_names: set[str] = set()
+    resolutions: set[str] = set()
+    signatures: set[str] = set()
+    total_matching = 0
+    total_selected = 0
+    missing_count_rules = 0
+    aggregate_start = None
+    aggregate_end = None
+    invalid_count = 0
+    for rule in training_dataset.rules:
+        if rule.folder is None or rule.folder.dataset is None:
+            invalid_count += 1
+            continue
+        folder = rule.folder
+        dataset = folder.dataset
+        aggregate_start = rule.start_timestamp if aggregate_start is None else min(aggregate_start, rule.start_timestamp)
+        aggregate_end = rule.end_timestamp if aggregate_end is None else max(aggregate_end, rule.end_timestamp)
+        matching, selected = count_rule_images(db, rule)
+        if matching is None or selected is None:
+            missing_count_rules += 1
+        else:
+            total_matching += matching
+            total_selected += selected
+        dataset_names.add(dataset.name)
+        if folder.resolution_summary:
+            resolutions.update(folder.resolution_summary.keys())
+        signature = folder_image_signature(folder)
+        if signature:
+            signatures.add(signature)
+
+    integrity_warnings: list[str] = []
+    if invalid_count:
+        integrity_warnings.append(
+            f"{invalid_count} invalid Train/Test rule(s) reference a missing dataset folder and were skipped."
+        )
+    if missing_count_rules:
+        integrity_warnings.append(
+            f"Counts need refresh for {missing_count_rules} Train/Test rule(s). Use Refresh counts to compute stored image counts."
+        )
+
+    resolved_lock_reasons = (
+        training_dataset_update_lock_reasons(db, training_dataset.id) if lock_reasons is None else lock_reasons
+    )
+    return TrainingDatasetSummaryRead(
+        id=training_dataset.id,
+        name=training_dataset.name,
+        usage_label=training_dataset.usage_label,
+        notes=training_dataset.notes,
+        created_at=training_dataset.created_at,
+        updated_at=training_dataset.updated_at,
+        start_timestamp=aggregate_start,
+        end_timestamp=aggregate_end,
+        dataset_names=sorted(dataset_names),
+        image_resolutions=sorted(resolutions),
+        image_signatures=sorted(signatures),
+        total_matching_images=total_matching,
+        total_selected_images=total_selected,
+        is_update_locked=bool(resolved_lock_reasons),
+        update_lock_reasons=resolved_lock_reasons,
+        invalid_rule_count=invalid_count,
         integrity_warnings=integrity_warnings,
         counts_missing=missing_count_rules > 0,
     )
@@ -890,13 +1000,45 @@ def serialize_preprocessing_pipeline(
 ) -> PreprocessingPipelineRead:
     reasons = preprocessing_pipeline_update_lock_reasons(db, pipeline.id) if lock_reasons is None else lock_reasons
     return PreprocessingPipelineRead.model_validate(pipeline).model_copy(
-        update={"is_update_locked": bool(reasons), "update_lock_reasons": reasons}
+        update={
+            "is_update_locked": bool(reasons),
+            "update_lock_reasons": reasons,
+            "step_count": len((pipeline.graph or {}).get("nodes") or []),
+            "step_types": [str(node.get("type")) for node in ((pipeline.graph or {}).get("nodes") or [])],
+        }
     )
 
 
-def list_preprocessing_pipelines(db: Session) -> list[PreprocessingPipelineRead]:
+def summarize_preprocessing_pipeline(
+    pipeline: models.PreprocessingPipeline,
+    lock_reasons: list[str] | None = None,
+) -> PreprocessingPipelineSummaryRead:
+    nodes = (pipeline.graph or {}).get("nodes") or []
+    return PreprocessingPipelineSummaryRead(
+        id=pipeline.id,
+        name=pipeline.name,
+        description=pipeline.description,
+        preview_folder_id=pipeline.preview_folder_id,
+        input_width=pipeline.input_width,
+        input_height=pipeline.input_height,
+        output_width=pipeline.output_width,
+        output_height=pipeline.output_height,
+        created_at=pipeline.created_at,
+        updated_at=pipeline.updated_at,
+        is_update_locked=bool(lock_reasons or []),
+        update_lock_reasons=lock_reasons or [],
+        step_count=len(nodes),
+        step_types=[str(node.get("type")) for node in nodes],
+    )
+
+
+def list_preprocessing_pipelines(
+    db: Session, *, summary: bool = False
+) -> list[PreprocessingPipelineRead | PreprocessingPipelineSummaryRead]:
     pipelines = list(db.scalars(select(models.PreprocessingPipeline).order_by(models.PreprocessingPipeline.created_at.desc())))
     lock_map = _preprocessing_pipeline_lock_reason_map(db)
+    if summary:
+        return [summarize_preprocessing_pipeline(pipeline, lock_map.get(pipeline.id, [])) for pipeline in pipelines]
     return [serialize_preprocessing_pipeline(db, pipeline, lock_map.get(pipeline.id, [])) for pipeline in pipelines]
 
 
@@ -1388,15 +1530,19 @@ def create_method_configuration(db: Session, payload: MethodConfigurationCreate)
     return get_method_configuration(db, method_configuration.id)  # type: ignore[return-value]
 
 
-def list_method_configurations(db: Session) -> list[MethodConfigurationRead]:
-    configurations = list(
-        db.scalars(
-            select(models.MethodConfiguration)
-            .order_by(models.MethodConfiguration.created_at.desc())
-            .options(selectinload(models.MethodConfiguration.parameters))
-        )
-    )
+def list_method_configurations(
+    db: Session, *, summary: bool = False
+) -> list[MethodConfigurationRead | MethodConfigurationSummaryRead]:
+    query = select(models.MethodConfiguration).order_by(models.MethodConfiguration.created_at.desc())
+    if not summary:
+        query = query.options(selectinload(models.MethodConfiguration.parameters))
+    configurations = list(db.scalars(query))
     lock_map = _method_configuration_lock_reason_map(db)
+    if summary:
+        return [
+            summarize_method_configuration(configuration, lock_map.get(configuration.id, []))
+            for configuration in configurations
+        ]
     return [
         serialize_method_configuration(configuration, db, lock_map.get(configuration.id, []))
         for configuration in configurations
@@ -1520,6 +1666,36 @@ def serialize_method_configuration(
         parameters=parameters,
         is_update_locked=bool(resolved_lock_reasons),
         update_lock_reasons=resolved_lock_reasons,
+    )
+
+
+def summarize_method_configuration(
+    configuration: models.MethodConfiguration,
+    lock_reasons: list[str] | None = None,
+) -> MethodConfigurationSummaryRead:
+    return MethodConfigurationSummaryRead(
+        id=configuration.id,
+        name=configuration.name,
+        description=configuration.description,
+        method_type=configuration.method_type,
+        method_family=configuration.method_family,
+        method_version=configuration.method_version,
+        training_mode=configuration.training_mode,
+        architecture_type=configuration.method_type,
+        architecture_version=configuration.method_version,
+        requires_training=configuration.requires_training,
+        supports_training_pipeline=configuration.supports_training_pipeline,
+        artifact_kind=configuration.artifact_kind,
+        builder_kind=configuration.builder_kind,
+        method_config=configuration.method_config,
+        model_config=configuration.method_config,
+        training_config=configuration.training_config,
+        inference_config=configuration.inference_config,
+        created_at=configuration.created_at,
+        updated_at=configuration.updated_at,
+        validation=None,
+        is_update_locked=bool(lock_reasons or []),
+        update_lock_reasons=lock_reasons or [],
     )
 
 
@@ -1817,10 +1993,12 @@ def _training_pipeline_query():
     )
 
 
-def list_training_pipelines(db: Session) -> list[TrainingPipelineRead]:
+def list_training_pipelines(db: Session, *, summary: bool = False) -> list[TrainingPipelineRead | TrainingPipelineSummaryRead]:
     pipelines = list(
         db.scalars(_training_pipeline_query().order_by(models.TrainingPipeline.created_at.desc()))
     )
+    if summary:
+        return [summarize_training_pipeline(db, pipeline) for pipeline in pipelines]
     return [serialize_training_pipeline(db, pipeline) for pipeline in pipelines]
 
 
@@ -1870,6 +2048,51 @@ def serialize_training_pipeline(db: Session, pipeline: models.TrainingPipeline) 
 
     lock_reasons = training_pipeline_update_lock_reasons(db, pipeline.id)
     return TrainingPipelineRead(
+        id=pipeline.id,
+        name=pipeline.name,
+        description=pipeline.description,
+        shuffle=pipeline.shuffle,
+        training_parameters=pipeline.training_parameters,
+        preprocessing_pipeline_id=pipeline.preprocessing_pipeline_id,
+        preprocessing_pipeline_name=pipeline.preprocessing_pipeline.name,
+        preprocessing_input_width=pipeline.preprocessing_pipeline.input_width,
+        preprocessing_input_height=pipeline.preprocessing_pipeline.input_height,
+        preprocessing_output_width=pipeline.preprocessing_pipeline.output_width,
+        preprocessing_output_height=pipeline.preprocessing_pipeline.output_height,
+        method_configuration_id=pipeline.method_configuration_id,
+        method_configuration_name=pipeline.method_configuration.name,
+        method_type=pipeline.method_configuration.method_type,
+        training_mode=pipeline.method_configuration.training_mode,
+        builder_kind=pipeline.method_configuration.builder_kind,
+        total_selected_images=total_selected,
+        training_datasets=entries,
+        created_at=pipeline.created_at,
+        updated_at=pipeline.updated_at,
+        is_update_locked=bool(lock_reasons),
+        update_lock_reasons=lock_reasons,
+    )
+
+
+def summarize_training_pipeline(db: Session, pipeline: models.TrainingPipeline) -> TrainingPipelineSummaryRead:
+    entries: list[TrainingPipelineDatasetRead] = []
+    total_selected = 0
+    for entry in pipeline.entries:
+        summary = summarize_training_dataset(db, entry.training_dataset, [])
+        total_selected += summary.total_selected_images
+        entries.append(
+            TrainingPipelineDatasetRead(
+                training_dataset_id=entry.training_dataset_id,
+                position=entry.position,
+                name=summary.name,
+                start_timestamp=summary.start_timestamp,
+                end_timestamp=summary.end_timestamp,
+                total_selected_images=summary.total_selected_images,
+                dataset_names=summary.dataset_names,
+            )
+        )
+
+    lock_reasons = training_pipeline_update_lock_reasons(db, pipeline.id)
+    return TrainingPipelineSummaryRead(
         id=pipeline.id,
         name=pipeline.name,
         description=pipeline.description,

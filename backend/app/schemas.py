@@ -128,6 +128,7 @@ class TrainingDatasetRead(BaseModel):
     usage_label: str = "train"
     notes: str | None
     created_at: datetime
+    updated_at: datetime | None = None
     start_timestamp: datetime | None = None
     end_timestamp: datetime | None = None
     dataset_names: list[str]
@@ -138,6 +139,27 @@ class TrainingDatasetRead(BaseModel):
     total_matching_images: int
     total_selected_images: int
     rules: list[TrainingDatasetRuleRead] = []
+    is_update_locked: bool = False
+    update_lock_reasons: list[str] = []
+    invalid_rule_count: int = 0
+    integrity_warnings: list[str] = []
+    counts_missing: bool = False
+
+
+class TrainingDatasetSummaryRead(BaseModel):
+    id: int
+    name: str
+    usage_label: str = "train"
+    notes: str | None
+    created_at: datetime
+    updated_at: datetime | None = None
+    start_timestamp: datetime | None = None
+    end_timestamp: datetime | None = None
+    dataset_names: list[str]
+    image_resolutions: list[str] = []
+    image_signatures: list[str] = []
+    total_matching_images: int
+    total_selected_images: int
     is_update_locked: bool = False
     update_lock_reasons: list[str] = []
     invalid_rule_count: int = 0
@@ -200,6 +222,27 @@ class PreprocessingPipelineRead(BaseModel):
     updated_at: datetime
     is_update_locked: bool = False
     update_lock_reasons: list[str] = []
+    step_count: int | None = None
+    step_types: list[str] = []
+
+
+class PreprocessingPipelineSummaryRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    name: str
+    description: str | None
+    preview_folder_id: int | None
+    input_width: int | None
+    input_height: int | None
+    output_width: int | None
+    output_height: int | None
+    created_at: datetime
+    updated_at: datetime
+    is_update_locked: bool = False
+    update_lock_reasons: list[str] = []
+    step_count: int
+    step_types: list[str] = []
 
 
 class PreprocessingPreviewRequest(BaseModel):
@@ -422,6 +465,33 @@ class MethodConfigurationRead(BaseModel):
     update_lock_reasons: list[str] = []
 
 
+class MethodConfigurationSummaryRead(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    id: int
+    name: str
+    description: str | None
+    method_type: str
+    method_family: str
+    method_version: str
+    training_mode: str
+    architecture_type: str
+    architecture_version: str
+    requires_training: bool
+    supports_training_pipeline: bool
+    artifact_kind: str
+    builder_kind: str
+    method_config: dict
+    model_params: dict = Field(alias="model_config")
+    training_config: dict
+    inference_config: dict
+    created_at: datetime
+    updated_at: datetime
+    validation: dict | None = None
+    is_update_locked: bool = False
+    update_lock_reasons: list[str] = []
+
+
 class MethodConfigurationValidationResponse(BaseModel):
     valid: bool
     errors: list[str] = []
@@ -473,6 +543,31 @@ class TrainingPipelineDatasetRead(BaseModel):
 
 
 class TrainingPipelineRead(BaseModel):
+    id: int
+    name: str
+    description: str | None
+    shuffle: bool
+    training_parameters: dict
+    preprocessing_pipeline_id: int
+    preprocessing_pipeline_name: str
+    preprocessing_input_width: int | None
+    preprocessing_input_height: int | None
+    preprocessing_output_width: int | None
+    preprocessing_output_height: int | None
+    method_configuration_id: int
+    method_configuration_name: str
+    method_type: str
+    training_mode: str
+    builder_kind: str
+    total_selected_images: int
+    training_datasets: list[TrainingPipelineDatasetRead] = []
+    created_at: datetime
+    updated_at: datetime
+    is_update_locked: bool = False
+    update_lock_reasons: list[str] = []
+
+
+class TrainingPipelineSummaryRead(BaseModel):
     id: int
     name: str
     description: str | None
@@ -858,7 +953,10 @@ class HeatmapRunSummary(BaseModel):
     config_signature: str
     render_version: int
     created_at: datetime
-    updated_at: datetime
+
+
+class CacheRevisionsRead(BaseModel):
+    revisions: dict[str, str]
 
 
 class HeatmapRangeRunCreate(BaseModel):

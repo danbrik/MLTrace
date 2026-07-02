@@ -1,4 +1,5 @@
 import type {
+  CacheRevisions,
   Dataset,
   DatasetConnectionTest,
   AnalysisLayout,
@@ -36,8 +37,16 @@ import type {
   TrainingRun,
   TrainingRunFilters,
 } from './types';
+import { cachedResource, invalidateResources, setResourceRevision, type ResourceKey } from './resourceCache';
 
 const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL ?? '').trim().replace(/\/+$/, '');
+const STATIC_TTL_MS = 24 * 60 * 60 * 1000;
+const REFERENCE_TTL_MS = 5 * 60 * 1000;
+const RUN_TTL_MS = 1500;
+
+let revisionsCache: { value?: Record<string, string>; expiresAt: number; inFlight?: Promise<Record<string, string>> } = {
+  expiresAt: 0,
+};
 
 /** Error carrying the HTTP status and the raw `detail` payload (string or object). */
 export class ApiError extends Error {
@@ -100,8 +109,85 @@ async function request<T>(path: string, options?: RequestInit, timeoutMs?: numbe
   return response.json() as Promise<T>;
 }
 
+async function cacheRevisions(): Promise<Record<string, string>> {
+  const now = Date.now();
+  if (revisionsCache.value && revisionsCache.expiresAt > now) {
+    return revisionsCache.value;
+  }
+  if (revisionsCache.inFlight) {
+    return revisionsCache.inFlight;
+  }
+  const inFlight = request<CacheRevisions>('/api/cache/revisions')
+    .then((result) => {
+      revisionsCache = { value: result.revisions, expiresAt: Date.now() + 2000 };
+      return result.revisions;
+    })
+    .finally(() => {
+      if (revisionsCache.inFlight === inFlight) {
+        delete revisionsCache.inFlight;
+      }
+    });
+  revisionsCache.inFlight = inFlight;
+  return inFlight;
+}
+
+function revisionFor(key: ResourceKey): Promise<string | undefined> {
+  return cacheRevisions().then((revisions) => revisions[key]);
+}
+
+function cachedList<T>(key: ResourceKey, path: string, ttlMs: number): Promise<T> {
+  return cachedResource<T>(
+    key,
+    () =>
+      request<T>(path).then((value) => {
+        const revision = revisionsCache.value?.[key];
+        if (revision) setResourceRevision(key, revision);
+        return value;
+      }),
+    { ttlMs, revision: () => revisionFor(key) },
+  );
+}
+
+function invalidate(keys: ResourceKey[]): void {
+  revisionsCache = { expiresAt: 0 };
+  invalidateResources(keys);
+}
+
+function normalizeTrainingDataset(dataset: TrainingDataset): TrainingDataset {
+  return { ...dataset, rules: dataset.rules ?? [] };
+}
+
+function normalizePreprocessingPipeline(pipeline: PreprocessingPipeline): PreprocessingPipeline {
+  return {
+    ...pipeline,
+    graph: pipeline.graph ?? { nodes: [], edges: [] },
+    step_count: pipeline.step_count ?? pipeline.graph?.nodes?.length ?? 0,
+    step_types: pipeline.step_types ?? pipeline.graph?.nodes?.map((node) => node.type) ?? [],
+  };
+}
+
+function emptyDiagram(method: MethodConfiguration) {
+  return {
+    architecture_type: method.method_type,
+    builder_kind: method.builder_kind,
+    nodes: [],
+    edges: [],
+  };
+}
+
+function normalizeMethodConfiguration(method: MethodConfiguration): MethodConfiguration {
+  return {
+    ...method,
+    method_graph: method.method_graph ?? {},
+    model_graph: method.model_graph ?? method.method_graph ?? {},
+    model_config: method.model_config ?? method.method_config ?? {},
+    diagram: method.diagram ?? emptyDiagram(method),
+    parameters: method.parameters ?? [],
+  };
+}
+
 export function listDatasets(): Promise<Dataset[]> {
-  return request<Dataset[]>('/api/datasets');
+  return cachedList<Dataset[]>('datasets', '/api/datasets', REFERENCE_TTL_MS);
 }
 
 export function getDataset(datasetId: number): Promise<Dataset> {
@@ -112,7 +198,10 @@ export function createDataset(payload: { name: string; root_path: string }): Pro
   return request<Dataset>('/api/datasets', {
     method: 'POST',
     body: JSON.stringify(payload),
-  }, 60_000);
+  }, 60_000).then((dataset) => {
+    invalidate(['datasets']);
+    return dataset;
+  });
 }
 
 export function testDatasetConnection(payload: { root_path: string }): Promise<DatasetConnectionTest> {
@@ -126,6 +215,7 @@ export async function deleteDataset(datasetId: number): Promise<void> {
   await request<void>(`/api/datasets/${datasetId}`, {
     method: 'DELETE',
   });
+  invalidate(['datasets', 'trainingDatasets', 'preprocessingPipelines']);
 }
 
 export function confirmTimestampFormat(
@@ -135,6 +225,9 @@ export function confirmTimestampFormat(
   return request<Dataset>(`/api/datasets/${datasetId}/confirm-timestamp-format`, {
     method: 'POST',
     body: JSON.stringify(payload),
+  }).then((dataset) => {
+    invalidate(['datasets']);
+    return dataset;
   });
 }
 
@@ -142,6 +235,9 @@ export function rescanDataset(datasetId: number): Promise<Dataset> {
   return request<Dataset>(`/api/datasets/${datasetId}/rescan`, {
     method: 'POST',
     body: JSON.stringify({}),
+  }).then((dataset) => {
+    invalidate(['datasets', 'trainingDatasets', 'preprocessingPipelines']);
+    return dataset;
   });
 }
 
@@ -163,15 +259,20 @@ export function createTrainingDataset(payload: {
   return request<TrainingDataset>('/api/training-datasets', {
     method: 'POST',
     body: JSON.stringify(payload),
+  }).then((dataset) => {
+    invalidate(['trainingDatasets', 'trainingPipelines']);
+    return normalizeTrainingDataset(dataset);
   });
 }
 
 export function listTrainingDatasets(): Promise<TrainingDataset[]> {
-  return request<TrainingDataset[]>('/api/training-datasets');
+  return cachedList<TrainingDataset[]>('trainingDatasets', '/api/training-datasets?summary=true', REFERENCE_TTL_MS).then((datasets) =>
+    datasets.map(normalizeTrainingDataset),
+  );
 }
 
 export function getTrainingDataset(trainingDatasetId: number): Promise<TrainingDataset> {
-  return request<TrainingDataset>(`/api/training-datasets/${trainingDatasetId}`);
+  return request<TrainingDataset>(`/api/training-datasets/${trainingDatasetId}`).then(normalizeTrainingDataset);
 }
 
 export function updateTrainingDataset(
@@ -186,6 +287,9 @@ export function updateTrainingDataset(
   return request<TrainingDataset>(`/api/training-datasets/${trainingDatasetId}`, {
     method: 'PUT',
     body: JSON.stringify(payload),
+  }).then((dataset) => {
+    invalidate(['trainingDatasets', 'trainingPipelines']);
+    return normalizeTrainingDataset(dataset);
   });
 }
 
@@ -193,6 +297,9 @@ export function cleanupTrainingDatasetInvalidRules(trainingDatasetId: number): P
   return request<TrainingDataset>(`/api/training-datasets/${trainingDatasetId}/cleanup-invalid-rules`, {
     method: 'POST',
     body: JSON.stringify({}),
+  }).then((dataset) => {
+    invalidate(['trainingDatasets', 'trainingPipelines']);
+    return normalizeTrainingDataset(dataset);
   });
 }
 
@@ -200,6 +307,9 @@ export function refreshTrainingDatasetCounts(trainingDatasetId: number): Promise
   return request<TrainingDataset>(`/api/training-datasets/${trainingDatasetId}/refresh-counts`, {
     method: 'POST',
     body: JSON.stringify({}),
+  }).then((dataset) => {
+    invalidate(['trainingDatasets', 'trainingPipelines']);
+    return normalizeTrainingDataset(dataset);
   });
 }
 
@@ -207,18 +317,23 @@ export async function deleteTrainingDataset(trainingDatasetId: number): Promise<
   await request<void>(`/api/training-datasets/${trainingDatasetId}`, {
     method: 'DELETE',
   });
+  invalidate(['trainingDatasets', 'trainingPipelines']);
 }
 
 export function listPreprocessingSteps(): Promise<PreprocessingStepDefinition[]> {
-  return request<PreprocessingStepDefinition[]>('/api/preprocessing/steps');
+  return cachedList<PreprocessingStepDefinition[]>('preprocessingSteps', '/api/preprocessing/steps', STATIC_TTL_MS);
 }
 
 export function listPreprocessingPipelines(): Promise<PreprocessingPipeline[]> {
-  return request<PreprocessingPipeline[]>('/api/preprocessing/pipelines');
+  return cachedList<PreprocessingPipeline[]>(
+    'preprocessingPipelines',
+    '/api/preprocessing/pipelines?summary=true',
+    REFERENCE_TTL_MS,
+  ).then((pipelines) => pipelines.map(normalizePreprocessingPipeline));
 }
 
 export function getPreprocessingPipeline(pipelineId: number): Promise<PreprocessingPipeline> {
-  return request<PreprocessingPipeline>(`/api/preprocessing/pipelines/${pipelineId}`);
+  return request<PreprocessingPipeline>(`/api/preprocessing/pipelines/${pipelineId}`).then(normalizePreprocessingPipeline);
 }
 
 export function createPreprocessingPipeline(payload: {
@@ -234,6 +349,9 @@ export function createPreprocessingPipeline(payload: {
   return request<PreprocessingPipeline>('/api/preprocessing/pipelines', {
     method: 'POST',
     body: JSON.stringify(payload),
+  }).then((pipeline) => {
+    invalidate(['preprocessingPipelines', 'trainingPipelines']);
+    return normalizePreprocessingPipeline(pipeline);
   });
 }
 
@@ -253,6 +371,9 @@ export function updatePreprocessingPipeline(
   return request<PreprocessingPipeline>(`/api/preprocessing/pipelines/${pipelineId}`, {
     method: 'PUT',
     body: JSON.stringify(payload),
+  }).then((pipeline) => {
+    invalidate(['preprocessingPipelines', 'trainingPipelines']);
+    return normalizePreprocessingPipeline(pipeline);
   });
 }
 
@@ -260,6 +381,7 @@ export async function deletePreprocessingPipeline(pipelineId: number): Promise<v
   await request<void>(`/api/preprocessing/pipelines/${pipelineId}`, {
     method: 'DELETE',
   });
+  invalidate(['preprocessingPipelines', 'trainingPipelines']);
 }
 
 export function previewPreprocessingPipeline(payload: {
@@ -273,7 +395,7 @@ export function previewPreprocessingPipeline(payload: {
 }
 
 export function listMethodDefinitions(): Promise<MethodDefinition[]> {
-  return request<MethodDefinition[]>('/api/methods/definitions');
+  return cachedList<MethodDefinition[]>('methodDefinitions', '/api/methods/definitions', STATIC_TTL_MS);
 }
 
 export function getMethodDefinition(methodType: string): Promise<MethodDefinition> {
@@ -281,21 +403,28 @@ export function getMethodDefinition(methodType: string): Promise<MethodDefinitio
 }
 
 export function listModelLayers(): Promise<ModelLayerDefinition[]> {
-  return request<ModelLayerDefinition[]>('/api/methods/layers');
+  return cachedList<ModelLayerDefinition[]>('methodLayers', '/api/methods/layers', STATIC_TTL_MS);
 }
 
 export function listMethodConfigurations(): Promise<MethodConfiguration[]> {
-  return request<MethodConfiguration[]>('/api/methods/configurations');
+  return cachedList<MethodConfiguration[]>(
+    'methodConfigurations',
+    '/api/methods/configurations?summary=true',
+    REFERENCE_TTL_MS,
+  ).then((methods) => methods.map(normalizeMethodConfiguration));
 }
 
 export function getMethodConfiguration(configurationId: number): Promise<MethodConfiguration> {
-  return request<MethodConfiguration>(`/api/methods/configurations/${configurationId}`);
+  return request<MethodConfiguration>(`/api/methods/configurations/${configurationId}`).then(normalizeMethodConfiguration);
 }
 
 export function createMethodConfiguration(payload: MethodConfigurationSavePayload): Promise<MethodConfiguration> {
   return request<MethodConfiguration>('/api/methods/configurations', {
     method: 'POST',
     body: JSON.stringify(payload),
+  }).then((method) => {
+    invalidate(['methodConfigurations', 'trainingPipelines']);
+    return normalizeMethodConfiguration(method);
   });
 }
 
@@ -306,6 +435,9 @@ export function updateMethodConfiguration(
   return request<MethodConfiguration>(`/api/methods/configurations/${configurationId}`, {
     method: 'PUT',
     body: JSON.stringify(payload),
+  }).then((method) => {
+    invalidate(['methodConfigurations', 'trainingPipelines']);
+    return normalizeMethodConfiguration(method);
   });
 }
 
@@ -313,6 +445,7 @@ export async function deleteMethodConfiguration(configurationId: number): Promis
   await request<void>(`/api/methods/configurations/${configurationId}`, {
     method: 'DELETE',
   });
+  invalidate(['methodConfigurations', 'trainingPipelines']);
 }
 
 export function validateMethodConfiguration(payload: MethodConfigurationPayload): Promise<MethodValidationResponse> {
@@ -337,7 +470,7 @@ export function runMethodTorchCheck(payload: MethodConfigurationPayload): Promis
 }
 
 export function listTrainingPipelines(): Promise<TrainingPipeline[]> {
-  return request<TrainingPipeline[]>('/api/training-pipelines');
+  return cachedList<TrainingPipeline[]>('trainingPipelines', '/api/training-pipelines?summary=true', REFERENCE_TTL_MS);
 }
 
 export function getTrainingPipeline(pipelineId: number): Promise<TrainingPipeline> {
@@ -348,6 +481,9 @@ export function createTrainingPipeline(payload: TrainingPipelineSavePayload): Pr
   return request<TrainingPipeline>('/api/training-pipelines', {
     method: 'POST',
     body: JSON.stringify(payload),
+  }).then((pipeline) => {
+    invalidate(['trainingPipelines', 'trainingDatasets', 'preprocessingPipelines', 'methodConfigurations']);
+    return pipeline;
   });
 }
 
@@ -358,6 +494,9 @@ export function updateTrainingPipeline(
   return request<TrainingPipeline>(`/api/training-pipelines/${pipelineId}`, {
     method: 'PUT',
     body: JSON.stringify(payload),
+  }).then((pipeline) => {
+    invalidate(['trainingPipelines', 'trainingDatasets', 'preprocessingPipelines', 'methodConfigurations']);
+    return pipeline;
   });
 }
 
@@ -365,6 +504,7 @@ export async function deleteTrainingPipeline(pipelineId: number): Promise<void> 
   await request<void>(`/api/training-pipelines/${pipelineId}`, {
     method: 'DELETE',
   });
+  invalidate(['trainingPipelines', 'trainingDatasets', 'preprocessingPipelines', 'methodConfigurations']);
 }
 
 export function dryRunTrainingPipeline(payload: TrainingPipelinePayload): Promise<TrainingPipelineDryRun> {
@@ -391,7 +531,8 @@ export function listTrainingRuns(filters: TrainingRunFilters = {}): Promise<Trai
     }
   }
   const query = params.toString();
-  return request<TrainingRun[]>(`/api/training-runs${query ? `?${query}` : ''}`);
+  if (query) return request<TrainingRun[]>(`/api/training-runs?${query}`);
+  return cachedList<TrainingRun[]>('trainingRuns', '/api/training-runs', RUN_TTL_MS);
 }
 
 export function getTrainingRun(runId: number): Promise<TrainingRun> {
@@ -406,34 +547,48 @@ export function enqueueTrainingRun(trainingPipelineId: number): Promise<Training
   return request<TrainingRun>('/api/training-runs', {
     method: 'POST',
     body: JSON.stringify({ training_pipeline_id: trainingPipelineId }),
+  }).then((run) => {
+    invalidate(['trainingRuns', 'trainingPipelines']);
+    return run;
   });
 }
 
 export function abortTrainingRun(runId: number): Promise<TrainingRun> {
-  return request<TrainingRun>(`/api/training-runs/${runId}/abort`, { method: 'POST' });
+  return request<TrainingRun>(`/api/training-runs/${runId}/abort`, { method: 'POST' }).then((run) => {
+    invalidate(['trainingRuns']);
+    return run;
+  });
 }
 
 export function restartTrainingRun(runId: number): Promise<TrainingRun> {
-  return request<TrainingRun>(`/api/training-runs/${runId}/restart`, { method: 'POST' });
+  return request<TrainingRun>(`/api/training-runs/${runId}/restart`, { method: 'POST' }).then((run) => {
+    invalidate(['trainingRuns']);
+    return run;
+  });
 }
 
 export async function deleteTrainingRun(runId: number): Promise<void> {
   await request<void>(`/api/training-runs/${runId}`, { method: 'DELETE' });
+  invalidate(['trainingRuns', 'trainingPipelines']);
 }
 
 export function listRois(): Promise<RoiDefinition[]> {
-  return request<RoiDefinition[]>('/api/rois');
+  return cachedList<RoiDefinition[]>('rois', '/api/rois', REFERENCE_TTL_MS);
 }
 
 export function createRoi(payload: RoiDefinitionPayload): Promise<RoiDefinition> {
   return request<RoiDefinition>('/api/rois', {
     method: 'POST',
     body: JSON.stringify(payload),
+  }).then((roi) => {
+    invalidate(['rois']);
+    return roi;
   });
 }
 
 export async function deleteRoi(roiId: number): Promise<void> {
   await request<void>(`/api/rois/${roiId}`, { method: 'DELETE' });
+  invalidate(['rois']);
 }
 
 export function previewRoi(payload: { training_run_id: number; training_dataset_id: number }): Promise<RoiPreview> {
@@ -444,7 +599,7 @@ export function previewRoi(payload: { training_run_id: number; training_dataset_
 }
 
 export function listTestingRuns(): Promise<TestingRun[]> {
-  return request<TestingRun[]>('/api/testing-runs');
+  return cachedList<TestingRun[]>('testingRuns', '/api/testing-runs', RUN_TTL_MS);
 }
 
 export function enqueueTestingRun(payload: {
@@ -457,6 +612,9 @@ export function enqueueTestingRun(payload: {
   return request<TestingRun>('/api/testing-runs', {
     method: 'POST',
     body: JSON.stringify(payload),
+  }).then((run) => {
+    invalidate(['testingRuns']);
+    return run;
   });
 }
 
@@ -472,7 +630,7 @@ export function getTestingRunResultImage(runId: number, resultId: number): Promi
 }
 
 export function listHeatmaps(): Promise<HeatmapRunSummary[]> {
-  return request<HeatmapRunSummary[]>('/api/heatmaps');
+  return cachedList<HeatmapRunSummary[]>('heatmaps', '/api/heatmaps', RUN_TTL_MS);
 }
 
 export function getHeatmap(runId: number): Promise<HeatmapRun> {
@@ -491,15 +649,19 @@ export function createHeatmap(payload: {
   return request<HeatmapRun>('/api/heatmaps', {
     method: 'POST',
     body: JSON.stringify(payload),
-  }, 120_000);
+  }, 120_000).then((run) => {
+    invalidate(['heatmaps']);
+    return run;
+  });
 }
 
 export async function clearHeatmaps(): Promise<void> {
   await request<void>('/api/heatmaps', { method: 'DELETE' });
+  invalidate(['heatmaps']);
 }
 
 export function listHeatmapRanges(): Promise<HeatmapRangeRun[]> {
-  return request<HeatmapRangeRun[]>('/api/heatmap-ranges');
+  return cachedList<HeatmapRangeRun[]>('heatmapRanges', '/api/heatmap-ranges', RUN_TTL_MS);
 }
 
 export function createHeatmapRange(payload: {
@@ -513,6 +675,9 @@ export function createHeatmapRange(payload: {
   return request<HeatmapRangeRun>('/api/heatmap-ranges', {
     method: 'POST',
     body: JSON.stringify(payload),
+  }).then((run) => {
+    invalidate(['heatmapRanges']);
+    return run;
   });
 }
 
@@ -521,11 +686,15 @@ export function getHeatmapRange(runId: number): Promise<HeatmapRangeRun> {
 }
 
 export function abortHeatmapRange(runId: number): Promise<HeatmapRangeRun> {
-  return request<HeatmapRangeRun>(`/api/heatmap-ranges/${runId}/abort`, { method: 'POST' });
+  return request<HeatmapRangeRun>(`/api/heatmap-ranges/${runId}/abort`, { method: 'POST' }).then((run) => {
+    invalidate(['heatmapRanges']);
+    return run;
+  });
 }
 
 export async function deleteHeatmapRange(runId: number): Promise<void> {
   await request<void>(`/api/heatmap-ranges/${runId}`, { method: 'DELETE' });
+  invalidate(['heatmapRanges']);
 }
 
 export function getHeatmapRangeLog(runId: number): Promise<{ log: string }> {
@@ -533,7 +702,7 @@ export function getHeatmapRangeLog(runId: number): Promise<{ log: string }> {
 }
 
 export function listAnalysisLayouts(): Promise<AnalysisLayout[]> {
-  return request<AnalysisLayout[]>('/api/analysis/layouts');
+  return cachedList<AnalysisLayout[]>('analysisLayouts', '/api/analysis/layouts', REFERENCE_TTL_MS);
 }
 
 export function getAnalysisLayout(layoutId: number): Promise<AnalysisLayout> {
@@ -548,6 +717,9 @@ export function createAnalysisLayout(payload: {
   return request<AnalysisLayout>('/api/analysis/layouts', {
     method: 'POST',
     body: JSON.stringify(payload),
+  }).then((layout) => {
+    invalidate(['analysisLayouts']);
+    return layout;
   });
 }
 
@@ -562,11 +734,15 @@ export function updateAnalysisLayout(
   return request<AnalysisLayout>(`/api/analysis/layouts/${layoutId}`, {
     method: 'PUT',
     body: JSON.stringify(payload),
+  }).then((layout) => {
+    invalidate(['analysisLayouts']);
+    return layout;
   });
 }
 
 export async function deleteAnalysisLayout(layoutId: number): Promise<void> {
   await request<void>(`/api/analysis/layouts/${layoutId}`, { method: 'DELETE' });
+  invalidate(['analysisLayouts']);
 }
 
 /** URL for one rendered overlay frame PNG (served directly, not via fetch). */
@@ -610,11 +786,14 @@ export function createInspectRun(payload: {
   return request<InspectRun>('/api/inspect/runs', {
     method: 'POST',
     body: JSON.stringify({ content_mode: 'final_preprocessed_output', ...payload }),
+  }).then((run) => {
+    invalidate(['inspectRuns']);
+    return run;
   });
 }
 
 export function listInspectRuns(): Promise<InspectRun[]> {
-  return request<InspectRun[]>('/api/inspect/runs');
+  return cachedList<InspectRun[]>('inspectRuns', '/api/inspect/runs', RUN_TTL_MS);
 }
 
 export function getInspectRun(runId: number): Promise<InspectRun> {
@@ -625,6 +804,9 @@ export function abortInspectRun(runId: number): Promise<InspectRun> {
   return request<InspectRun>(`/api/inspect/runs/${runId}/abort`, {
     method: 'POST',
     body: JSON.stringify({}),
+  }).then((run) => {
+    invalidate(['inspectRuns']);
+    return run;
   });
 }
 
@@ -632,6 +814,7 @@ export async function deleteInspectRun(runId: number): Promise<void> {
   await request<void>(`/api/inspect/runs/${runId}`, {
     method: 'DELETE',
   });
+  invalidate(['inspectRuns']);
 }
 
 export function getInspectRunLog(runId: number): Promise<{ log: string }> {
@@ -662,15 +845,22 @@ export function getTestingRunLog(runId: number): Promise<{ log: string }> {
 }
 
 export function abortTestingRun(runId: number): Promise<TestingRun> {
-  return request<TestingRun>(`/api/testing-runs/${runId}/abort`, { method: 'POST' });
+  return request<TestingRun>(`/api/testing-runs/${runId}/abort`, { method: 'POST' }).then((run) => {
+    invalidate(['testingRuns']);
+    return run;
+  });
 }
 
 export function restartTestingRun(runId: number): Promise<TestingRun> {
-  return request<TestingRun>(`/api/testing-runs/${runId}/restart`, { method: 'POST' });
+  return request<TestingRun>(`/api/testing-runs/${runId}/restart`, { method: 'POST' }).then((run) => {
+    invalidate(['testingRuns']);
+    return run;
+  });
 }
 
 export async function deleteTestingRun(runId: number): Promise<void> {
   await request<void>(`/api/testing-runs/${runId}`, { method: 'DELETE' });
+  invalidate(['testingRuns']);
 }
 
 export const listModelArchitectures = listMethodDefinitions;

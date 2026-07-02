@@ -1192,7 +1192,7 @@ export function PreprocessingPipelinesPage({ active = true }: { active?: boolean
                 {pipelines.map((pipeline) => (
                   <Table.Tr key={pipeline.id}>
                     <Table.Td>{pipeline.name}</Table.Td>
-                    <Table.Td>{pipeline.graph.nodes.length}</Table.Td>
+                    <Table.Td>{pipeline.step_count ?? pipeline.graph.nodes.length}</Table.Td>
                     <Table.Td>{sizeLabel(pipeline.input_width, pipeline.input_height)}</Table.Td>
                     <Table.Td>{sizeLabel(pipeline.output_width, pipeline.output_height)}</Table.Td>
                     <Table.Td>{pipeline.description ?? ''}</Table.Td>

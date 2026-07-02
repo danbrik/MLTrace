@@ -43,6 +43,10 @@ export type DatasetConnectionTest = {
   message: string;
 };
 
+export type CacheRevisions = {
+  revisions: Record<string, string>;
+};
+
 export type TrainingDatasetRuleInput = {
   folder_id: number;
   start_timestamp: string;
@@ -161,6 +165,8 @@ export type PreprocessingPipeline = {
   updated_at: string;
   is_update_locked: boolean;
   update_lock_reasons: string[];
+  step_count?: number | null;
+  step_types?: string[];
 };
 
 export type PreprocessingPreviewImage = {

@@ -1,6 +1,8 @@
 from contextlib import asynccontextmanager
+import logging
+import time
 
-from fastapi import Depends, FastAPI, HTTPException
+from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from sqlalchemy.exc import IntegrityError
@@ -13,6 +15,7 @@ from app.schemas import (
     DatasetConnectionTestResponse,
     DatasetCreate,
     DatasetRead,
+    CacheRevisionsRead,
     AnalysisLayoutCreate,
     AnalysisLayoutRead,
     HeatmapRangeRunCreate,
@@ -27,12 +30,14 @@ from app.schemas import (
     MethodConfigurationCreate,
     MethodConfigurationPayload,
     MethodConfigurationRead,
+    MethodConfigurationSummaryRead,
     MethodTorchCheckResponse,
     MethodConfigurationValidationResponse,
     MethodDefinitionRead,
     ModelLayerRead,
     PreprocessingPipelineCreate,
     PreprocessingPipelineRead,
+    PreprocessingPipelineSummaryRead,
     PreprocessingPreviewRequest,
     PreprocessingPreviewResponse,
     PreprocessingStepRead,
@@ -51,12 +56,14 @@ from app.schemas import (
     TrainingDatasetPreviewRequest,
     TrainingDatasetPreviewResponse,
     TrainingDatasetRead,
+    TrainingDatasetSummaryRead,
     TrainingPipelineCreate,
     TrainingPipelineDryRunRequest,
     TrainingPipelineDryRunResponse,
     TrainingPipelineDuplicateResponse,
     TrainingPipelinePayload,
     TrainingPipelineRead,
+    TrainingPipelineSummaryRead,
     TrainingRunEnqueueRequest,
     TrainingRunLogResponse,
     TrainingRunRead,
@@ -72,6 +79,7 @@ from app.training.service import RunConflict
 from app.services import (
     DuplicatePipelineError,
     create_dataset,
+    cache_revisions,
     create_method_configuration,
     create_preprocessing_pipeline,
     create_training_dataset,
@@ -113,6 +121,9 @@ from app.services import (
 )
 
 
+logger = logging.getLogger("mltrace.api")
+
+
 def _value_error_status(exc: ValueError) -> int:
     message = str(exc).lower()
     if "not editable" in message or "locked" in message or "already used" in message:
@@ -151,9 +162,22 @@ def create_app() -> FastAPI:
         allow_headers=["*"],
     )
 
+    @app.middleware("http")
+    async def log_slow_api_requests(request: Request, call_next):
+        started = time.perf_counter()
+        response = await call_next(request)
+        elapsed_ms = (time.perf_counter() - started) * 1000
+        if request.url.path.startswith("/api/") and elapsed_ms > 500:
+            logger.info("Slow API request %.0fms %s %s", elapsed_ms, request.method, request.url.path)
+        return response
+
     @app.get("/api/health")
     def health() -> dict[str, str]:
         return {"status": "ok"}
+
+    @app.get("/api/cache/revisions", response_model=CacheRevisionsRead)
+    def api_cache_revisions(db: Session = Depends(get_db)):
+        return cache_revisions(db)
 
     @app.get("/api/analysis/layouts", response_model=list[AnalysisLayoutRead])
     def api_list_analysis_layouts(db: Session = Depends(get_db)):
@@ -262,9 +286,9 @@ def create_app() -> FastAPI:
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    @app.get("/api/training-datasets", response_model=list[TrainingDatasetRead])
-    def api_list_training_datasets(db: Session = Depends(get_db)):
-        return list_training_datasets(db)
+    @app.get("/api/training-datasets", response_model=list[TrainingDatasetRead] | list[TrainingDatasetSummaryRead])
+    def api_list_training_datasets(summary: bool = Query(False), db: Session = Depends(get_db)):
+        return list_training_datasets(db, summary=summary)
 
     @app.get("/api/training-datasets/{training_dataset_id}", response_model=TrainingDatasetRead)
     def api_get_training_dataset(training_dataset_id: int, db: Session = Depends(get_db)):
@@ -319,9 +343,12 @@ def create_app() -> FastAPI:
     def api_list_preprocessing_steps():
         return list_preprocessing_steps()
 
-    @app.get("/api/preprocessing/pipelines", response_model=list[PreprocessingPipelineRead])
-    def api_list_preprocessing_pipelines(db: Session = Depends(get_db)):
-        return list_preprocessing_pipelines(db)
+    @app.get(
+        "/api/preprocessing/pipelines",
+        response_model=list[PreprocessingPipelineRead] | list[PreprocessingPipelineSummaryRead],
+    )
+    def api_list_preprocessing_pipelines(summary: bool = Query(False), db: Session = Depends(get_db)):
+        return list_preprocessing_pipelines(db, summary=summary)
 
     @app.post("/api/preprocessing/pipelines", response_model=PreprocessingPipelineRead)
     def api_create_preprocessing_pipeline(payload: PreprocessingPipelineCreate, db: Session = Depends(get_db)):
@@ -381,9 +408,12 @@ def create_app() -> FastAPI:
     def api_list_method_layers():
         return list_method_layers()
 
-    @app.get("/api/methods/configurations", response_model=list[MethodConfigurationRead])
-    def api_list_method_configurations(db: Session = Depends(get_db)):
-        return list_method_configurations(db)
+    @app.get(
+        "/api/methods/configurations",
+        response_model=list[MethodConfigurationRead] | list[MethodConfigurationSummaryRead],
+    )
+    def api_list_method_configurations(summary: bool = Query(False), db: Session = Depends(get_db)):
+        return list_method_configurations(db, summary=summary)
 
     @app.post("/api/methods/configurations", response_model=MethodConfigurationRead)
     def api_create_method_configuration(payload: MethodConfigurationCreate, db: Session = Depends(get_db)):
@@ -439,9 +469,9 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=404, detail="Method configuration not found.")
         return None
 
-    @app.get("/api/training-pipelines", response_model=list[TrainingPipelineRead])
-    def api_list_training_pipelines(db: Session = Depends(get_db)):
-        return list_training_pipelines(db)
+    @app.get("/api/training-pipelines", response_model=list[TrainingPipelineRead] | list[TrainingPipelineSummaryRead])
+    def api_list_training_pipelines(summary: bool = Query(False), db: Session = Depends(get_db)):
+        return list_training_pipelines(db, summary=summary)
 
     @app.post("/api/training-pipelines", response_model=TrainingPipelineRead)
     def api_create_training_pipeline(payload: TrainingPipelineCreate, db: Session = Depends(get_db)):

@@ -28,6 +28,7 @@ function resolutionLabel(width: number | null, height: number | null): string {
 }
 
 function PreprocessingDetails({ pipeline }: { pipeline: PreprocessingPipeline }) {
+  const nodes = orderedGraphNodes(pipeline);
   return (
     <Stack gap="sm">
       <Group>
@@ -41,7 +42,12 @@ function PreprocessingDetails({ pipeline }: { pipeline: PreprocessingPipeline })
           {pipeline.description}
         </Text>
       )}
-      {orderedGraphNodes(pipeline).map((node, index) => (
+      {nodes.length === 0 && (
+        <Alert color="blue">
+          Detailed preprocessing steps are loaded when the pipeline is opened in the Preprocessing builder.
+        </Alert>
+      )}
+      {nodes.map((node, index) => (
         <Paper key={node.id} withBorder p="sm" radius="sm">
           <Text size="sm" fw={700}>
             {index + 1}. {node.type}
@@ -109,7 +115,7 @@ export function PreprocessingPipelinePicker({
 
   const stepOptions = useMemo(() => {
     const types = new Set<string>();
-    pipelines.forEach((pipeline) => pipeline.graph.nodes.forEach((node) => types.add(node.type)));
+    pipelines.forEach((pipeline) => (pipeline.step_types ?? pipeline.graph.nodes.map((node) => node.type)).forEach((type) => types.add(type)));
     return [...types].sort();
   }, [pipelines]);
 
@@ -135,7 +141,7 @@ export function PreprocessingPipelinePicker({
       if (inputFilter && pipelineInputResolution(pipeline) !== inputFilter) return false;
       if (outputFilter && pipelineOutputResolution(pipeline) !== outputFilter) return false;
       if (stepFilter.length > 0) {
-        const stepTypes = new Set(pipeline.graph.nodes.map((node) => node.type));
+        const stepTypes = new Set(pipeline.step_types ?? pipeline.graph.nodes.map((node) => node.type));
         if (!stepFilter.every((type) => stepTypes.has(type))) return false;
       }
       return true;
@@ -164,7 +170,7 @@ export function PreprocessingPipelinePicker({
           out {resolutionLabel(selectedPipeline.output_width, selectedPipeline.output_height)}
         </Badge>
         <Badge size="xs" variant="light" color="gray">
-          {selectedPipeline.graph.nodes.length} steps
+          {selectedPipeline.step_count ?? selectedPipeline.graph.nodes.length} steps
         </Badge>
         <Tooltip label="Inspect preprocessing pipeline">
           <ActionIcon variant="subtle" onClick={() => setDetailPipeline(selectedPipeline)} aria-label="Inspect preprocessing pipeline">
@@ -252,7 +258,7 @@ export function PreprocessingPipelinePicker({
                         </ActionIcon>
                       </Table.Td>
                       <Table.Td>{pipeline.name}</Table.Td>
-                      <Table.Td>{pipeline.graph.nodes.length}</Table.Td>
+                      <Table.Td>{pipeline.step_count ?? pipeline.graph.nodes.length}</Table.Td>
                       <Table.Td>
                         <Badge
                           size="xs"

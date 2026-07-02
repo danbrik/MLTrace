@@ -79,12 +79,19 @@ export function TrainingPipelineFlow({
                 </div>
               )}
               {preprocessingPipeline &&
-                orderedGraphNodes(preprocessingPipeline).map((node, index, all) => (
-                  <div key={`step-${node.id}`} className="model-diagram-item">
-                    <FlowNode section="preprocess" label={node.type} detail={stepDetail(node)} />
-                    {(index < all.length - 1 || configuration) && <FlowArrow />}
-                  </div>
-                ))}
+                (orderedGraphNodes(preprocessingPipeline).length > 0
+                  ? orderedGraphNodes(preprocessingPipeline).map((node, index, all) => (
+                      <div key={`step-${node.id}`} className="model-diagram-item">
+                        <FlowNode section="preprocess" label={node.type} detail={stepDetail(node)} />
+                        {(index < all.length - 1 || configuration) && <FlowArrow />}
+                      </div>
+                    ))
+                  : (preprocessingPipeline.step_types ?? []).map((type, index, all) => (
+                      <div key={`step-summary-${type}-${index}`} className="model-diagram-item">
+                        <FlowNode section="preprocess" label={type} detail="summary" />
+                        {(index < all.length - 1 || configuration) && <FlowArrow />}
+                      </div>
+                    )))}
               {configuration &&
                 (configuration.diagram?.nodes ?? []).map((node, index, all) => (
                   <div key={`method-${node.id}`} className="model-diagram-item">

@@ -388,6 +388,71 @@ def test_preprocessing_pipeline_crud_and_preview(tmp_path: Path) -> None:
             pass
 
 
+def test_summary_lists_and_cache_revisions_are_lightweight(tmp_path: Path) -> None:
+    client_iter = make_client()
+    client = next(client_iter)
+    try:
+        before = client.get("/api/cache/revisions")
+        assert before.status_code == 200
+        before_revisions = before.json()["revisions"]
+
+        dataset = add_scanned_dataset(client, tmp_path / "dataset_summary", "Summary", "sum", 4)
+        folder_id = dataset["folders"][0]["id"]
+        created_trainset = client.post(
+            "/api/training-datasets",
+            json={
+                "name": "Summary trainset",
+                "usage_label": "train",
+                "rules": [
+                    {
+                        "folder_id": folder_id,
+                        "start_timestamp": "2026-02-04T15:30:00",
+                        "end_timestamp": "2026-02-04T15:30:30",
+                        "stride": 1,
+                    }
+                ],
+            },
+        )
+        assert created_trainset.status_code == 200
+
+        graph = {
+            "nodes": [
+                {"id": "load", "type": "load_image", "config": {}},
+                {"id": "resize", "type": "resize", "config": {"width": 8, "height": 4}},
+            ],
+            "edges": [{"source": "load", "target": "resize"}],
+        }
+        created_pipeline = client.post(
+            "/api/preprocessing/pipelines",
+            json={"name": "Summary pipe", "graph": graph},
+        )
+        assert created_pipeline.status_code == 200
+
+        trainsets = client.get("/api/training-datasets?summary=true")
+        assert trainsets.status_code == 200
+        trainset_body = trainsets.json()[0]
+        assert trainset_body["total_selected_images"] == 4
+        assert "rules" not in trainset_body
+
+        pipelines = client.get("/api/preprocessing/pipelines?summary=true")
+        assert pipelines.status_code == 200
+        pipeline_body = pipelines.json()[0]
+        assert pipeline_body["step_count"] == 2
+        assert pipeline_body["step_types"] == ["load_image", "resize"]
+        assert "graph" not in pipeline_body
+
+        after = client.get("/api/cache/revisions")
+        assert after.status_code == 200
+        after_revisions = after.json()["revisions"]
+        assert before_revisions["trainingDatasets"] != after_revisions["trainingDatasets"]
+        assert before_revisions["preprocessingPipelines"] != after_revisions["preprocessingPipelines"]
+    finally:
+        try:
+            next(client_iter)
+        except StopIteration:
+            pass
+
+
 def test_preprocessing_pipeline_update_and_unique_name() -> None:
     client_iter = make_client()
     client = next(client_iter)

@@ -97,6 +97,9 @@ class TrainingDataset(Base):
     usage_label: Mapped[str] = mapped_column(String(32), nullable=False, default="train")
     notes: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=False), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=False), server_default=func.now(), onupdate=func.now()
+    )
 
     dataset: Mapped[Dataset | None] = relationship(back_populates="training_datasets")
     rules: Mapped[list["TrainingDatasetRule"]] = relationship(
