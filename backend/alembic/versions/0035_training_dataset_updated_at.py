@@ -18,12 +18,22 @@ depends_on = None
 
 
 def upgrade() -> None:
-    op.add_column(
-        "training_datasets",
-        sa.Column("updated_at", sa.DateTime(timezone=False), server_default=sa.func.now(), nullable=True),
+    bind = op.get_bind()
+    columns = {column["name"] for column in sa.inspect(bind).get_columns("training_datasets")}
+    if "updated_at" not in columns:
+        # SQLite cannot add a column with a non-constant CURRENT_TIMESTAMP
+        # default to an existing table. Add the nullable column first, then
+        # backfill it explicitly below.
+        op.add_column("training_datasets", sa.Column("updated_at", sa.DateTime(timezone=False), nullable=True))
+    op.execute(
+        "UPDATE training_datasets "
+        "SET updated_at = COALESCE(updated_at, created_at, CURRENT_TIMESTAMP) "
+        "WHERE updated_at IS NULL"
     )
-    op.execute("UPDATE training_datasets SET updated_at = COALESCE(updated_at, created_at, CURRENT_TIMESTAMP)")
 
 
 def downgrade() -> None:
-    op.drop_column("training_datasets", "updated_at")
+    bind = op.get_bind()
+    columns = {column["name"] for column in sa.inspect(bind).get_columns("training_datasets")}
+    if "updated_at" in columns:
+        op.drop_column("training_datasets", "updated_at")

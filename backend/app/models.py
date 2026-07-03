@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import UTC, datetime
 
 from sqlalchemy import BigInteger, Boolean, DateTime, Float, ForeignKey, Index, Integer, String, Text, UniqueConstraint, func
 from sqlalchemy.dialects.postgresql import JSONB
@@ -10,6 +10,10 @@ from app.database import Base
 
 def json_type():
     return JSON().with_variant(JSONB(), "postgresql")
+
+
+def utc_now() -> datetime:
+    return datetime.now(UTC).replace(tzinfo=None)
 
 
 class Dataset(Base):
@@ -98,7 +102,7 @@ class TrainingDataset(Base):
     notes: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=False), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=False), server_default=func.now(), onupdate=func.now()
+        DateTime(timezone=False), default=utc_now, server_default=func.now(), onupdate=utc_now
     )
 
     dataset: Mapped[Dataset | None] = relationship(back_populates="training_datasets")
