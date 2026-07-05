@@ -165,10 +165,20 @@ def run_testing(run_id: int, abort_event: threading.Event | None = None) -> None
                     future_stride=int(method_config.get("future_stride") or method_config.get("temporal_stride") or 1),
                     missing_frame_policy=str(method_config.get("missing_frame_policy") or "skip"),
                     score_timestamp_mode=str(method_config.get("score_timestamp_mode") or "last_input"),
+                    sequence_contiguity_mode=str(method_config.get("sequence_contiguity_mode") or "ordered_index"),
                 )
                 clips = list(clip_summary.clips)
                 if not clips:
                     raise ValueError("Train/test dataset produced no valid sequence clips.")
+                logger.info(
+                    "STAE testing run %s resolved %s clips (%s skipped, %s selected frames, %s possible clips, mode=%s)",
+                    run_id,
+                    len(clips),
+                    clip_summary.skipped_missing,
+                    clip_summary.selected_frame_count,
+                    clip_summary.possible_clip_count,
+                    clip_summary.sequence_contiguity_mode,
+                )
                 run.expected_image_count = len(clips)
                 db.commit()
 

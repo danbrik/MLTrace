@@ -62,6 +62,8 @@ pip-wheel-metadata/
 
 # Project data / samples (kept out of VCS)
 sample_datasets/
+external_datasets/
+tools/setup_aebad_v_dataset.py
 
 # Java / Kotlin / Gradle
 .gradle/

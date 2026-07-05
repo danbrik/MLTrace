@@ -39,6 +39,7 @@ class SpatioTemporalAutoencoderArchitecture(BaseModelArchitecture):
         "future_length": 1,
         "temporal_stride": 1,
         "future_stride": 1,
+        "sequence_contiguity_mode": "ordered_index",
         "missing_frame_policy": "skip",
         "score_timestamp_mode": "last_input",
         "prediction_branch": True,
@@ -54,6 +55,7 @@ class SpatioTemporalAutoencoderArchitecture(BaseModelArchitecture):
             "future_length",
             "temporal_stride",
             "future_stride",
+            "sequence_contiguity_mode",
             "missing_frame_policy",
             "score_timestamp_mode",
             "prediction_branch",
@@ -91,12 +93,25 @@ class SpatioTemporalAutoencoderArchitecture(BaseModelArchitecture):
                 "default": 1,
                 "description": "Spacing between predicted future frames. Default 1 predicts the immediate next frame(s).",
             },
+            "sequence_contiguity_mode": {
+                "type": "string",
+                "label": "Sequence continuity",
+                "enum": ["ordered_index", "timestamp_cadence"],
+                "default": "ordered_index",
+                "description": (
+                    "Frame order is recommended for videos and frame folders; timestamp cadence requires "
+                    "real timestamp gaps to match the folder cadence and is useful for sensor time series."
+                ),
+            },
             "missing_frame_policy": {
                 "type": "string",
                 "label": "Missing frame policy",
                 "enum": ["skip", "fail"],
                 "default": "skip",
-                "description": "skip ignores clips with missing expected frames; fail aborts the run with a clear error.",
+                "description": (
+                    "Only used with timestamp cadence. skip ignores clips with missing expected frames; "
+                    "fail aborts the run with a clear error."
+                ),
             },
             "score_timestamp_mode": {
                 "type": "string",

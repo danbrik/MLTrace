@@ -2152,6 +2152,7 @@ def dry_run_training_pipeline(db: Session, payload: TrainingPipelineDryRunReques
 
         method_config = configuration.method_config or {}
         future_length = int(method_config.get("future_length") or 0) if method_config.get("prediction_branch") else 0
+        sequence_contiguity_mode = str(method_config.get("sequence_contiguity_mode") or "ordered_index")
         try:
             clip_summary = enumerate_training_dataset_clip_samples(
                 first_dataset,
@@ -2161,21 +2162,35 @@ def dry_run_training_pipeline(db: Session, payload: TrainingPipelineDryRunReques
                 future_stride=int(method_config.get("future_stride") or method_config.get("temporal_stride") or 1),
                 missing_frame_policy=str(method_config.get("missing_frame_policy") or "skip"),
                 score_timestamp_mode=str(method_config.get("score_timestamp_mode") or "last_input"),
+                sequence_contiguity_mode=sequence_contiguity_mode,
             )
         except ValueError as exc:
             return TrainingPipelineDryRunResponse(valid=False, mode="failed", errors=[str(exc)], logs=logs, training_dataset_name=first_dataset.name)
+        if (
+            clip_summary.sequence_contiguity_mode == "timestamp_cadence"
+            and clip_summary.possible_clip_count
+            and clip_summary.skipped_missing / clip_summary.possible_clip_count > 0.5
+        ):
+            warnings.append(
+                "Many clips were skipped because timestamp spacing does not match folder cadence. "
+                "Use ordered_index for video-frame datasets."
+            )
         if not clip_summary.clips:
             return TrainingPipelineDryRunResponse(
                 valid=False,
                 mode="failed",
                 errors=["No valid sequence clips found for the selected dataset and STAE sequence parameters."],
-                warnings=[f"Skipped clips because of missing frames: {clip_summary.skipped_missing}"] if clip_summary.skipped_missing else [],
+                warnings=warnings
+                + ([f"Skipped clips because of missing frames: {clip_summary.skipped_missing}"] if clip_summary.skipped_missing else []),
                 logs=logs,
                 training_dataset_name=first_dataset.name,
             )
         clip = clip_summary.clips[0]
         source_image = clip.input_frames[0]
         logs.append(
+            f"Sequence continuity: {clip_summary.sequence_contiguity_mode}. "
+            f"Selected frames: {clip_summary.selected_frame_count}. "
+            f"Possible clips: {clip_summary.possible_clip_count}. "
             f"Resolved {len(clip_summary.clips)} sequence clip(s), skipped {clip_summary.skipped_missing}. "
             f"Example input timestamps: {[frame.timestamp_parsed.isoformat() for frame in clip.input_frames]}"
         )
@@ -2198,7 +2213,8 @@ def dry_run_training_pipeline(db: Session, payload: TrainingPipelineDryRunReques
             valid=True,
             mode="forward_pass",
             errors=[],
-            warnings=[f"Skipped clips because of missing frames: {clip_summary.skipped_missing}"] if clip_summary.skipped_missing else [],
+            warnings=warnings
+            + ([f"Skipped clips because of missing frames: {clip_summary.skipped_missing}"] if clip_summary.skipped_missing else []),
             logs=logs,
             training_dataset_name=first_dataset.name,
             source_image_path=source_image.file_path,

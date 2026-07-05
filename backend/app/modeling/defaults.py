@@ -473,6 +473,7 @@ def _paper_stae_method_config(*, prediction_branch: bool) -> dict:
         "future_length": 16 if prediction_branch else 0,
         "temporal_stride": 1,
         "future_stride": 1,
+        "sequence_contiguity_mode": "ordered_index",
         "missing_frame_policy": "skip",
         "score_timestamp_mode": "last_input",
         "prediction_branch": prediction_branch,
@@ -563,6 +564,7 @@ def default_method_payloads() -> list[MethodConfigurationCreate]:
                 "future_length": 1,
                 "temporal_stride": 1,
                 "future_stride": 1,
+                "sequence_contiguity_mode": "ordered_index",
                 "missing_frame_policy": "skip",
                 "score_timestamp_mode": "last_input",
                 "prediction_branch": True,
@@ -875,6 +877,11 @@ def ensure_default_method_configurations(db: Session) -> int:
     old_payloads = _old_paper_payloads_by_name()
     new_payloads = {payload.name: payload for payload in default_method_payloads()}
     payloads = default_method_payloads()
+    stae_default_names = {
+        "STAE reconstruction prediction default",
+        "STAE Reconstruction paper default",
+        "STAE Reconstruction + Future Prediction paper default",
+    }
     for payload in payloads:
         existing = db.scalar(
             select(models.MethodConfiguration).where(func.lower(models.MethodConfiguration.name) == payload.name.lower())
@@ -885,6 +892,17 @@ def ensure_default_method_configurations(db: Session) -> int:
                 _apply_method_payload(db, existing, new_payloads[payload.name])
                 db.commit()
                 logger.info("Updated bundled method configuration '%s' to current paper-near default", payload.name)
+            elif (
+                existing.name in stae_default_names
+                and existing.method_type == "spatiotemporal_autoencoder"
+                and isinstance(existing.method_config, dict)
+                and "sequence_contiguity_mode" not in existing.method_config
+            ):
+                existing.method_config = {**existing.method_config, "sequence_contiguity_mode": "ordered_index"}
+                db.flush()
+                _replace_method_parameter_index(db, existing)
+                db.commit()
+                logger.info("Added ordered-index sequence continuity to bundled method configuration '%s'", payload.name)
             continue
         create_method_configuration(db, payload)
         created += 1

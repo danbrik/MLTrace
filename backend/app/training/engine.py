@@ -1080,8 +1080,26 @@ def run_training(run_id: int, abort_event: threading.Event | None = None) -> Non
                 run.artifact_kind = "mean_image"
             elif configuration.builder_kind == "spatiotemporal_autoencoder":
                 logger.info("Training run %s resolving sequence clips", run_id)
-                clips, skipped = enumerate_clips_or_fail(pipeline, configuration.method_config)
-                logger.info("Training run %s resolved %s clips (%s skipped)", run_id, len(clips), skipped)
+                clips, clip_summary = enumerate_clips_or_fail(pipeline, configuration.method_config)
+                logger.info(
+                    "Training run %s resolved %s clips (%s skipped, %s selected frames, %s possible clips, mode=%s)",
+                    run_id,
+                    len(clips),
+                    clip_summary.skipped_missing,
+                    clip_summary.selected_frame_count,
+                    clip_summary.possible_clip_count,
+                    clip_summary.sequence_contiguity_mode,
+                )
+                if (
+                    clip_summary.sequence_contiguity_mode == "timestamp_cadence"
+                    and clip_summary.possible_clip_count
+                    and clip_summary.skipped_missing / clip_summary.possible_clip_count > 0.5
+                ):
+                    logger.warning(
+                        "Training run %s skipped many clips because timestamp spacing does not match folder cadence. "
+                        "Use ordered_index for video-frame datasets.",
+                        run_id,
+                    )
                 artifact_path = artifact_dir / "artifact.pt"
                 count = train_spatiotemporal_gradient(
                     db, run, configuration, clips, graph, run.training_parameters, artifact_path, abort_event
@@ -1142,4 +1160,4 @@ def enumerate_clips_or_fail(pipeline: models.TrainingPipeline, method_config: di
     summary = enumerate_training_pipeline_clip_samples(pipeline, method_config)
     if not summary.clips:
         raise ValueError("No valid sequence clips found for this training pipeline's training sets.")
-    return list(summary.clips), summary.skipped_missing
+    return list(summary.clips), summary

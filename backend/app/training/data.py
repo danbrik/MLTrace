@@ -55,6 +55,9 @@ class ResolvedClipSample:
 class ClipEnumerationSummary:
     clips: tuple[ResolvedClipSample, ...]
     skipped_missing: int
+    selected_frame_count: int = 0
+    possible_clip_count: int = 0
+    sequence_contiguity_mode: str = "ordered_index"
 
 
 TimestampIndexEntry = tuple[datetime, str, str]
@@ -408,6 +411,10 @@ def _clip_score_timestamp(
     return input_frames[-1].timestamp_parsed
 
 
+def _sequence_contiguity_mode(value: str | None) -> str:
+    return "timestamp_cadence" if value == "timestamp_cadence" else "ordered_index"
+
+
 def enumerate_rule_clip_samples(
     rule: models.TrainingDatasetRule,
     *,
@@ -417,6 +424,7 @@ def enumerate_rule_clip_samples(
     future_stride: int = 1,
     missing_frame_policy: str = "skip",
     score_timestamp_mode: str = "last_input",
+    sequence_contiguity_mode: str = "ordered_index",
 ) -> ClipEnumerationSummary:
     """Build clip samples from one rule without opening image pixels.
 
@@ -429,38 +437,47 @@ def enumerate_rule_clip_samples(
     future_length = max(0, int(future_length))
     temporal_stride = max(1, int(temporal_stride))
     future_stride = max(1, int(future_stride))
+    contiguity_mode = _sequence_contiguity_mode(sequence_contiguity_mode)
     needed_span = (clip_length - 1) * temporal_stride + future_length * future_stride
     if len(records) <= needed_span:
-        return ClipEnumerationSummary(clips=(), skipped_missing=0)
+        return ClipEnumerationSummary(
+            clips=(),
+            skipped_missing=0,
+            selected_frame_count=len(records),
+            possible_clip_count=0,
+            sequence_contiguity_mode=contiguity_mode,
+        )
 
     cadence = _folder_cadence_seconds(rule.folder)
+    possible_clip_count = max(0, len(records) - needed_span)
     clips: list[ResolvedClipSample] = []
     skipped = 0
-    for start in range(0, len(records) - needed_span):
+    for start in range(0, possible_clip_count):
         input_indices = [start + index * temporal_stride for index in range(clip_length)]
         last_input_index = input_indices[-1]
         future_indices = [last_input_index + (index + 1) * future_stride for index in range(future_length)]
         indices = input_indices + future_indices
         input_frames = [records[index] for index in input_indices]
         future_frames = [records[index] for index in future_indices]
-        valid = True
-        for left_index, right_index in zip(indices, indices[1:]):
-            if not _timestamps_match_stride(
-                records[left_index].timestamp_parsed,
-                records[right_index].timestamp_parsed,
-                expected_steps=right_index - left_index,
-                cadence_seconds=cadence,
-            ):
-                valid = False
-                break
-        if not valid:
-            skipped += 1
-            if missing_frame_policy == "fail":
-                raise ValueError(
-                    "Missing frame detected while building sequence clips. "
-                    f"Rule folder '{rule.folder.relative_path}' around {records[start].timestamp_parsed.isoformat()}."
-                )
-            continue
+        if contiguity_mode == "timestamp_cadence":
+            valid = True
+            for left_index, right_index in zip(indices, indices[1:]):
+                if not _timestamps_match_stride(
+                    records[left_index].timestamp_parsed,
+                    records[right_index].timestamp_parsed,
+                    expected_steps=right_index - left_index,
+                    cadence_seconds=cadence,
+                ):
+                    valid = False
+                    break
+            if not valid:
+                skipped += 1
+                if missing_frame_policy == "fail":
+                    raise ValueError(
+                        "Missing frame detected while building sequence clips. "
+                        f"Rule folder '{rule.folder.relative_path}' around {records[start].timestamp_parsed.isoformat()}."
+                    )
+                continue
         all_frames = input_frames + future_frames
         clips.append(
             ResolvedClipSample(
@@ -473,7 +490,13 @@ def enumerate_rule_clip_samples(
                 folder_id=rule.folder_id,
             )
         )
-    return ClipEnumerationSummary(clips=tuple(clips), skipped_missing=skipped)
+    return ClipEnumerationSummary(
+        clips=tuple(clips),
+        skipped_missing=skipped,
+        selected_frame_count=len(records),
+        possible_clip_count=possible_clip_count,
+        sequence_contiguity_mode=contiguity_mode,
+    )
 
 
 def enumerate_training_dataset_clip_samples(
@@ -485,9 +508,13 @@ def enumerate_training_dataset_clip_samples(
     future_stride: int = 1,
     missing_frame_policy: str = "skip",
     score_timestamp_mode: str = "last_input",
+    sequence_contiguity_mode: str = "ordered_index",
 ) -> ClipEnumerationSummary:
     clips: list[ResolvedClipSample] = []
     skipped = 0
+    selected_frame_count = 0
+    possible_clip_count = 0
+    contiguity_mode = _sequence_contiguity_mode(sequence_contiguity_mode)
     for rule in _sorted_rules(training_dataset):
         summary = enumerate_rule_clip_samples(
             rule,
@@ -497,11 +524,20 @@ def enumerate_training_dataset_clip_samples(
             future_stride=future_stride,
             missing_frame_policy=missing_frame_policy,
             score_timestamp_mode=score_timestamp_mode,
+            sequence_contiguity_mode=contiguity_mode,
         )
         clips.extend(summary.clips)
         skipped += summary.skipped_missing
+        selected_frame_count += summary.selected_frame_count
+        possible_clip_count += summary.possible_clip_count
     clips.sort(key=lambda clip: (clip.score_timestamp, clip.dataset_name, clip.folder_id, clip.clip_start))
-    return ClipEnumerationSummary(clips=tuple(clips), skipped_missing=skipped)
+    return ClipEnumerationSummary(
+        clips=tuple(clips),
+        skipped_missing=skipped,
+        selected_frame_count=selected_frame_count,
+        possible_clip_count=possible_clip_count,
+        sequence_contiguity_mode=contiguity_mode,
+    )
 
 
 def enumerate_training_pipeline_clip_samples(
@@ -510,7 +546,10 @@ def enumerate_training_pipeline_clip_samples(
 ) -> ClipEnumerationSummary:
     clips: list[ResolvedClipSample] = []
     skipped = 0
+    selected_frame_count = 0
+    possible_clip_count = 0
     future_length = int(method_config.get("future_length") or 0) if method_config.get("prediction_branch") else 0
+    contiguity_mode = _sequence_contiguity_mode(str(method_config.get("sequence_contiguity_mode") or "ordered_index"))
     for entry in sorted(pipeline.entries, key=lambda item: item.position):
         summary = enumerate_training_dataset_clip_samples(
             entry.training_dataset,
@@ -520,8 +559,17 @@ def enumerate_training_pipeline_clip_samples(
             future_stride=int(method_config.get("future_stride") or method_config.get("temporal_stride") or 1),
             missing_frame_policy=str(method_config.get("missing_frame_policy") or "skip"),
             score_timestamp_mode=str(method_config.get("score_timestamp_mode") or "last_input"),
+            sequence_contiguity_mode=contiguity_mode,
         )
         clips.extend(summary.clips)
         skipped += summary.skipped_missing
+        selected_frame_count += summary.selected_frame_count
+        possible_clip_count += summary.possible_clip_count
     clips.sort(key=lambda clip: (clip.score_timestamp, clip.dataset_name, clip.folder_id, clip.clip_start))
-    return ClipEnumerationSummary(clips=tuple(clips), skipped_missing=skipped)
+    return ClipEnumerationSummary(
+        clips=tuple(clips),
+        skipped_missing=skipped,
+        selected_frame_count=selected_frame_count,
+        possible_clip_count=possible_clip_count,
+        sequence_contiguity_mode=contiguity_mode,
+    )
