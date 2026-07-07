@@ -47,6 +47,7 @@ from app.schemas import (
     PreprocessingPreviewRequest,
     PreprocessingPreviewResponse,
     PreprocessingStepRead,
+    RegistryDeleteRequest,
     RoiDefinitionCreate,
     RoiDefinitionRead,
     RoiPreviewRequest,
@@ -76,6 +77,7 @@ from app.schemas import (
 )
 from app.analysis import service as analysis_service
 from app.heatmap import service as heatmap_service
+from app.registry import service as registry_service
 from app.inspect import service as inspect_service
 from app.optimization import service as optimization_service
 from app.testing import service as testing_service
@@ -887,6 +889,65 @@ def create_app() -> FastAPI:
         if not deleted:
             raise HTTPException(status_code=404, detail="Heatmap range run not found.")
         return None
+
+    # -- Data Manager (registry) ------------------------------------------------
+
+    _REGISTRY_RESERVED_PARAMS = {"search", "sort", "order", "limit", "offset"}
+
+    @app.get("/api/registry/summary")
+    def api_registry_summary(db: Session = Depends(get_db)):
+        return registry_service.registry_summary(db)
+
+    @app.post("/api/registry/delete-preview")
+    def api_registry_delete_preview(payload: RegistryDeleteRequest, db: Session = Depends(get_db)):
+        try:
+            return registry_service.delete_preview(db, [(item.entity_type, item.id) for item in payload.items])
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.post("/api/registry/delete")
+    def api_registry_delete(payload: RegistryDeleteRequest, db: Session = Depends(get_db)):
+        try:
+            return registry_service.delete_entities(
+                db, [(item.entity_type, item.id) for item in payload.items], cascade=payload.cascade
+            )
+        except registry_service.RegistryConflict as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except (ValueError, RunConflict) as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    @app.get("/api/registry/{entity_type}")
+    def api_registry_list(
+        entity_type: str,
+        request: Request,
+        search: str | None = None,
+        sort: str | None = None,
+        order: str = "desc",
+        limit: int = 50,
+        offset: int = 0,
+        db: Session = Depends(get_db),
+    ):
+        filters = {
+            key: value
+            for key, value in request.query_params.items()
+            if key not in _REGISTRY_RESERVED_PARAMS and value
+        }
+        try:
+            return registry_service.list_registry_rows(
+                db, entity_type, search=search, filters=filters, sort=sort, order=order, limit=limit, offset=offset
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.get("/api/registry/{entity_type}/{entity_id}")
+    def api_registry_detail(entity_type: str, entity_id: int, db: Session = Depends(get_db)):
+        try:
+            detail = registry_service.get_registry_detail(db, entity_type, entity_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        if detail is None:
+            raise HTTPException(status_code=404, detail="Object not found.")
+        return detail
 
     @app.post("/api/inspect/preview", response_model=InspectPreviewResponse)
     def api_preview_inspect(payload: InspectPreviewRequest, db: Session = Depends(get_db)):

@@ -1164,6 +1164,16 @@ class SchedulerSettingsUpdate(BaseModel):
     only_gpu: bool = False
 
 
+class RegistryItemRef(BaseModel):
+    entity_type: str
+    id: int
+
+
+class RegistryDeleteRequest(BaseModel):
+    items: list[RegistryItemRef] = Field(min_length=1)
+    cascade: bool = False
+
+
 ModelArchitectureRead = MethodDefinitionRead
 ModelConfigurationParameterRead = MethodConfigurationParameterRead
 ModelConfigurationPayload = MethodConfigurationPayload

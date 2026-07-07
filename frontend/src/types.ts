@@ -911,3 +911,70 @@ export type ModelConfiguration = MethodConfiguration;
 export type ModelConfigurationPayload = MethodConfigurationPayload;
 export type ModelConfigurationSavePayload = MethodConfigurationSavePayload;
 export type ModelValidationResponse = MethodValidationResponse;
+
+// -- Data Manager (registry) --------------------------------------------------
+
+export type RegistryFilterDef = {
+  key: string;
+  label: string;
+  kind: 'select' | 'daterange' | 'usage';
+  options: string[] | null;
+};
+
+export type RegistryTypeSummary = {
+  key: string;
+  label: string;
+  count: number;
+  filters: RegistryFilterDef[];
+};
+
+export type RegistrySummary = { types: RegistryTypeSummary[] };
+
+export type RegistryRow = {
+  id: number;
+  name: string;
+  usage_count: number;
+  disk_size_bytes?: number | null;
+  status?: string;
+  created_at?: string;
+  [key: string]: unknown;
+};
+
+export type RegistryList = { total: number; rows: RegistryRow[] };
+
+export type RegistryArtifact = {
+  path: string;
+  exists: boolean;
+  is_dir: boolean;
+  size_bytes: number;
+};
+
+export type RegistryDependent = { entity_type: string; id: number; name: string };
+
+export type RegistryDetail = {
+  entity_type: string;
+  id: number;
+  name: string;
+  fields: Record<string, unknown>;
+  artifacts: RegistryArtifact[];
+  dependents: RegistryDependent[];
+  blockers: string[];
+};
+
+export type RegistryItemRef = { entity_type: string; id: number };
+
+export type RegistryDeletePreview = {
+  groups: Array<{
+    entity_type: string;
+    label: string;
+    items: Array<{ id: number; name: string; selected: boolean }>;
+  }>;
+  total_objects: number;
+  dependent_objects: number;
+  files: RegistryArtifact[];
+  total_bytes: number;
+  blockers: string[];
+  notes: string[];
+};
+
+export type RegistryDeleteResult = { deleted: Record<string, number>; freed_bytes: number };

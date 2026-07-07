@@ -1,5 +1,6 @@
 import { AppShell, Box, Button, Group, Stack, Text, Title, Tooltip, ActionIcon } from '@mantine/core';
 import {
+  Archive,
   BarChart3,
   BrainCircuit,
   CalendarClock,
@@ -18,6 +19,7 @@ import type React from 'react';
 
 import { PageErrorBoundary } from './components/PageErrorBoundary';
 import { AnalysisPage } from './pages/AnalysisPage';
+import { DataManagerPage } from './pages/DataManagerPage';
 import { DatasetsPage } from './pages/DatasetsPage';
 import { InspectPage } from './pages/InspectPage';
 import { MethodsPage } from './pages/ModelsPage';
@@ -38,7 +40,8 @@ type Page =
   | 'inspect'
   | 'optimization'
   | 'analysis'
-  | 'scheduler';
+  | 'scheduler'
+  | 'data-manager';
 
 export function App() {
   const [page, setPage] = useState<Page>('datasets');
@@ -55,6 +58,7 @@ export function App() {
     { id: 'optimization', label: 'Optimization', icon: <SlidersHorizontal size={18} /> },
     { id: 'analysis', label: 'Analysis', icon: <BarChart3 size={18} /> },
     { id: 'scheduler', label: 'Scheduler', icon: <CalendarClock size={18} /> },
+    { id: 'data-manager', label: 'Data Manager', icon: <Archive size={18} /> },
   ];
 
   return (
@@ -157,6 +161,11 @@ export function App() {
         <Box display={page === 'scheduler' ? 'block' : 'none'}>
           <PageErrorBoundary label="Scheduler">
             <SchedulerPage active={page === 'scheduler'} />
+          </PageErrorBoundary>
+        </Box>
+        <Box display={page === 'data-manager' ? 'block' : 'none'}>
+          <PageErrorBoundary label="Data Manager">
+            <DataManagerPage active={page === 'data-manager'} />
           </PageErrorBoundary>
         </Box>
       </AppShell.Main>

@@ -24,6 +24,12 @@ import type {
   PreprocessingPipeline,
   PreprocessingPreview,
   PreprocessingStepDefinition,
+  RegistryDeletePreview,
+  RegistryDeleteResult,
+  RegistryDetail,
+  RegistryItemRef,
+  RegistryList,
+  RegistrySummary,
   RoiDefinition,
   RoiDefinitionPayload,
   RoiPreview,
@@ -981,3 +987,51 @@ export const deleteModelConfiguration = deleteMethodConfiguration;
 export const validateModelConfiguration = validateMethodConfiguration;
 export const buildModelDiagram = buildMethodDiagram;
 export const runModelTorchCheck = runMethodTorchCheck;
+
+// -- Data Manager (registry) --------------------------------------------------
+
+export function getRegistrySummary(): Promise<RegistrySummary> {
+  return request<RegistrySummary>('/api/registry/summary');
+}
+
+export function listRegistry(
+  entityType: string,
+  params: {
+    search?: string;
+    filters?: Record<string, string>;
+    sort?: string;
+    order?: 'asc' | 'desc';
+    limit?: number;
+    offset?: number;
+  } = {},
+): Promise<RegistryList> {
+  const query = new URLSearchParams();
+  if (params.search) query.set('search', params.search);
+  if (params.sort) query.set('sort', params.sort);
+  if (params.order) query.set('order', params.order);
+  if (params.limit != null) query.set('limit', String(params.limit));
+  if (params.offset != null) query.set('offset', String(params.offset));
+  for (const [key, value] of Object.entries(params.filters ?? {})) {
+    if (value) query.set(key, value);
+  }
+  const suffix = query.toString() ? `?${query.toString()}` : '';
+  return request<RegistryList>(`/api/registry/${entityType}${suffix}`);
+}
+
+export function getRegistryDetail(entityType: string, id: number): Promise<RegistryDetail> {
+  return request<RegistryDetail>(`/api/registry/${entityType}/${id}`);
+}
+
+export function registryDeletePreview(items: RegistryItemRef[]): Promise<RegistryDeletePreview> {
+  return request<RegistryDeletePreview>('/api/registry/delete-preview', {
+    method: 'POST',
+    body: JSON.stringify({ items, cascade: false }),
+  });
+}
+
+export function registryDelete(items: RegistryItemRef[], cascade: boolean): Promise<RegistryDeleteResult> {
+  return request<RegistryDeleteResult>('/api/registry/delete', {
+    method: 'POST',
+    body: JSON.stringify({ items, cascade }),
+  }, 120_000);
+}
