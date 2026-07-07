@@ -64,6 +64,7 @@ pip-wheel-metadata/
 sample_datasets/
 external_datasets/
 tools/setup_aebad_v_dataset.py
+docs/local/*
 
 # Java / Kotlin / Gradle
 .gradle/
