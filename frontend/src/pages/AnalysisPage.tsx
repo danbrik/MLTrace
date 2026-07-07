@@ -98,6 +98,8 @@ type AnalyticsKind =
   | 'evidence_score'
   | 'slope_height_ratio'
   | 'energy_ratio'
+  | 'snr_db'
+  | 'snr_ratio'
   | 'rolling_std'
   | 'rolling_cv'
   | 'time_since_onset'
@@ -651,6 +653,8 @@ const ANALYTICS_DEFINITIONS: AnalyticsDefinition[] = [
   { kind: 'evidence_score', label: 'Evidence score', description: 'Online positive/negative evidence score.', defaultParams: { windowMode: 'samples', windowSamples: 20, windowMinutes: 5, alpha: 0.2, zThreshold: 1, slopeThreshold: 0, w1: 1, w2: 1, w3: 0.2, v1: 1, v2: 0.5, v3: 1, epsilon: 1e-12 } },
   { kind: 'slope_height_ratio', label: 'Slope / height ratio', description: 'Current slope relative to robust z-score height.', defaultParams: { windowMode: 'samples', windowSamples: 60, windowMinutes: 60, alpha: 0.2, epsilon: 1e-12 } },
   { kind: 'energy_ratio', label: 'Short / long energy ratio', description: 'Short rolling area divided by long rolling area.', defaultParams: { windowMode: 'samples', windowSamples: 12, windowMinutes: 3, longWindowSamples: 40, longWindowMinutes: 10, baselineWindowSamples: 60, baselineWindowMinutes: 60, alpha: 0.2, threshold: 1, epsilon: 1e-12 } },
+  { kind: 'snr_db', label: 'Signal-to-noise ratio (dB)', description: 'Causal rolling signal-to-noise ratio in decibels. Signal is the absolute local mean; noise is local standard deviation.', defaultParams: { windowMode: 'samples', windowSamples: 60, windowMinutes: 60, epsilon: 1e-12 } },
+  { kind: 'snr_ratio', label: 'Signal-to-noise ratio (ratio)', description: 'Causal rolling signal-to-noise ratio as a unitless quotient. Signal is the absolute local mean; noise is local standard deviation.', defaultParams: { windowMode: 'samples', windowSamples: 60, windowMinutes: 60, epsilon: 1e-12 } },
   { kind: 'rolling_std', label: 'Rolling std', description: 'Causal local standard deviation.', defaultParams: { windowMode: 'samples', windowSamples: 20, windowMinutes: 5, alpha: 0.2 } },
   { kind: 'rolling_cv', label: 'Rolling coefficient of variation', description: 'Rolling std divided by rolling mean.', defaultParams: { windowMode: 'samples', windowSamples: 20, windowMinutes: 5, alpha: 0.2, epsilon: 1e-12 } },
   { kind: 'time_since_onset', label: 'Time since onset', description: 'Elapsed time since z and slope crossed onset thresholds.', defaultParams: { windowMode: 'samples', windowSamples: 60, windowMinutes: 60, alpha: 0.2, onsetThreshold: 1, slopeThreshold: 0, resetThreshold: 0.5, epsilon: 1e-12 } },
@@ -715,6 +719,8 @@ function analyticsParamLabel(key: string): string {
     v1: 'Negative slope weight',
     v2: 'Below-threshold weight',
     v3: 'Drawdown weight',
+    snr_db: 'Signal-to-noise ratio (dB)',
+    snr_ratio: 'Signal-to-noise ratio (ratio)',
   };
   return labels[key] ?? key;
 }
@@ -753,6 +759,8 @@ function analyticsParamInfo(key: string): string {
     v1: 'Weight of negative slope evidence.',
     v2: 'Penalty when z-score is below threshold.',
     v3: 'Penalty from relative drawdown.',
+    snr_db: 'Causal rolling signal-to-noise ratio on a logarithmic dB scale. +20 dB means the local signal amplitude is 10x the local noise amplitude.',
+    snr_ratio: 'Causal rolling signal-to-noise ratio as a unitless quotient: absolute local mean divided by local standard deviation.',
   };
   return infos[key] ?? 'Parameter used by this causal time-series analytics stage.';
 }
@@ -976,6 +984,19 @@ function computeAnalyticsSeries(config: AnalyticsMethodConfig, values: number[],
       const longArea = rollingAreaFrom(values, times, config, 'longWindowSamples', 'longWindowMinutes');
       const epsilon = numberParam(config, 'epsilon', 1e-12);
       return shortArea.map((value, index) => finiteOrNull(value / (longArea[index] + epsilon)));
+    }
+    case 'snr_db':
+    case 'snr_ratio': {
+      const epsilon = numberParam(config, 'epsilon', 1e-12);
+      return values.map((_, index) => {
+        const start = windowStartIndex(times, index, config);
+        const window = values.slice(start, index + 1).filter(Number.isFinite);
+        if (window.length < 2) return null;
+        const mean = window.reduce((sum, value) => sum + value, 0) / window.length;
+        const variance = window.reduce((sum, value) => sum + (value - mean) ** 2, 0) / window.length;
+        const ratio = Math.abs(mean) / (Math.sqrt(variance) + epsilon);
+        return config.kind === 'snr_ratio' ? finiteOrNull(ratio) : finiteOrNull(20 * Math.log10(ratio));
+      });
     }
     case 'rolling_std':
     case 'rolling_cv': {
