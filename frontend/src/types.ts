@@ -779,6 +779,110 @@ export type AnalysisLayout = {
   updated_at: string;
 };
 
+export type OptimizationParameterSpec = {
+  path: string;
+  kind: 'int' | 'float' | 'categorical';
+  low?: number | null;
+  high?: number | null;
+  step?: number | null;
+  log?: boolean;
+  choices?: Array<number | string | boolean> | null;
+};
+
+export type OptimizationStudyPayload = {
+  name: string;
+  description?: string | null;
+  preprocessing_pipeline_id: number;
+  method_configuration_ids: number[];
+  normal_train_dataset_id: number;
+  normal_validation_dataset_id: number;
+  anomaly_validation_dataset_id: number;
+  normal_holdout_dataset_id?: number | null;
+  anomaly_holdout_dataset_id?: number | null;
+  search_space: OptimizationParameterSpec[];
+  objective_name: string;
+  direction: 'maximize' | 'minimize';
+  n_trials: number;
+  max_parallel_trials: number;
+  sampler: 'tpe' | 'random';
+  split_config?: Record<string, unknown>;
+  objective_config?: Record<string, unknown>;
+};
+
+export type OptimizationTrial = {
+  id: number;
+  study_id: number;
+  number: number;
+  status: string;
+  phase: string;
+  sampled_params: Record<string, unknown>;
+  method_configuration_id: number | null;
+  training_pipeline_id: number | null;
+  training_run_id: number | null;
+  normal_testing_run_id: number | null;
+  anomaly_testing_run_id: number | null;
+  normal_holdout_testing_run_id: number | null;
+  anomaly_holdout_testing_run_id: number | null;
+  objective_value: number | null;
+  metrics: Record<string, unknown> | null;
+  error_message: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type OptimizationStudy = {
+  id: number;
+  name: string;
+  description: string | null;
+  status: string;
+  objective_name: string;
+  direction: string;
+  n_trials: number;
+  max_parallel_trials: number;
+  sampler: string;
+  preprocessing_pipeline_id: number;
+  preprocessing_pipeline_name: string;
+  method_configuration_ids: number[];
+  normal_train_dataset_id: number;
+  normal_train_dataset_name: string;
+  normal_validation_dataset_id: number;
+  normal_validation_dataset_name: string;
+  anomaly_validation_dataset_id: number;
+  anomaly_validation_dataset_name: string;
+  normal_holdout_dataset_id: number | null;
+  normal_holdout_dataset_name: string | null;
+  anomaly_holdout_dataset_id: number | null;
+  anomaly_holdout_dataset_name: string | null;
+  search_space: OptimizationParameterSpec[];
+  split_config: Record<string, unknown>;
+  objective_config: Record<string, unknown>;
+  best_trial_id: number | null;
+  best_value: number | null;
+  error_message: string | null;
+  started_at: string | null;
+  ended_at: string | null;
+  created_at: string;
+  updated_at: string;
+  trials: OptimizationTrial[];
+};
+
+export type OptimizationSplitPayload = {
+  name_prefix: string;
+  normal_source_dataset_id: number;
+  anomaly_source_dataset_id: number;
+  normal_train_fraction: number;
+  normal_validation_fraction: number;
+  anomaly_validation_fraction: number;
+};
+
+export type OptimizationSplit = {
+  normal_train_dataset: TrainingDataset;
+  normal_validation_dataset: TrainingDataset;
+  normal_holdout_dataset: TrainingDataset;
+  anomaly_validation_dataset: TrainingDataset;
+  anomaly_holdout_dataset: TrainingDataset;
+};
+
 export type SchedulerSettings = {
   detected_gpu_count: number;
   max_gpu_slots: number;

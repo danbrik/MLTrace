@@ -88,6 +88,7 @@ def cache_revisions(db: Session) -> CacheRevisionsRead:
         "heatmapRanges": _revision_for_model(db, models.HeatmapRangeRun, models.HeatmapRangeRun.updated_at),
         "inspectRuns": _revision_for_model(db, models.InspectRun, models.InspectRun.updated_at),
         "analysisLayouts": _revision_for_model(db, models.AnalysisLayout, models.AnalysisLayout.updated_at),
+        "optimizationStudies": _revision_for_model(db, models.OptimizationStudy, models.OptimizationStudy.updated_at),
         "rois": _revision_for_model(db, models.RoiDefinition, models.RoiDefinition.updated_at),
         "preprocessingSteps": f"static:{len(registry.list_definitions())}",
         "methodDefinitions": f"static:{len(model_registry.list_definitions())}",

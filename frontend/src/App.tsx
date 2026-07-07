@@ -7,6 +7,7 @@ import {
   Eye,
   FlaskConical,
   ListChecks,
+  SlidersHorizontal,
   PanelLeftClose,
   PanelLeftOpen,
   Route,
@@ -20,6 +21,7 @@ import { AnalysisPage } from './pages/AnalysisPage';
 import { DatasetsPage } from './pages/DatasetsPage';
 import { InspectPage } from './pages/InspectPage';
 import { MethodsPage } from './pages/ModelsPage';
+import { OptimizationPage } from './pages/OptimizationPage';
 import { PreprocessingPipelinesPage } from './pages/PreprocessingPipelinesPage';
 import { SchedulerPage } from './pages/SchedulerPage';
 import { TrainingDatasetsPage } from './pages/TrainingDatasetsPage';
@@ -34,6 +36,7 @@ type Page =
   | 'training-pipelines'
   | 'testing'
   | 'inspect'
+  | 'optimization'
   | 'analysis'
   | 'scheduler';
 
@@ -49,6 +52,7 @@ export function App() {
     { id: 'training-pipelines', label: 'Training Pipelines', icon: <Route size={18} /> },
     { id: 'testing', label: 'Inference', icon: <FlaskConical size={18} /> },
     { id: 'inspect', label: 'Inspect', icon: <Eye size={18} /> },
+    { id: 'optimization', label: 'Optimization', icon: <SlidersHorizontal size={18} /> },
     { id: 'analysis', label: 'Analysis', icon: <BarChart3 size={18} /> },
     { id: 'scheduler', label: 'Scheduler', icon: <CalendarClock size={18} /> },
   ];
@@ -138,6 +142,11 @@ export function App() {
         <Box display={page === 'inspect' ? 'block' : 'none'}>
           <PageErrorBoundary label="Inspect">
             <InspectPage active={page === 'inspect'} />
+          </PageErrorBoundary>
+        </Box>
+        <Box display={page === 'optimization' ? 'block' : 'none'}>
+          <PageErrorBoundary label="Optimization">
+            <OptimizationPage active={page === 'optimization'} />
           </PageErrorBoundary>
         </Box>
         <Box display={page === 'analysis' ? 'block' : 'none'}>

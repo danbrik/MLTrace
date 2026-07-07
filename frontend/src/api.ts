@@ -16,6 +16,10 @@ import type {
   MethodDefinition,
   MethodValidationResponse,
   ModelLayerDefinition,
+  OptimizationSplit,
+  OptimizationSplitPayload,
+  OptimizationStudy,
+  OptimizationStudyPayload,
   PreprocessingGraph,
   PreprocessingPipeline,
   PreprocessingPreview,
@@ -743,6 +747,90 @@ export function updateAnalysisLayout(
 export async function deleteAnalysisLayout(layoutId: number): Promise<void> {
   await request<void>(`/api/analysis/layouts/${layoutId}`, { method: 'DELETE' });
   invalidate(['analysisLayouts']);
+}
+
+export function listOptimizationStudies(): Promise<OptimizationStudy[]> {
+  return cachedList<OptimizationStudy[]>('optimizationStudies', '/api/optimization/studies', RUN_TTL_MS);
+}
+
+export function getOptimizationStudy(studyId: number): Promise<OptimizationStudy> {
+  return request<OptimizationStudy>(`/api/optimization/studies/${studyId}`);
+}
+
+export function createOptimizationStudy(payload: OptimizationStudyPayload): Promise<OptimizationStudy> {
+  return request<OptimizationStudy>('/api/optimization/studies', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  }).then((study) => {
+    invalidate(['optimizationStudies']);
+    return study;
+  });
+}
+
+export function updateOptimizationStudy(studyId: number, payload: OptimizationStudyPayload): Promise<OptimizationStudy> {
+  return request<OptimizationStudy>(`/api/optimization/studies/${studyId}`, {
+    method: 'PUT',
+    body: JSON.stringify(payload),
+  }).then((study) => {
+    invalidate(['optimizationStudies']);
+    return study;
+  });
+}
+
+export async function deleteOptimizationStudy(studyId: number): Promise<void> {
+  await request<void>(`/api/optimization/studies/${studyId}`, { method: 'DELETE' });
+  invalidate(['optimizationStudies']);
+}
+
+export function startOptimizationStudy(studyId: number): Promise<OptimizationStudy> {
+  return request<OptimizationStudy>(`/api/optimization/studies/${studyId}/start`, { method: 'POST' }).then((study) => {
+    invalidate(['optimizationStudies', 'methodConfigurations', 'trainingPipelines', 'trainingRuns']);
+    return study;
+  });
+}
+
+export function pauseOptimizationStudy(studyId: number): Promise<OptimizationStudy> {
+  return request<OptimizationStudy>(`/api/optimization/studies/${studyId}/pause`, { method: 'POST' }).then((study) => {
+    invalidate(['optimizationStudies']);
+    return study;
+  });
+}
+
+export function resumeOptimizationStudy(studyId: number): Promise<OptimizationStudy> {
+  return request<OptimizationStudy>(`/api/optimization/studies/${studyId}/resume`, { method: 'POST' }).then((study) => {
+    invalidate(['optimizationStudies']);
+    return study;
+  });
+}
+
+export function abortOptimizationStudy(studyId: number): Promise<OptimizationStudy> {
+  return request<OptimizationStudy>(`/api/optimization/studies/${studyId}/abort`, { method: 'POST' }).then((study) => {
+    invalidate(['optimizationStudies', 'trainingRuns', 'testingRuns']);
+    return study;
+  });
+}
+
+export function createOptimizationSplit(payload: OptimizationSplitPayload): Promise<OptimizationSplit> {
+  return request<OptimizationSplit>('/api/optimization/splits', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  }, 120_000).then((split) => {
+    invalidate(['trainingDatasets']);
+    return split;
+  });
+}
+
+export function promoteOptimizationTrial(
+  trialId: number,
+  payload: { name: string; description?: string | null },
+): Promise<TrainingPipeline> {
+  return request<TrainingPipeline>(`/api/optimization/trials/${trialId}/promote`, {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  }).then((pipeline) => {
+    invalidate(['optimizationStudies', 'trainingPipelines']);
+    return pipeline;
+  });
 }
 
 /** URL for one rendered overlay frame PNG (served directly, not via fetch). */

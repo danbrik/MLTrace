@@ -685,5 +685,115 @@ class AnalysisLayout(Base):
     )
 
 
+class OptimizationStudy(Base):
+    """An Optuna-style hyperparameter study orchestrated through MLTrace runs."""
+
+    __tablename__ = "optimization_studies"
+    __table_args__ = (
+        Index("ix_optimization_studies_status", "status"),
+        Index("ix_optimization_studies_created_at", "created_at"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    name: Mapped[str] = mapped_column(String(255), nullable=False, unique=True)
+    description: Mapped[str | None] = mapped_column(Text)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="draft")
+    objective_name: Mapped[str] = mapped_column(String(64), nullable=False, default="median_anomaly_minus_p95_normal")
+    direction: Mapped[str] = mapped_column(String(16), nullable=False, default="maximize")
+    n_trials: Mapped[int] = mapped_column(Integer, nullable=False, default=10)
+    max_parallel_trials: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    sampler: Mapped[str] = mapped_column(String(64), nullable=False, default="tpe")
+
+    preprocessing_pipeline_id: Mapped[int] = mapped_column(
+        ForeignKey("preprocessing_pipelines.id", ondelete="RESTRICT"), nullable=False
+    )
+    method_configuration_ids: Mapped[list] = mapped_column(json_type(), nullable=False, default=list)
+    normal_train_dataset_id: Mapped[int] = mapped_column(
+        ForeignKey("training_datasets.id", ondelete="RESTRICT"), nullable=False
+    )
+    normal_validation_dataset_id: Mapped[int] = mapped_column(
+        ForeignKey("training_datasets.id", ondelete="RESTRICT"), nullable=False
+    )
+    anomaly_validation_dataset_id: Mapped[int] = mapped_column(
+        ForeignKey("training_datasets.id", ondelete="RESTRICT"), nullable=False
+    )
+    normal_holdout_dataset_id: Mapped[int | None] = mapped_column(
+        ForeignKey("training_datasets.id", ondelete="RESTRICT")
+    )
+    anomaly_holdout_dataset_id: Mapped[int | None] = mapped_column(
+        ForeignKey("training_datasets.id", ondelete="RESTRICT")
+    )
+
+    search_space: Mapped[dict] = mapped_column(json_type(), nullable=False, default=dict)
+    split_config: Mapped[dict] = mapped_column(json_type(), nullable=False, default=dict)
+    objective_config: Mapped[dict] = mapped_column(json_type(), nullable=False, default=dict)
+    best_trial_id: Mapped[int | None] = mapped_column(Integer)
+    best_value: Mapped[float | None] = mapped_column(Float)
+    error_message: Mapped[str | None] = mapped_column(Text)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=False))
+    ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=False))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=False), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=False), server_default=func.now(), onupdate=func.now()
+    )
+
+    preprocessing_pipeline: Mapped[PreprocessingPipeline] = relationship()
+    normal_train_dataset: Mapped[TrainingDataset] = relationship(foreign_keys=[normal_train_dataset_id])
+    normal_validation_dataset: Mapped[TrainingDataset] = relationship(foreign_keys=[normal_validation_dataset_id])
+    anomaly_validation_dataset: Mapped[TrainingDataset] = relationship(foreign_keys=[anomaly_validation_dataset_id])
+    normal_holdout_dataset: Mapped[TrainingDataset | None] = relationship(foreign_keys=[normal_holdout_dataset_id])
+    anomaly_holdout_dataset: Mapped[TrainingDataset | None] = relationship(foreign_keys=[anomaly_holdout_dataset_id])
+    trials: Mapped[list["OptimizationTrial"]] = relationship(
+        back_populates="study",
+        cascade="all, delete-orphan",
+        order_by="OptimizationTrial.number",
+    )
+
+
+class OptimizationTrial(Base):
+    """One sampled candidate inside an optimization study."""
+
+    __tablename__ = "optimization_trials"
+    __table_args__ = (
+        UniqueConstraint("study_id", "number", name="uq_optimization_trial_number"),
+        Index("ix_optimization_trials_study_status", "study_id", "status"),
+        Index("ix_optimization_trials_value", "objective_value"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    study_id: Mapped[int] = mapped_column(ForeignKey("optimization_studies.id", ondelete="CASCADE"), nullable=False)
+    number: Mapped[int] = mapped_column(Integer, nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="waiting")
+    phase: Mapped[str] = mapped_column(String(64), nullable=False, default="waiting")
+    sampled_params: Mapped[dict] = mapped_column(json_type(), nullable=False, default=dict)
+    method_configuration_id: Mapped[int | None] = mapped_column(
+        ForeignKey("method_configurations.id", ondelete="SET NULL")
+    )
+    training_pipeline_id: Mapped[int | None] = mapped_column(
+        ForeignKey("training_pipelines.id", ondelete="SET NULL")
+    )
+    training_run_id: Mapped[int | None] = mapped_column(ForeignKey("training_runs.id", ondelete="SET NULL"))
+    normal_testing_run_id: Mapped[int | None] = mapped_column(ForeignKey("testing_runs.id", ondelete="SET NULL"))
+    anomaly_testing_run_id: Mapped[int | None] = mapped_column(ForeignKey("testing_runs.id", ondelete="SET NULL"))
+    normal_holdout_testing_run_id: Mapped[int | None] = mapped_column(ForeignKey("testing_runs.id", ondelete="SET NULL"))
+    anomaly_holdout_testing_run_id: Mapped[int | None] = mapped_column(ForeignKey("testing_runs.id", ondelete="SET NULL"))
+    objective_value: Mapped[float | None] = mapped_column(Float)
+    metrics: Mapped[dict | None] = mapped_column(json_type())
+    error_message: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=False), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=False), server_default=func.now(), onupdate=func.now()
+    )
+
+    study: Mapped[OptimizationStudy] = relationship(back_populates="trials")
+    method_configuration: Mapped[MethodConfiguration | None] = relationship()
+    training_pipeline: Mapped[TrainingPipeline | None] = relationship()
+    training_run: Mapped[TrainingRun | None] = relationship(foreign_keys=[training_run_id])
+    normal_testing_run: Mapped[TestingRun | None] = relationship(foreign_keys=[normal_testing_run_id])
+    anomaly_testing_run: Mapped[TestingRun | None] = relationship(foreign_keys=[anomaly_testing_run_id])
+    normal_holdout_testing_run: Mapped[TestingRun | None] = relationship(foreign_keys=[normal_holdout_testing_run_id])
+    anomaly_holdout_testing_run: Mapped[TestingRun | None] = relationship(foreign_keys=[anomaly_holdout_testing_run_id])
+
+
 ModelConfiguration = MethodConfiguration
 ModelConfigurationParameter = MethodConfigurationParameter

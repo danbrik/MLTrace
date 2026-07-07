@@ -35,6 +35,12 @@ from app.schemas import (
     MethodConfigurationValidationResponse,
     MethodDefinitionRead,
     ModelLayerRead,
+    OptimizationPromoteRequest,
+    OptimizationSplitCreate,
+    OptimizationSplitRead,
+    OptimizationStudyCreate,
+    OptimizationStudyRead,
+    OptimizationStudyUpdate,
     PreprocessingPipelineCreate,
     PreprocessingPipelineRead,
     PreprocessingPipelineSummaryRead,
@@ -71,6 +77,7 @@ from app.schemas import (
 from app.analysis import service as analysis_service
 from app.heatmap import service as heatmap_service
 from app.inspect import service as inspect_service
+from app.optimization import service as optimization_service
 from app.testing import service as testing_service
 from app.testing.service import TestingConflict
 from app.training import service as training_service
@@ -143,11 +150,13 @@ async def lifespan(app: FastAPI):
     finally:
         db.close()
     scheduler.start()
+    optimization_service.optimization_loop.start()
     inspect_service.inspect_queue.start()
     try:
         yield
     finally:
         inspect_service.inspect_queue.stop()
+        optimization_service.optimization_loop.stop()
         scheduler.stop()
 
 
@@ -212,6 +221,97 @@ def create_app() -> FastAPI:
         if not analysis_service.delete_analysis_layout(db, layout_id):
             raise HTTPException(status_code=404, detail="Analysis layout not found.")
         return None
+
+    @app.get("/api/optimization/studies", response_model=list[OptimizationStudyRead])
+    def api_list_optimization_studies(db: Session = Depends(get_db)):
+        return optimization_service.list_studies(db)
+
+    @app.post("/api/optimization/splits", response_model=OptimizationSplitRead)
+    def api_create_optimization_split(payload: OptimizationSplitCreate, db: Session = Depends(get_db)):
+        try:
+            return optimization_service.create_time_split(db, payload)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.post("/api/optimization/studies", response_model=OptimizationStudyRead)
+    def api_create_optimization_study(payload: OptimizationStudyCreate, db: Session = Depends(get_db)):
+        try:
+            return optimization_service.create_study(db, payload)
+        except ValueError as exc:
+            raise HTTPException(status_code=409 if "already exists" in str(exc) else 400, detail=str(exc)) from exc
+
+    @app.get("/api/optimization/studies/{study_id}", response_model=OptimizationStudyRead)
+    def api_get_optimization_study(study_id: int, db: Session = Depends(get_db)):
+        study = optimization_service.get_study(db, study_id)
+        if study is None:
+            raise HTTPException(status_code=404, detail="Optimization study not found.")
+        return study
+
+    @app.put("/api/optimization/studies/{study_id}", response_model=OptimizationStudyRead)
+    def api_update_optimization_study(study_id: int, payload: OptimizationStudyUpdate, db: Session = Depends(get_db)):
+        try:
+            study = optimization_service.update_study(db, study_id, payload)
+        except ValueError as exc:
+            raise HTTPException(status_code=409 if "already exists" in str(exc) else 400, detail=str(exc)) from exc
+        if study is None:
+            raise HTTPException(status_code=404, detail="Optimization study not found.")
+        return study
+
+    @app.delete("/api/optimization/studies/{study_id}", status_code=204)
+    def api_delete_optimization_study(study_id: int, db: Session = Depends(get_db)):
+        try:
+            deleted = optimization_service.delete_study(db, study_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        if not deleted:
+            raise HTTPException(status_code=404, detail="Optimization study not found.")
+        return None
+
+    @app.post("/api/optimization/studies/{study_id}/start", response_model=OptimizationStudyRead)
+    def api_start_optimization_study(study_id: int, db: Session = Depends(get_db)):
+        try:
+            study = optimization_service.start_study(db, study_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        if study is None:
+            raise HTTPException(status_code=404, detail="Optimization study not found.")
+        return study
+
+    @app.post("/api/optimization/studies/{study_id}/pause", response_model=OptimizationStudyRead)
+    def api_pause_optimization_study(study_id: int, db: Session = Depends(get_db)):
+        study = optimization_service.pause_study(db, study_id)
+        if study is None:
+            raise HTTPException(status_code=404, detail="Optimization study not found.")
+        return study
+
+    @app.post("/api/optimization/studies/{study_id}/resume", response_model=OptimizationStudyRead)
+    def api_resume_optimization_study(study_id: int, db: Session = Depends(get_db)):
+        study = optimization_service.resume_study(db, study_id)
+        if study is None:
+            raise HTTPException(status_code=404, detail="Optimization study not found.")
+        return study
+
+    @app.post("/api/optimization/studies/{study_id}/abort", response_model=OptimizationStudyRead)
+    def api_abort_optimization_study(study_id: int, db: Session = Depends(get_db)):
+        study = optimization_service.abort_study(db, study_id)
+        if study is None:
+            raise HTTPException(status_code=404, detail="Optimization study not found.")
+        return study
+
+    @app.post("/api/optimization/trials/{trial_id}/promote", response_model=TrainingPipelineRead)
+    def api_promote_optimization_trial(trial_id: int, payload: OptimizationPromoteRequest, db: Session = Depends(get_db)):
+        try:
+            pipeline = optimization_service.promote_trial(db, trial_id, payload)
+        except DuplicatePipelineError as exc:
+            raise HTTPException(
+                status_code=409,
+                detail={"message": str(exc), "existing_pipeline_id": exc.existing.id},
+            ) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        if pipeline is None:
+            raise HTTPException(status_code=404, detail="Optimization trial not found.")
+        return pipeline
 
     @app.post("/api/datasets", response_model=DatasetRead)
     def api_create_dataset(payload: DatasetCreate, db: Session = Depends(get_db)):

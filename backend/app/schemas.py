@@ -372,6 +372,142 @@ class AnalysisLayoutRead(BaseModel):
     updated_at: datetime
 
 
+class OptimizationParameterSpec(BaseModel):
+    path: str = Field(min_length=1)
+    kind: Literal["int", "float", "categorical"]
+    low: float | int | None = None
+    high: float | int | None = None
+    step: float | int | None = None
+    log: bool = False
+    choices: list[float | int | str | bool] | None = None
+
+
+class OptimizationStudyCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=255)
+    description: str | None = None
+    preprocessing_pipeline_id: int
+    method_configuration_ids: list[int] = Field(min_length=1)
+    normal_train_dataset_id: int
+    normal_validation_dataset_id: int
+    anomaly_validation_dataset_id: int
+    normal_holdout_dataset_id: int | None = None
+    anomaly_holdout_dataset_id: int | None = None
+    search_space: list[OptimizationParameterSpec] = Field(default_factory=list)
+    objective_name: Literal[
+        "median_anomaly_minus_p95_normal",
+        "mean_gap",
+        "roc_auc",
+        "pr_auc",
+        "normal_validation_loss",
+    ] = "median_anomaly_minus_p95_normal"
+    direction: Literal["maximize", "minimize"] = "maximize"
+    n_trials: int = Field(default=10, ge=1, le=1000)
+    max_parallel_trials: int = Field(default=1, ge=1, le=64)
+    sampler: Literal["tpe", "random"] = "tpe"
+    split_config: dict = Field(default_factory=dict)
+    objective_config: dict = Field(default_factory=dict)
+
+    @field_validator("method_configuration_ids")
+    @classmethod
+    def validate_method_ids(cls, value: list[int]) -> list[int]:
+        if len(value) != len(set(value)):
+            raise ValueError("method_configuration_ids must not contain duplicates")
+        return value
+
+
+class OptimizationStudyUpdate(OptimizationStudyCreate):
+    pass
+
+
+class OptimizationSplitCreate(BaseModel):
+    name_prefix: str = Field(min_length=1, max_length=160)
+    normal_source_dataset_id: int
+    anomaly_source_dataset_id: int
+    normal_train_fraction: float = Field(default=0.75, gt=0.0, lt=1.0)
+    normal_validation_fraction: float = Field(default=0.125, gt=0.0, lt=1.0)
+    anomaly_validation_fraction: float = Field(default=0.5, gt=0.0, lt=1.0)
+
+    @model_validator(mode="after")
+    def validate_fractions(self):
+        if self.normal_train_fraction + self.normal_validation_fraction >= 1.0:
+            raise ValueError("normal_train_fraction + normal_validation_fraction must be < 1.0")
+        return self
+
+
+class OptimizationSplitRead(BaseModel):
+    normal_train_dataset: TrainingDatasetRead
+    normal_validation_dataset: TrainingDatasetRead
+    normal_holdout_dataset: TrainingDatasetRead
+    anomaly_validation_dataset: TrainingDatasetRead
+    anomaly_holdout_dataset: TrainingDatasetRead
+
+
+class OptimizationTrialRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    study_id: int
+    number: int
+    status: str
+    phase: str
+    sampled_params: dict
+    method_configuration_id: int | None
+    training_pipeline_id: int | None
+    training_run_id: int | None
+    normal_testing_run_id: int | None
+    anomaly_testing_run_id: int | None
+    normal_holdout_testing_run_id: int | None
+    anomaly_holdout_testing_run_id: int | None
+    objective_value: float | None
+    metrics: dict | None
+    error_message: str | None
+    created_at: datetime
+    updated_at: datetime
+
+
+class OptimizationStudyRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    name: str
+    description: str | None
+    status: str
+    objective_name: str
+    direction: str
+    n_trials: int
+    max_parallel_trials: int
+    sampler: str
+    preprocessing_pipeline_id: int
+    preprocessing_pipeline_name: str
+    method_configuration_ids: list[int]
+    normal_train_dataset_id: int
+    normal_train_dataset_name: str
+    normal_validation_dataset_id: int
+    normal_validation_dataset_name: str
+    anomaly_validation_dataset_id: int
+    anomaly_validation_dataset_name: str
+    normal_holdout_dataset_id: int | None
+    normal_holdout_dataset_name: str | None
+    anomaly_holdout_dataset_id: int | None
+    anomaly_holdout_dataset_name: str | None
+    search_space: list[dict]
+    split_config: dict
+    objective_config: dict
+    best_trial_id: int | None
+    best_value: float | None
+    error_message: str | None
+    started_at: datetime | None
+    ended_at: datetime | None
+    created_at: datetime
+    updated_at: datetime
+    trials: list[OptimizationTrialRead] = []
+
+
+class OptimizationPromoteRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=255)
+    description: str | None = None
+
+
 class MethodDefinitionRead(BaseModel):
     type: str
     label: str
