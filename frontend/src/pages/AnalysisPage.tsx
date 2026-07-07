@@ -74,6 +74,39 @@ const ANALYSIS_MAX_POINTS = 8000;
 
 type PlotType = 'timeseries' | 'heatmap';
 type HeatmapMode = 'single' | 'range';
+type AnalyticsDisplayMode = 'multi_panel';
+type AnalyticsKind =
+  | 'raw'
+  | 'ewma'
+  | 'derivative'
+  | 'smoothed_derivative'
+  | 'second_derivative'
+  | 'rolling_slope'
+  | 'rolling_median'
+  | 'rolling_mad'
+  | 'robust_z'
+  | 'positive_exceedance'
+  | 'rolling_area'
+  | 'rolling_mean'
+  | 'rolling_max'
+  | 'drawdown'
+  | 'positive_slope_count'
+  | 'positive_slope_fraction'
+  | 'rising_streak'
+  | 'cusum'
+  | 'page_hinkley'
+  | 'evidence_score'
+  | 'slope_height_ratio'
+  | 'energy_ratio'
+  | 'rolling_std'
+  | 'rolling_cv'
+  | 'time_since_onset'
+  | 'state_machine';
+
+type AnalyticsMethodConfig = {
+  kind: AnalyticsKind;
+  params: Record<string, number | string | boolean>;
+};
 
 type PlotDraft = {
   plotType: PlotType;
@@ -85,6 +118,8 @@ type PlotDraft = {
   end: string;
   sampling: number;
   movingAverage: number;
+  timeseriesAnalytics: AnalyticsMethodConfig[];
+  analyticsDisplayMode: AnalyticsDisplayMode;
   heatmapMode: HeatmapMode;
   timestamp: string | null;
   includeReference: boolean;
@@ -578,7 +613,378 @@ function renderTrainsetPipelineSummary(pipeline: TrainingPipeline, datasets: Tra
 
 const TRACE_COLORS = ['#1c7ed6', '#e8590c', '#2f9e44', '#9c36b5', '#0c8599', '#e03131', '#5f3dc4', '#66a80f'];
 
+type AnalyticsDefinition = {
+  kind: AnalyticsKind;
+  label: string;
+  description: string;
+  defaultParams: Record<string, number | string | boolean>;
+};
+
+const ANALYTICS_DEFINITIONS: AnalyticsDefinition[] = [
+  { kind: 'raw', label: 'Raw score', description: 'Original anomaly score without additional transformation.', defaultParams: {} },
+  { kind: 'ewma', label: 'EWMA', description: 'Causal exponential moving average.', defaultParams: { alpha: 0.2 } },
+  { kind: 'derivative', label: 'First derivative', description: 'Point-to-point slope of raw or smoothed score.', defaultParams: { source: 'smoothed', alpha: 0.2, timeNormalized: false } },
+  { kind: 'smoothed_derivative', label: 'Smoothed derivative', description: 'EWMA-smoothed first derivative.', defaultParams: { source: 'smoothed', alpha: 0.2, beta: 0.2, timeNormalized: false } },
+  { kind: 'second_derivative', label: 'Second derivative', description: 'Change of the derivative.', defaultParams: { source: 'smoothed', alpha: 0.2, beta: 0.2, timeNormalized: false } },
+  { kind: 'rolling_slope', label: 'Rolling slope', description: 'Causal slope over a past window.', defaultParams: { windowMode: 'samples', windowSamples: 12, windowMinutes: 3, alpha: 0.2, timeNormalized: false } },
+  { kind: 'rolling_median', label: 'Rolling median baseline', description: 'Causal rolling median baseline.', defaultParams: { windowMode: 'samples', windowSamples: 60, windowMinutes: 60, alpha: 0.2 } },
+  { kind: 'rolling_mad', label: 'Rolling MAD', description: 'Robust local spread around rolling median.', defaultParams: { windowMode: 'samples', windowSamples: 60, windowMinutes: 60, alpha: 0.2 } },
+  { kind: 'robust_z', label: 'Robust z-score', description: 'Score relative to rolling median and MAD.', defaultParams: { windowMode: 'samples', windowSamples: 60, windowMinutes: 60, alpha: 0.2, epsilon: 1e-12 } },
+  { kind: 'positive_exceedance', label: 'Positive exceedance', description: 'Positive part above a z-score threshold.', defaultParams: { windowMode: 'samples', windowSamples: 60, windowMinutes: 60, alpha: 0.2, threshold: 1, epsilon: 1e-12 } },
+  { kind: 'rolling_area', label: 'Rolling area', description: 'Accumulated positive exceedance in a causal window.', defaultParams: { windowMode: 'samples', windowSamples: 12, windowMinutes: 3, baselineWindowSamples: 60, baselineWindowMinutes: 60, alpha: 0.2, threshold: 1, epsilon: 1e-12 } },
+  { kind: 'rolling_mean', label: 'Rolling mean', description: 'Causal local average of the smoothed score.', defaultParams: { windowMode: 'samples', windowSamples: 12, windowMinutes: 3, alpha: 0.2 } },
+  { kind: 'rolling_max', label: 'Rolling maximum', description: 'Causal local maximum.', defaultParams: { windowMode: 'samples', windowSamples: 20, windowMinutes: 5, alpha: 0.2 } },
+  { kind: 'drawdown', label: 'Drawdown', description: 'Drop from causal rolling maximum.', defaultParams: { windowMode: 'samples', windowSamples: 20, windowMinutes: 5, alpha: 0.2, mode: 'relative', epsilon: 1e-12 } },
+  { kind: 'positive_slope_count', label: 'Positive slope count', description: 'Number of positive slopes in the causal window.', defaultParams: { windowMode: 'samples', windowSamples: 12, windowMinutes: 3, alpha: 0.2, slopeThreshold: 0 } },
+  { kind: 'positive_slope_fraction', label: 'Positive slope fraction', description: 'Fraction of slopes above threshold in the causal window.', defaultParams: { windowMode: 'samples', windowSamples: 12, windowMinutes: 3, alpha: 0.2, slopeThreshold: 0 } },
+  { kind: 'rising_streak', label: 'Rising streak', description: 'Current consecutive count of positive slopes.', defaultParams: { alpha: 0.2, slopeThreshold: 0 } },
+  { kind: 'cusum', label: 'CUSUM', description: 'Positive evidence accumulator on robust z-score.', defaultParams: { windowMode: 'samples', windowSamples: 60, windowMinutes: 60, alpha: 0.2, k: 1, h: 8, epsilon: 1e-12 } },
+  { kind: 'page_hinkley', label: 'Page-Hinkley', description: 'Online mean-shift accumulator.', defaultParams: { windowMode: 'samples', windowSamples: 60, windowMinutes: 60, alpha: 0.2, delta: 0.2, lambda: 8, epsilon: 1e-12 } },
+  { kind: 'evidence_score', label: 'Evidence score', description: 'Online positive/negative evidence score.', defaultParams: { windowMode: 'samples', windowSamples: 20, windowMinutes: 5, alpha: 0.2, zThreshold: 1, slopeThreshold: 0, w1: 1, w2: 1, w3: 0.2, v1: 1, v2: 0.5, v3: 1, epsilon: 1e-12 } },
+  { kind: 'slope_height_ratio', label: 'Slope / height ratio', description: 'Current slope relative to robust z-score height.', defaultParams: { windowMode: 'samples', windowSamples: 60, windowMinutes: 60, alpha: 0.2, epsilon: 1e-12 } },
+  { kind: 'energy_ratio', label: 'Short / long energy ratio', description: 'Short rolling area divided by long rolling area.', defaultParams: { windowMode: 'samples', windowSamples: 12, windowMinutes: 3, longWindowSamples: 40, longWindowMinutes: 10, baselineWindowSamples: 60, baselineWindowMinutes: 60, alpha: 0.2, threshold: 1, epsilon: 1e-12 } },
+  { kind: 'rolling_std', label: 'Rolling std', description: 'Causal local standard deviation.', defaultParams: { windowMode: 'samples', windowSamples: 20, windowMinutes: 5, alpha: 0.2 } },
+  { kind: 'rolling_cv', label: 'Rolling coefficient of variation', description: 'Rolling std divided by rolling mean.', defaultParams: { windowMode: 'samples', windowSamples: 20, windowMinutes: 5, alpha: 0.2, epsilon: 1e-12 } },
+  { kind: 'time_since_onset', label: 'Time since onset', description: 'Elapsed time since z and slope crossed onset thresholds.', defaultParams: { windowMode: 'samples', windowSamples: 60, windowMinutes: 60, alpha: 0.2, onsetThreshold: 1, slopeThreshold: 0, resetThreshold: 0.5, epsilon: 1e-12 } },
+  { kind: 'state_machine', label: 'State machine', description: 'Visual state band from z-score, slope and CUSUM thresholds.', defaultParams: { windowMode: 'samples', windowSamples: 60, windowMinutes: 60, alpha: 0.2, lowThreshold: 1, slopeThreshold: 0, hLow: 5, hHigh: 10, offThreshold: 0.5, epsilon: 1e-12 } },
+];
+
+function analyticsDefinition(kind: AnalyticsKind): AnalyticsDefinition {
+  return ANALYTICS_DEFINITIONS.find((definition) => definition.kind === kind) ?? ANALYTICS_DEFINITIONS[0];
+}
+
+function defaultAnalyticsConfig(kind: AnalyticsKind): AnalyticsMethodConfig {
+  const definition = analyticsDefinition(kind);
+  return { kind, params: { ...definition.defaultParams } };
+}
+
+function analyticsSummary(configs: AnalyticsMethodConfig[]): string {
+  if (configs.length === 0) return 'Analytics: none';
+  return `Analytics: ${configs.map((config) => {
+    const params = config.params;
+    const details: string[] = [];
+    if (typeof params.alpha === 'number') details.push(`alpha=${params.alpha}`);
+    if (typeof params.beta === 'number') details.push(`beta=${params.beta}`);
+    if (typeof params.windowSamples === 'number' && params.windowMode === 'samples') details.push(`W=${params.windowSamples} samples`);
+    if (typeof params.windowMinutes === 'number' && params.windowMode === 'minutes') details.push(`W=${params.windowMinutes} min`);
+    if (typeof params.k === 'number') details.push(`k=${params.k}`);
+    if (typeof params.h === 'number') details.push(`h=${params.h}`);
+    return `${analyticsDefinition(config.kind).label}${details.length ? ` (${details.join(', ')})` : ''}`;
+  }).join(', ')}`;
+}
+
+function analyticsParamLabel(key: string): string {
+  const labels: Record<string, string> = {
+    alpha: 'Alpha',
+    beta: 'Beta',
+    windowMode: 'Window unit',
+    windowSamples: 'Window samples',
+    windowMinutes: 'Window minutes',
+    baselineWindowSamples: 'Baseline samples',
+    baselineWindowMinutes: 'Baseline minutes',
+    longWindowSamples: 'Long window samples',
+    longWindowMinutes: 'Long window minutes',
+    threshold: 'Threshold',
+    slopeThreshold: 'Slope threshold',
+    onsetThreshold: 'Onset threshold',
+    resetThreshold: 'Reset threshold',
+    lowThreshold: 'Low threshold',
+    offThreshold: 'Off threshold',
+    zThreshold: 'Z threshold',
+    epsilon: 'Epsilon',
+    k: 'CUSUM k',
+    h: 'CUSUM h',
+    hLow: 'Low evidence threshold',
+    hHigh: 'High evidence threshold',
+    delta: 'Delta',
+    lambda: 'Lambda',
+    source: 'Signal basis',
+    timeNormalized: 'Normalize by time',
+    mode: 'Mode',
+    w1: 'Positive z weight',
+    w2: 'Positive slope weight',
+    w3: 'Positive slope flag weight',
+    v1: 'Negative slope weight',
+    v2: 'Below-threshold weight',
+    v3: 'Drawdown weight',
+  };
+  return labels[key] ?? key;
+}
+
+function numberParam(config: AnalyticsMethodConfig, key: string, fallback: number): number {
+  const value = config.params[key];
+  return typeof value === 'number' && Number.isFinite(value) ? value : fallback;
+}
+
+function stringParam(config: AnalyticsMethodConfig, key: string, fallback: string): string {
+  const value = config.params[key];
+  return typeof value === 'string' ? value : fallback;
+}
+
+function boolParam(config: AnalyticsMethodConfig, key: string, fallback: boolean): boolean {
+  const value = config.params[key];
+  return typeof value === 'boolean' ? value : fallback;
+}
+
+function finiteOrNull(value: number): number | null {
+  return Number.isFinite(value) ? value : null;
+}
+
+function ewma(values: number[], alpha: number): number[] {
+  if (values.length === 0) return [];
+  const boundedAlpha = Math.min(1, Math.max(0, alpha));
+  const output: number[] = [];
+  for (let index = 0; index < values.length; index += 1) {
+    output.push(index === 0 ? values[index] : boundedAlpha * values[index] + (1 - boundedAlpha) * output[index - 1]);
+  }
+  return output;
+}
+
+function timeDeltaSeconds(times: number[], index: number): number {
+  if (index <= 0) return 1;
+  const delta = (times[index] - times[index - 1]) / 1000;
+  return Number.isFinite(delta) && delta > 0 ? delta : 1;
+}
+
+function derivative(values: number[], times: number[], timeNormalized: boolean): number[] {
+  return values.map((value, index) => {
+    if (index === 0) return 0;
+    const delta = value - values[index - 1];
+    return timeNormalized ? delta / timeDeltaSeconds(times, index) : delta;
+  });
+}
+
+function windowStartIndex(times: number[], index: number, config: AnalyticsMethodConfig, sampleKey = 'windowSamples', minuteKey = 'windowMinutes'): number {
+  if (stringParam(config, 'windowMode', 'samples') === 'minutes') {
+    const minutes = Math.max(0, numberParam(config, minuteKey, 3));
+    const startMs = times[index] - minutes * 60_000;
+    let start = index;
+    while (start > 0 && times[start - 1] >= startMs) start -= 1;
+    return start;
+  }
+  const samples = Math.max(1, Math.floor(numberParam(config, sampleKey, 12)));
+  return Math.max(0, index - samples + 1);
+}
+
+function median(values: number[]): number {
+  if (values.length === 0) return Number.NaN;
+  const sorted = [...values].sort((left, right) => left - right);
+  const mid = Math.floor(sorted.length / 2);
+  return sorted.length % 2 === 0 ? (sorted[mid - 1] + sorted[mid]) / 2 : sorted[mid];
+}
+
+function rollingMap(values: number[], times: number[], config: AnalyticsMethodConfig, reducer: (slice: number[], index: number, start: number) => number, sampleKey?: string, minuteKey?: string): number[] {
+  return values.map((_, index) => {
+    const start = windowStartIndex(times, index, config, sampleKey, minuteKey);
+    return reducer(values.slice(start, index + 1), index, start);
+  });
+}
+
+function robustZ(values: number[], times: number[], config: AnalyticsMethodConfig): { z: number[]; baseline: number[]; mad: number[] } {
+  const alpha = numberParam(config, 'alpha', 0.2);
+  const epsilon = numberParam(config, 'epsilon', 1e-12);
+  const smooth = ewma(values, alpha);
+  const baseline = rollingMap(smooth, times, config, (slice) => median(slice));
+  const mad = smooth.map((_, index) => {
+    const start = windowStartIndex(times, index, config);
+    const deviations = smooth.slice(start, index + 1).map((value) => Math.abs(value - baseline[index]));
+    return median(deviations);
+  });
+  return {
+    z: smooth.map((value, index) => (value - baseline[index]) / (1.4826 * mad[index] + epsilon)),
+    baseline,
+    mad,
+  };
+}
+
+function positiveExceedance(values: number[], times: number[], config: AnalyticsMethodConfig): number[] {
+  const z = robustZ(values, times, config).z;
+  const threshold = numberParam(config, 'threshold', numberParam(config, 'zThreshold', 1));
+  return z.map((value) => Math.max(0, value - threshold));
+}
+
+function rollingAreaFrom(values: number[], times: number[], config: AnalyticsMethodConfig, sampleKey = 'windowSamples', minuteKey = 'windowMinutes'): number[] {
+  const exceedance = positiveExceedance(values, times, config);
+  return exceedance.map((_, index) => {
+    const start = windowStartIndex(times, index, config, sampleKey, minuteKey);
+    return exceedance.slice(start, index + 1).reduce((sum, value) => sum + value, 0);
+  });
+}
+
+function analyticsBase(values: number[], config: AnalyticsMethodConfig): number[] {
+  return stringParam(config, 'source', 'smoothed') === 'raw' ? values : ewma(values, numberParam(config, 'alpha', 0.2));
+}
+
+function computeAnalyticsSeries(config: AnalyticsMethodConfig, values: number[], timestamps: string[]): Array<number | null> {
+  const times = timestamps.map((timestamp) => new Date(timestamp).getTime());
+  const alpha = numberParam(config, 'alpha', 0.2);
+  const base = analyticsBase(values, config);
+  const d = derivative(base, times, boolParam(config, 'timeNormalized', false));
+  switch (config.kind) {
+    case 'raw':
+      return values.map(finiteOrNull);
+    case 'ewma':
+      return ewma(values, alpha).map(finiteOrNull);
+    case 'derivative':
+      return d.map(finiteOrNull);
+    case 'smoothed_derivative':
+      return ewma(d, numberParam(config, 'beta', 0.2)).map(finiteOrNull);
+    case 'second_derivative':
+      return derivative(ewma(d, numberParam(config, 'beta', 0.2)), times, boolParam(config, 'timeNormalized', false)).map(finiteOrNull);
+    case 'rolling_slope':
+      return base.map((value, index) => {
+        const start = windowStartIndex(times, index, config);
+        const delta = value - base[start];
+        const denom = boolParam(config, 'timeNormalized', false) ? Math.max(1, (times[index] - times[start]) / 1000) : Math.max(1, index - start);
+        return finiteOrNull(delta / denom);
+      });
+    case 'rolling_median':
+      return rollingMap(ewma(values, alpha), times, config, (slice) => median(slice)).map(finiteOrNull);
+    case 'rolling_mad': {
+      const rz = robustZ(values, times, config);
+      return rz.mad.map(finiteOrNull);
+    }
+    case 'robust_z':
+      return robustZ(values, times, config).z.map(finiteOrNull);
+    case 'positive_exceedance':
+      return positiveExceedance(values, times, config).map(finiteOrNull);
+    case 'rolling_area':
+      return rollingAreaFrom(values, times, config).map(finiteOrNull);
+    case 'rolling_mean':
+      return rollingMap(ewma(values, alpha), times, config, (slice) => slice.reduce((sum, value) => sum + value, 0) / slice.length).map(finiteOrNull);
+    case 'rolling_max':
+      return rollingMap(ewma(values, alpha), times, config, (slice) => Math.max(...slice)).map(finiteOrNull);
+    case 'drawdown': {
+      const smooth = ewma(values, alpha);
+      const maxes = rollingMap(smooth, times, config, (slice) => Math.max(...slice));
+      const epsilon = numberParam(config, 'epsilon', 1e-12);
+      return smooth.map((value, index) => {
+        const absolute = maxes[index] - value;
+        return finiteOrNull(stringParam(config, 'mode', 'relative') === 'relative' ? absolute / (maxes[index] + epsilon) : absolute);
+      });
+    }
+    case 'positive_slope_count':
+    case 'positive_slope_fraction': {
+      const threshold = numberParam(config, 'slopeThreshold', 0);
+      return d.map((_, index) => {
+        const start = windowStartIndex(times, index, config);
+        const window = d.slice(start, index + 1);
+        const count = window.filter((value) => value > threshold).length;
+        return finiteOrNull(config.kind === 'positive_slope_fraction' ? count / Math.max(1, window.length) : count);
+      });
+    }
+    case 'rising_streak': {
+      const threshold = numberParam(config, 'slopeThreshold', 0);
+      let streak = 0;
+      return d.map((value) => {
+        streak = value > threshold ? streak + 1 : 0;
+        return streak;
+      });
+    }
+    case 'cusum': {
+      const z = robustZ(values, times, config).z;
+      const k = numberParam(config, 'k', 1);
+      let g = 0;
+      return z.map((value) => {
+        g = Math.max(0, g + value - k);
+        return finiteOrNull(g);
+      });
+    }
+    case 'page_hinkley': {
+      const z = robustZ(values, times, config).z;
+      const delta = numberParam(config, 'delta', 0.2);
+      let mean = 0;
+      let ph = 0;
+      return z.map((value, index) => {
+        mean += (value - mean) / (index + 1);
+        ph = Math.max(0, ph + value - mean - delta);
+        return finiteOrNull(ph);
+      });
+    }
+    case 'evidence_score': {
+      const z = robustZ(values, times, config).z;
+      const smoothD = ewma(d, numberParam(config, 'beta', 0.2));
+      const zThreshold = numberParam(config, 'zThreshold', 1);
+      const slopeThreshold = numberParam(config, 'slopeThreshold', 0);
+      const drawdownConfig = { ...config, kind: 'drawdown' as AnalyticsKind, params: { ...config.params, mode: 'relative' } };
+      const drawdown = computeAnalyticsSeries(drawdownConfig, values, timestamps).map((value) => value ?? 0);
+      let evidence = 0;
+      return z.map((value, index) => {
+        const positive = numberParam(config, 'w1', 1) * Math.max(0, value - zThreshold)
+          + numberParam(config, 'w2', 1) * Math.max(0, smoothD[index] - slopeThreshold)
+          + numberParam(config, 'w3', 0.2) * (smoothD[index] > slopeThreshold ? 1 : 0);
+        const negative = numberParam(config, 'v1', 1) * Math.max(0, -smoothD[index])
+          + numberParam(config, 'v2', 0.5) * (value < zThreshold ? 1 : 0)
+          + numberParam(config, 'v3', 1) * drawdown[index];
+        evidence = Math.max(0, evidence + positive - negative);
+        return finiteOrNull(evidence);
+      });
+    }
+    case 'slope_height_ratio': {
+      const z = robustZ(values, times, config).z;
+      const epsilon = numberParam(config, 'epsilon', 1e-12);
+      return d.map((value, index) => finiteOrNull(value / (Math.abs(z[index]) + epsilon)));
+    }
+    case 'energy_ratio': {
+      const shortArea = rollingAreaFrom(values, times, config);
+      const longArea = rollingAreaFrom(values, times, config, 'longWindowSamples', 'longWindowMinutes');
+      const epsilon = numberParam(config, 'epsilon', 1e-12);
+      return shortArea.map((value, index) => finiteOrNull(value / (longArea[index] + epsilon)));
+    }
+    case 'rolling_std':
+    case 'rolling_cv': {
+      const smooth = ewma(values, alpha);
+      const means = rollingMap(smooth, times, config, (slice) => slice.reduce((sum, value) => sum + value, 0) / slice.length);
+      const stds = rollingMap(smooth, times, config, (slice) => {
+        const mean = slice.reduce((sum, value) => sum + value, 0) / slice.length;
+        return Math.sqrt(slice.reduce((sum, value) => sum + (value - mean) ** 2, 0) / slice.length);
+      });
+      const epsilon = numberParam(config, 'epsilon', 1e-12);
+      return (config.kind === 'rolling_cv' ? stds.map((value, index) => value / (means[index] + epsilon)) : stds).map(finiteOrNull);
+    }
+    case 'time_since_onset': {
+      const z = robustZ(values, times, config).z;
+      const onsetThreshold = numberParam(config, 'onsetThreshold', 1);
+      const slopeThreshold = numberParam(config, 'slopeThreshold', 0);
+      const resetThreshold = numberParam(config, 'resetThreshold', 0.5);
+      let onsetTime: number | null = null;
+      return z.map((value, index) => {
+        if (onsetTime === null && value > onsetThreshold && d[index] > slopeThreshold) onsetTime = times[index];
+        if (onsetTime !== null && value < resetThreshold) onsetTime = null;
+        return onsetTime === null ? 0 : finiteOrNull((times[index] - onsetTime) / 1000);
+      });
+    }
+    case 'state_machine': {
+      const z = robustZ(values, times, config).z;
+      const cusumConfig = { ...config, kind: 'cusum' as AnalyticsKind, params: { ...config.params, h: numberParam(config, 'hHigh', 10) } };
+      const cusum = computeAnalyticsSeries(cusumConfig, values, timestamps).map((value) => value ?? 0);
+      const low = numberParam(config, 'lowThreshold', 1);
+      const slope = numberParam(config, 'slopeThreshold', 0);
+      const hLow = numberParam(config, 'hLow', 5);
+      const hHigh = numberParam(config, 'hHigh', 10);
+      const off = numberParam(config, 'offThreshold', 0.5);
+      let state = 0;
+      return z.map((value, index) => {
+        if (cusum[index] >= hHigh) state = 3;
+        else if (cusum[index] >= hLow) state = 2;
+        else if (value > low && d[index] > slope) state = 1;
+        else if (state > 0 && value < off) state = 0;
+        return state;
+      });
+    }
+    default:
+      return values.map(finiteOrNull);
+  }
+}
+
 function TimeSeriesPlot({ plot, results }: { plot: AnalysisPlot; results: CombinedResult[] }) {
+  const analyticsConfigs = plot.timeseriesAnalytics ?? [];
+  const panels = useMemo(() => {
+    if (analyticsConfigs.length === 0) return [defaultAnalyticsConfig('raw')];
+    const hasRaw = analyticsConfigs.some((config) => config.kind === 'raw');
+    return hasRaw ? analyticsConfigs : [defaultAnalyticsConfig('raw'), ...analyticsConfigs];
+  }, [analyticsConfigs]);
+
   const traces = useMemo<Data[]>(() => {
     const groups = new Map<string, { name: string; color: string; metric: string; results: CombinedResult[] }>();
     if (plot.traces?.length) {
@@ -604,41 +1010,64 @@ function TimeSeriesPlot({ plot, results }: { plot: AnalysisPlot; results: Combin
         });
       }
     }
-    return [...groups.values()].filter((group) => group.results.length > 0).map((group, index) => {
-      const smoothed = movingAverage(group.results.map((result) => scoreValue(result, plot.scoreSeries)), plot.movingAverage);
-      return {
-        type: 'scatter',
-        mode: 'lines',
-        name: group.name,
-        x: group.results.map((result) => result.timestamp),
-        y: smoothed,
-        line: { color: group.color || TRACE_COLORS[index % TRACE_COLORS.length], width: 1.7 },
-        hovertemplate: `%{x|%Y-%m-%d %H:%M:%S}<br>${metricLabel(group.metric)} %{y:.5g}<extra>%{fullData.name}</extra>`,
-      } as Data;
+    const nextTraces: Data[] = [];
+    [...groups.values()].filter((group) => group.results.length > 0).forEach((group, groupIndex) => {
+      const x = group.results.map((result) => result.timestamp);
+      const rawValues = group.results.map((result) => scoreValue(result, plot.scoreSeries));
+      panels.forEach((panel, panelIndex) => {
+        const y =
+          analyticsConfigs.length === 0
+            ? movingAverage(rawValues, plot.movingAverage).map(finiteOrNull)
+            : computeAnalyticsSeries(panel, rawValues, x);
+        nextTraces.push({
+          type: 'scatter',
+          mode: 'lines',
+          name: panelIndex === 0 ? group.name : `${group.name} · ${analyticsDefinition(panel.kind).label}`,
+          x,
+          y,
+          xaxis: 'x',
+          yaxis: panelIndex === 0 ? 'y' : `y${panelIndex + 1}`,
+          line: { color: group.color || TRACE_COLORS[groupIndex % TRACE_COLORS.length], width: panel.kind === 'state_machine' ? 2.2 : 1.7, shape: panel.kind === 'state_machine' ? 'hv' : 'linear' },
+          showlegend: panelIndex === 0,
+          hovertemplate: `%{x|%Y-%m-%d %H:%M:%S}<br>${analyticsDefinition(panel.kind).label} %{y:.5g}<extra>${group.name}</extra>`,
+        } as unknown as Data);
+      });
     });
-  }, [plot.movingAverage, plot.scoreSeries, plot.traces, results]);
+    return nextTraces;
+  }, [analyticsConfigs.length, panels, plot.movingAverage, plot.scoreSeries, plot.traces, results]);
 
   const layout = useMemo<Partial<Layout>>(
-    () => ({
-      showlegend: traces.length > 1,
-      legend: { orientation: 'h', y: -0.28, x: 0 },
-      hovermode: 'x unified',
-      xaxis: {
-        title: { text: 'Time', font: { size: 12 } },
-        type: 'date',
-        rangeslider: { thickness: 0.08 },
-        showgrid: true,
-        gridcolor: 'rgba(128,128,128,0.15)',
-      },
-      yaxis: {
-        title: { text: plot.scoreSeries === 'score' ? 'Reconstruction / anomaly score' : plot.scoreSeries, font: { size: 12 } },
-        showgrid: true,
-        gridcolor: 'rgba(128,128,128,0.15)',
-        zeroline: false,
-      },
-      margin: { l: 64, r: 24, t: 12, b: 56 },
-    }),
-    [plot.scoreSeries, traces.length],
+    () => {
+      const panelCount = Math.max(1, panels.length);
+      const gap = 0.035;
+      const panelHeight = (1 - gap * (panelCount - 1)) / panelCount;
+      const nextLayout: Partial<Layout> & Record<string, unknown> = {
+        showlegend: traces.length > panelCount,
+        legend: { orientation: 'h', y: -0.18, x: 0 },
+        hovermode: 'x unified',
+        xaxis: {
+          title: { text: 'Time', font: { size: 12 } },
+          type: 'date',
+          rangeslider: panelCount === 1 ? { thickness: 0.08 } : undefined,
+          showgrid: true,
+          gridcolor: 'rgba(128,128,128,0.15)',
+        },
+        margin: { l: 72, r: 24, t: 12, b: 58 },
+      };
+      panels.forEach((panel, index) => {
+        const top = 1 - index * (panelHeight + gap);
+        const bottom = top - panelHeight;
+        nextLayout[index === 0 ? 'yaxis' : `yaxis${index + 1}`] = {
+          title: { text: analyticsDefinition(panel.kind).label, font: { size: 11 } },
+          domain: [Math.max(0, bottom), Math.min(1, top)],
+          showgrid: true,
+          gridcolor: 'rgba(128,128,128,0.15)',
+          zeroline: panel.kind !== 'raw' && panel.kind !== 'ewma',
+        };
+      });
+      return nextLayout as Partial<Layout>;
+    },
+    [panels, traces.length],
   );
 
   if (results.length === 0) {
@@ -647,12 +1076,13 @@ function TimeSeriesPlot({ plot, results }: { plot: AnalysisPlot; results: Combin
 
   return (
     <Stack gap="xs">
-      <PlotlyChart data={traces} layout={layout} height={420} />
+      <PlotlyChart data={traces} layout={layout} height={analyticsConfigs.length > 0 ? Math.max(420, panels.length * 210) : 420} />
       <Group gap="xs">
         <Badge variant="light">{results.length} points</Badge>
         {plot.movingAverage > 1 && <Badge variant="light" color="blue">moving avg {plot.movingAverage}</Badge>}
         {plot.sampling > 1 && <Badge variant="light" color="gray">sample every {plot.sampling}</Badge>}
         {plot.traces?.length ? <Badge variant="light" color="teal">{plot.traces.length} traces</Badge> : null}
+        {analyticsConfigs.length > 0 ? <Badge variant="light" color="violet">{analyticsConfigs.length} analytics</Badge> : null}
       </Group>
     </Stack>
   );
@@ -1231,6 +1661,8 @@ function defaultDraft(): PlotDraft {
     end: '',
     sampling: 1,
     movingAverage: 1,
+    timeseriesAnalytics: [],
+    analyticsDisplayMode: 'multi_panel',
     heatmapMode: 'single',
     timestamp: null,
     includeReference: true,
@@ -1257,11 +1689,30 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
 }
 
+function restoreAnalytics(value: unknown): AnalyticsMethodConfig[] {
+  if (!Array.isArray(value)) return [];
+  const validKinds = new Set(ANALYTICS_DEFINITIONS.map((definition) => definition.kind));
+  return value.filter(isRecord).map((item) => {
+    const kind = String(item.kind ?? '') as AnalyticsKind;
+    if (!validKinds.has(kind)) return null;
+    const defaults = defaultAnalyticsConfig(kind);
+    return {
+      kind,
+      params: {
+        ...defaults.params,
+        ...(isRecord(item.params) ? item.params : {}),
+      },
+    };
+  }).filter((item): item is AnalyticsMethodConfig => item !== null);
+}
+
 function restoreDraft(value: unknown): PlotDraft {
   if (!isRecord(value)) return defaultDraft();
   return {
     ...defaultDraft(),
     ...(value as Partial<PlotDraft>),
+    timeseriesAnalytics: restoreAnalytics(value.timeseriesAnalytics),
+    analyticsDisplayMode: 'multi_panel',
     heatmapConfig: {
       ...defaultHeatmapConfig(),
       ...(isRecord(value.heatmapConfig) ? value.heatmapConfig : {}),
@@ -1514,7 +1965,12 @@ export function AnalysisPage({ active = true }: { active?: boolean }) {
 
   useEffect(() => {
     const validMetrics = new Set(metricOptionsForSelection.map((option) => option.value));
-    setSelectedMetricKeys((current) => current.filter((metric) => validMetrics.has(metric)));
+    setSelectedMetricKeys((current) => {
+      const filtered = current.filter((metric) => validMetrics.has(metric));
+      if (filtered.length > 0) return filtered;
+      if (validMetrics.has('mse')) return ['mse'];
+      return metricOptionsForSelection[0]?.value ? [metricOptionsForSelection[0].value] : [];
+    });
   }, [metricOptionsForSelection]);
 
   const fetchResults = useCallback(
@@ -1866,6 +2322,7 @@ export function AnalysisPage({ active = true }: { active?: boolean }) {
       `Sampling: every ${sampling}`,
     ];
     if (draft.movingAverage > 1) parts.push(`Moving average: ${draft.movingAverage}`);
+    if (draft.plotType === 'timeseries') parts.push(analyticsSummary(draft.timeseriesAnalytics));
     if (selectedRoiKey && selectedRoiKey !== 'none') {
       parts.push(`ROI: ${roiOptionsForSelection.find((option) => option.value === selectedRoiKey)?.label ?? selectedRoiKey}`);
     } else {
@@ -2016,6 +2473,94 @@ export function AnalysisPage({ active = true }: { active?: boolean }) {
       ...current,
       heatmapConfig: { ...current.heatmapConfig, ...patch },
     }));
+  }
+
+  function updateAnalyticsConfig(index: number, patch: Partial<AnalyticsMethodConfig>) {
+    setDraft((current) => ({
+      ...current,
+      timeseriesAnalytics: current.timeseriesAnalytics.map((config, configIndex) =>
+        configIndex === index
+          ? { ...config, ...patch, params: { ...config.params, ...(patch.params ?? {}) } }
+          : config,
+      ),
+    }));
+    setPlotPreview(null);
+  }
+
+  function renderAnalyticsParamInput(config: AnalyticsMethodConfig, index: number, key: string, value: number | string | boolean) {
+    if (key === 'windowSamples' && config.params.windowMode === 'minutes') return null;
+    if (key === 'windowMinutes' && config.params.windowMode !== 'minutes') return null;
+    if (key === 'baselineWindowSamples' && config.params.windowMode === 'minutes') return null;
+    if (key === 'baselineWindowMinutes' && config.params.windowMode !== 'minutes') return null;
+    if (key === 'longWindowSamples' && config.params.windowMode === 'minutes') return null;
+    if (key === 'longWindowMinutes' && config.params.windowMode !== 'minutes') return null;
+    if (key === 'windowMode') {
+      return (
+        <Select
+          key={key}
+          label={analyticsParamLabel(key)}
+          data={[
+            { value: 'samples', label: 'Samples' },
+            { value: 'minutes', label: 'Minutes' },
+          ]}
+          value={String(value)}
+          onChange={(nextValue) => updateAnalyticsConfig(index, { params: { [key]: nextValue ?? 'samples' } })}
+        />
+      );
+    }
+    if (key === 'source') {
+      return (
+        <Select
+          key={key}
+          label={analyticsParamLabel(key)}
+          data={[
+            { value: 'raw', label: 'Raw score' },
+            { value: 'smoothed', label: 'EWMA smoothed' },
+          ]}
+          value={String(value)}
+          onChange={(nextValue) => updateAnalyticsConfig(index, { params: { [key]: nextValue ?? 'smoothed' } })}
+        />
+      );
+    }
+    if (key === 'mode') {
+      return (
+        <Select
+          key={key}
+          label={analyticsParamLabel(key)}
+          data={[
+            { value: 'relative', label: 'Relative' },
+            { value: 'absolute', label: 'Absolute' },
+          ]}
+          value={String(value)}
+          onChange={(nextValue) => updateAnalyticsConfig(index, { params: { [key]: nextValue ?? 'relative' } })}
+        />
+      );
+    }
+    if (typeof value === 'boolean') {
+      return (
+        <Switch
+          key={key}
+          label={analyticsParamLabel(key)}
+          checked={value}
+          onChange={(event) => updateAnalyticsConfig(index, { params: { [key]: event.currentTarget.checked } })}
+        />
+      );
+    }
+    if (typeof value === 'number') {
+      const isInteger = key.toLowerCase().includes('samples') || key.toLowerCase().includes('window') || key === 'h' || key === 'hLow' || key === 'hHigh';
+      return (
+        <NumberInput
+          key={key}
+          label={analyticsParamLabel(key)}
+          value={value}
+          min={key === 'epsilon' ? 0 : undefined}
+          step={key === 'epsilon' ? 1e-12 : isInteger ? 1 : 0.1}
+          decimalScale={key === 'epsilon' ? 14 : undefined}
+          onChange={(nextValue) => updateAnalyticsConfig(index, { params: { [key]: valueAsNumber(nextValue, value) } })}
+        />
+      );
+    }
+    return null;
   }
 
   return (
@@ -2453,27 +2998,90 @@ export function AnalysisPage({ active = true }: { active?: boolean }) {
                       />
                     </SimpleGrid>
                     {draft.plotType === 'timeseries' ? (
-                      <SimpleGrid cols={{ base: 1, md: 3 }}>
-                        <Select
-                          label="Score line"
-                          data={scoreSeriesOptions(combinedDraftResults)}
-                          value={draft.scoreSeries}
-                          onChange={(value) => {
-                            setDraft((current) => ({ ...current, scoreSeries: value ?? 'score' }));
-                            setPlotPreview(null);
-                          }}
-                        />
-                        <NumberInput
-                          label="Moving average window"
-                          min={1}
-                          value={draft.movingAverage}
-                          onChange={(value) => {
-                            setDraft((current) => ({ ...current, movingAverage: valueAsNumber(value, 1) }));
-                            setPlotPreview(null);
-                          }}
-                        />
-                        <TextInput label="X-axis" value="Time" disabled />
-                      </SimpleGrid>
+                      <Stack gap="md">
+                        <SimpleGrid cols={{ base: 1, md: 3 }}>
+                          <Select
+                            label="Score line"
+                            data={scoreSeriesOptions(combinedDraftResults)}
+                            value={draft.scoreSeries}
+                            onChange={(value) => {
+                              setDraft((current) => ({ ...current, scoreSeries: value ?? 'score' }));
+                              setPlotPreview(null);
+                            }}
+                          />
+                          <NumberInput
+                            label="Moving average window"
+                            min={1}
+                            value={draft.movingAverage}
+                            onChange={(value) => {
+                              setDraft((current) => ({ ...current, movingAverage: valueAsNumber(value, 1) }));
+                              setPlotPreview(null);
+                            }}
+                          />
+                          <TextInput label="X-axis" value="Time" disabled />
+                        </SimpleGrid>
+                        <Paper withBorder p="sm" radius="sm">
+                          <Stack gap="sm">
+                            <div>
+                              <Text fw={700}>Timeseries analytics</Text>
+                              <Text size="sm" c="dimmed">
+                                Optional causal transforms from the selected metric. Empty means raw score only.
+                              </Text>
+                            </div>
+                            <MultiSelect
+                              label="Analytics methods"
+                              placeholder="None"
+                              data={ANALYTICS_DEFINITIONS.map((definition) => ({ value: definition.kind, label: definition.label }))}
+                              value={draft.timeseriesAnalytics.map((config) => config.kind)}
+                              searchable
+                              clearable
+                              onChange={(values) => {
+                                setDraft((current) => {
+                                  const existing = new Map(current.timeseriesAnalytics.map((config) => [config.kind, config]));
+                                  return {
+                                    ...current,
+                                    timeseriesAnalytics: values.map((value) => existing.get(value as AnalyticsKind) ?? defaultAnalyticsConfig(value as AnalyticsKind)),
+                                    analyticsDisplayMode: 'multi_panel',
+                                  };
+                                });
+                                setPlotPreview(null);
+                              }}
+                            />
+                            {draft.timeseriesAnalytics.length > 0 && (
+                              <Stack gap="sm">
+                                {draft.timeseriesAnalytics.map((config, index) => (
+                                  <Paper key={config.kind} withBorder p="sm" radius="sm">
+                                    <Stack gap="xs">
+                                      <Group justify="space-between" align="flex-start">
+                                        <div>
+                                          <Text fw={600}>{analyticsDefinition(config.kind).label}</Text>
+                                          <Text size="xs" c="dimmed">{analyticsDefinition(config.kind).description}</Text>
+                                        </div>
+                                        <ActionIcon
+                                          variant="subtle"
+                                          color="red"
+                                          onClick={() => {
+                                            setDraft((current) => ({
+                                              ...current,
+                                              timeseriesAnalytics: current.timeseriesAnalytics.filter((_, configIndex) => configIndex !== index),
+                                            }));
+                                            setPlotPreview(null);
+                                          }}
+                                        >
+                                          <Trash2 size={16} />
+                                        </ActionIcon>
+                                      </Group>
+                                      <SimpleGrid cols={{ base: 1, md: 3 }}>
+                                        {Object.entries(config.params).map(([key, value]) => renderAnalyticsParamInput(config, index, key, value))}
+                                      </SimpleGrid>
+                                    </Stack>
+                                  </Paper>
+                                ))}
+                              </Stack>
+                            )}
+                          </Stack>
+                        </Paper>
+                      </Stack>
                     ) : (
                 <Stack gap="md">
                   <SimpleGrid cols={{ base: 1, md: 3 }}>
