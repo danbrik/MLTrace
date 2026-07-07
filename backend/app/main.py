@@ -947,6 +947,27 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=404, detail="Video not found.")
         return FileResponse(path, media_type="video/mp4", filename=f"inspect-run-{run_id}.mp4")
 
+    @app.get("/api/inspect/runs/{run_id}/results.csv")
+    def api_get_inspect_csv(run_id: int, db: Session = Depends(get_db)):
+        path = inspect_service.inspect_csv_path(db, run_id)
+        if path is None:
+            raise HTTPException(status_code=404, detail="CSV not found.")
+        return FileResponse(path, media_type="text/csv", filename=f"inspect-run-{run_id}-results.csv")
+
+    @app.get("/api/inspect/runs/{run_id}/summary.json")
+    def api_get_inspect_summary(run_id: int, db: Session = Depends(get_db)):
+        path = inspect_service.inspect_summary_path(db, run_id)
+        if path is None:
+            raise HTTPException(status_code=404, detail="Summary not found.")
+        return FileResponse(path, media_type="application/json", filename=f"inspect-run-{run_id}-summary.json")
+
+    @app.get("/api/inspect/runs/{run_id}/plot-preview.png")
+    def api_get_inspect_plot_preview(run_id: int, db: Session = Depends(get_db)):
+        path = inspect_service.inspect_plot_preview_path(db, run_id)
+        if path is None:
+            raise HTTPException(status_code=404, detail="Plot preview not found.")
+        return FileResponse(path, media_type="image/png", filename=f"inspect-run-{run_id}-plot-preview.png")
+
     @app.get("/api/inspect/runs/{run_id}/log", response_model=TrainingRunLogResponse)
     def api_get_inspect_log(run_id: int, db: Session = Depends(get_db)):
         log = inspect_service.read_inspect_log(db, run_id)

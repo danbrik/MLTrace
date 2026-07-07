@@ -18,6 +18,7 @@ from sqlalchemy.orm import Session, selectinload
 
 from app import models
 from app.database import SessionLocal, data_dir
+from app.inspect.diagnostics import compute_diagnostic, result_to_preview_response
 from app.inspect.contrast import enhance_to_uint8, to_intensity_16scale
 from app.preprocessing.pipeline import (
     encode_absolute_image_data_url,
@@ -88,6 +89,10 @@ def preview_inspect(db: Session, payload: InspectPreviewRequest) -> InspectPrevi
         raise ValueError(f"Preprocessing pipeline does not exist: {payload.preprocessing_pipeline_id}")
     if payload.end_timestamp < payload.start_timestamp:
         raise ValueError("end_timestamp must not be before start_timestamp.")
+    analysis_mode = _analysis_mode(payload)
+    roi = db.get(models.RoiDefinition, payload.roi_id) if payload.roi_id is not None else None
+    if payload.roi_id is not None and roi is None:
+        raise ValueError(f"ROI does not exist: {payload.roi_id}")
 
     # Cheap total count for display; only the head of records is actually rendered.
     total_selected = _estimate_frame_count(
@@ -114,7 +119,50 @@ def preview_inspect(db: Session, payload: InspectPreviewRequest) -> InspectPrevi
     graph = PreprocessingGraph.model_validate(preprocessing_pipeline.graph)
     compiled = compile_pipeline(graph)
 
-    if payload.contrast_enabled:
+    if analysis_mode in {"energy", "optical_flow"}:
+        result = compute_diagnostic(
+            analysis_mode,
+            compiled,
+            records,
+            payload.analysis_config,
+            roi,
+            preview_limit=_PREVIEW_FRAME_LIMIT,
+            generate_video=bool(payload.generate_video),
+        )
+        preview_data = result_to_preview_response(result)
+        first = records[0]
+        example = result["example_rgb"]
+        width, height, channels, dtype, value_min, value_max = image_metadata(example)
+        return InspectPreviewResponse(
+            training_dataset_id=training_dataset.id,
+            preprocessing_pipeline_id=preprocessing_pipeline.id,
+            start_timestamp=payload.start_timestamp,
+            end_timestamp=payload.end_timestamp,
+            stride=max(1, payload.stride),
+            matching_images=total_selected,
+            selected_images=total_selected,
+            first_image_path=first.file_path,
+            first_timestamp=first.timestamp_parsed,
+            width=width,
+            height=height,
+            channels=channels,
+            dtype=dtype,
+            value_min=value_min,
+            value_max=value_max,
+            preview_frame_count=len(result["rows"]),
+            preview_frames=[],
+            analysis_mode=analysis_mode,
+            analysis_config=payload.analysis_config,
+            roi_id=roi.id if roi else None,
+            roi_name=roi.name if roi else None,
+            generate_video=bool(payload.generate_video),
+            image_data_url=preview_data["image_data_url"],
+            plot_image_data_url=preview_data["plot_image_data_url"],
+            diagnostic_columns=preview_data["diagnostic_columns"],
+            diagnostic_series=preview_data["diagnostic_series"],
+        )
+
+    if analysis_mode == "contrast_enhanced":
         return _preview_contrast(
             payload, training_dataset, preprocessing_pipeline, records, compiled, total_selected
         )
@@ -152,7 +200,18 @@ def preview_inspect(db: Session, payload: InspectPreviewRequest) -> InspectPrevi
         image_data_url=encode_absolute_image_data_url(image),
         preview_frame_count=len(preview_frames),
         preview_frames=preview_frames,
+        analysis_mode=analysis_mode,
+        analysis_config=payload.analysis_config,
+        roi_id=roi.id if roi else None,
+        roi_name=roi.name if roi else None,
+        generate_video=bool(payload.generate_video),
     )
+
+
+def _analysis_mode(payload: InspectPreviewRequest | InspectRunCreate) -> str:
+    if payload.contrast_enabled and payload.analysis_mode == "preprocessed_video":
+        return "contrast_enhanced"
+    return payload.analysis_mode
 
 
 def _preview_contrast(
@@ -276,16 +335,22 @@ def _estimate_frame_count(
 def create_inspect_run(db: Session, payload: InspectRunCreate) -> InspectRunRead:
     if payload.content_mode != "final_preprocessed_output":
         raise ValueError("Only final_preprocessed_output is supported.")
-    if payload.contrast_enabled and payload.contrast_vmax <= 0:
+    analysis_mode = _analysis_mode(payload)
+    if analysis_mode == "contrast_enhanced" and payload.contrast_vmax <= 0:
         raise ValueError("Contrast vmax must be greater than zero.")
     if payload.end_timestamp < payload.start_timestamp:
         raise ValueError("end_timestamp must not be before start_timestamp.")
+    if analysis_mode not in {"preprocessed_video", "contrast_enhanced", "energy", "optical_flow"}:
+        raise ValueError(f"Unsupported Inspect analysis mode: {analysis_mode}.")
     training_dataset = _load_training_dataset(db, int(payload.training_dataset_id))
     if training_dataset is None:
         raise ValueError(f"Train/Test Dataset does not exist: {payload.training_dataset_id}")
     preprocessing_pipeline = _load_preprocessing_pipeline(db, int(payload.preprocessing_pipeline_id))
     if preprocessing_pipeline is None:
         raise ValueError(f"Preprocessing pipeline does not exist: {payload.preprocessing_pipeline_id}")
+    roi = db.get(models.RoiDefinition, payload.roi_id) if payload.roi_id is not None else None
+    if payload.roi_id is not None and roi is None:
+        raise ValueError(f"ROI does not exist: {payload.roi_id}")
 
     # Cheap count only — the worker enumerates the authoritative frame list. This
     # keeps "Run" instant instead of blocking on a full filesystem enumeration.
@@ -304,7 +369,11 @@ def create_inspect_run(db: Session, payload: InspectRunCreate) -> InspectRunRead
         stride=max(1, payload.stride),
         fps=max(1, min(60, int(payload.fps))),
         content_mode=payload.content_mode,
-        contrast_enabled=bool(payload.contrast_enabled),
+        analysis_mode=analysis_mode,
+        analysis_config=payload.analysis_config or {},
+        roi_id=roi.id if roi else None,
+        generate_video=bool(payload.generate_video),
+        contrast_enabled=analysis_mode == "contrast_enhanced",
         contrast_reference_frames=max(1, int(payload.contrast_reference_frames)),
         contrast_shift=float(payload.contrast_shift),
         contrast_vmax=float(payload.contrast_vmax),
@@ -388,6 +457,30 @@ def inspect_video_path(db: Session, run_id: int) -> Path | None:
     if run is None or not run.video_path:
         return None
     path = Path(run.video_path)
+    return path if path.exists() else None
+
+
+def inspect_csv_path(db: Session, run_id: int) -> Path | None:
+    run = db.get(models.InspectRun, run_id)
+    if run is None or not run.csv_path:
+        return None
+    path = Path(run.csv_path)
+    return path if path.exists() else None
+
+
+def inspect_summary_path(db: Session, run_id: int) -> Path | None:
+    run = db.get(models.InspectRun, run_id)
+    if run is None or not run.summary_json_path:
+        return None
+    path = Path(run.summary_json_path)
+    return path if path.exists() else None
+
+
+def inspect_plot_preview_path(db: Session, run_id: int) -> Path | None:
+    run = db.get(models.InspectRun, run_id)
+    if run is None or not run.plot_preview_path:
+        return None
+    path = Path(run.plot_preview_path)
     return path if path.exists() else None
 
 

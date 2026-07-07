@@ -733,6 +733,14 @@ export type InspectPreview = {
     image_path: string;
     image_data_url: string;
   }>;
+  analysis_mode: string;
+  analysis_config: Record<string, unknown> | null;
+  roi_id: number | null;
+  roi_name: string | null;
+  generate_video: boolean;
+  diagnostic_columns: string[];
+  diagnostic_series: Array<Record<string, unknown>>;
+  plot_image_data_url: string | null;
   contrast_enabled?: boolean;
   contrast_reference_frames_used?: number | null;
   contrast_diff_min?: number | null;
@@ -755,6 +763,10 @@ export type InspectRun = {
   stride: number;
   fps: number;
   content_mode: string;
+  analysis_mode: string;
+  analysis_config: Record<string, unknown> | null;
+  roi_id: number | null;
+  generate_video: boolean;
   contrast_enabled: boolean;
   contrast_reference_frames: number | null;
   contrast_shift: number | null;
@@ -764,6 +776,10 @@ export type InspectRun = {
   done_count: number;
   frames_dir: string | null;
   video_path: string | null;
+  csv_path: string | null;
+  summary_json_path: string | null;
+  plot_preview_path: string | null;
+  overlay_video_path: string | null;
   training_dataset_name: string;
   preprocessing_pipeline_name: string;
   created_at: string;

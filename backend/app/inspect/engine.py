@@ -15,6 +15,7 @@ from PIL import Image
 from app import models
 from app.database import SessionLocal, data_dir
 from app.inspect.contrast import StreamingMovingAverage, enhance_to_uint8, to_intensity_16scale
+from app.inspect.diagnostics import compute_diagnostic, write_diagnostic_artifacts
 from app.preprocessing.pipeline import absolute_image_to_uint8, compile_pipeline
 from app.schemas import PreprocessingGraph
 from app.training.data import enumerate_training_dataset_image_records_for_range
@@ -211,6 +212,57 @@ def _render_contrast(
     return writer
 
 
+def _render_diagnostic(
+    run: models.InspectRun,
+    db: Session,
+    abort_event: threading.Event,
+    compiled,
+    records,
+    artifact_dir: Path,
+) -> None:
+    """Stream temporal diagnostic scores to CSV/JSON and optional overlay video."""
+    mode = run.analysis_mode
+    roi = run.roi
+    run.frame_count = max(0, len(records) - 1)
+    run.done_count = 0
+    db.commit()
+
+    def _progress(done: int) -> None:
+        run.done_count = done
+        if done == 1 or done % 10 == 0 or done == run.frame_count:
+            db.commit()
+
+    try:
+        result = compute_diagnostic(
+            mode,
+            compiled,
+            records,
+            run.analysis_config or {},
+            roi,
+            abort_event=abort_event,
+            artifact_dir=artifact_dir,
+            fps=int(run.fps),
+            generate_video=bool(run.generate_video),
+            progress_callback=_progress,
+        )
+    except RuntimeError as exc:
+        if str(exc) == "aborted":
+            raise AbortedError() from exc
+        raise
+    paths = write_diagnostic_artifacts(result, artifact_dir)
+    run.csv_path = paths["csv_path"]
+    run.summary_json_path = paths["summary_json_path"]
+    run.plot_preview_path = paths["plot_preview_path"]
+    if result.get("video_path"):
+        run.video_path = str(result["video_path"])
+        run.overlay_video_path = str(result["video_path"])
+    if result.get("frames_dir"):
+        run.frames_dir = str(result["frames_dir"])
+    run.done_count = len(result["rows"])
+    run.frame_count = len(result["rows"])
+    db.commit()
+
+
 
 def run_inspect(run_id: int, abort_event: threading.Event | None = None) -> None:
     abort_event = abort_event or threading.Event()
@@ -259,7 +311,9 @@ def run_inspect(run_id: int, abort_event: threading.Event | None = None) -> None
             run.video_path = str(video_path)
             db.commit()
 
-            if run.contrast_enabled:
+            if run.analysis_mode in {"energy", "optical_flow"}:
+                _render_diagnostic(run, db, abort_event, compiled, records, artifact_dir)
+            elif run.contrast_enabled or run.analysis_mode == "contrast_enhanced":
                 writer = _render_contrast(run, db, abort_event, compiled, records, frames_dir, video_path)
             else:
                 writer = _render_passthrough(run, db, abort_event, compiled, records, frames_dir, video_path)
@@ -270,7 +324,8 @@ def run_inspect(run_id: int, abort_event: threading.Event | None = None) -> None
             run.status = "finished"
             run.ended_at = _utcnow()
             run.duration_seconds = round(time.perf_counter() - started, 3)
-            run.done_count = len(records)
+            if run.analysis_mode not in {"energy", "optical_flow"}:
+                run.done_count = len(records)
             db.commit()
             logger.info("Inspect run %s finished (%s frames)", run.id, len(records))
         except AbortedError:

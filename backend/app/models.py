@@ -641,6 +641,11 @@ class InspectRun(Base):
     fps: Mapped[int] = mapped_column(Integer, nullable=False, default=12)
     content_mode: Mapped[str] = mapped_column(String(64), nullable=False, default="final_preprocessed_output")
 
+    analysis_mode: Mapped[str] = mapped_column(String(64), nullable=False, default="preprocessed_video")
+    analysis_config: Mapped[dict | None] = mapped_column(json_type())
+    roi_id: Mapped[int | None] = mapped_column(ForeignKey("roi_definitions.id", ondelete="SET NULL"))
+    generate_video: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+
     contrast_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     contrast_reference_frames: Mapped[int | None] = mapped_column(Integer)
     contrast_shift: Mapped[float | None] = mapped_column(Float)
@@ -651,6 +656,10 @@ class InspectRun(Base):
     done_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     frames_dir: Mapped[str | None] = mapped_column(Text)
     video_path: Mapped[str | None] = mapped_column(Text)
+    csv_path: Mapped[str | None] = mapped_column(Text)
+    summary_json_path: Mapped[str | None] = mapped_column(Text)
+    plot_preview_path: Mapped[str | None] = mapped_column(Text)
+    overlay_video_path: Mapped[str | None] = mapped_column(Text)
 
     training_dataset_name: Mapped[str] = mapped_column(String(255), nullable=False)
     preprocessing_pipeline_name: Mapped[str] = mapped_column(String(255), nullable=False)
@@ -662,6 +671,7 @@ class InspectRun(Base):
 
     training_dataset: Mapped[TrainingDataset] = relationship()
     preprocessing_pipeline: Mapped[PreprocessingPipeline] = relationship()
+    roi: Mapped[RoiDefinition | None] = relationship()
 
 
 class AnalysisLayout(Base):

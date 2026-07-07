@@ -277,6 +277,10 @@ class InspectPreviewRequest(BaseModel):
     end_timestamp: datetime
     stride: int = Field(default=1, ge=1)
     content_mode: Literal["final_preprocessed_output"] = "final_preprocessed_output"
+    analysis_mode: Literal["preprocessed_video", "contrast_enhanced", "energy", "optical_flow"] = "preprocessed_video"
+    analysis_config: dict | None = None
+    roi_id: int | None = None
+    generate_video: bool = True
 
     contrast_enabled: bool = False
     contrast_reference_frames: int = Field(default=100, ge=1)
@@ -312,6 +316,14 @@ class InspectPreviewResponse(BaseModel):
     image_data_url: str
     preview_frame_count: int = 1
     preview_frames: list[dict] = []
+    analysis_mode: str = "preprocessed_video"
+    analysis_config: dict | None = None
+    roi_id: int | None = None
+    roi_name: str | None = None
+    generate_video: bool = True
+    diagnostic_columns: list[str] = []
+    diagnostic_series: list[dict] = []
+    plot_image_data_url: str | None = None
     contrast_enabled: bool = False
     contrast_reference_frames_used: int | None = None
     contrast_diff_min: float | None = None
@@ -340,6 +352,10 @@ class InspectRunRead(BaseModel):
     stride: int
     fps: int
     content_mode: str
+    analysis_mode: str
+    analysis_config: dict | None
+    roi_id: int | None
+    generate_video: bool
     contrast_enabled: bool
     contrast_reference_frames: int | None
     contrast_shift: float | None
@@ -349,6 +365,10 @@ class InspectRunRead(BaseModel):
     done_count: int
     frames_dir: str | None
     video_path: str | None
+    csv_path: str | None
+    summary_json_path: str | None
+    plot_preview_path: str | None
+    overlay_video_path: str | None
     training_dataset_name: str
     preprocessing_pipeline_name: str
     created_at: datetime

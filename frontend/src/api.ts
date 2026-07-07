@@ -845,6 +845,10 @@ export function previewInspect(payload: {
   end_timestamp: string;
   stride: number;
   content_mode?: 'final_preprocessed_output';
+  analysis_mode?: 'preprocessed_video' | 'contrast_enhanced' | 'energy' | 'optical_flow';
+  analysis_config?: Record<string, unknown> | null;
+  roi_id?: number | null;
+  generate_video?: boolean;
   contrast_enabled?: boolean;
   contrast_reference_frames?: number;
   contrast_shift?: number;
@@ -865,6 +869,10 @@ export function createInspectRun(payload: {
   stride: number;
   fps: number;
   content_mode?: 'final_preprocessed_output';
+  analysis_mode?: 'preprocessed_video' | 'contrast_enhanced' | 'energy' | 'optical_flow';
+  analysis_config?: Record<string, unknown> | null;
+  roi_id?: number | null;
+  generate_video?: boolean;
   contrast_enabled?: boolean;
   contrast_reference_frames?: number;
   contrast_shift?: number;
@@ -915,6 +923,18 @@ export function inspectRunFrameUrl(runId: number, index: number): string {
 
 export function inspectRunVideoUrl(runId: number): string {
   return `${API_BASE_URL}/api/inspect/runs/${runId}/video.mp4`;
+}
+
+export function inspectRunCsvUrl(runId: number): string {
+  return `${API_BASE_URL}/api/inspect/runs/${runId}/results.csv`;
+}
+
+export function inspectRunSummaryUrl(runId: number): string {
+  return `${API_BASE_URL}/api/inspect/runs/${runId}/summary.json`;
+}
+
+export function inspectRunPlotPreviewUrl(runId: number): string {
+  return `${API_BASE_URL}/api/inspect/runs/${runId}/plot-preview.png`;
 }
 
 export function getSchedulerSettings(): Promise<SchedulerSettings> {
