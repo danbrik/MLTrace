@@ -4,8 +4,10 @@ import {
   Badge,
   Button,
   Collapse,
+  ColorInput,
   Group,
   Loader,
+  MultiSelect,
   Modal,
   NumberInput,
   Paper,
@@ -49,7 +51,6 @@ import { DateTime24Input } from '../components/DateTime24Input';
 import { PlotlyChart } from '../components/PlotlyChart';
 import { StepCard } from '../components/StepCard';
 import type { Data, Layout } from '../lib/plotly';
-import { usePendingIds } from '../hooks/usePendingIds';
 import { formatValue } from '../methods/utils';
 import { datasetResolutions, formatResolution, orderedGraphNodes, stepDetail } from '../training/graph';
 import type {
@@ -78,6 +79,7 @@ type PlotDraft = {
   plotType: PlotType;
   testingRunId: string | null;
   title: string;
+  subtitle: string;
   scoreSeries: string;
   start: string;
   end: string;
@@ -94,6 +96,7 @@ type PlotDraft = {
 type AnalysisPlot = PlotDraft & {
   id: string;
   sources: PlotSourceConfig[];
+  traces?: PlotTraceConfig[];
 };
 
 type DetailModalState = {
@@ -107,6 +110,20 @@ type PlotSourceConfig = {
   end: string;
   sampling: number;
   timestamp: string | null;
+};
+
+type PlotTraceConfig = PlotSourceConfig & {
+  metric: string;
+  modelLabel: string;
+  legendLabel: string;
+  color: string;
+};
+
+type PlotPreview = {
+  title: string;
+  subtitle: string;
+  traces: PlotTraceConfig[];
+  duplicateNotes: string[];
 };
 
 type CombinedResult = TestingRunResult & {
@@ -277,6 +294,59 @@ function sourceBounds(dataset: TrainingDataset | null | undefined): { start: str
     start: toDateTimeLocal(starts[0]),
     end: toDateTimeLocal(ends.at(-1)),
   };
+}
+
+function metricKeyForRun(run: TestingRun): string {
+  const configMetric = run.inference_config?.error_metric ?? run.inference_config?.residual_metric;
+  if (typeof configMetric === 'string' && configMetric.trim()) return normalizeMetricKey(configMetric);
+  return 'mse';
+}
+
+function normalizeMetricKey(metric: string): string {
+  const normalized = metric.trim().toLowerCase();
+  if (normalized === 'ssim' || normalized === 'ssim_distance') return 'ssim_distance';
+  if (normalized === 'l1' || normalized === 'mae') return 'mae';
+  if (normalized === 'l2' || normalized === 'mse') return 'mse';
+  return normalized || 'mse';
+}
+
+function metricLabel(metric: string): string {
+  const normalized = normalizeMetricKey(metric);
+  if (normalized === 'mse') return 'MSE';
+  if (normalized === 'mae') return 'MAE';
+  if (normalized === 'ssim_distance') return 'SSIM';
+  return normalized.replaceAll('_', ' ').toUpperCase();
+}
+
+function metricOrder(metric: string): number {
+  const normalized = normalizeMetricKey(metric);
+  if (normalized === 'mse') return 0;
+  if (normalized === 'mae') return 1;
+  if (normalized === 'ssim_distance') return 2;
+  return 10;
+}
+
+function traceToSource(trace: PlotTraceConfig): PlotSourceConfig {
+  return {
+    testingRunId: trace.testingRunId,
+    start: trace.start,
+    end: trace.end,
+    sampling: trace.sampling,
+    timestamp: trace.timestamp,
+  };
+}
+
+function plotSources(plot: AnalysisPlot): PlotSourceConfig[] {
+  return plot.traces?.length ? plot.traces.map(traceToSource) : plot.sources;
+}
+
+function sourceTraceKey(source: PlotSourceConfig): string {
+  return `${source.testingRunId}`;
+}
+
+function traceLabelForRun(run: TestingRun, metric: string, multipleMetrics: boolean): string {
+  const modelLabel = run.training_pipeline_name || run.training_run_name || `Training run #${run.training_run_id}`;
+  return multipleMetrics ? `${modelLabel} · ${metricLabel(metric)}` : modelLabel;
 }
 
 function filterAndSampleResults(
@@ -510,13 +580,31 @@ const TRACE_COLORS = ['#1c7ed6', '#e8590c', '#2f9e44', '#9c36b5', '#0c8599', '#e
 
 function TimeSeriesPlot({ plot, results }: { plot: AnalysisPlot; results: CombinedResult[] }) {
   const traces = useMemo<Data[]>(() => {
-    const groups = new Map<number, { name: string; results: CombinedResult[] }>();
-    for (const result of results) {
-      const group = groups.get(result.testingRunId);
-      if (group) group.results.push(result);
-      else groups.set(result.testingRunId, { name: result.testingRunName, results: [result] });
+    const groups = new Map<string, { name: string; color: string; metric: string; results: CombinedResult[] }>();
+    if (plot.traces?.length) {
+      for (const trace of plot.traces) {
+        groups.set(sourceTraceKey(trace), {
+          name: trace.legendLabel,
+          color: trace.color,
+          metric: trace.metric,
+          results: [],
+        });
+      }
     }
-    return [...groups.values()].map((group, index) => {
+    for (const result of results) {
+      const key = String(result.testingRunId);
+      const group = groups.get(key);
+      if (group) group.results.push(result);
+      else {
+        groups.set(key, {
+          name: result.testingRunName,
+          color: TRACE_COLORS[groups.size % TRACE_COLORS.length],
+          metric: 'score',
+          results: [result],
+        });
+      }
+    }
+    return [...groups.values()].filter((group) => group.results.length > 0).map((group, index) => {
       const smoothed = movingAverage(group.results.map((result) => scoreValue(result, plot.scoreSeries)), plot.movingAverage);
       return {
         type: 'scatter',
@@ -524,11 +612,11 @@ function TimeSeriesPlot({ plot, results }: { plot: AnalysisPlot; results: Combin
         name: group.name,
         x: group.results.map((result) => result.timestamp),
         y: smoothed,
-        line: { color: TRACE_COLORS[index % TRACE_COLORS.length], width: 1.5 },
-        hovertemplate: '%{x|%Y-%m-%d %H:%M:%S}<br>error %{y:.5g}<extra>%{fullData.name}</extra>',
+        line: { color: group.color || TRACE_COLORS[index % TRACE_COLORS.length], width: 1.7 },
+        hovertemplate: `%{x|%Y-%m-%d %H:%M:%S}<br>${metricLabel(group.metric)} %{y:.5g}<extra>%{fullData.name}</extra>`,
       } as Data;
     });
-  }, [plot.movingAverage, plot.scoreSeries, results]);
+  }, [plot.movingAverage, plot.scoreSeries, plot.traces, results]);
 
   const layout = useMemo<Partial<Layout>>(
     () => ({
@@ -564,6 +652,7 @@ function TimeSeriesPlot({ plot, results }: { plot: AnalysisPlot; results: Combin
         <Badge variant="light">{results.length} points</Badge>
         {plot.movingAverage > 1 && <Badge variant="light" color="blue">moving avg {plot.movingAverage}</Badge>}
         {plot.sampling > 1 && <Badge variant="light" color="gray">sample every {plot.sampling}</Badge>}
+        {plot.traces?.length ? <Badge variant="light" color="teal">{plot.traces.length} traces</Badge> : null}
       </Group>
     </Stack>
   );
@@ -1085,8 +1174,13 @@ function AnalysisPlotCard({
                 {plot.plotType === 'heatmap' ? 'Heatmap' : 'Time series'}
               </Badge>
             </Group>
+            {plot.subtitle && (
+              <Text size="sm" c="dimmed" mt={2}>
+                {plot.subtitle}
+              </Text>
+            )}
             <Text size="sm" c="dimmed">
-              {results.length} deduplicated rows · {plot.sources.length} source{plot.sources.length === 1 ? '' : 's'}
+              {results.length} result rows · {plotSources(plot).length} source{plotSources(plot).length === 1 ? '' : 's'}
             </Text>
           </div>
           <Group gap={4}>
@@ -1131,6 +1225,7 @@ function defaultDraft(): PlotDraft {
     plotType: 'timeseries',
     testingRunId: null,
     title: '',
+    subtitle: '',
     scoreSeries: 'score',
     start: '',
     end: '',
@@ -1146,10 +1241,13 @@ function defaultDraft(): PlotDraft {
 }
 
 type AnalysisBoardLayout = {
-  version: 1;
+  version: 1 | 2;
   draft: PlotDraft;
   plots: AnalysisPlot[];
   selectedPipelineId: string | null;
+  selectedModelIds?: string[];
+  selectedInferenceDatasetId?: string | null;
+  selectedMetricKeys?: string[];
   selectedRoiKey: string | null;
   selectedSources: PlotSourceConfig[];
   addPlotOpen: boolean;
@@ -1182,14 +1280,31 @@ function restoreSources(value: unknown): PlotSourceConfig[] {
   })).filter((source) => source.testingRunId);
 }
 
+function restoreTraces(value: unknown): PlotTraceConfig[] {
+  if (!Array.isArray(value)) return [];
+  return value.filter(isRecord).map((trace, index) => {
+    const source = restoreSources([trace])[0];
+    return {
+      ...source,
+      metric: normalizeMetricKey(String(trace.metric ?? 'mse')),
+      modelLabel: String(trace.modelLabel ?? trace.legendLabel ?? `Source ${index + 1}`),
+      legendLabel: String(trace.legendLabel ?? trace.modelLabel ?? `Source ${index + 1}`),
+      color: String(trace.color ?? TRACE_COLORS[index % TRACE_COLORS.length]),
+    };
+  }).filter((trace) => trace.testingRunId);
+}
+
 function restorePlots(value: unknown): AnalysisPlot[] {
   if (!Array.isArray(value)) return [];
   return value.filter(isRecord).map((plot) => {
     const draft = restoreDraft(plot);
+    const traces = restoreTraces(plot.traces);
+    const sources = restoreSources(plot.sources);
     return {
       ...draft,
       id: String(plot.id ?? crypto.randomUUID()),
-      sources: restoreSources(plot.sources),
+      sources: sources.length > 0 ? sources : traces.map(traceToSource),
+      traces,
     };
   });
 }
@@ -1200,6 +1315,12 @@ function restoreBoardLayout(value: Record<string, unknown>): AnalysisBoardLayout
     draft: restoreDraft(value.draft),
     plots: restorePlots(value.plots),
     selectedPipelineId: value.selectedPipelineId === null || value.selectedPipelineId === undefined ? null : String(value.selectedPipelineId),
+    selectedModelIds: Array.isArray(value.selectedModelIds) ? value.selectedModelIds.map(String).filter(Boolean) : [],
+    selectedInferenceDatasetId:
+      value.selectedInferenceDatasetId === null || value.selectedInferenceDatasetId === undefined ? null : String(value.selectedInferenceDatasetId),
+    selectedMetricKeys: Array.isArray(value.selectedMetricKeys)
+      ? value.selectedMetricKeys.map((metric) => normalizeMetricKey(String(metric))).filter(Boolean)
+      : [],
     selectedRoiKey: value.selectedRoiKey === null || value.selectedRoiKey === undefined ? null : String(value.selectedRoiKey),
     selectedSources: restoreSources(value.selectedSources),
     addPlotOpen: typeof value.addPlotOpen === 'boolean' ? value.addPlotOpen : true,
@@ -1220,12 +1341,16 @@ export function AnalysisPage({ active = true }: { active?: boolean }) {
   const [heatmapCache, setHeatmapCache] = useState<Record<string, HeatmapRun>>({});
   const [loadingHeatmaps, setLoadingHeatmaps] = useState<Record<string, boolean>>({});
   const [heatmapErrors, setHeatmapErrors] = useState<Record<string, string>>({});
-  const sourceActions = usePendingIds();
   const [addPlotOpen, setAddPlotOpen] = useState(true);
   const [selectedPipelineId, setSelectedPipelineId] = useState<string | null>(null);
   const [pipelineSearch, setPipelineSearch] = useState('');
-  const [selectedRoiKey, setSelectedRoiKey] = useState<string | null>(null);
+  const [selectedModelIds, setSelectedModelIds] = useState<string[]>([]);
+  const [selectedInferenceDatasetId, setSelectedInferenceDatasetId] = useState<string | null>(null);
+  const [selectedMetricKeys, setSelectedMetricKeys] = useState<string[]>([]);
+  const [selectedRoiKey, setSelectedRoiKey] = useState<string | null>('none');
   const [selectedSources, setSelectedSources] = useState<PlotSourceConfig[]>([]);
+  const [plotPreview, setPlotPreview] = useState<PlotPreview | null>(null);
+  const [preloadingPlot, setPreloadingPlot] = useState(false);
   const [detailModal, setDetailModal] = useState<DetailModalState>(null);
   const [analysisLayouts, setAnalysisLayouts] = useState<AnalysisLayout[]>([]);
   const [selectedLayoutId, setSelectedLayoutId] = useState<string | null>(null);
@@ -1266,14 +1391,11 @@ export function AnalysisPage({ active = true }: { active?: boolean }) {
   );
 
   const selectedRunId = draft.testingRunId ? Number(draft.testingRunId) : null;
-  const selectedRun = selectedRunId !== null ? testingRuns.find((run) => run.id === selectedRunId) ?? null : null;
-  const selectedResults = selectedRunId !== null ? resultsByRunId[selectedRunId] : undefined;
   const trainingRunById = useMemo(() => new Map(trainingRuns.map((run) => [run.id, run])), [trainingRuns]);
   const trainingDatasetById = useMemo(() => new Map(trainingDatasets.map((dataset) => [dataset.id, dataset])), [trainingDatasets]);
   const trainingPipelineById = useMemo(() => new Map(trainingPipelines.map((pipeline) => [pipeline.id, pipeline])), [trainingPipelines]);
   const preprocessingById = useMemo(() => new Map(preprocessingPipelines.map((pipeline) => [pipeline.id, pipeline])), [preprocessingPipelines]);
   const methodById = useMemo(() => new Map(methodConfigurations.map((method) => [method.id, method])), [methodConfigurations]);
-  const selectedPipeline = selectedPipelineId ? trainingPipelineById.get(Number(selectedPipelineId)) ?? null : null;
   const selectedLayout = selectedLayoutId ? analysisLayouts.find((layout) => layout.id === Number(selectedLayoutId)) ?? null : null;
   const layoutNameTrimmed = layoutName.trim();
   const layoutNameExistsForCreate = analysisLayouts.some(
@@ -1283,29 +1405,117 @@ export function AnalysisPage({ active = true }: { active?: boolean }) {
     (layout) => layout.id !== Number(selectedLayoutId) && layout.name.toLowerCase() === layoutNameTrimmed.toLowerCase(),
   );
 
-  const finishedRunsForPipeline = useMemo(() => {
-    if (!selectedPipelineId) return [];
-    return finishedRuns.filter((run) => trainingRunById.get(run.training_run_id)?.training_pipeline_id === Number(selectedPipelineId));
-  }, [finishedRuns, selectedPipelineId, trainingRunById]);
-
-  const roiOptionsForPipeline = useMemo(() => {
-    const seen = new Map<string, { value: string; label: string }>();
-    for (const run of finishedRunsForPipeline) {
-      const key = run.roi_id === null ? 'none' : String(run.roi_id);
-      if (!seen.has(key)) {
-        seen.set(key, {
-          value: key,
-          label: run.roi_id === null ? 'No ROI' : run.roi_name ?? `ROI #${run.roi_id}`,
+  const analysableModelRows = useMemo(() => {
+    const byTrainingRun = new Map<number, { id: number; label: string; run: TrainingRun | null; testingRuns: TestingRun[] }>();
+    for (const run of finishedRuns) {
+      const trainingRun = trainingRunById.get(run.training_run_id) ?? null;
+      const existing = byTrainingRun.get(run.training_run_id);
+      if (existing) {
+        existing.testingRuns.push(run);
+      } else {
+        byTrainingRun.set(run.training_run_id, {
+          id: run.training_run_id,
+          label: run.training_pipeline_name || run.training_run_name || `Training run #${run.training_run_id}`,
+          run: trainingRun,
+          testingRuns: [run],
         });
       }
     }
-    return [...seen.values()];
-  }, [finishedRunsForPipeline]);
+    const query = pipelineSearch.trim().toLowerCase();
+    return [...byTrainingRun.values()]
+      .filter((row) => {
+        if (!query) return true;
+        return row.label.toLowerCase().includes(query) || row.testingRuns.some((run) => run.training_dataset_name.toLowerCase().includes(query));
+      })
+      .sort((left, right) => left.label.localeCompare(right.label));
+  }, [finishedRuns, pipelineSearch, trainingRunById]);
 
-  const candidateRuns = useMemo(() => {
-    if (!selectedRoiKey) return [];
-    return finishedRunsForPipeline.filter((run) => (run.roi_id === null ? 'none' : String(run.roi_id)) === selectedRoiKey);
-  }, [finishedRunsForPipeline, selectedRoiKey]);
+  const selectedModelIdSet = useMemo(() => new Set(selectedModelIds.map(Number)), [selectedModelIds]);
+  const runsForSelectedModels = useMemo(
+    () => finishedRuns.filter((run) => selectedModelIdSet.has(run.training_run_id)),
+    [finishedRuns, selectedModelIdSet],
+  );
+
+  const commonDatasetOptions = useMemo(() => {
+    if (selectedModelIds.length === 0) return [];
+    const modelIds = selectedModelIds.map(Number);
+    const sets = modelIds.map((modelId) => new Set(finishedRuns.filter((run) => run.training_run_id === modelId).map((run) => run.training_dataset_id)));
+    const commonIds = [...(sets[0] ?? new Set<number>())].filter((datasetId) => sets.every((set) => set.has(datasetId)));
+    return commonIds
+      .map((datasetId) => {
+        const dataset = trainingDatasetById.get(datasetId);
+        const runs = runsForSelectedModels.filter((run) => run.training_dataset_id === datasetId);
+        return {
+          value: String(datasetId),
+          label: dataset?.name ?? runs[0]?.training_dataset_name ?? `Inference dataset #${datasetId}`,
+          dataset,
+          runs,
+        };
+      })
+      .sort((left, right) => left.label.localeCompare(right.label));
+  }, [finishedRuns, runsForSelectedModels, selectedModelIds, trainingDatasetById]);
+
+  const selectedInferenceDataset = selectedInferenceDatasetId ? trainingDatasetById.get(Number(selectedInferenceDatasetId)) ?? null : null;
+  const selectedInferenceBounds = sourceBounds(selectedInferenceDataset);
+
+  const roiOptionsForSelection = useMemo(() => {
+    if (!selectedInferenceDatasetId || selectedModelIds.length === 0) return [{ value: 'none', label: 'No ROI' }];
+    const modelIds = selectedModelIds.map(Number);
+    const sets = modelIds.map((modelId) => {
+      const options = new Map<string, string>();
+      for (const run of finishedRuns) {
+        if (run.training_run_id !== modelId || run.training_dataset_id !== Number(selectedInferenceDatasetId)) continue;
+        const key = run.roi_id === null ? 'none' : String(run.roi_id);
+        options.set(key, run.roi_id === null ? 'No ROI' : run.roi_name ?? `ROI #${run.roi_id}`);
+      }
+      return options;
+    });
+    const commonKeys = [...(sets[0]?.keys() ?? [])].filter((key) => sets.every((set) => set.has(key)));
+    const sorted = commonKeys
+      .map((key) => ({ value: key, label: sets[0].get(key) ?? (key === 'none' ? 'No ROI' : `ROI #${key}`) }))
+      .sort((left, right) => (left.value === 'none' ? -1 : right.value === 'none' ? 1 : left.label.localeCompare(right.label)));
+    if (!sorted.some((option) => option.value === 'none')) sorted.unshift({ value: 'none', label: 'No ROI' });
+    return sorted.length > 0 ? sorted : [{ value: 'none', label: 'No ROI' }];
+  }, [finishedRuns, selectedInferenceDatasetId, selectedModelIds]);
+
+  const metricOptionsForSelection = useMemo(() => {
+    if (!selectedInferenceDatasetId || !selectedRoiKey || selectedModelIds.length === 0) return [];
+    const modelIds = selectedModelIds.map(Number);
+    const sets = modelIds.map((modelId) => {
+      const metrics = new Set<string>();
+      for (const run of finishedRuns) {
+        if (run.training_run_id !== modelId || run.training_dataset_id !== Number(selectedInferenceDatasetId)) continue;
+        if ((run.roi_id === null ? 'none' : String(run.roi_id)) !== selectedRoiKey) continue;
+        metrics.add(metricKeyForRun(run));
+      }
+      return metrics;
+    });
+    return [...(sets[0] ?? new Set<string>())]
+      .filter((metric) => sets.every((set) => set.has(metric)))
+      .sort((left, right) => metricOrder(left) - metricOrder(right) || left.localeCompare(right))
+      .map((metric) => ({ value: metric, label: metricLabel(metric) }));
+  }, [finishedRuns, selectedInferenceDatasetId, selectedModelIds, selectedRoiKey]);
+
+  useEffect(() => {
+    if (selectedInferenceDatasetId && !commonDatasetOptions.some((option) => option.value === selectedInferenceDatasetId)) {
+      setSelectedInferenceDatasetId(null);
+      setSelectedMetricKeys([]);
+      setPlotPreview(null);
+    }
+  }, [commonDatasetOptions, selectedInferenceDatasetId]);
+
+  useEffect(() => {
+    if (!roiOptionsForSelection.some((option) => option.value === selectedRoiKey)) {
+      setSelectedRoiKey('none');
+      setSelectedMetricKeys([]);
+      setPlotPreview(null);
+    }
+  }, [roiOptionsForSelection, selectedRoiKey]);
+
+  useEffect(() => {
+    const validMetrics = new Set(metricOptionsForSelection.map((option) => option.value));
+    setSelectedMetricKeys((current) => current.filter((metric) => validMetrics.has(metric)));
+  }, [metricOptionsForSelection]);
 
   const fetchResults = useCallback(
     async (runId: number) => {
@@ -1326,10 +1536,13 @@ export function AnalysisPage({ active = true }: { active?: boolean }) {
 
   function buildBoardLayout(): AnalysisBoardLayout {
     return {
-      version: 1,
+      version: 2,
       draft,
       plots,
       selectedPipelineId,
+      selectedModelIds,
+      selectedInferenceDatasetId,
+      selectedMetricKeys,
       selectedRoiKey,
       selectedSources,
       addPlotOpen,
@@ -1340,7 +1553,7 @@ export function AnalysisPage({ active = true }: { active?: boolean }) {
     const ids = new Set<number>();
     for (const source of layout.selectedSources) ids.add(Number(source.testingRunId));
     for (const plot of layout.plots) {
-      for (const source of plot.sources) ids.add(Number(source.testingRunId));
+      for (const source of plotSources(plot)) ids.add(Number(source.testingRunId));
     }
     return [...ids].filter((id) => Number.isFinite(id));
   }
@@ -1357,8 +1570,12 @@ export function AnalysisPage({ active = true }: { active?: boolean }) {
       setDraft(restored.draft);
       setPlots(restored.plots);
       setSelectedPipelineId(restored.selectedPipelineId);
-      setSelectedRoiKey(restored.selectedRoiKey);
+      setSelectedModelIds(restored.selectedModelIds ?? []);
+      setSelectedInferenceDatasetId(restored.selectedInferenceDatasetId ?? null);
+      setSelectedMetricKeys(restored.selectedMetricKeys ?? []);
+      setSelectedRoiKey(restored.selectedRoiKey ?? 'none');
       setSelectedSources(restored.selectedSources);
+      setPlotPreview(null);
       setAddPlotOpen(restored.addPlotOpen);
       setHeatmapCache({});
       setHeatmapErrors({});
@@ -1517,6 +1734,7 @@ export function AnalysisPage({ active = true }: { active?: boolean }) {
 
   useEffect(() => {
     if (selectedRunId === null) return;
+    if (plotPreview) return;
     if (draft.plotType === 'heatmap' && draft.heatmapMode === 'single') {
       const run = testingRuns.find((item) => item.id === selectedRunId);
       const bounds = sourceBounds(run ? trainingDatasetById.get(run.training_dataset_id) : null);
@@ -1551,7 +1769,7 @@ export function AnalysisPage({ active = true }: { active?: boolean }) {
         });
       })
       .catch((error) => notifyError('Could not load testing results', error));
-  }, [draft.heatmapMode, draft.plotType, fetchResults, selectedRunId, testingRuns, trainingDatasetById]);
+  }, [draft.heatmapMode, draft.plotType, fetchResults, plotPreview, selectedRunId, testingRuns, trainingDatasetById]);
 
   useEffect(() => {
     if (draft.plotType === 'heatmap' && draft.heatmapMode === 'single') return;
@@ -1559,11 +1777,6 @@ export function AnalysisPage({ active = true }: { active?: boolean }) {
       fetchResults(Number(source.testingRunId)).catch((error) => notifyError('Could not load testing results', error));
     });
   }, [draft.heatmapMode, draft.plotType, fetchResults, selectedSources]);
-
-  const filteredDraftResults = useMemo(() => {
-    if (!selectedResults) return [];
-    return filterAndSampleResults(selectedResults.results, draft.start, draft.end, draft.sampling);
-  }, [draft.end, draft.sampling, draft.start, selectedResults]);
 
   function combinedResultsForSources(sources: PlotSourceConfig[], plotType: PlotType, heatmapMode: HeatmapMode): CombinedResult[] {
     const dedup = new Map<string, CombinedResult>();
@@ -1599,7 +1812,7 @@ export function AnalysisPage({ active = true }: { active?: boolean }) {
           ? data.results.filter((result) => result.timestamp === source.timestamp).slice(0, 1)
           : filterAndSampleResults(data.results, source.start, source.end, source.sampling);
       for (const result of sourceResults) {
-        const key = `${result.image_path}|${result.timestamp}`;
+        const key = `${source.testingRunId}|${result.image_path}|${result.timestamp}`;
         if (!dedup.has(key)) {
           dedup.set(key, {
             ...result,
@@ -1618,27 +1831,164 @@ export function AnalysisPage({ active = true }: { active?: boolean }) {
     [draft.heatmapMode, draft.plotType, resultsByRunId, selectedSources, testingRuns],
   );
 
-  function addPlot() {
-    if (selectedSources.length === 0) {
-      notifications.show({ color: 'yellow', title: 'Select inference datasets', message: 'Add at least one inference dataset source before adding a plot.' });
+  function resolveTestingRun(modelId: number, metric: string): { run: TestingRun | null; duplicateCount: number } {
+    if (!selectedInferenceDatasetId || !selectedRoiKey) return { run: null, duplicateCount: 0 };
+    const candidates = finishedRuns
+      .filter((run) => run.training_run_id === modelId)
+      .filter((run) => run.training_dataset_id === Number(selectedInferenceDatasetId))
+      .filter((run) => (run.roi_id === null ? 'none' : String(run.roi_id)) === selectedRoiKey)
+      .filter((run) => metricKeyForRun(run) === metric)
+      .sort((left, right) => {
+        const leftTime = new Date(left.ended_at ?? left.updated_at ?? left.created_at).getTime();
+        const rightTime = new Date(right.ended_at ?? right.updated_at ?? right.created_at).getTime();
+        return rightTime - leftTime;
+      });
+    return { run: candidates[0] ?? null, duplicateCount: Math.max(0, candidates.length - 1) };
+  }
+
+  function selectedModelLabel(modelId: string): string {
+    return analysableModelRows.find((row) => row.id === Number(modelId))?.label ?? `Training run #${modelId}`;
+  }
+
+  function autoPlotTitle(): string {
+    const modelPart = selectedModelIds.length === 1 ? selectedModelLabel(selectedModelIds[0]) : `${selectedModelIds.length} models`;
+    const datasetPart = selectedInferenceDataset?.name ?? 'Inference dataset';
+    const roiPart = selectedRoiKey && selectedRoiKey !== 'none'
+      ? ` · ${roiOptionsForSelection.find((option) => option.value === selectedRoiKey)?.label ?? `ROI #${selectedRoiKey}`}`
+      : '';
+    return `${modelPart} · ${datasetPart}${roiPart}`;
+  }
+
+  function buildPlotSubtitle(metrics: string[], start: string, end: string, sampling: number): string {
+    const parts = [
+      `Metrics: ${metrics.map(metricLabel).join(', ')}`,
+      `Range: ${start.replace('T', ' ')} to ${end.replace('T', ' ')}`,
+      `Sampling: every ${sampling}`,
+    ];
+    if (draft.movingAverage > 1) parts.push(`Moving average: ${draft.movingAverage}`);
+    if (selectedRoiKey && selectedRoiKey !== 'none') {
+      parts.push(`ROI: ${roiOptionsForSelection.find((option) => option.value === selectedRoiKey)?.label ?? selectedRoiKey}`);
+    } else {
+      parts.push('ROI: No ROI');
+    }
+    return parts.join(' · ');
+  }
+
+  async function preloadPlot() {
+    if (preloadingPlot) return;
+    if (selectedModelIds.length === 0) {
+      notifications.show({ color: 'yellow', title: 'Select models', message: 'Select one or more trained models first.' });
       return;
     }
-    const availableResults = combinedDraftResults;
-    if (availableResults.length === 0) {
-      notifications.show({ color: 'yellow', title: 'No matching results', message: 'Adjust time range or sampling.' });
+    if (!selectedInferenceDatasetId) {
+      notifications.show({ color: 'yellow', title: 'Select inference dataset', message: 'Select a shared inference dataset.' });
       return;
     }
-    const title =
-      draft.title.trim() ||
-      `${draft.plotType === 'heatmap' ? 'Heatmap' : 'Time series'} · ${selectedPipeline?.name ?? 'selected sources'}`;
+    if (!selectedRoiKey) {
+      notifications.show({ color: 'yellow', title: 'Select ROI', message: 'Select No ROI or a shared ROI.' });
+      return;
+    }
+    if (selectedMetricKeys.length === 0) {
+      notifications.show({ color: 'yellow', title: 'Select metrics', message: 'Select one or more metrics for the plot.' });
+      return;
+    }
+    if (draft.plotType === 'heatmap' && (selectedModelIds.length > 1 || selectedMetricKeys.length > 1)) {
+      notifications.show({ color: 'yellow', title: 'Heatmap needs one source', message: 'Heatmaps currently support one model and one metric. Use time series for multi-model comparisons.' });
+      return;
+    }
+    const start = draft.start || selectedInferenceBounds.start;
+    const end = draft.end || selectedInferenceBounds.end;
+    if (!start || !end) {
+      notifications.show({ color: 'yellow', title: 'Missing time bounds', message: 'The selected inference dataset has no start/end bounds.' });
+      return;
+    }
+    const sampling = Math.max(1, Math.floor(draft.sampling));
+    const duplicateNotes: string[] = [];
+    const traces: PlotTraceConfig[] = [];
+    setPreloadingPlot(true);
+    try {
+      for (const modelId of selectedModelIds) {
+        for (const metric of selectedMetricKeys) {
+          const { run, duplicateCount } = resolveTestingRun(Number(modelId), metric);
+          if (!run) {
+            throw new Error(`No finished ${metricLabel(metric)} inference run found for ${selectedModelLabel(modelId)}.`);
+          }
+          if (duplicateCount > 0) {
+            duplicateNotes.push(`${selectedModelLabel(modelId)} / ${metricLabel(metric)}: newest run used, ${duplicateCount} older duplicate${duplicateCount === 1 ? '' : 's'} ignored.`);
+          }
+          traces.push({
+            testingRunId: String(run.id),
+            metric,
+            modelLabel: selectedModelLabel(modelId),
+            legendLabel: traceLabelForRun(run, metric, selectedMetricKeys.length > 1),
+            color: TRACE_COLORS[traces.length % TRACE_COLORS.length],
+            start,
+            end,
+            sampling,
+            timestamp: draft.timestamp ?? start,
+          });
+        }
+      }
+      if (draft.plotType !== 'heatmap' || draft.heatmapMode !== 'single') {
+        await Promise.all(traces.map((trace) => fetchResults(Number(trace.testingRunId))));
+      }
+      setDraft((current) => ({
+        ...current,
+        title: current.title,
+        subtitle: buildPlotSubtitle(selectedMetricKeys, start, end, sampling),
+        testingRunId: traces[0]?.testingRunId ?? current.testingRunId,
+        start,
+        end,
+        sampling,
+        timestamp: current.timestamp ?? traces[0]?.timestamp ?? start,
+        scoreSeries: 'score',
+      }));
+      setSelectedSources(traces.map(traceToSource));
+      setPlotPreview({
+        title: draft.title.trim() || autoPlotTitle(),
+        subtitle: buildPlotSubtitle(selectedMetricKeys, start, end, sampling),
+        traces,
+        duplicateNotes,
+      });
+    } catch (error) {
+      notifyError('Could not preload plot', error);
+    } finally {
+      setPreloadingPlot(false);
+    }
+  }
+
+  function updatePreviewTrace(index: number, patch: Partial<PlotTraceConfig>) {
+    setPlotPreview((current) => {
+      if (!current) return current;
+      const traces = current.traces.map((trace, traceIndex) => (traceIndex === index ? { ...trace, ...patch } : trace));
+      return { ...current, traces };
+    });
+  }
+
+  function finishPlot() {
+    if (!plotPreview) {
+      notifications.show({ color: 'yellow', title: 'Preload required', message: 'Preload the plot before adding it to the board.' });
+      return;
+    }
+    const availableResults = combinedResultsForSources(plotPreview.traces.map(traceToSource), draft.plotType, draft.heatmapMode);
+    if (draft.plotType !== 'heatmap' || draft.heatmapMode !== 'single') {
+      if (availableResults.length === 0) {
+        notifications.show({ color: 'yellow', title: 'No matching results', message: 'Adjust time range, sampling or metric selection.' });
+        return;
+      }
+    }
     const nextPlot: AnalysisPlot = {
       ...draft,
       id: crypto.randomUUID(),
-      title,
-      sources: selectedSources,
-      timestamp: draft.timestamp ?? availableResults[0]?.timestamp ?? null,
+      title: plotPreview.title,
+      subtitle: plotPreview.subtitle,
+      sources: plotPreview.traces.map(traceToSource),
+      traces: plotPreview.traces,
+      testingRunId: plotPreview.traces[0]?.testingRunId ?? draft.testingRunId,
+      timestamp: draft.timestamp ?? availableResults[0]?.timestamp ?? plotPreview.traces[0]?.timestamp ?? null,
     };
     setPlots((current) => [...current, nextPlot]);
+    setPlotPreview(null);
   }
 
   function movePlot(plotId: string, direction: -1 | 1) {
@@ -1661,73 +2011,12 @@ export function AnalysisPage({ active = true }: { active?: boolean }) {
     return { trainingRun, trainingPipeline, trainset, preprocessing, method };
   }
 
-  async function addSource(run: TestingRun) {
-    if (selectedSources.some((source) => source.testingRunId === String(run.id))) return;
-    await sourceActions.runPending(`add-source:${run.id}`, async () => {
-      const bounds = sourceBounds(trainingDatasetById.get(run.training_dataset_id));
-      if (draft.plotType === 'heatmap' && draft.heatmapMode === 'single') {
-        setSelectedSources((current) => [
-          ...current,
-          {
-            testingRunId: String(run.id),
-            start: bounds.start,
-            end: bounds.end,
-            sampling: 1,
-            timestamp: bounds.start,
-          },
-        ]);
-        return;
-      }
-      const data = await fetchResults(run.id);
-      const first = data.results[0];
-      setSelectedSources((current) => [
-        ...current,
-        {
-          testingRunId: String(run.id),
-          start: bounds.start || toDateTimeLocal(first?.timestamp),
-          end: bounds.end || toDateTimeLocal(data.results[data.results.length - 1]?.timestamp),
-          sampling: 1,
-          timestamp: first?.timestamp ?? null,
-        },
-      ]);
-    }).catch((error) => notifyError('Could not load testing results', error));
-  }
-
-  function updateSource(runId: string, patch: Partial<PlotSourceConfig>) {
-    setSelectedSources((current) =>
-      current.map((source) => (source.testingRunId === runId ? { ...source, ...patch } : source)),
-    );
-  }
-
   function updateHeatmapConfig(patch: Partial<HeatmapVisualizationConfig>) {
     setDraft((current) => ({
       ...current,
       heatmapConfig: { ...current.heatmapConfig, ...patch },
     }));
   }
-
-  // Pipelines that have at least one finished testing run can be analysed.
-  const analysablePipelineIds = useMemo(() => {
-    const ids = new Set<number>();
-    for (const run of testingRuns) {
-      if (run.status !== 'finished') continue;
-      const trainingRun = trainingRunById.get(run.training_run_id);
-      if (trainingRun) ids.add(trainingRun.training_pipeline_id);
-    }
-    return ids;
-  }, [testingRuns, trainingRunById]);
-  const analysablePipelines = useMemo(() => {
-    const query = pipelineSearch.trim().toLowerCase();
-    return trainingPipelines.filter((pipeline) => {
-      if (!analysablePipelineIds.has(pipeline.id)) return false;
-      if (!query) return true;
-      return (
-        pipeline.name.toLowerCase().includes(query) ||
-        pipeline.method_configuration_name.toLowerCase().includes(query) ||
-        pipeline.training_datasets.some((entry) => entry.name.toLowerCase().includes(query))
-      );
-    });
-  }, [trainingPipelines, analysablePipelineIds, pipelineSearch]);
 
   return (
     <Stack gap="lg">
@@ -1865,148 +2154,209 @@ export function AnalysisPage({ active = true }: { active?: boolean }) {
           </Group>
           <Collapse in={addPlotOpen}>
             <Stack gap="md">
-              <StepCard index={1} title="Training pipeline" color="blue">
-                {selectedPipeline ? (
-                  <Group justify="space-between" align="center" wrap="wrap">
-                    <Group gap="xs">
-                      <Text fw={600}>{selectedPipeline.name}</Text>
-                      <Text size="sm" c="dimmed">
-                        {selectedPipeline.method_configuration_name} · input{' '}
-                        {formatResolution(selectedPipeline.preprocessing_input_width, selectedPipeline.preprocessing_input_height) ?? 'n/a'}
-                      </Text>
-                      <Badge variant="light">{finishedRunsForPipeline.length} finished inference runs</Badge>
-                      <DetailButton
-                        title="Training pipeline details"
-                        body={renderPipelineDetails(
-                          selectedPipeline,
-                          trainingDatasets,
-                          preprocessingById.get(selectedPipeline.preprocessing_pipeline_id) ?? null,
-                          methodById.get(selectedPipeline.method_configuration_id) ?? null,
-                        )}
-                        onOpen={setDetailModal}
-                      />
-                    </Group>
-                    <Button
-                      variant="subtle"
-                      leftSection={<Pencil size={16} />}
-                      onClick={() => {
-                        setSelectedPipelineId(null);
-                        setSelectedRoiKey(null);
-                        setSelectedSources([]);
-                      }}
-                    >
-                      Change pipeline
-                    </Button>
-                  </Group>
-                ) : (
-                  <>
-                    <TextInput
-                      placeholder="Search by pipeline, method or trainset"
-                      leftSection={<Search size={16} />}
-                      value={pipelineSearch}
-                      onChange={(event) => setPipelineSearch(event.currentTarget.value)}
-                    />
-                    <ScrollArea h={240}>
-                      <Table striped highlightOnHover verticalSpacing="sm" miw={900}>
-                        <Table.Thead>
-                          <Table.Tr>
-                            <Table.Th>Pipeline</Table.Th>
-                            <Table.Th>Trainsets</Table.Th>
-                            <Table.Th>Preprocessing</Table.Th>
-                            <Table.Th>Method</Table.Th>
-                            <Table.Th>Input size</Table.Th>
-                            <Table.Th />
-                          </Table.Tr>
-                        </Table.Thead>
-                        <Table.Tbody>
-                          {analysablePipelines.map((pipeline) => {
-                            const preprocessing = preprocessingById.get(pipeline.preprocessing_pipeline_id) ?? null;
-                            const method = methodById.get(pipeline.method_configuration_id) ?? null;
-                            return (
-                              <Table.Tr key={pipeline.id}>
-                                <Table.Td>{pipeline.name}</Table.Td>
-                                <Table.Td>
-                                  <Group gap={4} wrap="nowrap">
-                                    <Text size="sm">{pipeline.training_datasets.map((entry) => entry.name).join(', ')}</Text>
-                                    <DetailButton
-                                      title="Trainset details"
-                                      body={
-                                        <Stack gap="md">
-                                          {pipeline.training_datasets.map((entry) => (
-                                            <div key={entry.training_dataset_id}>
-                                              {renderTrainsetDetails(trainingDatasetById.get(entry.training_dataset_id) ?? null)}
-                                            </div>
-                                          ))}
-                                        </Stack>
-                                      }
-                                      onOpen={setDetailModal}
-                                    />
-                                  </Group>
-                                </Table.Td>
-                                <Table.Td>
-                                  <Group gap={4} wrap="nowrap">
-                                    <Text size="sm">{pipeline.preprocessing_pipeline_name}</Text>
-                                    <DetailButton title="Preprocessing details" body={renderPreprocessingDetails(preprocessing)} onOpen={setDetailModal} />
-                                  </Group>
-                                </Table.Td>
-                                <Table.Td>
-                                  <Group gap={4} wrap="nowrap">
-                                    <Text size="sm">{pipeline.method_configuration_name}</Text>
-                                    <DetailButton title="Method details" body={renderMethodDetails(method)} onOpen={setDetailModal} />
-                                  </Group>
-                                </Table.Td>
-                                <Table.Td>
-                                  <Badge variant="light" color="blue">
-                                    {formatResolution(pipeline.preprocessing_input_width, pipeline.preprocessing_input_height) ?? 'n/a'}
-                                  </Badge>
-                                </Table.Td>
-                                <Table.Td>
-                                  <Group justify="flex-end">
-                                    <Button
-                                      size="compact-sm"
-                                      variant="light"
-                                      leftSection={<Check size={14} />}
-                                      onClick={() => {
-                                        setSelectedPipelineId(String(pipeline.id));
-                                        setSelectedRoiKey(null);
-                                        setSelectedSources([]);
-                                      }}
-                                    >
-                                      Use
-                                    </Button>
-                                  </Group>
-                                </Table.Td>
-                              </Table.Tr>
-                            );
-                          })}
-                          {analysablePipelines.length === 0 && (
-                            <Table.Tr>
-                              <Table.Td colSpan={6}>
-                                <Text c="dimmed" ta="center" py="md">
-                                  No training pipelines with finished inference runs yet.
-                                </Text>
+              <StepCard index={1} title="Trained models" color="blue">
+                <Stack gap="sm">
+                  <TextInput
+                    placeholder="Search by model, pipeline or inference dataset"
+                    leftSection={<Search size={16} />}
+                    value={pipelineSearch}
+                    onChange={(event) => setPipelineSearch(event.currentTarget.value)}
+                  />
+                  <MultiSelect
+                    label="Selected models"
+                    placeholder="Choose one or more trained models"
+                    data={analysableModelRows.map((row) => ({ value: String(row.id), label: row.label }))}
+                    value={selectedModelIds}
+                    searchable
+                    clearable
+                    onChange={(values) => {
+                      setSelectedModelIds(values);
+                      setSelectedInferenceDatasetId(null);
+                      setSelectedMetricKeys([]);
+                      setSelectedRoiKey('none');
+                      setSelectedSources([]);
+                      setPlotPreview(null);
+                    }}
+                  />
+                  <ScrollArea h={220}>
+                    <Table striped highlightOnHover verticalSpacing="sm" miw={900}>
+                      <Table.Thead>
+                        <Table.Tr>
+                          <Table.Th>Model</Table.Th>
+                          <Table.Th>Inference datasets</Table.Th>
+                          <Table.Th>Metrics</Table.Th>
+                          <Table.Th>Finished runs</Table.Th>
+                          <Table.Th />
+                        </Table.Tr>
+                      </Table.Thead>
+                      <Table.Tbody>
+                        {analysableModelRows.map((row) => {
+                          const selected = selectedModelIds.includes(String(row.id));
+                          const metrics = [...new Set(row.testingRuns.map(metricKeyForRun))].sort((left, right) => metricOrder(left) - metricOrder(right));
+                          const datasets = [...new Set(row.testingRuns.map((run) => run.training_dataset_name))];
+                          return (
+                            <Table.Tr key={row.id} className={selected ? 'analysis-selected-row' : undefined}>
+                              <Table.Td>{row.label}</Table.Td>
+                              <Table.Td>{datasets.length}</Table.Td>
+                              <Table.Td>
+                                <Group gap={4}>
+                                  {metrics.map((metric) => (
+                                    <Badge key={metric} size="xs" variant="light" color="blue">
+                                      {metricLabel(metric)}
+                                    </Badge>
+                                  ))}
+                                </Group>
+                              </Table.Td>
+                              <Table.Td>{row.testingRuns.length}</Table.Td>
+                              <Table.Td>
+                                <Group justify="flex-end">
+                                  <Button
+                                    size="compact-sm"
+                                    variant={selected ? 'filled' : 'light'}
+                                    color={selected ? 'green' : 'blue'}
+                                    leftSection={<Check size={14} />}
+                                    onClick={() => {
+                                      setSelectedModelIds((current) =>
+                                        current.includes(String(row.id))
+                                          ? current.filter((id) => id !== String(row.id))
+                                          : [...current, String(row.id)],
+                                      );
+                                      setSelectedInferenceDatasetId(null);
+                                      setSelectedMetricKeys([]);
+                                      setSelectedRoiKey('none');
+                                      setSelectedSources([]);
+                                      setPlotPreview(null);
+                                    }}
+                                  >
+                                    {selected ? 'Selected' : 'Use'}
+                                  </Button>
+                                </Group>
                               </Table.Td>
                             </Table.Tr>
-                          )}
-                        </Table.Tbody>
-                      </Table>
-                    </ScrollArea>
-                  </>
-                )}
+                          );
+                        })}
+                        {analysableModelRows.length === 0 && (
+                          <Table.Tr>
+                            <Table.Td colSpan={5}>
+                              <Text c="dimmed" ta="center" py="md">
+                                No trained models with finished inference runs yet.
+                              </Text>
+                            </Table.Td>
+                          </Table.Tr>
+                        )}
+                      </Table.Tbody>
+                    </Table>
+                  </ScrollArea>
+                </Stack>
               </StepCard>
 
-              {selectedPipeline && (
-                <StepCard index={2} title="ROI & plot type" color="violet">
+              {selectedModelIds.length > 0 && (
+                <StepCard index={2} title="Inference datasets" color="teal">
+                  <Stack gap="sm">
+                    <Paper withBorder radius="sm" className="analysis-run-picker">
+                      <ScrollArea>
+                        <Table striped highlightOnHover verticalSpacing="sm" miw={900}>
+                          <Table.Thead>
+                            <Table.Tr>
+                              <Table.Th>Name</Table.Th>
+                              <Table.Th>Label</Table.Th>
+                              <Table.Th>Datasets</Table.Th>
+                              <Table.Th>Image size</Table.Th>
+                              <Table.Th>Stride</Table.Th>
+                              <Table.Th>Images</Table.Th>
+                              <Table.Th>Shared runs</Table.Th>
+                              <Table.Th />
+                              <Table.Th />
+                            </Table.Tr>
+                          </Table.Thead>
+                          <Table.Tbody>
+                            {commonDatasetOptions.map((option) => {
+                              const dataset = option.dataset;
+                              const selected = selectedInferenceDatasetId === option.value;
+                              return (
+                                <Table.Tr key={option.value} className={selected ? 'analysis-selected-row' : undefined}>
+                                  <Table.Td>{option.label}</Table.Td>
+                                  <Table.Td>
+                                    <Badge size="xs" variant="light" color={usageColor(dataset?.usage_label)}>
+                                      {usageLabel(dataset?.usage_label)}
+                                    </Badge>
+                                  </Table.Td>
+                                  <Table.Td>
+                                    <Group gap={4}>
+                                      {(dataset?.dataset_names ?? []).map((name) => (
+                                        <Badge key={name} size="xs" variant="light" color="gray">
+                                          {name}
+                                        </Badge>
+                                      ))}
+                                    </Group>
+                                  </Table.Td>
+                                  <Table.Td>
+                                    <Group gap={4}>
+                                      {(dataset ? datasetResolutions(dataset) : []).map((res) => (
+                                        <Badge key={res} size="xs" variant="light" color="teal">
+                                          {res}
+                                        </Badge>
+                                      ))}
+                                    </Group>
+                                  </Table.Td>
+                                  <Table.Td>{datasetStrides(dataset ?? null)}</Table.Td>
+                                  <Table.Td>{dataset?.total_selected_images ?? option.runs[0]?.image_count ?? '—'}</Table.Td>
+                                  <Table.Td>{option.runs.length}</Table.Td>
+                                  <Table.Td>
+                                    <DetailButton title="Inference dataset details" body={renderTrainsetDetails(dataset ?? null)} onOpen={setDetailModal} />
+                                  </Table.Td>
+                                  <Table.Td>
+                                    <Button
+                                      size="compact-sm"
+                                      variant={selected ? 'filled' : 'light'}
+                                      color={selected ? 'green' : 'blue'}
+                                      onClick={() => {
+                                        setSelectedInferenceDatasetId(option.value);
+                                        setSelectedMetricKeys([]);
+                                        setSelectedRoiKey('none');
+                                        setSelectedSources([]);
+                                        setPlotPreview(null);
+                                        const bounds = sourceBounds(dataset);
+                                        setDraft((current) => ({ ...current, start: bounds.start, end: bounds.end, timestamp: bounds.start || current.timestamp }));
+                                      }}
+                                    >
+                                      {selected ? 'Selected' : 'Use'}
+                                    </Button>
+                                  </Table.Td>
+                                </Table.Tr>
+                              );
+                            })}
+                            {commonDatasetOptions.length === 0 && (
+                              <Table.Tr>
+                                <Table.Td colSpan={9}>
+                                  <Text c="dimmed" ta="center" py="md">
+                                    No inference dataset is available for all selected models.
+                                  </Text>
+                                </Table.Td>
+                              </Table.Tr>
+                            )}
+                          </Table.Tbody>
+                        </Table>
+                      </ScrollArea>
+                    </Paper>
+                  </Stack>
+                </StepCard>
+              )}
+
+              {selectedInferenceDatasetId && (
+                <StepCard index={3} title="ROI & plot type" color="violet">
                   <SimpleGrid cols={{ base: 1, md: 2 }}>
                     <Select
                       label="ROI"
                       placeholder="Select ROI variant"
-                      data={roiOptionsForPipeline}
+                      data={roiOptionsForSelection}
                       value={selectedRoiKey}
                       searchable
                       onChange={(value) => {
-                        setSelectedRoiKey(value);
+                        setSelectedRoiKey(value ?? 'none');
+                        setSelectedMetricKeys([]);
                         setSelectedSources([]);
+                        setPlotPreview(null);
                       }}
                     />
                     <Select
@@ -2016,162 +2366,115 @@ export function AnalysisPage({ active = true }: { active?: boolean }) {
                         { value: 'heatmap', label: 'Heatmap' },
                       ]}
                       value={draft.plotType}
-                      onChange={(value) =>
+                      onChange={(value) => {
                         setDraft((current) => ({
                           ...current,
                           plotType: (value ?? 'timeseries') as PlotType,
-                        }))
-                      }
+                        }));
+                        setPlotPreview(null);
+                      }}
                     />
                   </SimpleGrid>
+                  {selectedRoiKey === 'none' && <Text size="sm" c="dimmed" mt="xs">No ROI is selected. Scores use the full image result from the matching inference runs.</Text>}
                 </StepCard>
               )}
 
-              {selectedPipeline && selectedRoiKey && (
-                <StepCard index={3} title="Inference datasets" color="teal">
-              <Paper withBorder radius="sm" className="analysis-run-picker">
-                <ScrollArea>
-                  <Table striped highlightOnHover verticalSpacing="sm" miw={900}>
-                    <Table.Thead>
-                      <Table.Tr>
-                        <Table.Th>Name</Table.Th>
-                        <Table.Th>Label</Table.Th>
-                        <Table.Th>Datasets</Table.Th>
-                        <Table.Th>Image size</Table.Th>
-                        <Table.Th>Stride</Table.Th>
-                        <Table.Th>Images</Table.Th>
-                        <Table.Th />
-                        <Table.Th />
-                      </Table.Tr>
-                    </Table.Thead>
-                    <Table.Tbody>
-                      {candidateRuns.map((run) => {
-                        const selected = draft.testingRunId === String(run.id);
-                        const dataset = detailObjectsForRun(run).trainset;
-                        const added = selectedSources.some((source) => source.testingRunId === String(run.id));
-                        return (
-                          <Table.Tr key={run.id} className={selected ? 'analysis-selected-row' : undefined}>
-                            <Table.Td>{run.training_dataset_name}</Table.Td>
-                            <Table.Td>
-                              <Badge size="xs" variant="light" color={usageColor(dataset?.usage_label)}>
-                                {usageLabel(dataset?.usage_label)}
-                              </Badge>
-                            </Table.Td>
-                            <Table.Td>
-                              <Group gap={4}>
-                                {(dataset?.dataset_names ?? []).map((name) => (
-                                  <Badge key={name} size="xs" variant="light" color="gray">
-                                    {name}
-                                  </Badge>
-                                ))}
-                              </Group>
-                            </Table.Td>
-                            <Table.Td>
-                              <Group gap={4}>
-                                {(dataset ? datasetResolutions(dataset) : []).map((res) => (
-                                  <Badge key={res} size="xs" variant="light" color="teal">
-                                    {res}
-                                  </Badge>
-                                ))}
-                              </Group>
-                            </Table.Td>
-                            <Table.Td>{datasetStrides(dataset)}</Table.Td>
-                            <Table.Td>{run.image_count ?? dataset?.total_selected_images ?? '—'}</Table.Td>
-                            <Table.Td>
-                              <DetailButton title="Inference dataset details" body={renderTrainsetDetails(dataset)} onOpen={setDetailModal} />
-                            </Table.Td>
-                            <Table.Td>
-                              <Button
-                                size="compact-sm"
-                                variant={added ? 'filled' : 'light'}
-                                color={added ? 'green' : 'blue'}
-                                loading={sourceActions.isPending(`add-source:${run.id}`)}
-                                onClick={() => addSource(run)}
-                                disabled={added || sourceActions.isPending(`add-source:${run.id}`)}
-                              >
-                                {sourceActions.isPending(`add-source:${run.id}`) ? 'Adding…' : added ? 'Added' : 'Add'}
-                              </Button>
-                            </Table.Td>
-                          </Table.Tr>
-                        );
-                      })}
-                      {candidateRuns.length === 0 && (
-                        <Table.Tr>
-                          <Table.Td colSpan={8}>
-                            <Text c="dimmed" ta="center" py="md">
-                              {selectedPipelineId && selectedRoiKey ? 'No inference datasets match this model/ROI.' : 'Select a training pipeline and ROI first.'}
-                            </Text>
-                          </Table.Td>
-                        </Table.Tr>
-                      )}
-                    </Table.Tbody>
-                  </Table>
-                </ScrollArea>
-              </Paper>
-              {selectedSources.length > 0 && (
-                <Paper withBorder p="sm" radius="sm">
-                  <Stack gap="sm">
-                    <Title order={4}>Selected inference datasets</Title>
-                    {selectedSources.map((source) => {
-                      const run = testingRuns.find((item) => item.id === Number(source.testingRunId));
-                      const bounds = sourceBounds(run ? trainingDatasetById.get(run.training_dataset_id) : null);
-                      return (
-                        <Paper key={source.testingRunId} withBorder p="sm" radius="sm">
-                          <Stack gap="xs">
-                            <Group justify="space-between">
-                              <Text fw={700} size="sm">{run?.training_dataset_name ?? `Testing run #${source.testingRunId}`}</Text>
-                              <ActionIcon color="red" variant="subtle" onClick={() => setSelectedSources((current) => current.filter((item) => item.testingRunId !== source.testingRunId))}>
-                                <Trash2 size={16} />
-                              </ActionIcon>
-                            </Group>
-                            {draft.plotType === 'heatmap' && draft.heatmapMode === 'single' ? (
-                              <DateTime24Input
-                                label="Timestamp"
-                                min={bounds.start}
-                                max={bounds.end}
-                                value={toDateTimeLocal(source.timestamp)}
-                                description={bounds.start && bounds.end ? `${bounds.start.replace('T', ' ')} to ${bounds.end.replace('T', ' ')}` : undefined}
-                                onChange={(value) => updateSource(source.testingRunId, { timestamp: value })}
-                              />
-                            ) : (
-                              <SimpleGrid cols={{ base: 1, md: 3 }}>
-                                <DateTime24Input label="Start" min={bounds.start} max={bounds.end} value={source.start} onChange={(value) => updateSource(source.testingRunId, { start: value })} />
-                                <DateTime24Input label="End" min={bounds.start} max={bounds.end} value={source.end} onChange={(value) => updateSource(source.testingRunId, { end: value })} />
-                                <NumberInput label="Sampling rate" min={1} value={source.sampling} onChange={(value) => updateSource(source.testingRunId, { sampling: valueAsNumber(value, 1) })} />
-                              </SimpleGrid>
-                            )}
-                          </Stack>
-                        </Paper>
-                      );
-                    })}
-                  </Stack>
-                </Paper>
-              )}
-                </StepCard>
-              )}
-
-              {selectedPipeline && selectedRoiKey && (
+              {selectedInferenceDatasetId && selectedRoiKey && (
                 <StepCard index={4} title="Plot configuration" color="gray">
-              <TextInput
-                label="Plot title"
-                value={draft.title}
-                onChange={(event) => {
-                  const value = event.currentTarget.value;
-                  setDraft((current) => ({ ...current, title: value }));
-                }}
-              />
-              {draft.plotType === 'timeseries' ? (
-                <SimpleGrid cols={{ base: 1, md: 3 }}>
-                  <Select
-                    label="Score line"
-                    data={scoreSeriesOptions(combinedDraftResults)}
-                    value={draft.scoreSeries}
-                    onChange={(value) => setDraft((current) => ({ ...current, scoreSeries: value ?? 'score' }))}
-                  />
-                  <NumberInput label="Moving average window" min={1} value={draft.movingAverage} onChange={(value) => setDraft((current) => ({ ...current, movingAverage: valueAsNumber(value, 1) }))} />
-                  <TextInput label="X-axis" value="Time" disabled />
-                </SimpleGrid>
-              ) : (
+                  <Stack gap="md">
+                    <TextInput
+                      label="Plot title"
+                      placeholder={autoPlotTitle()}
+                      value={draft.title}
+                      onChange={(event) => {
+                        const value = event.currentTarget.value;
+                        setDraft((current) => ({ ...current, title: value }));
+                        setPlotPreview(null);
+                      }}
+                    />
+                    <MultiSelect
+                      label="Metrics"
+                      placeholder="Select one or more metrics"
+                      data={metricOptionsForSelection}
+                      value={selectedMetricKeys}
+                      searchable
+                      clearable
+                      onChange={(values) => {
+                        setSelectedMetricKeys(values.map(normalizeMetricKey));
+                        setSelectedSources([]);
+                        setPlotPreview(null);
+                      }}
+                    />
+                    <SimpleGrid cols={{ base: 1, md: 3 }}>
+                      {draft.plotType === 'heatmap' && draft.heatmapMode === 'single' ? (
+                        <DateTime24Input
+                          label="Timestamp"
+                          min={selectedInferenceBounds.start}
+                          max={selectedInferenceBounds.end}
+                          value={toDateTimeLocal(draft.timestamp ?? selectedInferenceBounds.start)}
+                          description={selectedInferenceBounds.start && selectedInferenceBounds.end ? `${selectedInferenceBounds.start.replace('T', ' ')} to ${selectedInferenceBounds.end.replace('T', ' ')}` : undefined}
+                          onChange={(value) => {
+                            setDraft((current) => ({ ...current, timestamp: value }));
+                            setPlotPreview(null);
+                          }}
+                        />
+                      ) : (
+                        <>
+                          <DateTime24Input
+                            label="Start"
+                            min={selectedInferenceBounds.start}
+                            max={selectedInferenceBounds.end}
+                            value={draft.start}
+                            onChange={(value) => {
+                              setDraft((current) => ({ ...current, start: value }));
+                              setPlotPreview(null);
+                            }}
+                          />
+                          <DateTime24Input
+                            label="End"
+                            min={selectedInferenceBounds.start}
+                            max={selectedInferenceBounds.end}
+                            value={draft.end}
+                            onChange={(value) => {
+                              setDraft((current) => ({ ...current, end: value }));
+                              setPlotPreview(null);
+                            }}
+                          />
+                        </>
+                      )}
+                      <NumberInput
+                        label="Sampling rate"
+                        min={1}
+                        value={draft.sampling}
+                        onChange={(value) => {
+                          setDraft((current) => ({ ...current, sampling: valueAsNumber(value, 1) }));
+                          setPlotPreview(null);
+                        }}
+                      />
+                    </SimpleGrid>
+                    {draft.plotType === 'timeseries' ? (
+                      <SimpleGrid cols={{ base: 1, md: 3 }}>
+                        <Select
+                          label="Score line"
+                          data={scoreSeriesOptions(combinedDraftResults)}
+                          value={draft.scoreSeries}
+                          onChange={(value) => {
+                            setDraft((current) => ({ ...current, scoreSeries: value ?? 'score' }));
+                            setPlotPreview(null);
+                          }}
+                        />
+                        <NumberInput
+                          label="Moving average window"
+                          min={1}
+                          value={draft.movingAverage}
+                          onChange={(value) => {
+                            setDraft((current) => ({ ...current, movingAverage: valueAsNumber(value, 1) }));
+                            setPlotPreview(null);
+                          }}
+                        />
+                        <TextInput label="X-axis" value="Time" disabled />
+                      </SimpleGrid>
+                    ) : (
                 <Stack gap="md">
                   <SimpleGrid cols={{ base: 1, md: 3 }}>
                     <Select
@@ -2394,15 +2697,62 @@ export function AnalysisPage({ active = true }: { active?: boolean }) {
                   )}
                 </Stack>
               )}
-              {finishedRuns.length === 0 && <Alert color="blue">No finished testing runs with images are available yet.</Alert>}
-              <Group justify="space-between" align="center">
-                <Text size="sm" c="dimmed">
-                  {selectedSources.length > 0 ? `${combinedDraftResults.length} deduplicated result rows` : 'Add one or more inference dataset sources.'}
-                </Text>
-                <Button leftSection={<Plus size={18} />} onClick={addPlot} disabled={selectedSources.length === 0 || combinedDraftResults.length === 0}>
-                  Add plot
-                </Button>
-              </Group>
+                    {finishedRuns.length === 0 && <Alert color="blue">No finished testing runs with images are available yet.</Alert>}
+                    {plotPreview && (
+                      <Paper withBorder p="sm" radius="sm">
+                        <Stack gap="sm">
+                          <div>
+                            <Text fw={700}>Preloaded plot</Text>
+                            <Text size="sm" c="dimmed">{plotPreview.title}</Text>
+                            <Text size="xs" c="dimmed">{plotPreview.subtitle}</Text>
+                          </div>
+                          {plotPreview.duplicateNotes.length > 0 && (
+                            <Alert color="yellow">
+                              {plotPreview.duplicateNotes.map((note) => (
+                                <Text key={note} size="sm">{note}</Text>
+                              ))}
+                            </Alert>
+                          )}
+                          {plotPreview.traces.map((trace, index) => (
+                            <SimpleGrid key={`${trace.testingRunId}:${trace.metric}`} cols={{ base: 1, md: 3 }} spacing="sm">
+                              <TextInput
+                                label="Legend"
+                                value={trace.legendLabel}
+                                onChange={(event) => updatePreviewTrace(index, { legendLabel: event.currentTarget.value })}
+                              />
+                              <ColorInput
+                                label="Color"
+                                value={trace.color}
+                                onChange={(value) => updatePreviewTrace(index, { color: value })}
+                              />
+                              <TextInput label="Metric" value={metricLabel(trace.metric)} disabled />
+                            </SimpleGrid>
+                          ))}
+                        </Stack>
+                      </Paper>
+                    )}
+                    <Group justify="space-between" align="center">
+                      <Text size="sm" c="dimmed">
+                        {plotPreview
+                          ? `${plotPreview.traces.length} trace${plotPreview.traces.length === 1 ? '' : 's'} ready`
+                          : 'Preload a plot to review legend labels and colors before adding it to the board.'}
+                      </Text>
+                      <Group gap="sm">
+                        <Button
+                          variant="light"
+                          leftSection={<Upload size={18} />}
+                          loading={preloadingPlot}
+                          onClick={preloadPlot}
+                          disabled={selectedModelIds.length === 0 || !selectedInferenceDatasetId || selectedMetricKeys.length === 0}
+                        >
+                          Preload plot
+                        </Button>
+                        <Button leftSection={<Plus size={18} />} onClick={finishPlot} disabled={!plotPreview}>
+                          Finish plot
+                        </Button>
+                      </Group>
+                    </Group>
+                  </Stack>
                 </StepCard>
               )}
             </Stack>
@@ -2418,8 +2768,8 @@ export function AnalysisPage({ active = true }: { active?: boolean }) {
             const hasAllData =
               plot.plotType === 'heatmap' && plot.heatmapMode === 'single'
                 ? true
-                : plot.sources.every((source) => resultsByRunId[Number(source.testingRunId)]);
-            const results = combinedResultsForSources(plot.sources, plot.plotType, plot.heatmapMode);
+                : plotSources(plot).every((source) => resultsByRunId[Number(source.testingRunId)]);
+            const results = combinedResultsForSources(plotSources(plot), plot.plotType, plot.heatmapMode);
             return hasAllData ? (
               <AnalysisPlotCard
                 key={plot.id}
