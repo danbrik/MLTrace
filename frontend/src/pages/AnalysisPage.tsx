@@ -25,7 +25,7 @@ import {
 } from '@mantine/core';
 import { notifications } from '@mantine/notifications';
 import { ArrowDown, ArrowUp, Check, ChevronDown, ChevronRight, Info, Pause, Pencil, Play, Plus, RotateCcw, Save, Search, Trash2, Upload } from 'lucide-react';
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { memo, useCallback, useEffect, useMemo, useState } from 'react';
 import type React from 'react';
 
 import {
@@ -120,6 +120,8 @@ type PlotDraft = {
   movingAverage: number;
   timeseriesAnalytics: AnalyticsMethodConfig[];
   analyticsDisplayMode: AnalyticsDisplayMode;
+  showIntermediateAnalyticsPanels: boolean;
+  panelHeightPx: number;
   heatmapMode: HeatmapMode;
   timestamp: string | null;
   includeReference: boolean;
@@ -159,7 +161,13 @@ type PlotPreview = {
   subtitle: string;
   traces: PlotTraceConfig[];
   duplicateNotes: string[];
+  plot: AnalysisPlot;
 };
+
+type EditingPlotState = {
+  plot: AnalysisPlot;
+  index: number;
+} | null;
 
 type CombinedResult = TestingRunResult & {
   testingRunId: number;
@@ -711,6 +719,44 @@ function analyticsParamLabel(key: string): string {
   return labels[key] ?? key;
 }
 
+function analyticsParamInfo(key: string): string {
+  const infos: Record<string, string> = {
+    alpha: 'EWMA smoothing factor. Lower values smooth more strongly and react later; higher values react faster but are noisier.',
+    beta: 'EWMA smoothing factor for the derivative.',
+    windowMode: 'Choose whether rolling windows are counted in samples or in elapsed minutes.',
+    windowSamples: 'Number of past samples included in the causal rolling window.',
+    windowMinutes: 'Past time span included in the causal rolling window.',
+    baselineWindowSamples: 'Sample window used for robust median/MAD baseline estimation.',
+    baselineWindowMinutes: 'Minute window used for robust median/MAD baseline estimation.',
+    longWindowSamples: 'Long sample window for ratios such as short/long rolling energy.',
+    longWindowMinutes: 'Long minute window for ratios such as short/long rolling energy.',
+    threshold: 'Value above which positive evidence is counted.',
+    slopeThreshold: 'Minimum slope considered a meaningful positive rise.',
+    onsetThreshold: 'z-score threshold that starts an onset candidate.',
+    resetThreshold: 'z-score level below which an onset candidate is reset.',
+    lowThreshold: 'Lower z-score threshold for early state transitions.',
+    offThreshold: 'Level below which the state machine can return to normal.',
+    zThreshold: 'Robust z-score threshold used for positive evidence.',
+    epsilon: 'Small value added to denominators for numerical stability.',
+    k: 'CUSUM drift allowance. Larger values ignore more weak evidence.',
+    h: 'CUSUM alarm threshold shown for interpretation.',
+    hLow: 'Low CUSUM/evidence threshold for likely anomaly state.',
+    hHigh: 'High CUSUM/evidence threshold for confirmed anomaly state.',
+    delta: 'Page-Hinkley tolerance for mean-shift accumulation.',
+    lambda: 'Page-Hinkley alarm threshold shown for interpretation.',
+    source: 'Input signal used by this stage: raw previous output or EWMA-smoothed previous output.',
+    timeNormalized: 'Divide changes by elapsed seconds, useful for irregular sampling.',
+    mode: 'Relative drawdown normalizes by rolling maximum; absolute drawdown keeps score units.',
+    w1: 'Weight of positive z-score evidence.',
+    w2: 'Weight of positive slope magnitude evidence.',
+    w3: 'Weight of positive slope indicator evidence.',
+    v1: 'Weight of negative slope evidence.',
+    v2: 'Penalty when z-score is below threshold.',
+    v3: 'Penalty from relative drawdown.',
+  };
+  return infos[key] ?? 'Parameter used by this causal time-series analytics stage.';
+}
+
 function numberParam(config: AnalyticsMethodConfig, key: string, fallback: number): number {
   const value = config.params[key];
   return typeof value === 'number' && Number.isFinite(value) ? value : fallback;
@@ -979,11 +1025,11 @@ function computeAnalyticsSeries(config: AnalyticsMethodConfig, values: number[],
 
 function TimeSeriesPlot({ plot, results }: { plot: AnalysisPlot; results: CombinedResult[] }) {
   const analyticsConfigs = plot.timeseriesAnalytics ?? [];
-  const panels = useMemo(() => {
+  const displayPanels = useMemo(() => {
     if (analyticsConfigs.length === 0) return [defaultAnalyticsConfig('raw')];
-    const hasRaw = analyticsConfigs.some((config) => config.kind === 'raw');
-    return hasRaw ? analyticsConfigs : [defaultAnalyticsConfig('raw'), ...analyticsConfigs];
-  }, [analyticsConfigs]);
+    if (plot.showIntermediateAnalyticsPanels === false) return [analyticsConfigs[analyticsConfigs.length - 1]];
+    return [defaultAnalyticsConfig('raw'), ...analyticsConfigs];
+  }, [analyticsConfigs, plot.showIntermediateAnalyticsPanels]);
 
   const traces = useMemo<Data[]>(() => {
     const groups = new Map<string, { name: string; color: string; metric: string; results: CombinedResult[] }>();
@@ -1014,11 +1060,16 @@ function TimeSeriesPlot({ plot, results }: { plot: AnalysisPlot; results: Combin
     [...groups.values()].filter((group) => group.results.length > 0).forEach((group, groupIndex) => {
       const x = group.results.map((result) => result.timestamp);
       const rawValues = group.results.map((result) => scoreValue(result, plot.scoreSeries));
-      panels.forEach((panel, panelIndex) => {
-        const y =
-          analyticsConfigs.length === 0
-            ? movingAverage(rawValues, plot.movingAverage).map(finiteOrNull)
-            : computeAnalyticsSeries(panel, rawValues, x);
+      const stageOutputs = new Map<AnalyticsKind | 'input', Array<number | null>>();
+      stageOutputs.set('input', analyticsConfigs.length === 0 ? movingAverage(rawValues, plot.movingAverage).map(finiteOrNull) : rawValues.map(finiteOrNull));
+      let currentValues = rawValues;
+      analyticsConfigs.forEach((config) => {
+        const output = computeAnalyticsSeries(config, currentValues, x);
+        stageOutputs.set(config.kind, output);
+        currentValues = output.map((value) => (value === null ? Number.NaN : value));
+      });
+      displayPanels.forEach((panel, panelIndex) => {
+        const y = panel.kind === 'raw' ? stageOutputs.get('input') ?? [] : stageOutputs.get(panel.kind) ?? [];
         nextTraces.push({
           type: 'scatter',
           mode: 'lines',
@@ -1034,11 +1085,11 @@ function TimeSeriesPlot({ plot, results }: { plot: AnalysisPlot; results: Combin
       });
     });
     return nextTraces;
-  }, [analyticsConfigs.length, panels, plot.movingAverage, plot.scoreSeries, plot.traces, results]);
+  }, [analyticsConfigs, displayPanels, plot.movingAverage, plot.scoreSeries, plot.traces, results]);
 
   const layout = useMemo<Partial<Layout>>(
     () => {
-      const panelCount = Math.max(1, panels.length);
+      const panelCount = Math.max(1, displayPanels.length);
       const gap = 0.035;
       const panelHeight = (1 - gap * (panelCount - 1)) / panelCount;
       const nextLayout: Partial<Layout> & Record<string, unknown> = {
@@ -1054,7 +1105,7 @@ function TimeSeriesPlot({ plot, results }: { plot: AnalysisPlot; results: Combin
         },
         margin: { l: 72, r: 24, t: 12, b: 58 },
       };
-      panels.forEach((panel, index) => {
+      displayPanels.forEach((panel, index) => {
         const top = 1 - index * (panelHeight + gap);
         const bottom = top - panelHeight;
         nextLayout[index === 0 ? 'yaxis' : `yaxis${index + 1}`] = {
@@ -1067,7 +1118,7 @@ function TimeSeriesPlot({ plot, results }: { plot: AnalysisPlot; results: Combin
       });
       return nextLayout as Partial<Layout>;
     },
-    [panels, traces.length],
+    [displayPanels, traces.length],
   );
 
   if (results.length === 0) {
@@ -1076,7 +1127,11 @@ function TimeSeriesPlot({ plot, results }: { plot: AnalysisPlot; results: Combin
 
   return (
     <Stack gap="xs">
-      <PlotlyChart data={traces} layout={layout} height={analyticsConfigs.length > 0 ? Math.max(420, panels.length * 210) : 420} />
+      <PlotlyChart
+        data={traces}
+        layout={layout}
+        height={analyticsConfigs.length > 0 ? Math.max(520, displayPanels.length * (plot.panelHeightPx || 260)) : (plot.panelHeightPx || 420)}
+      />
       <Group gap="xs">
         <Badge variant="light">{results.length} points</Badge>
         {plot.movingAverage > 1 && <Badge variant="light" color="blue">moving avg {plot.movingAverage}</Badge>}
@@ -1568,7 +1623,7 @@ function HeatmapVideo({ plot, results }: { plot: AnalysisPlot; results: Combined
   );
 }
 
-function AnalysisPlotCard({
+const AnalysisPlotCard = memo(function AnalysisPlotCard({
   plot,
   results,
   heatmapCache,
@@ -1576,6 +1631,8 @@ function AnalysisPlotCard({
   heatmapErrors,
   ensureHeatmap,
   onMove,
+  onEdit,
+  onPatch,
   onRemove,
 }: {
   plot: AnalysisPlot;
@@ -1591,6 +1648,8 @@ function AnalysisPlotCard({
     options?: { force?: boolean },
   ) => Promise<void>;
   onMove: (direction: -1 | 1) => void;
+  onEdit: () => void;
+  onPatch: (patch: Partial<AnalysisPlot>) => void;
   onRemove: () => void;
 }) {
   return (
@@ -1614,6 +1673,18 @@ function AnalysisPlotCard({
             </Text>
           </div>
           <Group gap={4}>
+            {plot.plotType === 'timeseries' && (
+              <NumberInput
+                size="xs"
+                w={132}
+                label="Panel height"
+                min={120}
+                max={900}
+                step={20}
+                value={plot.panelHeightPx ?? (plot.timeseriesAnalytics?.length ? 260 : 420)}
+                onChange={(value) => onPatch({ panelHeightPx: valueAsNumber(value, plot.panelHeightPx ?? 260) })}
+              />
+            )}
             <Tooltip label="Move up">
               <ActionIcon variant="subtle" onClick={() => onMove(-1)}>
                 <ArrowUp size={16} />
@@ -1622,6 +1693,11 @@ function AnalysisPlotCard({
             <Tooltip label="Move down">
               <ActionIcon variant="subtle" onClick={() => onMove(1)}>
                 <ArrowDown size={16} />
+              </ActionIcon>
+            </Tooltip>
+            <Tooltip label="Edit plot">
+              <ActionIcon variant="subtle" onClick={onEdit}>
+                <Pencil size={16} />
               </ActionIcon>
             </Tooltip>
             <Tooltip label="Remove plot">
@@ -1648,7 +1724,7 @@ function AnalysisPlotCard({
       </Stack>
     </Paper>
   );
-}
+});
 
 function defaultDraft(): PlotDraft {
   return {
@@ -1663,6 +1739,8 @@ function defaultDraft(): PlotDraft {
     movingAverage: 1,
     timeseriesAnalytics: [],
     analyticsDisplayMode: 'multi_panel',
+    showIntermediateAnalyticsPanels: true,
+    panelHeightPx: 420,
     heatmapMode: 'single',
     timestamp: null,
     includeReference: true,
@@ -1708,11 +1786,14 @@ function restoreAnalytics(value: unknown): AnalyticsMethodConfig[] {
 
 function restoreDraft(value: unknown): PlotDraft {
   if (!isRecord(value)) return defaultDraft();
+  const restoredAnalytics = restoreAnalytics(value.timeseriesAnalyticsPipeline ?? value.timeseriesAnalytics);
   return {
     ...defaultDraft(),
     ...(value as Partial<PlotDraft>),
-    timeseriesAnalytics: restoreAnalytics(value.timeseriesAnalytics),
+    timeseriesAnalytics: restoredAnalytics,
     analyticsDisplayMode: 'multi_panel',
+    showIntermediateAnalyticsPanels: typeof value.showIntermediateAnalyticsPanels === 'boolean' ? value.showIntermediateAnalyticsPanels : true,
+    panelHeightPx: valueAsNumber(value.panelHeightPx as string | number, restoredAnalytics.length > 0 ? 260 : 420),
     heatmapConfig: {
       ...defaultHeatmapConfig(),
       ...(isRecord(value.heatmapConfig) ? value.heatmapConfig : {}),
@@ -1801,6 +1882,8 @@ export function AnalysisPage({ active = true }: { active?: boolean }) {
   const [selectedRoiKey, setSelectedRoiKey] = useState<string | null>('none');
   const [selectedSources, setSelectedSources] = useState<PlotSourceConfig[]>([]);
   const [plotPreview, setPlotPreview] = useState<PlotPreview | null>(null);
+  const [plotPreviewStale, setPlotPreviewStale] = useState(false);
+  const [editingPlot, setEditingPlot] = useState<EditingPlotState>(null);
   const [preloadingPlot, setPreloadingPlot] = useState(false);
   const [detailModal, setDetailModal] = useState<DetailModalState>(null);
   const [analysisLayouts, setAnalysisLayouts] = useState<AnalysisLayout[]>([]);
@@ -1951,7 +2034,7 @@ export function AnalysisPage({ active = true }: { active?: boolean }) {
     if (selectedInferenceDatasetId && !commonDatasetOptions.some((option) => option.value === selectedInferenceDatasetId)) {
       setSelectedInferenceDatasetId(null);
       setSelectedMetricKeys([]);
-      setPlotPreview(null);
+      resetSelectionPreview();
     }
   }, [commonDatasetOptions, selectedInferenceDatasetId]);
 
@@ -1959,7 +2042,7 @@ export function AnalysisPage({ active = true }: { active?: boolean }) {
     if (!roiOptionsForSelection.some((option) => option.value === selectedRoiKey)) {
       setSelectedRoiKey('none');
       setSelectedMetricKeys([]);
-      setPlotPreview(null);
+      resetSelectionPreview();
     }
   }, [roiOptionsForSelection, selectedRoiKey]);
 
@@ -2031,7 +2114,7 @@ export function AnalysisPage({ active = true }: { active?: boolean }) {
       setSelectedMetricKeys(restored.selectedMetricKeys ?? []);
       setSelectedRoiKey(restored.selectedRoiKey ?? 'none');
       setSelectedSources(restored.selectedSources);
-      setPlotPreview(null);
+      clearPreview();
       setAddPlotOpen(restored.addPlotOpen);
       setHeatmapCache({});
       setHeatmapErrors({});
@@ -2287,6 +2370,30 @@ export function AnalysisPage({ active = true }: { active?: boolean }) {
     [draft.heatmapMode, draft.plotType, resultsByRunId, selectedSources, testingRuns],
   );
 
+  const previewPlot = plotPreview?.plot ?? null;
+  const previewResults = useMemo(
+    () => (previewPlot ? combinedResultsForSources(plotSources(previewPlot), previewPlot.plotType, previewPlot.heatmapMode) : []),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [plotPreview, resultsByRunId, testingRuns],
+  );
+
+  const plotResultsById = useMemo(() => {
+    const next = new Map<string, { hasAllData: boolean; results: CombinedResult[] }>();
+    for (const plot of plots) {
+      const sources = plotSources(plot);
+      const hasAllData =
+        plot.plotType === 'heatmap' && plot.heatmapMode === 'single'
+          ? true
+          : sources.every((source) => resultsByRunId[Number(source.testingRunId)]);
+      next.set(plot.id, {
+        hasAllData,
+        results: hasAllData ? combinedResultsForSources(sources, plot.plotType, plot.heatmapMode) : [],
+      });
+    }
+    return next;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [plots, resultsByRunId, testingRuns]);
+
   function resolveTestingRun(modelId: number, metric: string): { run: TestingRun | null; duplicateCount: number } {
     if (!selectedInferenceDatasetId || !selectedRoiKey) return { run: null, duplicateCount: 0 };
     const candidates = finishedRuns
@@ -2331,6 +2438,20 @@ export function AnalysisPage({ active = true }: { active?: boolean }) {
     return parts.join(' · ');
   }
 
+  function markPreviewStale() {
+    setPlotPreviewStale((current) => current || plotPreview !== null);
+  }
+
+  function clearPreview() {
+    setPlotPreview(null);
+    setPlotPreviewStale(false);
+  }
+
+  function resetSelectionPreview() {
+    if (editingPlot) cancelPlotEdit();
+    else clearPreview();
+  }
+
   async function preloadPlot() {
     if (preloadingPlot) return;
     if (selectedModelIds.length === 0) {
@@ -2373,12 +2494,13 @@ export function AnalysisPage({ active = true }: { active?: boolean }) {
           if (duplicateCount > 0) {
             duplicateNotes.push(`${selectedModelLabel(modelId)} / ${metricLabel(metric)}: newest run used, ${duplicateCount} older duplicate${duplicateCount === 1 ? '' : 's'} ignored.`);
           }
+          const previousTrace = plotPreview?.traces.find((trace) => trace.testingRunId === String(run.id) && trace.metric === metric);
           traces.push({
             testingRunId: String(run.id),
             metric,
             modelLabel: selectedModelLabel(modelId),
-            legendLabel: traceLabelForRun(run, metric, selectedMetricKeys.length > 1),
-            color: TRACE_COLORS[traces.length % TRACE_COLORS.length],
+            legendLabel: previousTrace?.legendLabel ?? traceLabelForRun(run, metric, selectedMetricKeys.length > 1),
+            color: previousTrace?.color ?? TRACE_COLORS[traces.length % TRACE_COLORS.length],
             start,
             end,
             sampling,
@@ -2400,13 +2522,27 @@ export function AnalysisPage({ active = true }: { active?: boolean }) {
         timestamp: current.timestamp ?? traces[0]?.timestamp ?? start,
         scoreSeries: 'score',
       }));
+      const title = draft.title.trim() || autoPlotTitle();
+      const subtitle = buildPlotSubtitle(selectedMetricKeys, start, end, sampling);
+      const previewPlot: AnalysisPlot = {
+        ...draft,
+        id: editingPlot?.plot.id ?? 'preview',
+        title,
+        subtitle,
+        sources: traces.map(traceToSource),
+        traces,
+        testingRunId: traces[0]?.testingRunId ?? draft.testingRunId,
+        timestamp: draft.timestamp ?? traces[0]?.timestamp ?? start,
+      };
       setSelectedSources(traces.map(traceToSource));
       setPlotPreview({
-        title: draft.title.trim() || autoPlotTitle(),
-        subtitle: buildPlotSubtitle(selectedMetricKeys, start, end, sampling),
+        title,
+        subtitle,
         traces,
         duplicateNotes,
+        plot: previewPlot,
       });
+      setPlotPreviewStale(false);
     } catch (error) {
       notifyError('Could not preload plot', error);
     } finally {
@@ -2418,13 +2554,25 @@ export function AnalysisPage({ active = true }: { active?: boolean }) {
     setPlotPreview((current) => {
       if (!current) return current;
       const traces = current.traces.map((trace, traceIndex) => (traceIndex === index ? { ...trace, ...patch } : trace));
-      return { ...current, traces };
+      return {
+        ...current,
+        traces,
+        plot: {
+          ...current.plot,
+          sources: traces.map(traceToSource),
+          traces,
+        },
+      };
     });
   }
 
   function finishPlot() {
     if (!plotPreview) {
       notifications.show({ color: 'yellow', title: 'Preload required', message: 'Preload the plot before adding it to the board.' });
+      return;
+    }
+    if (plotPreviewStale) {
+      notifications.show({ color: 'yellow', title: 'Preview is stale', message: 'Update the preview before finishing this plot.' });
       return;
     }
     const availableResults = combinedResultsForSources(plotPreview.traces.map(traceToSource), draft.plotType, draft.heatmapMode);
@@ -2435,17 +2583,66 @@ export function AnalysisPage({ active = true }: { active?: boolean }) {
       }
     }
     const nextPlot: AnalysisPlot = {
-      ...draft,
-      id: crypto.randomUUID(),
-      title: plotPreview.title,
-      subtitle: plotPreview.subtitle,
-      sources: plotPreview.traces.map(traceToSource),
-      traces: plotPreview.traces,
-      testingRunId: plotPreview.traces[0]?.testingRunId ?? draft.testingRunId,
-      timestamp: draft.timestamp ?? availableResults[0]?.timestamp ?? plotPreview.traces[0]?.timestamp ?? null,
+      ...plotPreview.plot,
+      id: editingPlot?.plot.id ?? crypto.randomUUID(),
+      timestamp: plotPreview.plot.timestamp ?? availableResults[0]?.timestamp ?? plotPreview.traces[0]?.timestamp ?? null,
     };
-    setPlots((current) => [...current, nextPlot]);
-    setPlotPreview(null);
+    setPlots((current) => {
+      if (!editingPlot) return [...current, nextPlot];
+      const next = [...current];
+      next.splice(Math.min(editingPlot.index, next.length), 0, nextPlot);
+      return next;
+    });
+    setEditingPlot(null);
+    clearPreview();
+  }
+
+  function cancelPlotEdit() {
+    if (editingPlot) {
+      setPlots((current) => {
+        const next = [...current];
+        next.splice(Math.min(editingPlot.index, next.length), 0, editingPlot.plot);
+        return next;
+      });
+    }
+    setEditingPlot(null);
+    clearPreview();
+  }
+
+  function editPlot(plot: AnalysisPlot, index: number) {
+    const traces = plot.traces ?? plot.sources.map((source, sourceIndex) => {
+      const run = testingRuns.find((item) => item.id === Number(source.testingRunId));
+      const metric = run ? metricKeyForRun(run) : 'mse';
+      return {
+        ...source,
+        metric,
+        modelLabel: run?.training_pipeline_name ?? `Source ${sourceIndex + 1}`,
+        legendLabel: run?.training_pipeline_name ?? `Source ${sourceIndex + 1}`,
+        color: TRACE_COLORS[sourceIndex % TRACE_COLORS.length],
+      };
+    });
+    const firstRun = testingRuns.find((run) => run.id === Number(traces[0]?.testingRunId));
+    setEditingPlot({ plot, index });
+    setPlots((current) => current.filter((item) => item.id !== plot.id));
+    setDraft({ ...plot, traces: undefined } as PlotDraft);
+    setSelectedSources(traces.map(traceToSource));
+    setSelectedModelIds([...new Set(traces.map((trace) => testingRuns.find((run) => run.id === Number(trace.testingRunId))?.training_run_id).filter((id): id is number => typeof id === 'number').map(String))]);
+    setSelectedInferenceDatasetId(firstRun ? String(firstRun.training_dataset_id) : null);
+    setSelectedRoiKey(firstRun?.roi_id === null || firstRun?.roi_id === undefined ? 'none' : String(firstRun.roi_id));
+    setSelectedMetricKeys([...new Set(traces.map((trace) => trace.metric))]);
+    setPlotPreview({
+      title: plot.title,
+      subtitle: plot.subtitle,
+      traces,
+      duplicateNotes: [],
+      plot: {
+        ...plot,
+        sources: traces.map(traceToSource),
+        traces,
+      },
+    });
+    setPlotPreviewStale(false);
+    setAddPlotOpen(true);
   }
 
   function movePlot(plotId: string, direction: -1 | 1) {
@@ -2473,6 +2670,7 @@ export function AnalysisPage({ active = true }: { active?: boolean }) {
       ...current,
       heatmapConfig: { ...current.heatmapConfig, ...patch },
     }));
+    markPreviewStale();
   }
 
   function updateAnalyticsConfig(index: number, patch: Partial<AnalyticsMethodConfig>) {
@@ -2484,7 +2682,7 @@ export function AnalysisPage({ active = true }: { active?: boolean }) {
           : config,
       ),
     }));
-    setPlotPreview(null);
+    markPreviewStale();
   }
 
   function renderAnalyticsParamInput(config: AnalyticsMethodConfig, index: number, key: string, value: number | string | boolean) {
@@ -2498,7 +2696,7 @@ export function AnalysisPage({ active = true }: { active?: boolean }) {
       return (
         <Select
           key={key}
-          label={analyticsParamLabel(key)}
+          label={<InfoLabel label={analyticsParamLabel(key)} info={analyticsParamInfo(key)} />}
           data={[
             { value: 'samples', label: 'Samples' },
             { value: 'minutes', label: 'Minutes' },
@@ -2512,7 +2710,7 @@ export function AnalysisPage({ active = true }: { active?: boolean }) {
       return (
         <Select
           key={key}
-          label={analyticsParamLabel(key)}
+          label={<InfoLabel label={analyticsParamLabel(key)} info={analyticsParamInfo(key)} />}
           data={[
             { value: 'raw', label: 'Raw score' },
             { value: 'smoothed', label: 'EWMA smoothed' },
@@ -2526,7 +2724,7 @@ export function AnalysisPage({ active = true }: { active?: boolean }) {
       return (
         <Select
           key={key}
-          label={analyticsParamLabel(key)}
+          label={<InfoLabel label={analyticsParamLabel(key)} info={analyticsParamInfo(key)} />}
           data={[
             { value: 'relative', label: 'Relative' },
             { value: 'absolute', label: 'Absolute' },
@@ -2540,7 +2738,7 @@ export function AnalysisPage({ active = true }: { active?: boolean }) {
       return (
         <Switch
           key={key}
-          label={analyticsParamLabel(key)}
+          label={<InfoLabel label={analyticsParamLabel(key)} info={analyticsParamInfo(key)} />}
           checked={value}
           onChange={(event) => updateAnalyticsConfig(index, { params: { [key]: event.currentTarget.checked } })}
         />
@@ -2551,7 +2749,7 @@ export function AnalysisPage({ active = true }: { active?: boolean }) {
       return (
         <NumberInput
           key={key}
-          label={analyticsParamLabel(key)}
+          label={<InfoLabel label={analyticsParamLabel(key)} info={analyticsParamInfo(key)} />}
           value={value}
           min={key === 'epsilon' ? 0 : undefined}
           step={key === 'epsilon' ? 1e-12 : isInteger ? 1 : 0.1}
@@ -2720,7 +2918,7 @@ export function AnalysisPage({ active = true }: { active?: boolean }) {
                       setSelectedMetricKeys([]);
                       setSelectedRoiKey('none');
                       setSelectedSources([]);
-                      setPlotPreview(null);
+                      resetSelectionPreview();
                     }}
                   />
                   <ScrollArea h={220}>
@@ -2770,7 +2968,7 @@ export function AnalysisPage({ active = true }: { active?: boolean }) {
                                       setSelectedMetricKeys([]);
                                       setSelectedRoiKey('none');
                                       setSelectedSources([]);
-                                      setPlotPreview(null);
+                                      resetSelectionPreview();
                                     }}
                                   >
                                     {selected ? 'Selected' : 'Use'}
@@ -2860,7 +3058,7 @@ export function AnalysisPage({ active = true }: { active?: boolean }) {
                                         setSelectedMetricKeys([]);
                                         setSelectedRoiKey('none');
                                         setSelectedSources([]);
-                                        setPlotPreview(null);
+                                        resetSelectionPreview();
                                         const bounds = sourceBounds(dataset);
                                         setDraft((current) => ({ ...current, start: bounds.start, end: bounds.end, timestamp: bounds.start || current.timestamp }));
                                       }}
@@ -2901,7 +3099,7 @@ export function AnalysisPage({ active = true }: { active?: boolean }) {
                         setSelectedRoiKey(value ?? 'none');
                         setSelectedMetricKeys([]);
                         setSelectedSources([]);
-                        setPlotPreview(null);
+                        resetSelectionPreview();
                       }}
                     />
                     <Select
@@ -2916,7 +3114,7 @@ export function AnalysisPage({ active = true }: { active?: boolean }) {
                           ...current,
                           plotType: (value ?? 'timeseries') as PlotType,
                         }));
-                        setPlotPreview(null);
+                        markPreviewStale();
                       }}
                     />
                   </SimpleGrid>
@@ -2934,7 +3132,7 @@ export function AnalysisPage({ active = true }: { active?: boolean }) {
                       onChange={(event) => {
                         const value = event.currentTarget.value;
                         setDraft((current) => ({ ...current, title: value }));
-                        setPlotPreview(null);
+                        markPreviewStale();
                       }}
                     />
                     <MultiSelect
@@ -2947,7 +3145,7 @@ export function AnalysisPage({ active = true }: { active?: boolean }) {
                       onChange={(values) => {
                         setSelectedMetricKeys(values.map(normalizeMetricKey));
                         setSelectedSources([]);
-                        setPlotPreview(null);
+                        markPreviewStale();
                       }}
                     />
                     <SimpleGrid cols={{ base: 1, md: 3 }}>
@@ -2960,7 +3158,7 @@ export function AnalysisPage({ active = true }: { active?: boolean }) {
                           description={selectedInferenceBounds.start && selectedInferenceBounds.end ? `${selectedInferenceBounds.start.replace('T', ' ')} to ${selectedInferenceBounds.end.replace('T', ' ')}` : undefined}
                           onChange={(value) => {
                             setDraft((current) => ({ ...current, timestamp: value }));
-                            setPlotPreview(null);
+                            markPreviewStale();
                           }}
                         />
                       ) : (
@@ -2972,7 +3170,7 @@ export function AnalysisPage({ active = true }: { active?: boolean }) {
                             value={draft.start}
                             onChange={(value) => {
                               setDraft((current) => ({ ...current, start: value }));
-                              setPlotPreview(null);
+                              markPreviewStale();
                             }}
                           />
                           <DateTime24Input
@@ -2982,7 +3180,7 @@ export function AnalysisPage({ active = true }: { active?: boolean }) {
                             value={draft.end}
                             onChange={(value) => {
                               setDraft((current) => ({ ...current, end: value }));
-                              setPlotPreview(null);
+                              markPreviewStale();
                             }}
                           />
                         </>
@@ -2993,7 +3191,7 @@ export function AnalysisPage({ active = true }: { active?: boolean }) {
                         value={draft.sampling}
                         onChange={(value) => {
                           setDraft((current) => ({ ...current, sampling: valueAsNumber(value, 1) }));
-                          setPlotPreview(null);
+                          markPreviewStale();
                         }}
                       />
                     </SimpleGrid>
@@ -3006,7 +3204,7 @@ export function AnalysisPage({ active = true }: { active?: boolean }) {
                             value={draft.scoreSeries}
                             onChange={(value) => {
                               setDraft((current) => ({ ...current, scoreSeries: value ?? 'score' }));
-                              setPlotPreview(null);
+                              markPreviewStale();
                             }}
                           />
                           <NumberInput
@@ -3015,21 +3213,53 @@ export function AnalysisPage({ active = true }: { active?: boolean }) {
                             value={draft.movingAverage}
                             onChange={(value) => {
                               setDraft((current) => ({ ...current, movingAverage: valueAsNumber(value, 1) }));
-                              setPlotPreview(null);
+                              markPreviewStale();
                             }}
                           />
                           <TextInput label="X-axis" value="Time" disabled />
                         </SimpleGrid>
                         <Paper withBorder p="sm" radius="sm">
                           <Stack gap="sm">
+                            <Group justify="space-between" align="flex-start">
+                              <div>
+                                <Text fw={700}>Timeseries analytics pipeline</Text>
+                                <Text size="sm" c="dimmed">
+                                  Stages run left-to-right on the previous output. Example: MSE {'->'} First derivative {'->'} CUSUM.
+                                </Text>
+                              </div>
+                              <Switch
+                                label={<InfoLabel label="Show intermediate panels" info="On shows the raw score and every analytics stage as separate aligned panels. Off shows only the final pipeline output." />}
+                                checked={draft.showIntermediateAnalyticsPanels}
+                                onChange={(event) => {
+                                  const checked = event.currentTarget.checked;
+                                  setDraft((current) => ({ ...current, showIntermediateAnalyticsPanels: checked }));
+                                  markPreviewStale();
+                                }}
+                              />
+                            </Group>
+                            <NumberInput
+                              label={<InfoLabel label="Panel height" info="Vertical height per time-series panel. Increase this when multiple analytics stages make the graph too flat." />}
+                              min={120}
+                              max={900}
+                              step={20}
+                              value={draft.panelHeightPx}
+                              onChange={(value) => {
+                                const nextHeight = valueAsNumber(value, draft.panelHeightPx);
+                                setDraft((current) => ({ ...current, panelHeightPx: nextHeight }));
+                                setPlotPreview((current) =>
+                                  current
+                                    ? { ...current, plot: { ...current.plot, panelHeightPx: nextHeight } }
+                                    : current,
+                                );
+                              }}
+                            />
                             <div>
-                              <Text fw={700}>Timeseries analytics</Text>
                               <Text size="sm" c="dimmed">
-                                Optional causal transforms from the selected metric. Empty means raw score only.
+                                Add one or more causal stages. Empty means raw score only.
                               </Text>
                             </div>
                             <MultiSelect
-                              label="Analytics methods"
+                              label="Analytics stages"
                               placeholder="None"
                               data={ANALYTICS_DEFINITIONS.map((definition) => ({ value: definition.kind, label: definition.label }))}
                               value={draft.timeseriesAnalytics.map((config) => config.kind)}
@@ -3042,9 +3272,10 @@ export function AnalysisPage({ active = true }: { active?: boolean }) {
                                     ...current,
                                     timeseriesAnalytics: values.map((value) => existing.get(value as AnalyticsKind) ?? defaultAnalyticsConfig(value as AnalyticsKind)),
                                     analyticsDisplayMode: 'multi_panel',
+                                    panelHeightPx: values.length > 0 && current.timeseriesAnalytics.length === 0 ? 260 : current.panelHeightPx,
                                   };
                                 });
-                                setPlotPreview(null);
+                                markPreviewStale();
                               }}
                             />
                             {draft.timeseriesAnalytics.length > 0 && (
@@ -3054,22 +3285,61 @@ export function AnalysisPage({ active = true }: { active?: boolean }) {
                                     <Stack gap="xs">
                                       <Group justify="space-between" align="flex-start">
                                         <div>
-                                          <Text fw={600}>{analyticsDefinition(config.kind).label}</Text>
+                                          <Group gap="xs">
+                                            <Badge variant="light" color="violet">Stage {index + 1}</Badge>
+                                            <InfoLabel label={analyticsDefinition(config.kind).label} info={analyticsDefinition(config.kind).description} />
+                                          </Group>
                                           <Text size="xs" c="dimmed">{analyticsDefinition(config.kind).description}</Text>
                                         </div>
-                                        <ActionIcon
-                                          variant="subtle"
-                                          color="red"
-                                          onClick={() => {
-                                            setDraft((current) => ({
-                                              ...current,
-                                              timeseriesAnalytics: current.timeseriesAnalytics.filter((_, configIndex) => configIndex !== index),
-                                            }));
-                                            setPlotPreview(null);
-                                          }}
-                                        >
-                                          <Trash2 size={16} />
-                                        </ActionIcon>
+                                        <Group gap={4}>
+                                          <Tooltip label="Move stage up">
+                                            <ActionIcon
+                                              variant="subtle"
+                                              disabled={index === 0}
+                                              onClick={() => {
+                                                setDraft((current) => {
+                                                  const next = [...current.timeseriesAnalytics];
+                                                  [next[index - 1], next[index]] = [next[index], next[index - 1]];
+                                                  return { ...current, timeseriesAnalytics: next };
+                                                });
+                                                markPreviewStale();
+                                              }}
+                                            >
+                                              <ArrowUp size={16} />
+                                            </ActionIcon>
+                                          </Tooltip>
+                                          <Tooltip label="Move stage down">
+                                            <ActionIcon
+                                              variant="subtle"
+                                              disabled={index === draft.timeseriesAnalytics.length - 1}
+                                              onClick={() => {
+                                                setDraft((current) => {
+                                                  const next = [...current.timeseriesAnalytics];
+                                                  [next[index], next[index + 1]] = [next[index + 1], next[index]];
+                                                  return { ...current, timeseriesAnalytics: next };
+                                                });
+                                                markPreviewStale();
+                                              }}
+                                            >
+                                              <ArrowDown size={16} />
+                                            </ActionIcon>
+                                          </Tooltip>
+                                          <Tooltip label="Delete stage">
+                                            <ActionIcon
+                                              variant="subtle"
+                                              color="red"
+                                              onClick={() => {
+                                                setDraft((current) => ({
+                                                  ...current,
+                                                  timeseriesAnalytics: current.timeseriesAnalytics.filter((_, configIndex) => configIndex !== index),
+                                                }));
+                                                markPreviewStale();
+                                              }}
+                                            >
+                                              <Trash2 size={16} />
+                                            </ActionIcon>
+                                          </Tooltip>
+                                        </Group>
                                       </Group>
                                       <SimpleGrid cols={{ base: 1, md: 3 }}>
                                         {Object.entries(config.params).map(([key, value]) => renderAnalyticsParamInput(config, index, key, value))}
@@ -3092,13 +3362,14 @@ export function AnalysisPage({ active = true }: { active?: boolean }) {
                         { value: 'range', label: 'Date range video' },
                       ]}
                       value={draft.heatmapMode}
-                      onChange={(value) =>
+                      onChange={(value) => {
                         setDraft((current) => ({
                           ...current,
                           heatmapMode: (value ?? 'single') as HeatmapMode,
                           timestamp: value === 'range' ? null : current.timestamp,
-                        }))
-                      }
+                        }));
+                        markPreviewStale();
+                      }}
                     />
                     <TextInput
                       label={<InfoLabel label="Frames" info="Number of deduplicated source timestamps before the selected sampling rate is applied." />}
@@ -3111,6 +3382,7 @@ export function AnalysisPage({ active = true }: { active?: boolean }) {
                       onChange={(event) => {
                         const checked = event.currentTarget.checked;
                         setDraft((current) => ({ ...current, includeReference: checked }));
+                        markPreviewStale();
                       }}
                     />
                   </SimpleGrid>
@@ -3123,19 +3395,23 @@ export function AnalysisPage({ active = true }: { active?: boolean }) {
                           { value: 'prediction', label: 'Future prediction' },
                         ]}
                         value={draft.staeHeatmapView}
-                        onChange={(value) =>
+                        onChange={(value) => {
                           setDraft((current) => ({
                             ...current,
                             staeHeatmapView: (value ?? 'reconstruction') as 'reconstruction' | 'prediction',
-                          }))
-                        }
+                          }));
+                          markPreviewStale();
+                        }}
                       />
                       <NumberInput
                         label={<InfoLabel label="Prediction horizon" info="Future frame index for STAE prediction heatmaps. future+1 means the first predicted future frame." />}
                         min={1}
                         value={draft.predictionHorizon}
                         disabled={draft.staeHeatmapView !== 'prediction'}
-                        onChange={(value) => setDraft((current) => ({ ...current, predictionHorizon: valueAsNumber(value, 1) }))}
+                        onChange={(value) => {
+                          setDraft((current) => ({ ...current, predictionHorizon: valueAsNumber(value, 1) }));
+                          markPreviewStale();
+                        }}
                       />
                     </SimpleGrid>
                   )}
@@ -3310,16 +3586,42 @@ export function AnalysisPage({ active = true }: { active?: boolean }) {
                       <Paper withBorder p="sm" radius="sm">
                         <Stack gap="sm">
                           <div>
-                            <Text fw={700}>Preloaded plot</Text>
+                            <Group gap="xs">
+                              <Text fw={700}>{editingPlot ? 'Editing plot preview' : 'Preloaded plot preview'}</Text>
+                              {plotPreviewStale && <Badge color="yellow" variant="light">Preview stale</Badge>}
+                            </Group>
                             <Text size="sm" c="dimmed">{plotPreview.title}</Text>
                             <Text size="xs" c="dimmed">{plotPreview.subtitle}</Text>
                           </div>
+                          {plotPreviewStale && (
+                            <Alert color="yellow">
+                              Parameter changes are not applied to this preview yet. Click Update preview to recompute only this plot.
+                            </Alert>
+                          )}
                           {plotPreview.duplicateNotes.length > 0 && (
                             <Alert color="yellow">
                               {plotPreview.duplicateNotes.map((note) => (
                                 <Text key={note} size="sm">{note}</Text>
                               ))}
                             </Alert>
+                          )}
+                          {previewPlot && (
+                            <Paper withBorder p="xs" radius="sm">
+                              {previewPlot.plotType === 'timeseries' ? (
+                                <TimeSeriesPlot plot={previewPlot} results={previewResults} />
+                              ) : previewPlot.heatmapMode === 'range' ? (
+                                <HeatmapVideo plot={previewPlot} results={previewResults} />
+                              ) : (
+                                <HeatmapPlot
+                                  plot={previewPlot}
+                                  results={previewResults}
+                                  heatmapCache={heatmapCache}
+                                  loadingHeatmaps={loadingHeatmaps}
+                                  heatmapErrors={heatmapErrors}
+                                  ensureHeatmap={ensureHeatmap}
+                                />
+                              )}
+                            </Paper>
                           )}
                           {plotPreview.traces.map((trace, index) => (
                             <SimpleGrid key={`${trace.testingRunId}:${trace.metric}`} cols={{ base: 1, md: 3 }} spacing="sm">
@@ -3346,6 +3648,11 @@ export function AnalysisPage({ active = true }: { active?: boolean }) {
                           : 'Preload a plot to review legend labels and colors before adding it to the board.'}
                       </Text>
                       <Group gap="sm">
+                        {editingPlot && (
+                          <Button variant="default" onClick={cancelPlotEdit}>
+                            Cancel edit
+                          </Button>
+                        )}
                         <Button
                           variant="light"
                           leftSection={<Upload size={18} />}
@@ -3353,10 +3660,10 @@ export function AnalysisPage({ active = true }: { active?: boolean }) {
                           onClick={preloadPlot}
                           disabled={selectedModelIds.length === 0 || !selectedInferenceDatasetId || selectedMetricKeys.length === 0}
                         >
-                          Preload plot
+                          {plotPreview ? 'Update preview' : 'Preload plot'}
                         </Button>
-                        <Button leftSection={<Plus size={18} />} onClick={finishPlot} disabled={!plotPreview}>
-                          Finish plot
+                        <Button leftSection={<Plus size={18} />} onClick={finishPlot} disabled={!plotPreview || plotPreviewStale}>
+                          {editingPlot ? 'Finish edit' : 'Finish plot'}
                         </Button>
                       </Group>
                     </Group>
@@ -3373,21 +3680,23 @@ export function AnalysisPage({ active = true }: { active?: boolean }) {
       ) : (
         <Stack gap="md">
           {plots.map((plot) => {
-            const hasAllData =
-              plot.plotType === 'heatmap' && plot.heatmapMode === 'single'
-                ? true
-                : plotSources(plot).every((source) => resultsByRunId[Number(source.testingRunId)]);
-            const results = combinedResultsForSources(plotSources(plot), plot.plotType, plot.heatmapMode);
-            return hasAllData ? (
+            const plotData = plotResultsById.get(plot.id) ?? { hasAllData: false, results: [] };
+            return plotData.hasAllData ? (
               <AnalysisPlotCard
                 key={plot.id}
                 plot={plot}
-                results={results}
+                results={plotData.results}
                 heatmapCache={heatmapCache}
                 loadingHeatmaps={loadingHeatmaps}
                 heatmapErrors={heatmapErrors}
                 ensureHeatmap={ensureHeatmap}
                 onMove={(direction) => movePlot(plot.id, direction)}
+                onEdit={() => editPlot(plot, plots.findIndex((item) => item.id === plot.id))}
+                onPatch={(patch) =>
+                  setPlots((current) =>
+                    current.map((item) => (item.id === plot.id ? { ...item, ...patch } : item)),
+                  )
+                }
                 onRemove={() => setPlots((current) => current.filter((item) => item.id !== plot.id))}
               />
             ) : (
