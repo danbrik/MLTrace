@@ -298,6 +298,7 @@ class TrainingRun(Base):
     # Execution lifecycle.
     status: Mapped[str] = mapped_column(String(32), nullable=False, default="queued")
     enqueued_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=False))
+    queue_rank: Mapped[int | None] = mapped_column(Integer)
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=False))
     ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=False))
     duration_seconds: Mapped[float | None] = mapped_column(Float)
@@ -421,6 +422,7 @@ class TestingRun(Base):
 
     status: Mapped[str] = mapped_column(String(32), nullable=False, default="queued")
     enqueued_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=False))
+    queue_rank: Mapped[int | None] = mapped_column(Integer)
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=False))
     ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=False))
     duration_seconds: Mapped[float | None] = mapped_column(Float)
@@ -575,6 +577,7 @@ class HeatmapRangeRun(Base):
     # Scheduler/queue fields, mirroring TestingRun.
     status: Mapped[str] = mapped_column(String(32), nullable=False, default="queued")
     enqueued_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=False))
+    queue_rank: Mapped[int | None] = mapped_column(Integer)
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=False))
     ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=False))
     duration_seconds: Mapped[float | None] = mapped_column(Float)

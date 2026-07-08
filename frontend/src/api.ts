@@ -35,6 +35,7 @@ import type {
   RoiPreview,
   SchedulerSettings,
   TestingRun,
+  TestingRunBulkResponse,
   TestingRunResultImage,
   TestingRunResults,
   TrainingDataset,
@@ -628,6 +629,22 @@ export function enqueueTestingRun(payload: {
   });
 }
 
+export function bulkEnqueueTestingRuns(payload: {
+  training_run_ids: number[];
+  training_dataset_ids: number[];
+  roi_id?: number | null;
+  name_prefix?: string | null;
+  inference_config?: Record<string, unknown> | null;
+}): Promise<TestingRunBulkResponse> {
+  return request<TestingRunBulkResponse>('/api/testing-runs/bulk', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  }).then((response) => {
+    invalidate(['testingRuns']);
+    return response;
+  });
+}
+
 /** Fetch a run's per-image results. ``maxPoints`` decimates large runs server-side
  *  so charts stay bounded (the full set is always available in the CSV export). */
 export function getTestingRunResults(runId: number, maxPoints?: number): Promise<TestingRunResults> {
@@ -951,6 +968,20 @@ export function updateSchedulerSettings(payload: { max_gpu_slots: number; only_g
   return request<SchedulerSettings>('/api/scheduler/settings', {
     method: 'PUT',
     body: JSON.stringify(payload),
+  });
+}
+
+export function moveSchedulerJob(kind: 'train' | 'test' | 'heatmap', runId: number, direction: 'up' | 'down'): Promise<{
+  kind: 'train' | 'test' | 'heatmap';
+  run_id: number;
+  queue_rank: number | null;
+}> {
+  return request<{ kind: 'train' | 'test' | 'heatmap'; run_id: number; queue_rank: number | null }>(`/api/scheduler/jobs/${kind}/${runId}/move`, {
+    method: 'POST',
+    body: JSON.stringify({ direction }),
+  }).then((response) => {
+    invalidate(['trainingRuns', 'testingRuns', 'heatmapRanges']);
+    return response;
   });
 }
 

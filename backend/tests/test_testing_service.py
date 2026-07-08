@@ -16,6 +16,7 @@ from app.schemas import (
     HeatmapVisualizationConfig,
     RoiDefinitionCreate,
     RoiPreviewRequest,
+    TestingRunBulkCreate,
     TestingRunCreate as TestingRunCreatePayload,
 )
 from app.testing import service as testing_service
@@ -340,6 +341,101 @@ def test_roi_preview_and_mean_image_testing_run(tmp_path: Path, monkeypatch) -> 
         assert absolute.id != heatmap.id
         assert absolute.max_error == 10.0
         assert absolute.config_signature != heatmap.config_signature
+    finally:
+        db.close()
+
+
+def test_bulk_enqueue_creates_combinations_skips_duplicates_without_enumerating(tmp_path: Path, monkeypatch) -> None:
+    db = make_db()
+    try:
+        training_run_id, test_set_id = seed_finished_mean_image_run(db, tmp_path)
+        first_rule = db.scalar(
+            select(models.TrainingDatasetRule).where(models.TrainingDatasetRule.training_dataset_id == test_set_id)
+        )
+        second_set = models.TrainingDataset(name="Second Test Set", usage_label="test")
+        db.add(second_set)
+        db.flush()
+        db.add(
+            models.TrainingDatasetRule(
+                training_dataset_id=second_set.id,
+                folder_id=first_rule.folder_id,
+                start_timestamp=first_rule.start_timestamp,
+                end_timestamp=first_rule.end_timestamp,
+                stride=1,
+                selected_images=3,
+            )
+        )
+        db.commit()
+
+        def fail_if_enumerating(*_args, **_kwargs):
+            raise AssertionError("Bulk enqueue must not enumerate all dataset filenames.")
+
+        monkeypatch.setattr(testing_service, "enumerate_training_dataset_image_records", fail_if_enumerating)
+        payload = TestingRunBulkCreate(
+            training_run_ids=[training_run_id],
+            training_dataset_ids=[test_set_id, second_set.id],
+            inference_config={"error_metric": "mse"},
+        )
+
+        first = testing_service.bulk_enqueue_testing_runs(db, payload, wake_scheduler=False)
+        assert len(first.created) == 2
+        assert first.skipped == []
+        assert [run.queue_rank for run in first.created] == [1, 2]
+        assert first.created[0].expected_image_count is None
+        assert first.created[1].expected_image_count == 3
+
+        second = testing_service.bulk_enqueue_testing_runs(db, payload, wake_scheduler=False)
+        assert second.created == []
+        assert len(second.skipped) == 2
+        assert {item.existing_testing_run_id for item in second.skipped} == {run.id for run in first.created}
+    finally:
+        db.close()
+
+
+def test_bulk_enqueue_rejects_incompatible_dataset_resolution(tmp_path: Path) -> None:
+    db = make_db()
+    try:
+        training_run_id, _ = seed_finished_mean_image_run(db, tmp_path)
+        dataset = models.Dataset(
+            name="Different root",
+            root_path=str(tmp_path / "different"),
+            status="ready",
+            timestamp_regex=r"(?P<timestamp>\d{8}_\d{6})",
+            timestamp_format="%Y%m%d_%H%M%S",
+        )
+        db.add(dataset)
+        db.flush()
+        folder = models.DatasetFolder(
+            dataset_id=dataset.id,
+            relative_path=".",
+            image_count=1,
+            extension_summary={".tiff": 1},
+            resolution_summary={"10x6": 1},
+            image_metadata={"format": "TIFF", "mode": "L", "dtype": "uint8", "channels": 1},
+        )
+        db.add(folder)
+        db.flush()
+        incompatible = models.TrainingDataset(name="Wrong Size", usage_label="test")
+        db.add(incompatible)
+        db.flush()
+        db.add(
+            models.TrainingDatasetRule(
+                training_dataset_id=incompatible.id,
+                folder_id=folder.id,
+                start_timestamp=datetime(2026, 4, 1, 12, 0, 0),
+                end_timestamp=datetime(2026, 4, 1, 12, 0, 20),
+                stride=1,
+                selected_images=1,
+            )
+        )
+        db.commit()
+
+        with pytest.raises(ValueError, match="does not match required input size 8x6"):
+            testing_service.bulk_enqueue_testing_runs(
+                db,
+                TestingRunBulkCreate(training_run_ids=[training_run_id], training_dataset_ids=[incompatible.id]),
+                wake_scheduler=False,
+            )
     finally:
         db.close()
 

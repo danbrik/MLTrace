@@ -16,7 +16,7 @@ from sqlalchemy.orm import Session, selectinload
 from app import models, services
 from app.database import data_dir
 from app.schemas import TrainingRunMetricRead, TrainingRunRead
-from app.training.scheduler import scheduler
+from app.training.scheduler import next_queue_rank, scheduler
 
 ACTIVE_STATUSES = {"queued", "running"}
 
@@ -60,9 +60,10 @@ def _snapshot(db: Session, pipeline: models.TrainingPipeline) -> dict:
     }
 
 
-def _reset_run_for_queue(run: models.TrainingRun, snapshot: dict) -> None:
+def _reset_run_for_queue(db: Session, run: models.TrainingRun, snapshot: dict) -> None:
     run.status = "queued"
     run.enqueued_at = datetime.utcnow()
+    run.queue_rank = next_queue_rank(db)
     run.started_at = None
     run.ended_at = None
     run.duration_seconds = None
@@ -98,12 +99,12 @@ def enqueue_training_run(db: Session, pipeline_id: int) -> TrainingRunRead:
 
     if run is None:
         run = models.TrainingRun(training_pipeline_id=pipeline_id, **snapshot)
-        _reset_run_for_queue(run, snapshot)
+        _reset_run_for_queue(db, run, snapshot)
         db.add(run)
     else:
         # Restart: reset the same row (one history per pipeline) and clear old state.
         db.execute(delete(models.TrainingRunMetric).where(models.TrainingRunMetric.training_run_id == run.id))
-        _reset_run_for_queue(run, snapshot)
+        _reset_run_for_queue(db, run, snapshot)
         shutil.rmtree(_run_dir(run.id), ignore_errors=True)
 
     db.commit()
@@ -233,6 +234,7 @@ def serialize_training_run(db: Session, run: models.TrainingRun) -> TrainingRunR
         training_pipeline_id=run.training_pipeline_id,
         status=run.status,
         enqueued_at=run.enqueued_at,
+        queue_rank=run.queue_rank,
         started_at=run.started_at,
         ended_at=run.ended_at,
         duration_seconds=run.duration_seconds,

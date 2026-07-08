@@ -54,6 +54,10 @@ from app.schemas import (
     RoiPreviewResponse,
     SchedulerSettingsRead,
     SchedulerSettingsUpdate,
+    SchedulerJobMoveRequest,
+    SchedulerJobMoveResponse,
+    TestingRunBulkCreate,
+    TestingRunBulkResponse,
     TestingRunCreate,
     TestingRunResultImageResponse,
     TestingRunRead,
@@ -83,7 +87,7 @@ from app.optimization import service as optimization_service
 from app.testing import service as testing_service
 from app.testing.service import TestingConflict
 from app.training import service as training_service
-from app.training.scheduler import get_scheduler_settings, scheduler, update_scheduler_settings
+from app.training.scheduler import get_scheduler_settings, move_queued_job, scheduler, update_scheduler_settings
 from app.training.service import RunConflict
 from app.services import (
     DuplicatePipelineError,
@@ -781,6 +785,13 @@ def create_app() -> FastAPI:
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
+    @app.post("/api/testing-runs/bulk", response_model=TestingRunBulkResponse)
+    def api_bulk_enqueue_testing_runs(payload: TestingRunBulkCreate, db: Session = Depends(get_db)):
+        try:
+            return testing_service.bulk_enqueue_testing_runs(db, payload)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
     @app.get("/api/testing-runs/{run_id}", response_model=TestingRunRead)
     def api_get_testing_run(run_id: int, db: Session = Depends(get_db)):
         run = testing_service.get_testing_run(db, run_id)
@@ -1043,6 +1054,16 @@ def create_app() -> FastAPI:
     @app.put("/api/scheduler/settings", response_model=SchedulerSettingsRead)
     def api_update_scheduler_settings(payload: SchedulerSettingsUpdate):
         return update_scheduler_settings(payload.max_gpu_slots, payload.only_gpu)
+
+    @app.post("/api/scheduler/jobs/{kind}/{run_id}/move", response_model=SchedulerJobMoveResponse)
+    def api_move_scheduler_job(kind: str, run_id: int, payload: SchedulerJobMoveRequest, db: Session = Depends(get_db)):
+        try:
+            run = move_queued_job(db, kind, run_id, payload.direction)
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        if run is None:
+            raise HTTPException(status_code=404, detail="Scheduler job not found.")
+        return SchedulerJobMoveResponse(kind=kind, run_id=run.id, queue_rank=run.queue_rank)
 
     @app.get("/api/testing-runs/{run_id}/log", response_model=TrainingRunLogResponse)
     def api_get_testing_run_log(run_id: int, db: Session = Depends(get_db)):

@@ -17,7 +17,7 @@ from app import models
 from app.database import data_dir
 from app.schemas import HeatmapRangeRunCreate, HeatmapRangeRunRead
 from app.testing.service import CURRENT_HEATMAP_RENDER_VERSION, _load_testing_run_for_heatmap, _utcnow
-from app.training.scheduler import scheduler
+from app.training.scheduler import next_queue_rank, scheduler
 
 
 def _range_signature(
@@ -74,6 +74,7 @@ def enqueue_heatmap_range(
         testing_run_id=testing_run.id,
         status="queued",
         enqueued_at=_utcnow(),
+        queue_rank=next_queue_rank(db),
         start_timestamp=payload.start_timestamp,
         end_timestamp=payload.end_timestamp,
         stride=payload.stride,

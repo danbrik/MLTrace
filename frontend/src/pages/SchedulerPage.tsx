@@ -22,7 +22,7 @@ import { notifications } from '@mantine/notifications';
 
 import { StepCard } from '../components/StepCard';
 import { usePendingIds } from '../hooks/usePendingIds';
-import { FileText, Info, RotateCcw, Search, StopCircle, Trash2 } from 'lucide-react';
+import { ArrowDown, ArrowUp, FileText, Info, RotateCcw, Search, StopCircle, Trash2 } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState } from 'react';
 
 import {
@@ -45,6 +45,7 @@ import {
   listTestingRuns,
   listTrainingPipelines,
   listTrainingRuns,
+  moveSchedulerJob,
   restartTestingRun,
   restartTrainingRun,
   updateSchedulerSettings,
@@ -287,8 +288,25 @@ export function SchedulerPage({ active = true }: { active?: boolean }) {
       ...testingRuns.map((run) => ({ kind: 'test' as const, run })),
       ...heatmapRanges.map((run) => ({ kind: 'heatmap' as const, run })),
     ];
-    return list.sort((a, b) => (b.run.created_at ?? '').localeCompare(a.run.created_at ?? ''));
+    return list.sort((a, b) => {
+      const aQueued = a.run.status === 'queued';
+      const bQueued = b.run.status === 'queued';
+      if (aQueued && bQueued) {
+        const aRank = a.run.queue_rank ?? Number.MAX_SAFE_INTEGER;
+        const bRank = b.run.queue_rank ?? Number.MAX_SAFE_INTEGER;
+        if (aRank !== bRank) return aRank - bRank;
+        return (a.run.enqueued_at ?? '').localeCompare(b.run.enqueued_at ?? '') || a.run.id - b.run.id;
+      }
+      if (aQueued !== bQueued) return aQueued ? -1 : 1;
+      return (b.run.created_at ?? '').localeCompare(a.run.created_at ?? '');
+    });
   }, [trainingRuns, testingRuns, heatmapRanges]);
+
+  const queuedJobs = useMemo(() => jobs.filter((job) => job.run.status === 'queued'), [jobs]);
+  const queueIndexByKey = useMemo(
+    () => new Map(queuedJobs.map((job, index) => [jobKey(job), index])),
+    [queuedJobs],
+  );
 
   const methodOptions = useMemo(
     () => [...new Set(jobs.map((job) => jobMethodType(job)))].map((type) => ({ value: type, label: type })),
@@ -343,6 +361,10 @@ export function SchedulerPage({ active = true }: { active?: boolean }) {
           ? () => deleteHeatmapRange(job.run.id)
           : () => deleteTestingRun(job.run.id);
     withRefresh(`delete:${jobKey(job)}`, action, 'Could not remove');
+  }
+
+  function handleMove(job: SchedulerJob, direction: 'up' | 'down') {
+    withRefresh(`move-${direction}:${jobKey(job)}`, () => moveSchedulerJob(job.kind, job.run.id, direction), 'Could not move job');
   }
 
   async function handleSaveSettings() {
@@ -482,10 +504,14 @@ export function SchedulerPage({ active = true }: { active?: boolean }) {
                   const terminal = TERMINAL.has(run.status);
                   const abortable = run.status === 'queued' || run.status === 'running';
                   const key = jobKey(job);
+                  const queueIndex = queueIndexByKey.get(key);
+                  const movable = run.status === 'queued' && queueIndex !== undefined;
                   const rowBusy =
                     rowActions.isPending(`abort:${key}`) ||
                     rowActions.isPending(`restart:${key}`) ||
-                    rowActions.isPending(`delete:${key}`);
+                    rowActions.isPending(`delete:${key}`) ||
+                    rowActions.isPending(`move-up:${key}`) ||
+                    rowActions.isPending(`move-down:${key}`);
                   return (
                     <Table.Tr key={key}>
                       <Table.Td>
@@ -524,6 +550,30 @@ export function SchedulerPage({ active = true }: { active?: boolean }) {
                               <FileText size={18} />
                             </ActionIcon>
                           </Tooltip>
+                          {movable && (
+                            <>
+                              <Tooltip label="Move up">
+                                <ActionIcon
+                                  variant="subtle"
+                                  loading={rowActions.isPending(`move-up:${key}`)}
+                                  disabled={rowBusy || queueIndex === 0}
+                                  onClick={() => handleMove(job, 'up')}
+                                >
+                                  <ArrowUp size={18} />
+                                </ActionIcon>
+                              </Tooltip>
+                              <Tooltip label="Move down">
+                                <ActionIcon
+                                  variant="subtle"
+                                  loading={rowActions.isPending(`move-down:${key}`)}
+                                  disabled={rowBusy || queueIndex === queuedJobs.length - 1}
+                                  onClick={() => handleMove(job, 'down')}
+                                >
+                                  <ArrowDown size={18} />
+                                </ActionIcon>
+                              </Tooltip>
+                            </>
+                          )}
                           {abortable && (
                             <Tooltip label="Abort">
                               <ActionIcon

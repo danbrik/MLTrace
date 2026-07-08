@@ -36,6 +36,9 @@ from app.schemas import (
     RoiDefinitionRead,
     RoiPreviewRequest,
     RoiPreviewResponse,
+    TestingRunBulkCreate,
+    TestingRunBulkResponse,
+    TestingRunBulkSkipped,
     TestingRunCreate,
     TestingRunResultImageResponse,
     TestingRunRead,
@@ -44,7 +47,7 @@ from app.schemas import (
 )
 from app.training.data import ResolvedDatasetImage, enumerate_training_dataset_image_records
 from app.training.engine import _build_model, _to_nchw
-from app.training.scheduler import scheduler
+from app.training.scheduler import next_queue_rank, scheduler
 
 
 CURRENT_HEATMAP_RENDER_VERSION = 5
@@ -693,6 +696,7 @@ def _serialize_testing_run(run: models.TestingRun) -> TestingRunRead:
         roi_id=run.roi_id,
         status=run.status,
         enqueued_at=run.enqueued_at,
+        queue_rank=run.queue_rank,
         started_at=run.started_at,
         ended_at=run.ended_at,
         duration_seconds=run.duration_seconds,
@@ -1394,9 +1398,19 @@ def _find_duplicate_testing_run(
     return None
 
 
-def _reset_testing_run_for_queue(run: models.TestingRun) -> None:
+def _estimated_training_dataset_count(training_dataset: models.TrainingDataset) -> int | None:
+    values: list[int] = []
+    for rule in training_dataset.rules:
+        if rule.selected_images is None:
+            return None
+        values.append(int(rule.selected_images))
+    return sum(values)
+
+
+def _reset_testing_run_for_queue(db: Session, run: models.TestingRun) -> None:
     run.status = "queued"
     run.enqueued_at = _utcnow()
+    run.queue_rank = next_queue_rank(db)
     run.started_at = None
     run.ended_at = None
     run.duration_seconds = None
@@ -1428,7 +1442,7 @@ def enqueue_testing_run(db: Session, payload: TestingRunCreate, *, wake_schedule
     training_dataset = _load_training_dataset(db, payload.training_dataset_id)
     if training_dataset is None:
         raise ValueError(f"Train/test dataset does not exist: {payload.training_dataset_id}")
-    expected_image_count = len(enumerate_training_dataset_image_records(training_dataset))
+    expected_image_count = _estimated_training_dataset_count(training_dataset)
 
     roi = db.get(models.RoiDefinition, payload.roi_id) if payload.roi_id is not None else None
     if payload.roi_id is not None and roi is None:
@@ -1455,6 +1469,7 @@ def enqueue_testing_run(db: Session, payload: TestingRunCreate, *, wake_schedule
         roi_id=roi.id if roi else None,
         status="queued",
         enqueued_at=_utcnow(),
+        queue_rank=next_queue_rank(db),
         training_run_name=_snapshot_name(training_run),
         training_pipeline_name=pipeline.name,
         training_dataset_name=training_dataset.name,
@@ -1475,6 +1490,151 @@ def enqueue_testing_run(db: Session, payload: TestingRunCreate, *, wake_schedule
     if wake_scheduler:
         scheduler.wake()
     return _serialize_testing_run(testing_run)
+
+
+def _resolution(width: int | None, height: int | None) -> str | None:
+    return f"{width}x{height}" if width is not None and height is not None else None
+
+
+def _training_dataset_resolutions(training_dataset: models.TrainingDataset) -> list[str]:
+    resolutions: set[str] = set()
+    for rule in training_dataset.rules:
+        folder = rule.folder
+        if folder is not None and folder.resolution_summary:
+            resolutions.update(str(key) for key in folder.resolution_summary.keys())
+    return sorted(resolutions)
+
+
+def _validate_testable_training_run(training_run: models.TrainingRun) -> None:
+    if training_run.status != "finished":
+        raise ValueError(f"Testing requires a finished training run: {training_run.id}")
+    if not training_run.artifact_path or not training_run.artifact_kind:
+        raise ValueError(f"Training run has no artifact to test: {training_run.id}")
+
+
+def bulk_enqueue_testing_runs(
+    db: Session, payload: TestingRunBulkCreate, *, wake_scheduler: bool = True
+) -> TestingRunBulkResponse:
+    training_run_ids = list(dict.fromkeys(payload.training_run_ids))
+    training_dataset_ids = list(dict.fromkeys(payload.training_dataset_ids))
+    if len(training_run_ids) != len(payload.training_run_ids):
+        raise ValueError("Duplicate training_run_ids are not allowed.")
+    if len(training_dataset_ids) != len(payload.training_dataset_ids):
+        raise ValueError("Duplicate training_dataset_ids are not allowed.")
+
+    training_runs: list[models.TrainingRun] = []
+    for run_id in training_run_ids:
+        training_run = _load_training_run(db, run_id)
+        if training_run is None:
+            raise ValueError(f"Training run does not exist: {run_id}")
+        _validate_testable_training_run(training_run)
+        training_runs.append(training_run)
+
+    datasets: list[models.TrainingDataset] = []
+    for dataset_id in training_dataset_ids:
+        dataset = _load_training_dataset(db, dataset_id)
+        if dataset is None:
+            raise ValueError(f"Train/test dataset does not exist: {dataset_id}")
+        datasets.append(dataset)
+
+    input_resolutions = {
+        _resolution(
+            run.training_pipeline.preprocessing_pipeline.input_width,
+            run.training_pipeline.preprocessing_pipeline.input_height,
+        )
+        for run in training_runs
+    }
+    if len(input_resolutions) != 1:
+        raise ValueError("Selected models must expect the same raw preprocessing input size.")
+    required_input = next(iter(input_resolutions))
+    if required_input is not None:
+        for dataset in datasets:
+            resolutions = _training_dataset_resolutions(dataset)
+            if resolutions and required_input not in resolutions:
+                raise ValueError(
+                    f"Train/test dataset '{dataset.name}' does not match required input size {required_input}."
+                )
+
+    roi = db.get(models.RoiDefinition, payload.roi_id) if payload.roi_id is not None else None
+    if payload.roi_id is not None and roi is None:
+        raise ValueError(f"ROI does not exist: {payload.roi_id}")
+    if roi is not None:
+        output_resolutions = {
+            _resolution(
+                run.training_pipeline.preprocessing_pipeline.output_width,
+                run.training_pipeline.preprocessing_pipeline.output_height,
+            )
+            for run in training_runs
+        }
+        if len(output_resolutions) != 1:
+            raise ValueError("ROI bulk scoring requires all selected models to produce the same preprocessing output size.")
+        expected_output = next(iter(output_resolutions))
+        roi_resolution = _resolution(roi.image_width, roi.image_height)
+        if expected_output is not None and roi_resolution != expected_output:
+            raise ValueError(f"ROI '{roi.name}' is tuned for {roi_resolution}, but selected models output {expected_output}.")
+
+    created_models: list[models.TestingRun] = []
+    skipped: list[TestingRunBulkSkipped] = []
+    inference_config = payload.inference_config or None
+    name_prefix = (payload.name_prefix or "").strip()
+    for training_run in training_runs:
+        pipeline = training_run.training_pipeline
+        configuration = pipeline.method_configuration
+        for dataset in datasets:
+            existing = _find_duplicate_testing_run(
+                db,
+                training_run.id,
+                dataset.id,
+                roi.id if roi else None,
+                inference_config,
+            )
+            if existing is not None:
+                skipped.append(
+                    TestingRunBulkSkipped(
+                        training_run_id=training_run.id,
+                        training_dataset_id=dataset.id,
+                        roi_id=roi.id if roi else None,
+                        existing_testing_run_id=existing.id,
+                        existing_name=existing.name,
+                        reason="duplicate",
+                    )
+                )
+                continue
+            base_name = f"{dataset.name} on {_snapshot_name(training_run)}"
+            name = f"{name_prefix}: {base_name}" if name_prefix else base_name
+            testing_run = models.TestingRun(
+                name=name[:255],
+                training_run_id=training_run.id,
+                training_dataset_id=dataset.id,
+                roi_id=roi.id if roi else None,
+                status="queued",
+                enqueued_at=_utcnow(),
+                queue_rank=next_queue_rank(db),
+                training_run_name=_snapshot_name(training_run),
+                training_pipeline_name=pipeline.name,
+                training_dataset_name=dataset.name,
+                preprocessing_pipeline_name=pipeline.preprocessing_pipeline.name,
+                method_type=configuration.method_type,
+                method_family=configuration.method_family,
+                training_mode=configuration.training_mode,
+                artifact_kind=training_run.artifact_kind,
+                artifact_path=training_run.artifact_path,
+                roi_name=roi.name if roi else None,
+                roi_geometry=_roi_geometry(roi),
+                expected_image_count=_estimated_training_dataset_count(dataset),
+                inference_config=inference_config,
+            )
+            db.add(testing_run)
+            db.flush()
+            created_models.append(testing_run)
+    db.commit()
+    created: list[TestingRunRead] = []
+    for run in created_models:
+        db.refresh(run)
+        created.append(_serialize_testing_run(run))
+    if wake_scheduler and created:
+        scheduler.wake()
+    return TestingRunBulkResponse(created=created, skipped=skipped, errors=[])
 
 
 def create_testing_run(db: Session, payload: TestingRunCreate) -> TestingRunRead:
@@ -1583,7 +1743,7 @@ def restart_testing_run(db: Session, run_id: int) -> TestingRunRead | None:
     # Clear prior results/CSV and re-queue the same row (one history per config).
     db.execute(delete(models.TestingRunResult).where(models.TestingRunResult.testing_run_id == run.id))
     shutil.rmtree(_testing_run_dir(run.id), ignore_errors=True)
-    _reset_testing_run_for_queue(run)
+    _reset_testing_run_for_queue(db, run)
     db.commit()
     db.refresh(run)
     scheduler.wake()

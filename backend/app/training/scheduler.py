@@ -128,6 +128,67 @@ def _pid_alive(pid: int | None) -> bool:
     return True
 
 
+def _queue_rows(db) -> list[tuple[str, object]]:
+    rows: list[tuple[str, object]] = []
+    for kind, spec in _KINDS.items():
+        model = spec["model"]
+        for run in db.scalars(select(model).where(model.status == "queued")):
+            rows.append((kind, run))
+    rows.sort(
+        key=lambda item: (
+            getattr(item[1], "queue_rank", None) is None,
+            getattr(item[1], "queue_rank", None) or 0,
+            getattr(item[1], "enqueued_at", None) or datetime.min,
+            item[1].id,
+        )
+    )
+    return rows
+
+
+def normalize_queue_ranks(db) -> bool:
+    changed = False
+    for rank, (_, run) in enumerate(_queue_rows(db), start=1):
+        if getattr(run, "queue_rank", None) != rank:
+            run.queue_rank = rank
+            changed = True
+    return changed
+
+
+def next_queue_rank(db) -> int:
+    normalize_queue_ranks(db)
+    rows = _queue_rows(db)
+    return (max((int(run.queue_rank or 0) for _, run in rows), default=0) + 1)
+
+
+def move_queued_job(db, kind: str, run_id: int, direction: str):
+    if kind not in _KINDS:
+        raise ValueError(f"Unsupported scheduler job kind: {kind}")
+    if direction not in {"up", "down"}:
+        raise ValueError("direction must be 'up' or 'down'.")
+    model = _KINDS[kind]["model"]
+    run = db.get(model, run_id)
+    if run is None:
+        return None
+    if run.status != "queued":
+        raise ValueError("Only queued scheduler jobs can be moved.")
+
+    normalize_queue_ranks(db)
+    rows = _queue_rows(db)
+    index = next((idx for idx, item in enumerate(rows) if item[0] == kind and item[1].id == run_id), -1)
+    if index < 0:
+        raise ValueError("Queued scheduler job was not found in the queue.")
+    target = index - 1 if direction == "up" else index + 1
+    if target < 0 or target >= len(rows):
+        raise ValueError("Scheduler job is already at the queue boundary.")
+
+    other = rows[target][1]
+    run.queue_rank, other.queue_rank = other.queue_rank, run.queue_rank
+    db.commit()
+    db.refresh(run)
+    scheduler.wake()
+    return run
+
+
 class JobScheduler:
     def __init__(self) -> None:
         # Keyed by (kind, run_id).
@@ -212,14 +273,10 @@ class JobScheduler:
         return total
 
     def _queued_jobs(self, db) -> list[tuple[str, object]]:
-        """All queued jobs across kinds, oldest first (by enqueued_at then id)."""
-        jobs: list[tuple] = []
-        for kind, spec in _KINDS.items():
-            model = spec["model"]
-            for run in db.scalars(select(model).where(model.status == "queued")):
-                jobs.append((run.enqueued_at or datetime.min, run.id, kind, run))
-        jobs.sort(key=lambda item: (item[0], item[1]))
-        return [(kind, run) for _, _, kind, run in jobs]
+        """All queued jobs across kinds, in user-controlled scheduler order."""
+        if normalize_queue_ranks(db):
+            db.commit()
+        return _queue_rows(db)
 
     def _loop(self) -> None:
         while not self._stop.is_set():

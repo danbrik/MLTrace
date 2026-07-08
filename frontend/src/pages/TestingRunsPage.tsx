@@ -17,16 +17,15 @@ import {
   Tooltip,
 } from '@mantine/core';
 import { notifications } from '@mantine/notifications';
-import { Check, Image as ImageIcon, Info, Pencil, Play, Search, Trash2 } from 'lucide-react';
+import { Check, Image as ImageIcon, Info, Play, Search, Trash2 } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { PointerEvent } from 'react';
 import type React from 'react';
 
 import {
-  ApiError,
+  bulkEnqueueTestingRuns,
   createRoi,
   deleteRoi,
-  enqueueTestingRun,
   listMethodConfigurations,
   listPreprocessingPipelines,
   listRois,
@@ -34,7 +33,6 @@ import {
   listTrainingPipelines,
   listTrainingRuns,
   previewRoi,
-  restartTestingRun,
 } from '../api';
 import { StepCard } from '../components/StepCard';
 import { usePendingIds } from '../hooks/usePendingIds';
@@ -394,14 +392,14 @@ export function TestingRunsPage({ active = true, onRunQueued }: { active?: boole
   // Model selection + filters.
   const [modelSearch, setModelSearch] = useState('');
   const [modelMethodFilter, setModelMethodFilter] = useState<string | null>(null);
-  const [confirmedModelId, setConfirmedModelId] = useState<number | null>(null);
+  const [selectedModelIds, setSelectedModelIds] = useState<number[]>([]);
 
   // Dataset + ROI selection.
-  const [selectedDatasetId, setSelectedDatasetId] = useState<number | null>(null);
+  const [selectedDatasetIds, setSelectedDatasetIds] = useState<number[]>([]);
   const [roiEnabled, setRoiEnabled] = useState(false);
   const [selectedRoiId, setSelectedRoiId] = useState<string | null>(null);
   const [runName, setRunName] = useState('');
-  const [runNameTouched, setRunNameTouched] = useState(false);
+  const [, setRunNameTouched] = useState(false);
   const [scoreMetric, setScoreMetric] = useState('mse');
   const [roiName, setRoiName] = useState('');
   const [preview, setPreview] = useState<RoiPreview | null>(null);
@@ -465,44 +463,66 @@ export function TestingRunsPage({ active = true, onRunQueued }: { active?: boole
     () => [...new Set(models.map((run) => run.method_type))].map((type) => ({ value: type, label: type })),
     [models],
   );
+  const selectedModels = useMemo(
+    () => selectedModelIds.map((id) => models.find((run) => run.id === id)).filter((run): run is TrainingRun => Boolean(run)),
+    [models, selectedModelIds],
+  );
+  const primaryModel = selectedModels[0] ?? null;
+  // The image size a test dataset must have = the selected models' preprocessing input size.
+  const requiredInputResolution = useMemo(() => {
+    if (!primaryModel) return null;
+    const pipeline = pipelineById.get(primaryModel.training_pipeline_id);
+    return pipeline ? formatResolution(pipeline.preprocessing_input_width, pipeline.preprocessing_input_height) : null;
+  }, [primaryModel, pipelineById]);
+
+  const requiredOutputResolution = useMemo(() => {
+    if (!primaryModel) return null;
+    const pipeline = pipelineById.get(primaryModel.training_pipeline_id);
+    return pipeline ? formatResolution(pipeline.preprocessing_output_width, pipeline.preprocessing_output_height) : null;
+  }, [primaryModel, pipelineById]);
+  const selectedOutputResolutions = useMemo(() => {
+    const values = new Set<string>();
+    selectedModels.forEach((run) => {
+      const pipeline = pipelineById.get(run.training_pipeline_id);
+      const output = pipeline ? formatResolution(pipeline.preprocessing_output_width, pipeline.preprocessing_output_height) : null;
+      if (output) values.add(output);
+    });
+    return [...values].sort();
+  }, [selectedModels, pipelineById]);
+
   const filteredModels = useMemo(() => {
     const query = modelSearch.trim().toLowerCase();
-      return models.filter((run) => {
+    return models.filter((run) => {
       if (modelMethodFilter && run.method_type !== modelMethodFilter) return false;
+      if (requiredInputResolution) {
+        const pipeline = pipelineById.get(run.training_pipeline_id);
+        const inputRes = pipeline ? formatResolution(pipeline.preprocessing_input_width, pipeline.preprocessing_input_height) : null;
+        if (inputRes !== requiredInputResolution && !selectedModelIds.includes(run.id)) return false;
+      }
       if (!query) return true;
-      return (
-        run.training_pipeline_name.toLowerCase().includes(query) ||
-        run.method_type.toLowerCase().includes(query)
-      );
+      return run.training_pipeline_name.toLowerCase().includes(query) || run.method_type.toLowerCase().includes(query);
     });
-  }, [models, modelSearch, modelMethodFilter]);
-
-  const confirmedModel = useMemo(
-    () => models.find((run) => run.id === confirmedModelId) ?? null,
-    [models, confirmedModelId],
-  );
-  // The image size a test dataset must have = the model's preprocessing input size.
-  const requiredInputResolution = useMemo(() => {
-    if (!confirmedModel) return null;
-    const pipeline = pipelineById.get(confirmedModel.training_pipeline_id);
-    return pipeline ? formatResolution(pipeline.preprocessing_input_width, pipeline.preprocessing_input_height) : null;
-  }, [confirmedModel, pipelineById]);
+  }, [models, modelSearch, modelMethodFilter, pipelineById, requiredInputResolution, selectedModelIds]);
 
   const compatibleDatasets = useMemo(() => {
-    if (!confirmedModel) return [];
+    if (selectedModels.length === 0) return [];
     if (!requiredInputResolution) return trainingDatasets;
     return trainingDatasets.filter((dataset) => datasetResolutions(dataset).includes(requiredInputResolution));
-  }, [confirmedModel, requiredInputResolution, trainingDatasets]);
+  }, [selectedModels.length, requiredInputResolution, trainingDatasets]);
 
-  const selectedDataset = trainingDatasets.find((dataset) => dataset.id === selectedDatasetId) ?? null;
+  const selectedDatasets = selectedDatasetIds
+    .map((id) => trainingDatasets.find((dataset) => dataset.id === id))
+    .filter((dataset): dataset is TrainingDataset => Boolean(dataset));
+  const previewDatasetId = selectedDatasetIds[0] ?? null;
   const selectedRoi = rois.find((roi) => String(roi.id) === selectedRoiId) ?? null;
   const selectedRoiMismatch =
     roiEnabled &&
     preview &&
     selectedRoi &&
     (preview.width !== selectedRoi.image_width || preview.height !== selectedRoi.image_height);
+  const roiModelOutputMismatch = roiEnabled && selectedOutputResolutions.length > 1;
 
-  const selectedTrainingPipeline = confirmedModel ? pipelineById.get(confirmedModel.training_pipeline_id) ?? null : null;
+  const selectedTrainingPipeline = primaryModel ? pipelineById.get(primaryModel.training_pipeline_id) ?? null : null;
   const selectedPreprocessing = selectedTrainingPipeline
     ? preprocessingById.get(selectedTrainingPipeline.preprocessing_pipeline_id) ?? null
     : null;
@@ -519,19 +539,24 @@ export function TestingRunsPage({ active = true, onRunQueued }: { active?: boole
     setScoreMetric(typeof defaultMetric === 'string' ? defaultMetric : 'mse');
   }, [selectedMethodConfiguration?.id]);
 
-  const suggestedRunName = useMemo(() => {
-    if (!confirmedModel || !selectedDataset) return '';
-    const roiPart = roiEnabled && selectedRoi ? selectedRoi.name : 'full image';
-    return `${confirmedModel.training_pipeline_name} on ${selectedDataset.name} (${roiPart})`;
-  }, [confirmedModel, selectedDataset, roiEnabled, selectedRoi]);
+  function toggleModel(runId: number) {
+    setSelectedModelIds((current) => {
+      const next = current.includes(runId) ? current.filter((id) => id !== runId) : [...current, runId];
+      if (next.length === 0) {
+        setSelectedDatasetIds([]);
+        setSelectedRoiId(null);
+        setPreview(null);
+        setPoints(null);
+        setRoiEnabled(false);
+      }
+      return next;
+    });
+    setRunNameTouched(false);
+  }
 
-  useEffect(() => {
-    if (!runNameTouched) setRunName(suggestedRunName);
-  }, [suggestedRunName, runNameTouched]);
-
-  function confirmModel(runId: number) {
-    setConfirmedModelId(runId);
-    setSelectedDatasetId(null);
+  function clearModels() {
+    setSelectedModelIds([]);
+    setSelectedDatasetIds([]);
     setSelectedRoiId(null);
     setPreview(null);
     setPoints(null);
@@ -540,11 +565,11 @@ export function TestingRunsPage({ active = true, onRunQueued }: { active?: boole
   }
 
   async function handlePreview() {
-    if (!confirmedModelId || !selectedDatasetId) return;
+    if (!primaryModel || !previewDatasetId) return;
     if (loadingPreview) return;
     setLoadingPreview(true);
     try {
-      const nextPreview = await previewRoi({ training_run_id: confirmedModelId, training_dataset_id: selectedDatasetId });
+      const nextPreview = await previewRoi({ training_run_id: primaryModel.id, training_dataset_id: previewDatasetId });
       setPreview(nextPreview);
       setPoints(defaultRoiPoints(nextPreview));
       if (!roiName) setRoiName(`ROI ${nextPreview.width}x${nextPreview.height}`);
@@ -599,40 +624,27 @@ export function TestingRunsPage({ active = true, onRunQueued }: { active?: boole
   }
 
   async function handleRun() {
-    if (!confirmedModelId || !selectedDatasetId || selectedRoiMismatch) return;
+    if (selectedModelIds.length === 0 || selectedDatasetIds.length === 0 || selectedRoiMismatch) return;
     if (running) return;
     setRunning(true);
     try {
-      const run = await enqueueTestingRun({
-        training_run_id: confirmedModelId,
-        training_dataset_id: selectedDatasetId,
+      const response = await bulkEnqueueTestingRuns({
+        training_run_ids: selectedModelIds,
+        training_dataset_ids: selectedDatasetIds,
         roi_id: roiEnabled && selectedRoiId ? Number(selectedRoiId) : null,
-        name: runName.trim() || null,
+        name_prefix: runName.trim() || null,
         inference_config: { error_metric: scoreMetric },
       });
       setRunName('');
       setRunNameTouched(false);
-      notifications.show({ color: 'green', title: 'Testing queued', message: run.name });
+      notifications.show({
+        color: response.created.length > 0 ? 'green' : 'blue',
+        title: 'Inference queue updated',
+        message: `${response.created.length} queued, ${response.skipped.length} duplicate${response.skipped.length === 1 ? '' : 's'} skipped.`,
+      });
       onRunQueued?.();
     } catch (error) {
-      // Duplicate config: re-run (restart) the existing testing run instead.
-      if (error instanceof ApiError && error.status === 409) {
-        const detail = error.detail as { existing_testing_run_id?: number } | undefined;
-        if (detail?.existing_testing_run_id) {
-          try {
-            await restartTestingRun(detail.existing_testing_run_id);
-            notifications.show({ color: 'blue', title: 'Re-running existing testing run', message: error.message });
-            onRunQueued?.();
-            return;
-          } catch (restartError) {
-            notifyError('Could not re-run existing testing run', restartError);
-            return;
-          }
-        }
-        notifications.show({ color: 'orange', title: 'Duplicate testing run', message: error.message });
-      } else {
-        notifyError('Could not queue testing run', error);
-      }
+      notifyError('Could not queue inference batch', error);
     } finally {
       setRunning(false);
     }
@@ -652,61 +664,46 @@ export function TestingRunsPage({ active = true, onRunQueued }: { active?: boole
       {/* Step 1: model selection */}
       <StepCard
         index={1}
-        title="Trained model"
+        title="Trained models"
         color="blue"
-        complete={confirmedModel != null}
-        action={
-          confirmedModel ? (
-            <Button variant="subtle" leftSection={<Pencil size={16} />} onClick={() => setConfirmedModelId(null)}>
-              Change model
-            </Button>
-          ) : undefined
-        }
+        complete={selectedModels.length > 0}
+        action={selectedModels.length > 0 ? <Button variant="subtle" onClick={clearModels}>Clear</Button> : undefined}
       >
-
-          {confirmedModel ? (
+          {selectedModels.length > 0 && (
             <Alert color="green" icon={<Check size={16} />}>
-              <Group gap="xs" justify="space-between">
+              <Stack gap="xs">
                 <Group gap="xs">
-                  <Text fw={600}>{confirmedModel.training_pipeline_name}</Text>
+                  <Badge variant="light" color="blue">{selectedModels.length} selected</Badge>
                   <Text size="sm" c="dimmed">
-                    {methodLabel(methodByType.get(confirmedModel.method_type), confirmedModel.method_type)} ·{' '}
-                    {confirmedModel.artifact_kind} · expects input {requiredInputResolution ?? 'n/a'}
+                    Raw input locked to {requiredInputResolution ?? 'n/a'}
+                    {roiEnabled ? ` · ROI output ${requiredOutputResolution ?? 'n/a'}` : ''}
                   </Text>
-                  {selectedVaeSampleCount != null && (
-                    <Tooltip
-                      label="VAE sample_count controls reconstruction sampling. 1 uses the deterministic mu reconstruction and is fast; 100 averages Monte Carlo samples like Baur-style evaluation."
-                      multiline
-                      w={320}
-                      withArrow
-                    >
-                      <Badge variant="light" color={selectedVaeSampleCount > 1 ? 'violet' : 'gray'}>
-                        VAE samples {selectedVaeSampleCount}
-                      </Badge>
-                    </Tooltip>
+                  {selectedVaeSampleCount != null && selectedModels.length === 1 && (
+                    <Badge variant="light" color={selectedVaeSampleCount > 1 ? 'violet' : 'gray'}>
+                      VAE samples {selectedVaeSampleCount}
+                    </Badge>
                   )}
                 </Group>
-                <Group gap={4}>
-                  <Tooltip label="Inspect trainsets">
-                    <ActionIcon variant="subtle" onClick={() => setDetailModal({ title: 'Trainsets', body: renderPipelineDatasets(selectedTrainingPipeline, trainingDatasets) })}>
-                      <Info size={16} />
-                    </ActionIcon>
-                  </Tooltip>
-                  <Tooltip label="Inspect preprocessing">
-                    <ActionIcon variant="subtle" onClick={() => setDetailModal({ title: 'Preprocessing pipeline', body: renderPreprocessingDetails(selectedPreprocessing) })}>
-                      <Info size={16} />
-                    </ActionIcon>
-                  </Tooltip>
-                  <Tooltip label="Inspect method architecture">
-                    <ActionIcon variant="subtle" onClick={() => setDetailModal({ title: 'Method architecture', body: renderMethodDetails(selectedMethodConfiguration) })}>
-                      <Info size={16} />
-                    </ActionIcon>
-                  </Tooltip>
+                <Group gap="xs">
+                  {selectedModels.map((run) => (
+                    <Badge key={run.id} variant="filled" color="blue" rightSection={
+                      <ActionIcon
+                        size="xs"
+                        variant="transparent"
+                        color="white"
+                        aria-label={`Remove ${run.training_pipeline_name}`}
+                        onClick={() => toggleModel(run.id)}
+                      >
+                        <Trash2 size={10} />
+                      </ActionIcon>
+                    }>
+                      {run.training_pipeline_name}
+                    </Badge>
+                  ))}
                 </Group>
-              </Group>
+              </Stack>
             </Alert>
-          ) : (
-            <>
+          )}
               <TextInput
                 placeholder="Search by pipeline or method"
                 leftSection={<Search size={16} />}
@@ -737,8 +734,13 @@ export function TestingRunsPage({ active = true, onRunQueued }: { active?: boole
                       const inputRes = pipeline
                         ? formatResolution(pipeline.preprocessing_input_width, pipeline.preprocessing_input_height)
                         : null;
+                      const outputRes = pipeline
+                        ? formatResolution(pipeline.preprocessing_output_width, pipeline.preprocessing_output_height)
+                        : null;
+                      const selected = selectedModelIds.includes(run.id);
+                      const disabledByRoi = roiEnabled && requiredOutputResolution !== null && outputRes !== requiredOutputResolution && !selected;
                       return (
-                        <Table.Tr key={run.id}>
+                        <Table.Tr key={run.id} className={selected ? 'pipeline-step selected' : 'pipeline-step'}>
                           <Table.Td>{run.training_pipeline_name}</Table.Td>
                           <Table.Td>
                             <Group gap={4} wrap="nowrap">
@@ -795,9 +797,17 @@ export function TestingRunsPage({ active = true, onRunQueued }: { active?: boole
                           </Table.Td>
                           <Table.Td>
                             <Group justify="flex-end">
-                              <Button size="compact-sm" variant="light" leftSection={<Check size={14} />} onClick={() => confirmModel(run.id)}>
-                                Use
-                              </Button>
+                              <Tooltip label={disabledByRoi ? `ROI requires output ${requiredOutputResolution}` : selected ? 'Remove model' : 'Select model'}>
+                                <Button
+                                  size="compact-sm"
+                                  variant={selected ? 'filled' : 'light'}
+                                  leftSection={<Check size={14} />}
+                                  disabled={disabledByRoi}
+                                  onClick={() => toggleModel(run.id)}
+                                >
+                                  {selected ? 'Selected' : 'Select'}
+                                </Button>
+                              </Tooltip>
                             </Group>
                           </Table.Td>
                         </Table.Tr>
@@ -807,15 +817,13 @@ export function TestingRunsPage({ active = true, onRunQueued }: { active?: boole
                 </Table>
               </ScrollArea>
               {models.length === 0 && <Alert color="blue">No trained models yet. Run a training pipeline first.</Alert>}
-            </>
-          )}
       </StepCard>
 
       {/* Step 2: compatible dataset + ROI + run */}
-      {confirmedModel && (
-        <StepCard index={2} title="Inference dataset & run" color="violet" complete={selectedDatasetId != null}>
+      {selectedModels.length > 0 && (
+        <StepCard index={2} title="Inference datasets & run" color="violet" complete={selectedDatasetIds.length > 0}>
             <Text size="xs" c="dimmed">
-              Showing datasets whose image size matches the model's preprocessing input ({requiredInputResolution ?? 'any'}).
+              Showing datasets whose image size matches the selected models' preprocessing input ({requiredInputResolution ?? 'any'}).
             </Text>
             <ScrollArea h={200}>
               <Table striped highlightOnHover verticalSpacing="xs">
@@ -829,44 +837,56 @@ export function TestingRunsPage({ active = true, onRunQueued }: { active?: boole
                   </Table.Tr>
                 </Table.Thead>
                 <Table.Tbody>
-                  {compatibleDatasets.map((dataset) => (
-                    <Table.Tr
-                      key={dataset.id}
-                      className={dataset.id === selectedDatasetId ? 'pipeline-step selected' : 'pipeline-step'}
-                      style={{ cursor: 'pointer' }}
-                      onClick={() => {
-                        setSelectedDatasetId(dataset.id === selectedDatasetId ? null : dataset.id);
-                        setPreview(null);
-                        setPoints(null);
-                        setRunNameTouched(false);
-                      }}
-                    >
-                      <Table.Td>{dataset.name}</Table.Td>
-                      <Table.Td>{dataset.usage_label ?? 'train'}</Table.Td>
-                      <Table.Td>
-                        <Group gap={4}>
-                          {datasetResolutions(dataset).map((res) => (
-                            <Badge key={res} size="xs" variant="light" color="teal">
-                              {res}
-                            </Badge>
-                          ))}
-                        </Group>
-                      </Table.Td>
-                      <Table.Td>{dataset.counts_missing ? 'Needs refresh' : dataset.total_selected_images}</Table.Td>
-                      <Table.Td>{dataset.id === selectedDatasetId && <Check size={16} />}</Table.Td>
-                    </Table.Tr>
-                  ))}
+                  {compatibleDatasets.map((dataset) => {
+                    const selected = selectedDatasetIds.includes(dataset.id);
+                    return (
+                      <Table.Tr
+                        key={dataset.id}
+                        className={selected ? 'pipeline-step selected' : 'pipeline-step'}
+                        style={{ cursor: 'pointer' }}
+                        onClick={() => {
+                          setSelectedDatasetIds((current) =>
+                            current.includes(dataset.id) ? current.filter((id) => id !== dataset.id) : [...current, dataset.id],
+                          );
+                          setPreview(null);
+                          setPoints(null);
+                          setRunNameTouched(false);
+                        }}
+                      >
+                        <Table.Td>{dataset.name}</Table.Td>
+                        <Table.Td>{dataset.usage_label ?? 'train'}</Table.Td>
+                        <Table.Td>
+                          <Group gap={4}>
+                            {datasetResolutions(dataset).map((res) => (
+                              <Badge key={res} size="xs" variant="light" color="teal">
+                                {res}
+                              </Badge>
+                            ))}
+                          </Group>
+                        </Table.Td>
+                        <Table.Td>{dataset.counts_missing ? 'Needs refresh' : dataset.total_selected_images}</Table.Td>
+                        <Table.Td>{selected && <Check size={16} />}</Table.Td>
+                      </Table.Tr>
+                    );
+                  })}
                 </Table.Tbody>
               </Table>
             </ScrollArea>
             {compatibleDatasets.length === 0 && (
               <Alert color="yellow">No size-compatible inference datasets found for input {requiredInputResolution ?? 'n/a'}.</Alert>
             )}
+            {selectedDatasets.length > 0 && (
+              <Alert color="blue">
+                {selectedDatasets.length} dataset{selectedDatasets.length === 1 ? '' : 's'} selected ·{' '}
+                {selectedModelIds.length * selectedDatasets.length} inference run
+                {selectedModelIds.length * selectedDatasets.length === 1 ? '' : 's'} will be queued.
+              </Alert>
+            )}
 
             <Group align="flex-end">
               <TextInput
-                label="Run name"
-                description="Generated from model, dataset, and ROI; editable before queueing."
+                label="Name prefix"
+                description="Optional prefix added to each queued inference run."
                 placeholder="Auto"
                 value={runName}
                 onChange={(event) => {
@@ -899,9 +919,9 @@ export function TestingRunsPage({ active = true, onRunQueued }: { active?: boole
                 leftSection={<Play size={16} />}
                 onClick={handleRun}
                 loading={running}
-                disabled={!selectedDatasetId || Boolean(selectedRoiMismatch)}
+                disabled={selectedDatasetIds.length === 0 || Boolean(selectedRoiMismatch) || roiModelOutputMismatch}
               >
-                Run
+                Run {selectedModelIds.length * selectedDatasetIds.length || ''}
               </Button>
             </Group>
 
@@ -945,7 +965,7 @@ export function TestingRunsPage({ active = true, onRunQueued }: { active?: boole
                         leftSection={<ImageIcon size={16} />}
                         onClick={handlePreview}
                         loading={loadingPreview}
-                        disabled={!selectedDatasetId}
+                        disabled={!previewDatasetId || roiModelOutputMismatch}
                       >
                         Load ROI Preview
                       </Button>
@@ -973,6 +993,12 @@ export function TestingRunsPage({ active = true, onRunQueued }: { active?: boole
               <Alert color="red">
                 Selected ROI is tuned for {selectedRoi.image_width}x{selectedRoi.image_height}, but the preview is{' '}
                 {preview.width}x{preview.height}.
+              </Alert>
+            )}
+            {roiModelOutputMismatch && (
+              <Alert color="red">
+                ROI scoring requires all selected models to produce the same output size. Current outputs:{' '}
+                {selectedOutputResolutions.join(', ')}.
               </Alert>
             )}
 

@@ -798,6 +798,16 @@ class TrainingRunEnqueueRequest(BaseModel):
     training_pipeline_id: int
 
 
+class SchedulerJobMoveRequest(BaseModel):
+    direction: Literal["up", "down"]
+
+
+class SchedulerJobMoveResponse(BaseModel):
+    kind: Literal["train", "test", "heatmap"]
+    run_id: int
+    queue_rank: int | None
+
+
 class TrainingRunMetricRead(BaseModel):
     epoch: int
     train_loss: float | None
@@ -809,6 +819,7 @@ class TrainingRunRead(BaseModel):
     training_pipeline_id: int
     status: str
     enqueued_at: datetime | None
+    queue_rank: int | None = None
     started_at: datetime | None
     ended_at: datetime | None
     duration_seconds: float | None
@@ -934,6 +945,35 @@ class TestingRunCreate(BaseModel):
     inference_config: dict | None = None
 
 
+class TestingRunBulkCreate(BaseModel):
+    __test__: ClassVar[bool] = False
+
+    training_run_ids: list[int] = Field(min_length=1)
+    training_dataset_ids: list[int] = Field(min_length=1)
+    roi_id: int | None = None
+    name_prefix: str | None = Field(default=None, max_length=255)
+    inference_config: dict | None = None
+
+
+class TestingRunBulkSkipped(BaseModel):
+    __test__: ClassVar[bool] = False
+
+    training_run_id: int
+    training_dataset_id: int
+    roi_id: int | None = None
+    existing_testing_run_id: int
+    existing_name: str
+    reason: str
+
+
+class TestingRunBulkError(BaseModel):
+    __test__: ClassVar[bool] = False
+
+    training_run_id: int | None = None
+    training_dataset_id: int | None = None
+    message: str
+
+
 class TestingRunResultRead(BaseModel):
     __test__: ClassVar[bool] = False
 
@@ -960,6 +1000,7 @@ class TestingRunRead(BaseModel):
     roi_id: int | None
     status: str
     enqueued_at: datetime | None = None
+    queue_rank: int | None = None
     started_at: datetime | None
     ended_at: datetime | None
     duration_seconds: float | None
@@ -991,6 +1032,14 @@ class TestingRunRead(BaseModel):
     inference_config: dict | None = None
     created_at: datetime
     updated_at: datetime
+
+
+class TestingRunBulkResponse(BaseModel):
+    __test__: ClassVar[bool] = False
+
+    created: list[TestingRunRead]
+    skipped: list[TestingRunBulkSkipped] = []
+    errors: list[TestingRunBulkError] = []
 
 
 class TestingRunResultsResponse(BaseModel):
@@ -1137,6 +1186,7 @@ class HeatmapRangeRunRead(BaseModel):
     status: str
     error_message: str | None
     enqueued_at: datetime | None
+    queue_rank: int | None = None
     started_at: datetime | None
     ended_at: datetime | None
     duration_seconds: float | None

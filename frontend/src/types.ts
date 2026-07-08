@@ -449,6 +449,7 @@ export type TrainingRun = {
   training_pipeline_id: number;
   status: TrainingRunStatus;
   enqueued_at: string | null;
+  queue_rank: number | null;
   started_at: string | null;
   ended_at: string | null;
   duration_seconds: number | null;
@@ -547,6 +548,7 @@ export type TestingRun = {
   roi_id: number | null;
   status: TestingRunStatus | string;
   enqueued_at: string | null;
+  queue_rank: number | null;
   started_at: string | null;
   ended_at: string | null;
   duration_seconds: number | null;
@@ -576,6 +578,27 @@ export type TestingRun = {
   inference_config: Record<string, unknown> | null;
   created_at: string;
   updated_at: string;
+};
+
+export type TestingRunBulkSkipped = {
+  training_run_id: number;
+  training_dataset_id: number;
+  roi_id: number | null;
+  existing_testing_run_id: number;
+  existing_name: string;
+  reason: string;
+};
+
+export type TestingRunBulkError = {
+  training_run_id: number | null;
+  training_dataset_id: number | null;
+  message: string;
+};
+
+export type TestingRunBulkResponse = {
+  created: TestingRun[];
+  skipped: TestingRunBulkSkipped[];
+  errors: TestingRunBulkError[];
 };
 
 export type TestingRunResult = {
@@ -689,6 +712,7 @@ export type HeatmapRangeRun = {
   status: string;
   error_message: string | null;
   enqueued_at: string | null;
+  queue_rank: number | null;
   started_at: string | null;
   ended_at: string | null;
   duration_seconds: number | null;
