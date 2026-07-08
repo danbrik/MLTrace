@@ -7,7 +7,7 @@ from dataclasses import dataclass
 import numpy as np
 from PIL import Image
 
-from app.preprocessing.base import ImageSpec
+from app.preprocessing.base import ImageLoadError, ImageSpec  # noqa: F401 re-exported for engines
 from app.preprocessing.registry import PreprocessingRegistry, registry
 import app.preprocessing.steps  # noqa: F401 ensures core steps are registered
 from app.schemas import PreprocessingGraph, PreprocessingPreviewImage

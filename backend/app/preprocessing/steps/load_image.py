@@ -5,7 +5,7 @@ from pathlib import Path
 import numpy as np
 from PIL import Image
 
-from app.preprocessing.base import BasePreprocessingStep, ImageSpec
+from app.preprocessing.base import BasePreprocessingStep, ImageLoadError, ImageSpec
 
 
 class LoadImageStep(BasePreprocessingStep):
@@ -71,19 +71,23 @@ class LoadImageStep(BasePreprocessingStep):
         cfg = self.merged_config(config)
         mode = cfg["mode"]
         dtype = cfg["dtype"]
-        with Image.open(path) as loaded:
-            lock = self._lock_dims(config)
-            if lock is not None and (loaded.width, loaded.height) != lock:
-                raise ValueError(
-                    f"Input size is locked to {lock[0]}x{lock[1]}, but the selected image is "
-                    f"{loaded.width}x{loaded.height}."
-                )
-            if mode == "unchanged":
-                array = np.asarray(loaded)
-            elif mode == "grayscale":
-                array = np.asarray(loaded.convert("L"))
-            else:
-                array = np.asarray(loaded.convert("RGB"))
-            if dtype == "source":
-                return array
-            return array.astype(dtype)
+        try:
+            with Image.open(path) as loaded:
+                lock = self._lock_dims(config)
+                if lock is not None and (loaded.width, loaded.height) != lock:
+                    raise ValueError(
+                        f"Input size is locked to {lock[0]}x{lock[1]}, but the selected image is "
+                        f"{loaded.width}x{loaded.height}."
+                    )
+                if mode == "unchanged":
+                    array = np.asarray(loaded)
+                elif mode == "grayscale":
+                    array = np.asarray(loaded.convert("L"))
+                else:
+                    array = np.asarray(loaded.convert("RGB"))
+        except OSError as exc:
+            # UnidentifiedImageError, truncated-decode OSError, FileNotFoundError.
+            raise ImageLoadError(str(path), exc) from exc
+        if dtype == "source":
+            return array
+        return array.astype(dtype)

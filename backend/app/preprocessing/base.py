@@ -21,6 +21,18 @@ class ImageSpec:
     dtype: str | None = None
 
 
+class ImageLoadError(ValueError):
+    """A source image could not be decoded (corrupt, truncated, or missing)."""
+
+    def __init__(self, path: str, original: BaseException) -> None:
+        super().__init__(f"Could not load image '{path}': {original}")
+        self.path = str(path)
+        self.original = original
+
+    def __reduce__(self):  # keep picklable across DataLoader worker processes
+        return (type(self), (self.path, self.original))
+
+
 class BasePreprocessingStep(ABC):
     """Base class for modular preprocessing building blocks."""
 

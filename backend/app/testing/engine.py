@@ -21,7 +21,7 @@ from concurrent.futures import ThreadPoolExecutor
 from app import models
 from app.database import SessionLocal
 from app.logging_setup import log_device_diagnostics
-from app.preprocessing.pipeline import run_pipeline_array
+from app.preprocessing.pipeline import ImageLoadError, run_pipeline_array
 from app.schemas import PreprocessingGraph
 from app.testing.service import (
     ArtifactEvaluator,
@@ -40,6 +40,9 @@ logger = logging.getLogger("mltrace.testing")
 # Images per (GPU-)batched reconstruction. Bounded RAM: only this many images
 # are decoded/preprocessed and held at once.
 _INFER_BATCH = 16
+
+# Cap on skipped-image paths persisted on the run row; the count stays exact.
+_MAX_SKIPPED_PATHS = 200
 
 _CSV_HEADER = [
     "position", "timestamp", "image_path", "score", "full_mse",
@@ -153,6 +156,9 @@ def run_testing(run_id: int, abort_event: threading.Event | None = None) -> None
             pipeline = training_run.training_pipeline
             graph = PreprocessingGraph.model_validate(pipeline.preprocessing_pipeline.graph)
             evaluator = ArtifactEvaluator(training_run, run.inference_config)
+            # Unreadable/corrupt images skipped during this run ("skip + report").
+            # Appended from prep worker threads (list.append is thread-safe).
+            skipped_paths: list[str] = []
             is_stae = pipeline.method_configuration.builder_kind == "spatiotemporal_autoencoder"
             if is_stae:
                 method_config = pipeline.method_configuration.method_config or {}
@@ -198,8 +204,16 @@ def run_testing(run_id: int, abort_event: threading.Event | None = None) -> None
                 def _prep_clip(clip):
                     input_paths = [frame.file_path for frame in clip.input_frames]
                     future_paths = [frame.file_path for frame in clip.future_frames]
-                    input_tensor = _clip_tensor_from_paths(graph, input_paths)
-                    future_tensor = _clip_tensor_from_paths(graph, future_paths) if future_paths else None
+                    try:
+                        input_tensor = _clip_tensor_from_paths(graph, input_paths)
+                        future_tensor = _clip_tensor_from_paths(graph, future_paths) if future_paths else None
+                    except ImageLoadError as exc:
+                        logger.warning(
+                            "STAE testing run %s skipping clip with unreadable frame: %s (%s)",
+                            run_id, exc.path, exc.original,
+                        )
+                        skipped_paths.append(exc.path)
+                        return clip, None, None
                     return clip, input_tensor, future_tensor
 
                 with open(results_path, "w", encoding="utf-8", newline="") as handle:
@@ -210,10 +224,15 @@ def run_testing(run_id: int, abort_event: threading.Event | None = None) -> None
                             if abort_event.is_set():
                                 raise AbortedError()
                             prepared = list(pool.map(_prep_clip, clips[start : start + _INFER_BATCH]))
+                            prepared = [item for item in prepared if item[1] is not None]
+                            if not prepared:
+                                run.image_count = count
+                                db.commit()
+                                continue
                             outputs = evaluator.reconstruct_clip_batch([item[1] for item in prepared])
                             mappings = []
-                            for offset, ((clip, input_tensor, future_tensor), output) in enumerate(zip(prepared, outputs)):
-                                position = start + offset
+                            for (clip, input_tensor, future_tensor), output in zip(prepared, outputs):
+                                position = count
                                 reconstruction = output["reconstruction"]
                                 prediction = output["prediction"]
                                 reconstruction_score, reconstruction_metric_metadata = _score_clip_pair(
@@ -302,16 +321,22 @@ def run_testing(run_id: int, abort_event: threading.Event | None = None) -> None
                                 score_min = combined if score_min is None else min(score_min, combined)
                                 score_max = combined if score_max is None else max(score_max, combined)
                             db.bulk_insert_mappings(models.TestingRunResult, mappings)
-                            run.image_count = start + len(prepared)
+                            run.image_count = count
                             db.commit()
                             if (start // _INFER_BATCH) % 20 == 0:
                                 rate = count / max(1e-6, time.perf_counter() - started)
                                 logger.info("STAE testing run %s: %s/%s (%.0f clips/s)", run_id, count, total, rate)
 
+                if count == 0:
+                    raise ValueError(
+                        f"All {total} clips failed to load; see the skipped image list."
+                    )
                 run.status = "finished"
                 run.ended_at = _utcnow()
                 run.duration_seconds = round(time.perf_counter() - started, 3)
                 run.image_count = count
+                run.skipped_image_count = len(skipped_paths)
+                run.skipped_images = sorted(set(skipped_paths))[:_MAX_SKIPPED_PATHS]
                 run.score_mean = score_sum / count if count else None
                 run.score_min = score_min
                 run.score_max = score_max
@@ -330,7 +355,15 @@ def run_testing(run_id: int, abort_event: threading.Event | None = None) -> None
             db.commit()
 
             def _prep(record):
-                return run_pipeline_array(graph, record.file_path)
+                try:
+                    return record, run_pipeline_array(graph, record.file_path)
+                except ImageLoadError as exc:
+                    logger.warning(
+                        "Testing run %s skipping unreadable image: %s (%s)",
+                        run_id, record.file_path, exc.original,
+                    )
+                    skipped_paths.append(record.file_path)
+                    return record, None
 
             # Streaming, batched inference: preprocess a batch (parallel), score it
             # with one reconstruction pass, write rows via bulk insert + the CSV
@@ -355,13 +388,18 @@ def run_testing(run_id: int, abort_event: threading.Event | None = None) -> None
                         if abort_event.is_set():
                             raise AbortedError()
                         batch = records[start : start + _INFER_BATCH]
-                        images = list(pool.map(_prep, batch))
-                        scored = evaluator.score_batch(images, roi)
+                        prepared = list(pool.map(_prep, batch))
+                        prepared = [(record, image) for record, image in prepared if image is not None]
+                        if not prepared:
+                            run.image_count = count
+                            db.commit()
+                            continue
+                        scored = evaluator.score_batch([image for _, image in prepared], roi)
                         mappings = []
-                        for offset, (record, (full_mse, roi_mse, width, height, tile_scores, score_metadata)) in enumerate(
-                            zip(batch, scored)
+                        for (record, _), (full_mse, roi_mse, width, height, tile_scores, score_metadata) in zip(
+                            prepared, scored
                         ):
-                            position = start + offset
+                            position = count
                             fast_meta = score_metadata.get("fast_anogan") if isinstance(score_metadata, dict) else None
                             score = (
                                 float(fast_meta["combined_score"])
@@ -402,16 +440,22 @@ def run_testing(run_id: int, abort_event: threading.Event | None = None) -> None
                                 roi_sum += roi_mse
                                 roi_count += 1
                         db.bulk_insert_mappings(models.TestingRunResult, mappings)
-                        run.image_count = start + len(batch)
+                        run.image_count = count
                         db.commit()
                         if (start // _INFER_BATCH) % 20 == 0:
                             rate = count / max(1e-6, time.perf_counter() - started)
                             logger.info("Testing run %s: %s/%s (%.0f img/s)", run_id, count, total, rate)
 
+            if count == 0:
+                raise ValueError(
+                    f"All {total} images failed to load; see the skipped image list."
+                )
             run.status = "finished"
             run.ended_at = _utcnow()
             run.duration_seconds = round(time.perf_counter() - started, 3)
             run.image_count = count
+            run.skipped_image_count = len(skipped_paths)
+            run.skipped_images = sorted(set(skipped_paths))[:_MAX_SKIPPED_PATHS]
             run.score_mean = score_sum / count if count else None
             run.score_min = score_min
             run.score_max = score_max

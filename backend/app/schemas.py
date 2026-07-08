@@ -820,6 +820,8 @@ class TrainingRunRead(BaseModel):
     val_loss: float | None
     best_val_loss: float | None
     image_count: int | None
+    skipped_image_count: int | None = None
+    skipped_images: list[str] | None = None
     artifact_kind: str | None
     artifact_path: str | None
     artifact_size_bytes: int | None
@@ -966,6 +968,8 @@ class TestingRunRead(BaseModel):
     error_message: str | None
     image_count: int | None
     expected_image_count: int | None = None
+    skipped_image_count: int | None = None
+    skipped_images: list[str] | None = None
     score_mean: float | None
     score_min: float | None
     score_max: float | None

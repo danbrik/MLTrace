@@ -316,6 +316,9 @@ class TrainingRun(Base):
     val_loss: Mapped[float | None] = mapped_column(Float)
     best_val_loss: Mapped[float | None] = mapped_column(Float)
     image_count: Mapped[int | None] = mapped_column(Integer)
+    # Corrupt/unreadable source images skipped during the run ("skip + report").
+    skipped_image_count: Mapped[int | None] = mapped_column(Integer)
+    skipped_images: Mapped[list | None] = mapped_column(json_type())
 
     # Artifact (model weights or mean image) written to disk.
     artifact_kind: Mapped[str | None] = mapped_column(String(64))
@@ -431,6 +434,9 @@ class TestingRun(Base):
 
     image_count: Mapped[int | None] = mapped_column(Integer)
     expected_image_count: Mapped[int | None] = mapped_column(Integer)
+    # Corrupt/unreadable source images skipped during the run ("skip + report").
+    skipped_image_count: Mapped[int | None] = mapped_column(Integer)
+    skipped_images: Mapped[list | None] = mapped_column(json_type())
     score_mean: Mapped[float | None] = mapped_column(Float)
     score_min: Mapped[float | None] = mapped_column(Float)
     score_max: Mapped[float | None] = mapped_column(Float)

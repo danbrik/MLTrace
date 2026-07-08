@@ -6,7 +6,7 @@ import numpy as np
 import pytest
 from PIL import Image
 
-from app.preprocessing.base import BasePreprocessingStep, ImageSpec
+from app.preprocessing.base import BasePreprocessingStep, ImageLoadError, ImageSpec
 from app.preprocessing.pipeline import (
     compile_pipeline,
     encode_absolute_preview_png_data_url,
@@ -245,6 +245,28 @@ def test_load_image_size_lock_rejects_mismatched_size(tmp_path: Path) -> None:
             {"lock_size": True, "lock_width": 21, "lock_height": 10},
             {"source_image_path": str(image_path)},
         )
+
+
+def test_load_image_raises_image_load_error_for_corrupt_file(tmp_path: Path) -> None:
+    image_path = tmp_path / "corrupt.tiff"
+    image_path.write_bytes(b"this is not a tiff")
+    pipeline_graph = graph([{"id": "load", "type": "load_image", "config": {}}], [])
+
+    with pytest.raises(ImageLoadError) as err:
+        run_pipeline_array(pipeline_graph, str(image_path))
+
+    assert err.value.path == str(image_path)
+    assert isinstance(err.value, ValueError)
+
+
+def test_load_image_raises_image_load_error_for_missing_file(tmp_path: Path) -> None:
+    image_path = tmp_path / "does_not_exist.tiff"
+    pipeline_graph = graph([{"id": "load", "type": "load_image", "config": {}}], [])
+
+    with pytest.raises(ImageLoadError) as err:
+        run_pipeline_array(pipeline_graph, str(image_path))
+
+    assert err.value.path == str(image_path)
 
 
 def test_grayscale_propagates_single_channel(tmp_path: Path) -> None:

@@ -19,6 +19,7 @@ import threading
 import time
 from datetime import datetime
 from pathlib import Path
+from typing import NamedTuple
 
 import numpy as np
 
@@ -28,7 +29,7 @@ from app.logging_setup import log_device_diagnostics
 from app.metrics.ssim import ssim_loss_torch
 from app.modeling.fast_anogan import build_fast_anogan_modules, fast_anogan_forward
 from app.modeling.forward import build_sequential_modules, build_spatiotemporal_modules
-from app.preprocessing.pipeline import CompiledPreprocessingPipeline, compile_pipeline
+from app.preprocessing.pipeline import CompiledPreprocessingPipeline, ImageLoadError, compile_pipeline
 from app.schemas import PreprocessingGraph
 
 logger = logging.getLogger("mltrace.training")
@@ -37,6 +38,51 @@ DEFAULT_VALIDATION_FRACTION = 0.0
 SPLIT_SEED = 42
 CPU_GRADIENT_MAX_IMAGES = 5000
 CPU_GRADIENT_MAX_PIXELS = 512 * 512
+
+# Cap on skipped-image paths persisted on the run row; the count stays exact.
+_MAX_SKIPPED_PATHS = 200
+
+
+class _SkippedSample(NamedTuple):
+    """Sentinel returned by dataset __getitem__ for an unreadable source image.
+
+    A NamedTuple so it pickles across spawned DataLoader worker processes; the
+    custom collate functions filter these out and report the paths alongside
+    the batch (the only reliable channel back to the main process).
+    """
+
+    path: str
+
+
+def _collate_images_skip_bad(items):
+    """Collate image tensors, dropping unreadable samples: (batch | None, skipped paths)."""
+    import torch
+
+    skipped = [item.path for item in items if isinstance(item, _SkippedSample)]
+    good = [item for item in items if not isinstance(item, _SkippedSample)]
+    return (torch.stack(good) if good else None), skipped
+
+
+def _collate_clips_skip_bad(items):
+    """Collate (x, y_future) clip tuples, dropping clips with an unreadable frame."""
+    import torch
+
+    skipped = [item.path for item in items if isinstance(item, _SkippedSample)]
+    good = [item for item in items if not isinstance(item, _SkippedSample)]
+    if not good:
+        return None, None, skipped
+    x_batch = torch.stack([x for x, _ in good])
+    y_batch = torch.stack([y for _, y in good])
+    return x_batch, y_batch, skipped
+
+
+def _first_valid_sample(dataset, indices):
+    """Return the first decodable sample, scanning past corrupt images."""
+    for index in indices:
+        sample = dataset[index]
+        if not isinstance(sample, _SkippedSample):
+            return sample
+    raise ValueError("All training images failed to load.")
 
 
 class AbortedError(Exception):
@@ -98,8 +144,13 @@ def fit_mean_image(
     method_config: dict,
     artifact_path: Path,
     abort_event: threading.Event,
+    skipped_paths: list[str] | None = None,
 ) -> int:
-    """Accumulate the pixel-wise mean across all preprocessed images."""
+    """Accumulate the pixel-wise mean across all preprocessed images.
+
+    Unreadable images are skipped (and collected into ``skipped_paths`` when
+    given) instead of aborting the fit.
+    """
     acc_dtype = np.float64 if method_config.get("accumulator_dtype") == "float64" else np.float32
     compiled = compile_pipeline(graph)
     accumulator: np.ndarray | None = None
@@ -109,7 +160,13 @@ def fit_mean_image(
     for path in image_paths:
         if abort_event.is_set():
             raise AbortedError()
-        array = compiled.run(path)
+        try:
+            array = compiled.run(path)
+        except ImageLoadError as exc:
+            logger.warning("Skipping unreadable image: %s (%s)", path, exc.original)
+            if skipped_paths is not None:
+                skipped_paths.append(path)
+            continue
         if accumulator is None:
             accumulator = np.zeros(array.shape, dtype=acc_dtype)
             source_dtype = array.dtype
@@ -284,7 +341,10 @@ class _PreprocessedImageDataset:
     def __getitem__(self, index: int):
         import torch
 
-        array = _to_nchw(self._pipeline().run(self.image_paths[index]))
+        try:
+            array = _to_nchw(self._pipeline().run(self.image_paths[index]))
+        except ImageLoadError as exc:
+            return _SkippedSample(exc.path)
         return torch.from_numpy(array)
 
 
@@ -318,13 +378,16 @@ class _PreprocessedClipDataset:
 
     def __getitem__(self, index: int):
         clip = self.clips[index]
-        x = self._load_clip(clip.input_frames)
-        if clip.future_frames:
-            y_future = self._load_clip(clip.future_frames)
-        else:
-            import torch
+        try:
+            x = self._load_clip(clip.input_frames)
+            if clip.future_frames:
+                y_future = self._load_clip(clip.future_frames)
+            else:
+                import torch
 
-            y_future = torch.empty((x.shape[0], 0, x.shape[2], x.shape[3]), dtype=x.dtype)
+                y_future = torch.empty((x.shape[0], 0, x.shape[2], x.shape[3]), dtype=x.dtype)
+        except ImageLoadError as exc:
+            return _SkippedSample(exc.path)
         return x, y_future
 
 
@@ -456,7 +519,7 @@ def train_gradient(
     dataset = _PreprocessedImageDataset(image_paths, graph)
     dataset._compiled = compiled_probe
     pin = device.type == "cuda"
-    loader_kwargs: dict = {"num_workers": num_workers, "pin_memory": pin}
+    loader_kwargs: dict = {"num_workers": num_workers, "pin_memory": pin, "collate_fn": _collate_images_skip_bad}
     if num_workers > 0:
         loader_kwargs.update(persistent_workers=True, prefetch_factor=prefetch_factor)
     train_loader = DataLoader(Subset(dataset, train_idx), batch_size=batch_size, shuffle=True, **loader_kwargs)
@@ -465,6 +528,16 @@ def train_gradient(
         if val_idx
         else None
     )
+
+    # Unreadable images skipped during this run ("skip + report"); deduped
+    # because every epoch re-reads the same files.
+    skipped_paths: set[str] = set()
+
+    def _note_skipped(paths):
+        for path in paths:
+            if path not in skipped_paths:
+                skipped_paths.add(path)
+                logger.warning("Training run %s skipping unreadable image: %s", run.id, path)
     logger.info(
         "Training device=%s samples=%s (train=%s/val=%s) batch=%s workers=%s amp=%s input_pixels=%s",
         run.device,
@@ -486,7 +559,7 @@ def train_gradient(
     )
 
     first_sample_started = time.perf_counter()
-    first_sample = dataset[train_idx[0]]
+    first_sample = _first_valid_sample(dataset, train_idx)
     logger.info(
         "Training run %s first sample loaded in %.3fs shape=%s dtype=%s",
         run.id,
@@ -541,10 +614,13 @@ def train_gradient(
             batch_started = time.perf_counter()
             try:
                 next_started = time.perf_counter()
-                xb = next(iterator)
+                xb, batch_skipped = next(iterator)
                 data_wait_total += time.perf_counter() - next_started
             except StopIteration:
                 break
+            _note_skipped(batch_skipped)
+            if xb is None:
+                continue
 
             transfer_started = time.perf_counter()
             if device.type == "cuda":
@@ -610,7 +686,10 @@ def train_gradient(
             model.eval()
             with torch.no_grad():
                 val_total, val_batches = 0.0, 0
-                for xb in val_loader:
+                for xb, batch_skipped in val_loader:
+                    _note_skipped(batch_skipped)
+                    if xb is None:
+                        continue
                     xb = xb.to(device, non_blocking=pin)
                     with torch.amp.autocast(device.type, enabled=use_amp):
                         val_total += float(compute_loss(xb).item())
@@ -656,6 +735,9 @@ def train_gradient(
                 break
 
     torch.save(model.state_dict(), artifact_path)
+    run.skipped_image_count = len(skipped_paths)
+    run.skipped_images = sorted(skipped_paths)[:_MAX_SKIPPED_PATHS]
+    db.commit()
     return sample_count
 
 
@@ -713,13 +795,23 @@ def train_spatiotemporal_gradient(
     dataset = _PreprocessedClipDataset(clips, graph)
     dataset._compiled = compiled_probe
     pin = device.type == "cuda"
-    loader_kwargs: dict = {"num_workers": num_workers, "pin_memory": pin}
+    loader_kwargs: dict = {"num_workers": num_workers, "pin_memory": pin, "collate_fn": _collate_clips_skip_bad}
     if num_workers > 0:
         loader_kwargs.update(persistent_workers=True, prefetch_factor=prefetch_factor)
     train_loader = DataLoader(Subset(dataset, train_idx), batch_size=batch_size, shuffle=True, **loader_kwargs)
     val_loader = DataLoader(Subset(dataset, val_idx), batch_size=batch_size, shuffle=False, **loader_kwargs) if val_idx else None
 
-    first_sample = dataset[train_idx[0]]
+    # Clips skipped because a frame was unreadable ("skip + report"); deduped
+    # because every epoch re-reads the same files.
+    skipped_paths: set[str] = set()
+
+    def _note_skipped(paths):
+        for path in paths:
+            if path not in skipped_paths:
+                skipped_paths.add(path)
+                logger.warning("Training run %s skipping clip with unreadable frame: %s", run.id, path)
+
+    first_sample = _first_valid_sample(dataset, train_idx)
     model, _ = _build_model(torch, configuration)
     model.to(device)
     sample0 = first_sample[0][None].to(device, non_blocking=pin)
@@ -759,9 +851,12 @@ def train_spatiotemporal_gradient(
         model.train()
         train_total, train_batches = 0.0, 0
         epoch_started = time.perf_counter()
-        for xb, y_future in train_loader:
+        for xb, y_future, batch_skipped in train_loader:
             if abort_event.is_set():
                 raise AbortedError()
+            _note_skipped(batch_skipped)
+            if xb is None:
+                continue
             xb = xb.to(device, non_blocking=pin)
             y_future = y_future.to(device, non_blocking=pin)
             optimizer.zero_grad(set_to_none=True)
@@ -782,7 +877,10 @@ def train_spatiotemporal_gradient(
             model.eval()
             with torch.no_grad():
                 val_total, val_batches = 0.0, 0
-                for xb, y_future in val_loader:
+                for xb, y_future, batch_skipped in val_loader:
+                    _note_skipped(batch_skipped)
+                    if xb is None:
+                        continue
                     xb = xb.to(device, non_blocking=pin)
                     y_future = y_future.to(device, non_blocking=pin)
                     with torch.amp.autocast(device.type, enabled=use_amp):
@@ -811,6 +909,9 @@ def train_spatiotemporal_gradient(
                 break
 
     torch.save(model.state_dict(), artifact_path)
+    run.skipped_image_count = len(skipped_paths)
+    run.skipped_images = sorted(skipped_paths)[:_MAX_SKIPPED_PATHS]
+    db.commit()
     return sample_count
 
 
@@ -858,17 +959,32 @@ def train_fast_anogan(
     dataset = _PreprocessedImageDataset(image_paths, graph)
     dataset._compiled = compiled_probe
     pin = device.type == "cuda"
-    loader_kwargs: dict = {"num_workers": num_workers, "pin_memory": pin, "drop_last": sample_count >= batch_size}
+    loader_kwargs: dict = {
+        "num_workers": num_workers,
+        "pin_memory": pin,
+        "drop_last": sample_count >= batch_size,
+        "collate_fn": _collate_images_skip_bad,
+    }
     if num_workers > 0:
         loader_kwargs.update(persistent_workers=True, prefetch_factor=prefetch_factor)
     loader = DataLoader(dataset, batch_size=batch_size, shuffle=True, **loader_kwargs)
+
+    # Unreadable images skipped during this run ("skip + report"); deduped
+    # because the infinite batch iterator re-reads the same files.
+    skipped_paths: set[str] = set()
+
+    def _note_skipped(paths):
+        for path in paths:
+            if path not in skipped_paths:
+                skipped_paths.add(path)
+                logger.warning("Training run %s skipping unreadable image: %s", run.id, path)
 
     generator, critic, encoder = build_fast_anogan_modules(torch, configuration.method_graph, configuration.method_config)
     generator.to(device)
     critic.to(device)
     encoder.to(device)
     # Materialize lazy heads before optimizer creation.
-    first = dataset[0][None].to(device, non_blocking=pin)
+    first = _first_valid_sample(dataset, range(len(dataset)))[None].to(device, non_blocking=pin)
     with torch.no_grad():
         z0 = torch.randn((1, int(configuration.method_config["latent_dim"])), device=device)
         generator(z0)
@@ -881,7 +997,10 @@ def train_fast_anogan(
 
     def batches():
         while True:
-            for batch in loader:
+            for batch, batch_skipped in loader:
+                _note_skipped(batch_skipped)
+                if batch is None:
+                    continue
                 yield batch
 
     batch_iter = batches()
@@ -1030,6 +1149,9 @@ def train_fast_anogan(
         },
         artifact_path,
     )
+    run.skipped_image_count = len(skipped_paths)
+    run.skipped_images = sorted(skipped_paths)[:_MAX_SKIPPED_PATHS]
+    db.commit()
     return sample_count
 
 
@@ -1074,9 +1196,13 @@ def run_training(run_id: int, abort_event: threading.Event | None = None) -> Non
                 run.device = "CPU"
                 db.commit()
                 artifact_path = artifact_dir / "artifact.npy"
+                skipped_paths: list[str] = []
                 count = fit_mean_image(
-                    image_paths, graph, configuration.method_config, artifact_path, abort_event
+                    image_paths, graph, configuration.method_config, artifact_path, abort_event,
+                    skipped_paths=skipped_paths,
                 )
+                run.skipped_image_count = len(skipped_paths)
+                run.skipped_images = sorted(set(skipped_paths))[:_MAX_SKIPPED_PATHS]
                 run.artifact_kind = "mean_image"
             elif configuration.builder_kind == "spatiotemporal_autoencoder":
                 logger.info("Training run %s resolving sequence clips", run_id)
