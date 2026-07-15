@@ -24,7 +24,7 @@ import {
   Tooltip,
 } from '@mantine/core';
 import { notifications } from '@mantine/notifications';
-import { ArrowDown, ArrowUp, Check, ChevronDown, ChevronRight, Film, Flame, Image, Info, Pause, Pencil, Play, Plus, RefreshCw, RotateCcw, Save, Search, SlidersHorizontal, Trash2, Upload, X } from 'lucide-react';
+import { ArrowDown, ArrowUp, Check, ChevronDown, ChevronRight, Film, Flame, Image, Info, Pause, Pencil, Play, Plus, RefreshCw, RotateCcw, Save, Search, SlidersHorizontal, Trash2, Upload } from 'lucide-react';
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type React from 'react';
 
@@ -144,6 +144,7 @@ type AnalysisPlot = PlotDraft & {
   autoStartHeatmap?: boolean;
   heatmapFps?: number;
   heatmapScaleMode?: 'per_frame' | 'shared';
+  heatmapDisplaySize?: number;
 };
 
 type TimeSeriesHeatmapDraft = {
@@ -156,8 +157,22 @@ type TimeSeriesHeatmapDraft = {
   fps: number;
   scaleMode: 'per_frame' | 'shared';
   heatmapConfig: HeatmapVisualizationConfig;
+  includeReference: boolean;
+  displaySize: number;
   advancedOpen: boolean;
 };
+
+type HeatmapSelectionDefaults = {
+  sampling: number;
+  fps: number;
+  scaleMode: 'per_frame' | 'shared';
+  includeReference: boolean;
+  displaySize: number;
+  heatmapConfig: HeatmapVisualizationConfig;
+};
+
+const HEATMAP_SELECTION_DEFAULTS_KEY = 'mltrace.analysis.heatmap-selection-defaults.v1';
+const DEFAULT_HEATMAP_DISPLAY_SIZE = 400;
 
 type DetailModalState = {
   title: string;
@@ -232,6 +247,45 @@ function defaultHeatmapConfig(): HeatmapVisualizationConfig {
     ssim_k2: 0.03,
     ssim_data_range: 1,
   };
+}
+
+function defaultHeatmapSelectionDefaults(): HeatmapSelectionDefaults {
+  return {
+    sampling: 1,
+    fps: 8,
+    scaleMode: 'per_frame',
+    includeReference: false,
+    displaySize: DEFAULT_HEATMAP_DISPLAY_SIZE,
+    heatmapConfig: defaultHeatmapConfig(),
+  };
+}
+
+function loadHeatmapSelectionDefaults(): HeatmapSelectionDefaults {
+  const defaults = defaultHeatmapSelectionDefaults();
+  try {
+    const raw = window.localStorage.getItem(HEATMAP_SELECTION_DEFAULTS_KEY);
+    if (!raw) return defaults;
+    const saved = JSON.parse(raw) as Partial<HeatmapSelectionDefaults>;
+    return {
+      sampling: typeof saved.sampling === 'number' && saved.sampling >= 1 ? saved.sampling : defaults.sampling,
+      fps: typeof saved.fps === 'number' && saved.fps >= 1 && saved.fps <= 60 ? saved.fps : defaults.fps,
+      scaleMode: saved.scaleMode === 'shared' ? 'shared' : 'per_frame',
+      includeReference: typeof saved.includeReference === 'boolean' ? saved.includeReference : defaults.includeReference,
+      displaySize: typeof saved.displaySize === 'number' && saved.displaySize >= 240 && saved.displaySize <= 1200
+        ? saved.displaySize
+        : defaults.displaySize,
+      heatmapConfig: {
+        ...defaults.heatmapConfig,
+        ...(saved.heatmapConfig && typeof saved.heatmapConfig === 'object' ? saved.heatmapConfig : {}),
+      },
+    };
+  } catch {
+    return defaults;
+  }
+}
+
+function saveHeatmapSelectionDefaults(defaults: HeatmapSelectionDefaults) {
+  window.localStorage.setItem(HEATMAP_SELECTION_DEFAULTS_KEY, JSON.stringify(defaults));
 }
 
 function heatmapConfigKey(config: HeatmapVisualizationConfig, staeView = 'reconstruction', predictionHorizon = 1): string {
@@ -1148,6 +1202,7 @@ function TimeSeriesPlot({
       const gap = 0.035;
       const panelHeight = (1 - gap * (panelCount - 1)) / panelCount;
       const nextLayout: Partial<Layout> & Record<string, unknown> = {
+        uirevision: plot.id,
         showlegend: traces.length > panelCount,
         legend: { orientation: 'h', y: -0.18, x: 0 },
         hovermode: 'x unified',
@@ -1329,9 +1384,11 @@ function HeatmapPlot({
   }, [heatmap]);
 
   const frameStyle = heatmap ? { aspectRatio: `${heatmap.width} / ${heatmap.height}` } : undefined;
+  const heatmapDisplaySize = Math.max(240, Math.min(1200, plot.heatmapDisplaySize ?? DEFAULT_HEATMAP_DISPLAY_SIZE));
+  const heatmapPanelStyle: React.CSSProperties = { width: '100%', maxWidth: heatmapDisplaySize, marginInline: 'auto' };
 
   const errorPanel = heatmap ? (
-    <div className="analysis-heatmap-panel">
+    <div className="analysis-heatmap-panel" style={heatmapPanelStyle}>
       <Text size="sm" fw={500} c="dimmed" ta="center">
         Reconstruction error
       </Text>
@@ -1393,16 +1450,20 @@ function HeatmapPlot({
       <div className="analysis-heatmap-wrap">
         {heatmap ? (
           (plot.includeReference ?? true) ? (
-            <SimpleGrid cols={{ base: 1, md: 3 }} spacing="md">
-              <div className="analysis-heatmap-panel">
+            <SimpleGrid
+              cols={{ base: 1, md: 3 }}
+              spacing="md"
+              style={{ maxWidth: heatmapDisplaySize * 3 + 32, marginInline: 'auto', alignItems: 'start' }}
+            >
+              <div className="analysis-heatmap-panel" style={heatmapPanelStyle}>
                 <Text size="sm" fw={500} c="dimmed" ta="center">
-                  Original
+                  Input image
                 </Text>
                 <div className="analysis-heatmap-image-frame" style={frameStyle}>
                   <img src={heatmap.source_image_data_url} alt="Original source" className="analysis-heatmap-image" />
                 </div>
               </div>
-              <div className="analysis-heatmap-panel">
+              <div className="analysis-heatmap-panel" style={heatmapPanelStyle}>
                 <Text size="sm" fw={500} c="dimmed" ta="center">
                   Reconstructed
                 </Text>
@@ -1731,27 +1792,49 @@ const AnalysisPlotCard = memo(function AnalysisPlotCard({
           </div>
           <Group gap={4}>
             {plot.plotType === 'timeseries' && (
+              <NumberInput
+                size="xs"
+                w={132}
+                label="Panel height"
+                min={120}
+                max={900}
+                step={20}
+                value={plot.panelHeightPx ?? (plot.timeseriesAnalytics?.length ? 260 : 420)}
+                onChange={(value) => onPatch({ panelHeightPx: valueAsNumber(value, plot.panelHeightPx ?? 260) })}
+              />
+            )}
+            {plot.plotType === 'heatmap' && plot.heatmapMode === 'single' && (
               <>
-                <Button
-                  size="compact-sm"
-                  variant={heatmapSelectionActive ? 'filled' : 'light'}
-                  color={heatmapSelectionActive ? 'orange' : 'red'}
-                  leftSection={heatmapSelectionActive ? <X size={15} /> : <Flame size={15} />}
-                  onClick={() => setHeatmapSelectionActive((current) => !current)}
-                >
-                  {heatmapSelectionActive ? 'Cancel selection' : 'Heatmap from selection'}
-                </Button>
                 <NumberInput
                   size="xs"
-                  w={132}
-                  label="Panel height"
-                  min={120}
-                  max={900}
-                  step={20}
-                  value={plot.panelHeightPx ?? (plot.timeseriesAnalytics?.length ? 260 : 420)}
-                  onChange={(value) => onPatch({ panelHeightPx: valueAsNumber(value, plot.panelHeightPx ?? 260) })}
+                  w={125}
+                  label="Image size"
+                  suffix=" px"
+                  min={240}
+                  max={1200}
+                  step={40}
+                  value={plot.heatmapDisplaySize ?? DEFAULT_HEATMAP_DISPLAY_SIZE}
+                  onChange={(value) => onPatch({ heatmapDisplaySize: valueAsNumber(value, DEFAULT_HEATMAP_DISPLAY_SIZE) })}
+                />
+                <Switch
+                  size="xs"
+                  label="Reference"
+                  checked={plot.includeReference ?? true}
+                  onChange={(event) => onPatch({ includeReference: event.currentTarget.checked })}
                 />
               </>
+            )}
+            {plot.plotType === 'timeseries' && (
+              <Tooltip label={heatmapSelectionActive ? 'Cancel heatmap selection' : 'Create heatmap from plot selection'}>
+                <ActionIcon
+                  variant={heatmapSelectionActive ? 'filled' : 'subtle'}
+                  color="orange"
+                  aria-label={heatmapSelectionActive ? 'Cancel heatmap selection' : 'Create heatmap from plot selection'}
+                  onClick={() => setHeatmapSelectionActive((current) => !current)}
+                >
+                  <Text span fz={17} lh={1}>🔥</Text>
+                </ActionIcon>
+              </Tooltip>
             )}
             <Tooltip label="Move up">
               <ActionIcon variant="subtle" onClick={() => onMove(-1)}>
@@ -1777,7 +1860,7 @@ const AnalysisPlotCard = memo(function AnalysisPlotCard({
         </Group>
         {heatmapSelectionActive && (
           <Alert color="orange" icon={<Flame size={18} />}>
-            Click a data point for a single heatmap, or drag horizontally across the plot to create a heatmap video.
+            Zoom or pan to the desired section first. Then click a data point for a single heatmap, or drag horizontally to create a heatmap video. Click 🔥 again to cancel.
           </Alert>
         )}
         {plot.plotType === 'timeseries' ? (
@@ -2162,6 +2245,9 @@ function restorePlots(value: unknown): AnalysisPlot[] {
       autoStartHeatmap: typeof plot.autoStartHeatmap === 'boolean' ? plot.autoStartHeatmap : false,
       heatmapFps: plot.heatmapFps === null || plot.heatmapFps === undefined ? undefined : valueAsNumber(plot.heatmapFps as string | number, 8),
       heatmapScaleMode: plot.heatmapScaleMode === 'shared' ? 'shared' : 'per_frame',
+      heatmapDisplaySize: plot.heatmapDisplaySize === null || plot.heatmapDisplaySize === undefined
+        ? DEFAULT_HEATMAP_DISPLAY_SIZE
+        : valueAsNumber(plot.heatmapDisplaySize as string | number, DEFAULT_HEATMAP_DISPLAY_SIZE),
     };
   });
 }
@@ -2223,6 +2309,7 @@ export function AnalysisPage({ active = true }: { active?: boolean }) {
   const [layoutLoading, setLayoutLoading] = useState(false);
   const [layoutDeleting, setLayoutDeleting] = useState(false);
   const [timeSeriesHeatmapDraft, setTimeSeriesHeatmapDraft] = useState<TimeSeriesHeatmapDraft | null>(null);
+  const [heatmapSelectionDefaults, setHeatmapSelectionDefaults] = useState<HeatmapSelectionDefaults>(() => loadHeatmapSelectionDefaults());
 
   async function refresh() {
     const [nextTestingRuns, nextTrainingRuns, nextDatasets, nextPipelines, nextPreprocessing, nextMethods, nextLayouts, nextHeatmaps, nextHeatmapVideos] =
@@ -2890,16 +2977,33 @@ export function AnalysisPage({ active = true }: { active?: boolean }) {
       start: normalizedStart,
       end: normalizedEnd,
       testingRunId: firstSource,
-      sampling: 1,
-      fps: 8,
-      scaleMode: 'per_frame',
-      heatmapConfig: { ...defaultHeatmapConfig() },
+      sampling: heatmapSelectionDefaults.sampling,
+      fps: heatmapSelectionDefaults.fps,
+      scaleMode: heatmapSelectionDefaults.scaleMode,
+      heatmapConfig: { ...heatmapSelectionDefaults.heatmapConfig },
+      includeReference: heatmapSelectionDefaults.includeReference,
+      displaySize: heatmapSelectionDefaults.displaySize,
       advancedOpen: false,
     });
   }
 
   function patchDerivedHeatmapConfig(patch: Partial<HeatmapVisualizationConfig>) {
     setTimeSeriesHeatmapDraft((current) => current ? { ...current, heatmapConfig: { ...current.heatmapConfig, ...patch } } : current);
+  }
+
+  function storeCurrentHeatmapSelectionDefaults() {
+    if (!timeSeriesHeatmapDraft) return;
+    const nextDefaults: HeatmapSelectionDefaults = {
+      sampling: Math.max(1, Math.floor(timeSeriesHeatmapDraft.sampling)),
+      fps: Math.max(1, Math.min(60, Math.floor(timeSeriesHeatmapDraft.fps))),
+      scaleMode: timeSeriesHeatmapDraft.scaleMode,
+      includeReference: timeSeriesHeatmapDraft.includeReference,
+      displaySize: Math.max(240, Math.min(1200, Math.floor(timeSeriesHeatmapDraft.displaySize))),
+      heatmapConfig: { ...timeSeriesHeatmapDraft.heatmapConfig },
+    };
+    saveHeatmapSelectionDefaults(nextDefaults);
+    setHeatmapSelectionDefaults(nextDefaults);
+    notifications.show({ color: 'green', title: 'Heatmap defaults saved', message: 'These settings will be used for every new time-series heatmap selection.' });
   }
 
   function finishHeatmapDerivation() {
@@ -2931,7 +3035,7 @@ export function AnalysisPage({ active = true }: { active?: boolean }) {
       end: effectiveEnd,
       timestamp: source.timestamp,
       sampling: source.sampling,
-      includeReference: false,
+      includeReference: timeSeriesHeatmapDraft.includeReference,
       heatmapConfig: { ...timeSeriesHeatmapDraft.heatmapConfig },
       sources: [source],
       traces: selectedTrace ? [{ ...selectedTrace, ...source }] : undefined,
@@ -2939,6 +3043,7 @@ export function AnalysisPage({ active = true }: { active?: boolean }) {
       autoStartHeatmap: timeSeriesHeatmapDraft.mode === 'range',
       heatmapFps: timeSeriesHeatmapDraft.fps,
       heatmapScaleMode: timeSeriesHeatmapDraft.scaleMode,
+      heatmapDisplaySize: timeSeriesHeatmapDraft.displaySize,
     };
     setPlots((current) => {
       const sourceIndex = current.findIndex((plot) => plot.id === heatmapDerivationPlot.id);
@@ -4329,6 +4434,28 @@ export function AnalysisPage({ active = true }: { active?: boolean }) {
               )}
             </SimpleGrid>
 
+            <SimpleGrid cols={{ base: 1, md: 2 }}>
+              <Switch
+                label="Show reference images"
+                description="Display input, reconstruction and transparent heatmap side by side"
+                checked={timeSeriesHeatmapDraft.includeReference}
+                onChange={(event) => {
+                  const checked = event.currentTarget.checked;
+                  setTimeSeriesHeatmapDraft((current) => current ? { ...current, includeReference: checked } : current);
+                }}
+              />
+              <NumberInput
+                label="Heatmap image size"
+                description="Maximum width and height per image panel"
+                suffix=" px"
+                min={240}
+                max={1200}
+                step={40}
+                value={timeSeriesHeatmapDraft.displaySize}
+                onChange={(value) => setTimeSeriesHeatmapDraft((current) => current ? { ...current, displaySize: valueAsNumber(value, DEFAULT_HEATMAP_DISPLAY_SIZE) } : current)}
+              />
+            </SimpleGrid>
+
             <SimpleGrid cols={{ base: 1, md: 3 }}>
               <Select
                 label="Residual source"
@@ -4457,6 +4584,9 @@ export function AnalysisPage({ active = true }: { active?: boolean }) {
             </Collapse>
 
             <Group justify="flex-end">
+              <Button variant="light" leftSection={<Save size={16} />} onClick={storeCurrentHeatmapSelectionDefaults}>
+                Set as default
+              </Button>
               <Button variant="default" onClick={() => setTimeSeriesHeatmapDraft(null)}>Cancel</Button>
               <Button
                 color="red"

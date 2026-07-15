@@ -58,9 +58,15 @@ export function PlotlyChart({ data, layout, config, height = 400, className, onC
       ...layout,
     };
 
-    const plot = el as unknown as PlotlyHTMLElement;
-    Plotly.react(plot, data, themedLayout, { ...BASE_CONFIG, ...config });
+    Plotly.react(el as unknown as PlotlyHTMLElement, data, themedLayout, { ...BASE_CONFIG, ...config });
+  }, [data, layout, config, dark]);
 
+  useEffect(() => {
+    const plot = ref.current as unknown as PlotlyHTMLElement | null;
+    if (!plot) return undefined;
+
+    plot.removeAllListeners('plotly_click');
+    plot.removeAllListeners('plotly_selected');
     if (onClick) {
       plot.on('plotly_click', (event: PlotMouseEvent) => {
         const point = event.points[0];
@@ -76,18 +82,23 @@ export function PlotlyChart({ data, layout, config, height = 400, className, onC
       });
     }
 
-    const observer = new ResizeObserver(() => {
-      Plotly.Plots.resize(el);
-    });
+    return () => {
+      plot.removeAllListeners('plotly_click');
+      plot.removeAllListeners('plotly_selected');
+    };
+  }, [onClick, onSelected]);
+
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return undefined;
+    const observer = new ResizeObserver(() => Plotly.Plots.resize(el));
     observer.observe(el);
 
     return () => {
       observer.disconnect();
-      plot.removeAllListeners('plotly_click');
-      plot.removeAllListeners('plotly_selected');
-      Plotly.purge(plot);
+      Plotly.purge(el);
     };
-  }, [data, layout, config, dark, onClick, onSelected]);
+  }, []);
 
   return (
     <div
