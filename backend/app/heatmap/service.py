@@ -63,15 +63,17 @@ def enqueue_heatmap_range(
         payload.scale_mode,
         visualization_config,
     )
-    # Dedup: reuse an existing job with the same configuration unless it failed/aborted.
-    existing = db.scalar(
-        select(models.HeatmapRangeRun).where(
-            models.HeatmapRangeRun.config_signature == signature,
-            models.HeatmapRangeRun.status.in_(("queued", "running", "finished")),
+    # Dedup: reuse an existing job with the same configuration unless it failed/aborted
+    # or the caller explicitly needs to replace a legacy frame-only result.
+    if not payload.force_recompute:
+        existing = db.scalar(
+            select(models.HeatmapRangeRun).where(
+                models.HeatmapRangeRun.config_signature == signature,
+                models.HeatmapRangeRun.status.in_(("queued", "running", "finished")),
+            )
         )
-    )
-    if existing is not None:
-        return _serialize(existing)
+        if existing is not None:
+            return _serialize(existing)
 
     run = models.HeatmapRangeRun(
         testing_run_id=testing_run.id,

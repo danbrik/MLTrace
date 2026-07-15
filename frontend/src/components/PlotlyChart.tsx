@@ -1,6 +1,17 @@
 import { useEffect, useRef } from 'react';
 import { useMantineColorScheme } from '@mantine/core';
-import Plotly, { type Data, type Layout, type Config } from '../lib/plotly';
+import Plotly, { type Data, type Layout, type Config, type PlotlyHTMLElement, type PlotMouseEvent, type PlotSelectionEvent } from '../lib/plotly';
+
+export type PlotlyChartClick = {
+  timestamp: string;
+  curveNumber: number;
+  pointNumber: number;
+};
+
+export type PlotlyChartSelection = {
+  start: string;
+  end: string;
+};
 
 type PlotlyChartProps = {
   data: Data[];
@@ -9,6 +20,8 @@ type PlotlyChartProps = {
   /** CSS height of the plot container. */
   height?: number | string;
   className?: string;
+  onClick?: (event: PlotlyChartClick) => void;
+  onSelected?: (event: PlotlyChartSelection) => void;
 };
 
 const BASE_CONFIG: Partial<Config> = {
@@ -23,7 +36,7 @@ const BASE_CONFIG: Partial<Config> = {
  * Duenner Wrapper um Plotly.react: responsiv via ResizeObserver, raeumt beim
  * Unmount mit Plotly.purge auf. Kein react-plotly.js (React-19-Kompatibilitaet).
  */
-export function PlotlyChart({ data, layout, config, height = 400, className }: PlotlyChartProps) {
+export function PlotlyChart({ data, layout, config, height = 400, className, onClick, onSelected }: PlotlyChartProps) {
   const ref = useRef<HTMLDivElement | null>(null);
   const { colorScheme } = useMantineColorScheme();
   const dark = colorScheme === 'dark';
@@ -45,7 +58,23 @@ export function PlotlyChart({ data, layout, config, height = 400, className }: P
       ...layout,
     };
 
-    Plotly.react(el, data, themedLayout, { ...BASE_CONFIG, ...config });
+    const plot = el as unknown as PlotlyHTMLElement;
+    Plotly.react(plot, data, themedLayout, { ...BASE_CONFIG, ...config });
+
+    if (onClick) {
+      plot.on('plotly_click', (event: PlotMouseEvent) => {
+        const point = event.points[0];
+        if (!point || point.x === null || point.x === undefined) return;
+        onClick({ timestamp: String(point.x), curveNumber: point.curveNumber, pointNumber: point.pointNumber });
+      });
+    }
+    if (onSelected) {
+      plot.on('plotly_selected', (event: PlotSelectionEvent) => {
+        const xRange = event?.range?.x;
+        if (!xRange || xRange.length < 2) return;
+        onSelected({ start: String(xRange[0]), end: String(xRange[1]) });
+      });
+    }
 
     const observer = new ResizeObserver(() => {
       Plotly.Plots.resize(el);
@@ -54,9 +83,11 @@ export function PlotlyChart({ data, layout, config, height = 400, className }: P
 
     return () => {
       observer.disconnect();
-      Plotly.purge(el);
+      plot.removeAllListeners('plotly_click');
+      plot.removeAllListeners('plotly_selected');
+      Plotly.purge(plot);
     };
-  }, [data, layout, config, dark]);
+  }, [data, layout, config, dark, onClick, onSelected]);
 
   return (
     <div

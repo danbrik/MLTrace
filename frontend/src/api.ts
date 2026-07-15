@@ -701,6 +701,7 @@ export function createHeatmapRange(payload: {
   fps?: number;
   scale_mode?: 'per_frame' | 'shared';
   visualization_config?: HeatmapVisualizationConfig;
+  force_recompute?: boolean;
 }): Promise<HeatmapRangeRun> {
   return request<HeatmapRangeRun>('/api/heatmap-ranges', {
     method: 'POST',

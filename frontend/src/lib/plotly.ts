@@ -8,9 +8,9 @@ import scatter from 'plotly.js/lib/scatter';
 import heatmap from 'plotly.js/lib/heatmap';
 import bar from 'plotly.js/lib/bar';
 
-import type { Data, Layout, Config, PlotlyHTMLElement } from 'plotly.js';
+import type { Data, Layout, Config, PlotlyHTMLElement, PlotMouseEvent, PlotSelectionEvent } from 'plotly.js';
 
 Plotly.register([scatter, heatmap, bar]);
 
-export type { Data, Layout, Config, PlotlyHTMLElement };
+export type { Data, Layout, Config, PlotlyHTMLElement, PlotMouseEvent, PlotSelectionEvent };
 export default Plotly as typeof import('plotly.js');

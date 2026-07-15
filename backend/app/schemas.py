@@ -1178,6 +1178,7 @@ class HeatmapRangeRunCreate(BaseModel):
     fps: int = Field(default=8, ge=1, le=60)
     scale_mode: Literal["per_frame", "shared"] = "per_frame"
     visualization_config: HeatmapVisualizationConfig = Field(default_factory=HeatmapVisualizationConfig)
+    force_recompute: bool = False
 
 
 class HeatmapRangeRunRead(BaseModel):

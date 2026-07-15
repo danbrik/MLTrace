@@ -24,8 +24,8 @@ import {
   Tooltip,
 } from '@mantine/core';
 import { notifications } from '@mantine/notifications';
-import { ArrowDown, ArrowUp, Check, ChevronDown, ChevronRight, Film, Image, Info, Pause, Pencil, Play, Plus, RefreshCw, RotateCcw, Save, Search, Trash2, Upload } from 'lucide-react';
-import { memo, useCallback, useEffect, useMemo, useState } from 'react';
+import { ArrowDown, ArrowUp, Check, ChevronDown, ChevronRight, Film, Flame, Image, Info, Pause, Pencil, Play, Plus, RefreshCw, RotateCcw, Save, Search, SlidersHorizontal, Trash2, Upload, X } from 'lucide-react';
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type React from 'react';
 
 import {
@@ -51,7 +51,7 @@ import {
   updateAnalysisLayout,
 } from '../api';
 import { DateTime24Input } from '../components/DateTime24Input';
-import { PlotlyChart } from '../components/PlotlyChart';
+import { PlotlyChart, type PlotlyChartClick, type PlotlyChartSelection } from '../components/PlotlyChart';
 import { StepCard } from '../components/StepCard';
 import type { Data, Layout } from '../lib/plotly';
 import { formatValue } from '../methods/utils';
@@ -140,6 +140,23 @@ type AnalysisPlot = PlotDraft & {
   id: string;
   sources: PlotSourceConfig[];
   traces?: PlotTraceConfig[];
+  derivedFromPlotId?: string;
+  autoStartHeatmap?: boolean;
+  heatmapFps?: number;
+  heatmapScaleMode?: 'per_frame' | 'shared';
+};
+
+type TimeSeriesHeatmapDraft = {
+  sourcePlotId: string;
+  mode: HeatmapMode;
+  start: string;
+  end: string;
+  testingRunId: string;
+  sampling: number;
+  fps: number;
+  scaleMode: 'per_frame' | 'shared';
+  heatmapConfig: HeatmapVisualizationConfig;
+  advancedOpen: boolean;
 };
 
 type DetailModalState = {
@@ -1048,7 +1065,19 @@ function computeAnalyticsSeries(config: AnalyticsMethodConfig, values: number[],
   }
 }
 
-function TimeSeriesPlot({ plot, results }: { plot: AnalysisPlot; results: CombinedResult[] }) {
+function TimeSeriesPlot({
+  plot,
+  results,
+  selectionActive = false,
+  onPointClick,
+  onRangeSelected,
+}: {
+  plot: AnalysisPlot;
+  results: CombinedResult[];
+  selectionActive?: boolean;
+  onPointClick?: (event: PlotlyChartClick) => void;
+  onRangeSelected?: (event: PlotlyChartSelection) => void;
+}) {
   const analyticsConfigs = plot.timeseriesAnalytics ?? [];
   const displayPanels = useMemo(() => {
     if (analyticsConfigs.length === 0) return [defaultAnalyticsConfig('raw')];
@@ -1097,20 +1126,21 @@ function TimeSeriesPlot({ plot, results }: { plot: AnalysisPlot; results: Combin
         const y = panel.kind === 'raw' ? stageOutputs.get('input') ?? [] : stageOutputs.get(panel.kind) ?? [];
         nextTraces.push({
           type: 'scatter',
-          mode: 'lines',
+          mode: selectionActive ? 'lines+markers' : 'lines',
           name: panelIndex === 0 ? group.name : `${group.name} · ${analyticsDefinition(panel.kind).label}`,
           x,
           y,
           xaxis: 'x',
           yaxis: panelIndex === 0 ? 'y' : `y${panelIndex + 1}`,
           line: { color: group.color || TRACE_COLORS[groupIndex % TRACE_COLORS.length], width: panel.kind === 'state_machine' ? 2.2 : 1.7, shape: panel.kind === 'state_machine' ? 'hv' : 'linear' },
+          ...(selectionActive ? { marker: { size: 8, color: group.color || TRACE_COLORS[groupIndex % TRACE_COLORS.length] } } : {}),
           showlegend: panelIndex === 0,
           hovertemplate: `%{x|%Y-%m-%d %H:%M:%S}<br>${analyticsDefinition(panel.kind).label} %{y:.5g}<extra>${group.name}</extra>`,
         } as unknown as Data);
       });
     });
     return nextTraces;
-  }, [analyticsConfigs, displayPanels, plot.movingAverage, plot.scoreSeries, plot.traces, results]);
+  }, [analyticsConfigs, displayPanels, plot.movingAverage, plot.scoreSeries, plot.traces, results, selectionActive]);
 
   const layout = useMemo<Partial<Layout>>(
     () => {
@@ -1121,6 +1151,8 @@ function TimeSeriesPlot({ plot, results }: { plot: AnalysisPlot; results: Combin
         showlegend: traces.length > panelCount,
         legend: { orientation: 'h', y: -0.18, x: 0 },
         hovermode: 'x unified',
+        dragmode: selectionActive ? 'select' : 'zoom',
+        selectdirection: 'h',
         xaxis: {
           title: { text: 'Time', font: { size: 12 } },
           type: 'date',
@@ -1143,7 +1175,7 @@ function TimeSeriesPlot({ plot, results }: { plot: AnalysisPlot; results: Combin
       });
       return nextLayout as Partial<Layout>;
     },
-    [displayPanels, traces.length],
+    [displayPanels, selectionActive, traces.length],
   );
 
   if (results.length === 0) {
@@ -1155,6 +1187,8 @@ function TimeSeriesPlot({ plot, results }: { plot: AnalysisPlot; results: Combin
       <PlotlyChart
         data={traces}
         layout={layout}
+        onClick={selectionActive ? onPointClick : undefined}
+        onSelected={selectionActive ? onRangeSelected : undefined}
         height={analyticsConfigs.length > 0 ? Math.max(520, displayPanels.length * (plot.panelHeightPx || 260)) : (plot.panelHeightPx || 420)}
       />
       <Group gap="xs">
@@ -1442,11 +1476,12 @@ function HeatmapVideo({ plot, results }: { plot: AnalysisPlot; results: Combined
     };
   }, [plot.heatmapConfig, plot.sources, results]);
 
-  const [scaleMode, setScaleMode] = useState<'per_frame' | 'shared'>('per_frame');
+  const [scaleMode, setScaleMode] = useState<'per_frame' | 'shared'>(plot.heatmapScaleMode ?? 'per_frame');
   const [job, setJob] = useState<HeatmapRangeRun | null>(null);
   const [starting, setStarting] = useState(false);
   const [videoError, setVideoError] = useState<string | null>(null);
-  const [fps, setFps] = useState(8);
+  const [fps, setFps] = useState(plot.heatmapFps ?? 8);
+  const autoStartAttempted = useRef(false);
   const fixedCeiling = plot.heatmapConfig.fixed_ceiling_enabled;
   const effectiveScaleMode: 'per_frame' | 'shared' = fixedCeiling ? 'per_frame' : scaleMode;
 
@@ -1470,7 +1505,7 @@ function HeatmapVideo({ plot, results }: { plot: AnalysisPlot; results: Combined
   }, [polling, job?.id]);
 
   const frameCount = job?.frame_count ?? 0;
-  const ready = job?.status === 'finished' && frameCount > 0;
+  const ready = job?.status === 'finished' && frameCount > 0 && Boolean(job.video_path);
 
   async function startJob() {
     if (!params) return;
@@ -1485,6 +1520,7 @@ function HeatmapVideo({ plot, results }: { plot: AnalysisPlot; results: Combined
         fps,
         scale_mode: effectiveScaleMode,
         visualization_config: params.visualizationConfig,
+        force_recompute: job?.status === 'finished' && !job.video_path,
       });
       setJob(created);
     } catch (error) {
@@ -1493,6 +1529,12 @@ function HeatmapVideo({ plot, results }: { plot: AnalysisPlot; results: Combined
       setStarting(false);
     }
   }
+
+  useEffect(() => {
+    if (!plot.autoStartHeatmap || !params || autoStartAttempted.current) return;
+    autoStartAttempted.current = true;
+    void startJob();
+  }, [params, plot.autoStartHeatmap]);
 
   async function abortJob() {
     if (!job) return;
@@ -1552,6 +1594,12 @@ function HeatmapVideo({ plot, results }: { plot: AnalysisPlot; results: Combined
       </Group>
 
       {videoError && <Alert color="red">{videoError}</Alert>}
+
+      {job?.status === 'finished' && !job.video_path && (
+        <Alert color="orange">
+          This is a legacy frame-only result without an MP4. Render it again to create a playable video.
+        </Alert>
+      )}
 
       {polling && job && (
         <Stack gap={6}>
@@ -1629,6 +1677,7 @@ const AnalysisPlotCard = memo(function AnalysisPlotCard({
   onEdit,
   onPatch,
   onRemove,
+  onHeatmapSelection,
 }: {
   plot: AnalysisPlot;
   results: CombinedResult[];
@@ -1646,7 +1695,20 @@ const AnalysisPlotCard = memo(function AnalysisPlotCard({
   onEdit: () => void;
   onPatch: (patch: Partial<AnalysisPlot>) => void;
   onRemove: () => void;
+  onHeatmapSelection: (mode: HeatmapMode, start: string, end: string) => void;
 }) {
+  const [heatmapSelectionActive, setHeatmapSelectionActive] = useState(false);
+
+  const selectPoint = useCallback((event: PlotlyChartClick) => {
+    onHeatmapSelection('single', event.timestamp, event.timestamp);
+    setHeatmapSelectionActive(false);
+  }, [onHeatmapSelection]);
+
+  const selectRange = useCallback((event: PlotlyChartSelection) => {
+    onHeatmapSelection('range', event.start, event.end);
+    setHeatmapSelectionActive(false);
+  }, [onHeatmapSelection]);
+
   return (
     <Paper withBorder p="md" radius="sm">
       <Stack gap="md">
@@ -1669,16 +1731,27 @@ const AnalysisPlotCard = memo(function AnalysisPlotCard({
           </div>
           <Group gap={4}>
             {plot.plotType === 'timeseries' && (
-              <NumberInput
-                size="xs"
-                w={132}
-                label="Panel height"
-                min={120}
-                max={900}
-                step={20}
-                value={plot.panelHeightPx ?? (plot.timeseriesAnalytics?.length ? 260 : 420)}
-                onChange={(value) => onPatch({ panelHeightPx: valueAsNumber(value, plot.panelHeightPx ?? 260) })}
-              />
+              <>
+                <Button
+                  size="compact-sm"
+                  variant={heatmapSelectionActive ? 'filled' : 'light'}
+                  color={heatmapSelectionActive ? 'orange' : 'red'}
+                  leftSection={heatmapSelectionActive ? <X size={15} /> : <Flame size={15} />}
+                  onClick={() => setHeatmapSelectionActive((current) => !current)}
+                >
+                  {heatmapSelectionActive ? 'Cancel selection' : 'Heatmap from selection'}
+                </Button>
+                <NumberInput
+                  size="xs"
+                  w={132}
+                  label="Panel height"
+                  min={120}
+                  max={900}
+                  step={20}
+                  value={plot.panelHeightPx ?? (plot.timeseriesAnalytics?.length ? 260 : 420)}
+                  onChange={(value) => onPatch({ panelHeightPx: valueAsNumber(value, plot.panelHeightPx ?? 260) })}
+                />
+              </>
             )}
             <Tooltip label="Move up">
               <ActionIcon variant="subtle" onClick={() => onMove(-1)}>
@@ -1702,8 +1775,19 @@ const AnalysisPlotCard = memo(function AnalysisPlotCard({
             </Tooltip>
           </Group>
         </Group>
+        {heatmapSelectionActive && (
+          <Alert color="orange" icon={<Flame size={18} />}>
+            Click a data point for a single heatmap, or drag horizontally across the plot to create a heatmap video.
+          </Alert>
+        )}
         {plot.plotType === 'timeseries' ? (
-          <TimeSeriesPlot plot={plot} results={results} />
+          <TimeSeriesPlot
+            plot={plot}
+            results={results}
+            selectionActive={heatmapSelectionActive}
+            onPointClick={selectPoint}
+            onRangeSelected={selectRange}
+          />
         ) : plot.heatmapMode === 'range' ? (
           <HeatmapVideo plot={plot} results={results} />
         ) : (
@@ -1761,11 +1845,13 @@ function ExistingHeatmapArtifacts({
   testingRunById: Map<number, TestingRun>;
   intervalLabel: string;
   refreshing: boolean;
-  onRefresh: () => void;
+  onRefresh: () => void | Promise<void>;
 }) {
   const [selectedSingle, setSelectedSingle] = useState<HeatmapRun | null>(null);
   const [selectedVideo, setSelectedVideo] = useState<HeatmapRangeRun | null>(null);
   const [loadingSingleId, setLoadingSingleId] = useState<number | null>(null);
+  const [renderingVideoId, setRenderingVideoId] = useState<number | null>(null);
+  const [selectedVideoError, setSelectedVideoError] = useState<string | null>(null);
 
   async function openSingle(summary: HeatmapRunSummary) {
     setSelectedVideo(null);
@@ -1781,7 +1867,44 @@ function ExistingHeatmapArtifacts({
 
   function openVideo(video: HeatmapRangeRun) {
     setSelectedSingle(null);
+    setSelectedVideoError(null);
     setSelectedVideo(video);
+  }
+
+  async function renderLegacyVideo(video: HeatmapRangeRun) {
+    setRenderingVideoId(video.id);
+    try {
+      const created = await createHeatmapRange({
+        testing_run_id: video.testing_run_id,
+        start_timestamp: video.start_timestamp,
+        end_timestamp: video.end_timestamp,
+        stride: video.stride,
+        fps: video.fps,
+        scale_mode: video.scale_mode,
+        visualization_config: video.visualization_config,
+        force_recompute: true,
+      });
+      notifications.show({
+        color: 'blue',
+        title: 'MP4 render queued',
+        message: `Heatmap video run #${created.id} was added to the queue.`,
+      });
+      await onRefresh();
+    } catch (error) {
+      notifyError('Could not render heatmap MP4', error);
+    } finally {
+      setRenderingVideoId(null);
+    }
+  }
+
+  function videoUnavailableReason(video: HeatmapRangeRun): string | null {
+    if (video.status === 'finished' && !video.video_path) return 'No MP4 exists for this legacy frame-only run.';
+    if (video.status === 'queued') return 'The video is queued and has not been rendered yet.';
+    if (video.status === 'running') return `The video is still rendering (${video.done_count} / ${video.frame_count ?? '?'} frames).`;
+    if (video.status === 'failed') return video.error_message ? `Rendering failed: ${video.error_message}` : 'Rendering failed.';
+    if (video.status === 'aborted') return 'Rendering was aborted.';
+    if (video.status !== 'finished') return `The artifact cannot be opened while its status is ${video.status}.`;
+    return null;
   }
 
   const total = singles.length + videos.length;
@@ -1845,6 +1968,8 @@ function ExistingHeatmapArtifacts({
                 ))}
                 {videos.map((item) => {
                   const progress = item.frame_count ? Math.min(100, (item.done_count / item.frame_count) * 100) : 0;
+                  const unavailableReason = videoUnavailableReason(item);
+                  const canShow = item.status === 'finished' && Boolean(item.video_path);
                   return (
                     <Table.Tr key={`video-${item.id}`}>
                       <Table.Td><Badge leftSection={<Film size={12} />} color="blue" variant="light">Heatmap video</Badge></Table.Td>
@@ -1860,9 +1985,22 @@ function ExistingHeatmapArtifacts({
                         </Stack>
                       </Table.Td>
                       <Table.Td>
-                        <Button size="compact-sm" variant="light" disabled={item.status !== 'finished' || !item.video_path} onClick={() => openVideo(item)}>
-                          Show
-                        </Button>
+                        <Stack gap={4} miw={170}>
+                          {canShow ? (
+                            <Button size="compact-sm" variant="light" onClick={() => openVideo(item)}>
+                              Show
+                            </Button>
+                          ) : item.status === 'finished' && !item.video_path ? (
+                            <Button size="compact-sm" color="orange" variant="light" loading={renderingVideoId === item.id} onClick={() => renderLegacyVideo(item)}>
+                              Render MP4
+                            </Button>
+                          ) : (
+                            <Button size="compact-sm" variant="light" disabled>
+                              Show
+                            </Button>
+                          )}
+                          {unavailableReason && <Text size="xs" c={item.status === 'failed' ? 'red' : 'dimmed'}>{unavailableReason}</Text>}
+                        </Stack>
                       </Table.Td>
                     </Table.Tr>
                   );
@@ -1894,7 +2032,14 @@ function ExistingHeatmapArtifacts({
               </div>
               <Button size="compact-sm" variant="subtle" onClick={() => setSelectedVideo(null)}>Close</Button>
             </Group>
-            <video className="inspect-video-player" src={heatmapRangeVideoUrl(selectedVideo.id)} controls preload="metadata" />
+            {selectedVideoError && <Alert color="red" mb="sm">{selectedVideoError}</Alert>}
+            <video
+              className="inspect-video-player"
+              src={heatmapRangeVideoUrl(selectedVideo.id)}
+              controls
+              preload="metadata"
+              onError={() => setSelectedVideoError('The MP4 could not be loaded. The stored video file may be missing or invalid.')}
+            />
           </Paper>
         )}
       </Stack>
@@ -2013,6 +2158,10 @@ function restorePlots(value: unknown): AnalysisPlot[] {
       id: String(plot.id ?? crypto.randomUUID()),
       sources: sources.length > 0 ? sources : traces.map(traceToSource),
       traces,
+      derivedFromPlotId: plot.derivedFromPlotId === null || plot.derivedFromPlotId === undefined ? undefined : String(plot.derivedFromPlotId),
+      autoStartHeatmap: typeof plot.autoStartHeatmap === 'boolean' ? plot.autoStartHeatmap : false,
+      heatmapFps: plot.heatmapFps === null || plot.heatmapFps === undefined ? undefined : valueAsNumber(plot.heatmapFps as string | number, 8),
+      heatmapScaleMode: plot.heatmapScaleMode === 'shared' ? 'shared' : 'per_frame',
     };
   });
 }
@@ -2052,6 +2201,7 @@ export function AnalysisPage({ active = true }: { active?: boolean }) {
   const [heatmapCache, setHeatmapCache] = useState<Record<string, HeatmapRun>>({});
   const [loadingHeatmaps, setLoadingHeatmaps] = useState<Record<string, boolean>>({});
   const [heatmapErrors, setHeatmapErrors] = useState<Record<string, string>>({});
+  const heatmapRequests = useRef(new Set<string>());
   const [addPlotOpen, setAddPlotOpen] = useState(true);
   const [selectedPipelineId, setSelectedPipelineId] = useState<string | null>(null);
   const [pipelineSearch, setPipelineSearch] = useState('');
@@ -2072,6 +2222,7 @@ export function AnalysisPage({ active = true }: { active?: boolean }) {
   const [layoutSaving, setLayoutSaving] = useState(false);
   const [layoutLoading, setLayoutLoading] = useState(false);
   const [layoutDeleting, setLayoutDeleting] = useState(false);
+  const [timeSeriesHeatmapDraft, setTimeSeriesHeatmapDraft] = useState<TimeSeriesHeatmapDraft | null>(null);
 
   async function refresh() {
     const [nextTestingRuns, nextTrainingRuns, nextDatasets, nextPipelines, nextPreprocessing, nextMethods, nextLayouts, nextHeatmaps, nextHeatmapVideos] =
@@ -2481,7 +2632,9 @@ export function AnalysisPage({ active = true }: { active?: boolean }) {
       options?: { force?: boolean },
     ) => {
       const key = heatmapCacheKey(frame, config, staeView, predictionHorizon);
+      if (heatmapRequests.current.has(key)) return;
       if (!options?.force && (heatmapCache[key] || loadingHeatmaps[key] || heatmapErrors[key])) return;
+      heatmapRequests.current.add(key);
       if (options?.force) {
         setHeatmapErrors((current) => {
           const next = { ...current };
@@ -2522,6 +2675,7 @@ export function AnalysisPage({ active = true }: { active?: boolean }) {
         setHeatmapErrors((current) => ({ ...current, [key]: message }));
         notifyError('Could not compute heatmap', error);
       } finally {
+        heatmapRequests.current.delete(key);
         setLoadingHeatmaps((current) => ({ ...current, [key]: false }));
       }
     },
@@ -2650,6 +2804,159 @@ export function AnalysisPage({ active = true }: { active?: boolean }) {
     return next;
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [plots, resultsByRunId, testingRuns]);
+
+  const heatmapDerivationPlot = timeSeriesHeatmapDraft
+    ? plots.find((plot) => plot.id === timeSeriesHeatmapDraft.sourcePlotId) ?? null
+    : null;
+  const heatmapDerivationResults = timeSeriesHeatmapDraft
+    ? plotResultsById.get(timeSeriesHeatmapDraft.sourcePlotId)?.results ?? []
+    : [];
+  const heatmapDerivationSources = useMemo(() => {
+    if (!heatmapDerivationPlot) return [];
+    const options = new Map<string, string>();
+    for (const trace of heatmapDerivationPlot.traces ?? []) {
+      options.set(trace.testingRunId, trace.legendLabel || trace.modelLabel);
+    }
+    for (const source of plotSources(heatmapDerivationPlot)) {
+      const run = testingRuns.find((item) => item.id === Number(source.testingRunId));
+      if (!options.has(source.testingRunId)) options.set(source.testingRunId, run?.name ?? `Testing run #${source.testingRunId}`);
+    }
+    return [...options.entries()].map(([value, label]) => ({ value, label }));
+  }, [heatmapDerivationPlot, testingRuns]);
+
+  const effectiveHeatmapDerivationResults = useMemo(() => {
+    if (!timeSeriesHeatmapDraft) return [];
+    const sourceResults = heatmapDerivationResults
+      .filter((result) => String(result.testingRunId) === timeSeriesHeatmapDraft.testingRunId)
+      .sort((left, right) => new Date(left.timestamp).getTime() - new Date(right.timestamp).getTime());
+    if (sourceResults.length === 0) return [];
+    const start = new Date(timeSeriesHeatmapDraft.start).getTime();
+    const end = new Date(timeSeriesHeatmapDraft.end).getTime();
+    if (timeSeriesHeatmapDraft.mode === 'single') {
+      return [sourceResults.reduce((closest, result) =>
+        Math.abs(new Date(result.timestamp).getTime() - start) < Math.abs(new Date(closest.timestamp).getTime() - start) ? result : closest,
+      )];
+    }
+    return sourceResults.filter((result) => {
+      const timestamp = new Date(result.timestamp).getTime();
+      return timestamp >= Math.min(start, end) && timestamp <= Math.max(start, end);
+    });
+  }, [heatmapDerivationResults, timeSeriesHeatmapDraft]);
+
+  const heatmapDerivationError = !timeSeriesHeatmapDraft
+    ? null
+    : !heatmapDerivationPlot
+      ? 'The source time-series plot no longer exists.'
+      : !timeSeriesHeatmapDraft.testingRunId
+        ? 'Select one inference source.'
+        : effectiveHeatmapDerivationResults.length === 0
+          ? 'The selected inference source has no frames in this time selection.'
+          : null;
+  const heatmapDerivationVisibilityMode = timeSeriesHeatmapDraft?.heatmapConfig.fixed_ceiling_enabled
+    ? 'fixed_ceiling'
+    : timeSeriesHeatmapDraft?.heatmapConfig.max_clip_enabled
+      ? 'max_clip'
+      : 'opacity';
+
+  function beginHeatmapDerivation(plot: AnalysisPlot, results: CombinedResult[], mode: HeatmapMode, rawStart: string, rawEnd: string) {
+    const startMs = new Date(rawStart).getTime();
+    const endMs = new Date(rawEnd).getTime();
+    if (!Number.isFinite(startMs) || !Number.isFinite(endMs)) {
+      notifications.show({ color: 'red', title: 'Invalid time selection', message: 'The selected Plotly timestamps could not be read.' });
+      return;
+    }
+    const lower = Math.min(startMs, endMs);
+    const upper = Math.max(startMs, endMs);
+    const candidates = results.filter((result) => {
+      const timestamp = new Date(result.timestamp).getTime();
+      return Number.isFinite(timestamp) && (mode === 'single' || (timestamp >= lower && timestamp <= upper));
+    });
+    if (candidates.length === 0) {
+      notifications.show({ color: 'yellow', title: 'No frames selected', message: 'Select a data point or a range containing at least one visible frame.' });
+      return;
+    }
+    const sorted = [...candidates].sort((left, right) => new Date(left.timestamp).getTime() - new Date(right.timestamp).getTime());
+    const selectedPoint = mode === 'single'
+      ? sorted.reduce((closest, result) =>
+          Math.abs(new Date(result.timestamp).getTime() - startMs) < Math.abs(new Date(closest.timestamp).getTime() - startMs) ? result : closest,
+        )
+      : null;
+    const firstSource = plotSources(plot)[0]?.testingRunId ?? '';
+    const normalizedStart = selectedPoint?.timestamp ?? sorted[0].timestamp;
+    const normalizedEnd = selectedPoint?.timestamp ?? sorted[sorted.length - 1].timestamp;
+    setTimeSeriesHeatmapDraft({
+      sourcePlotId: plot.id,
+      mode,
+      start: normalizedStart,
+      end: normalizedEnd,
+      testingRunId: firstSource,
+      sampling: 1,
+      fps: 8,
+      scaleMode: 'per_frame',
+      heatmapConfig: { ...defaultHeatmapConfig() },
+      advancedOpen: false,
+    });
+  }
+
+  function patchDerivedHeatmapConfig(patch: Partial<HeatmapVisualizationConfig>) {
+    setTimeSeriesHeatmapDraft((current) => current ? { ...current, heatmapConfig: { ...current.heatmapConfig, ...patch } } : current);
+  }
+
+  function finishHeatmapDerivation() {
+    if (!timeSeriesHeatmapDraft || !heatmapDerivationPlot || heatmapDerivationError) return;
+    const selectedResults = effectiveHeatmapDerivationResults;
+    const effectiveStart = selectedResults[0].timestamp;
+    const effectiveEnd = selectedResults[selectedResults.length - 1].timestamp;
+    const run = testingRuns.find((item) => item.id === Number(timeSeriesHeatmapDraft.testingRunId));
+    const selectedTrace = heatmapDerivationPlot.traces?.find((trace) => trace.testingRunId === timeSeriesHeatmapDraft.testingRunId);
+    const label = selectedTrace?.legendLabel ?? run?.name ?? `Testing run #${timeSeriesHeatmapDraft.testingRunId}`;
+    const source: PlotSourceConfig = {
+      testingRunId: timeSeriesHeatmapDraft.testingRunId,
+      start: effectiveStart,
+      end: effectiveEnd,
+      sampling: timeSeriesHeatmapDraft.mode === 'range' ? Math.max(1, Math.floor(timeSeriesHeatmapDraft.sampling)) : 1,
+      timestamp: timeSeriesHeatmapDraft.mode === 'single' ? effectiveStart : null,
+    };
+    const derivedPlot: AnalysisPlot = {
+      ...defaultDraft(),
+      id: crypto.randomUUID(),
+      plotType: 'heatmap',
+      heatmapMode: timeSeriesHeatmapDraft.mode,
+      title: timeSeriesHeatmapDraft.mode === 'single' ? `Heatmap · ${label}` : `Heatmap video · ${label}`,
+      subtitle: timeSeriesHeatmapDraft.mode === 'single'
+        ? artifactTimestamp(effectiveStart)
+        : `${artifactTimestamp(effectiveStart)} – ${artifactTimestamp(effectiveEnd)} · every ${source.sampling} frame${source.sampling === 1 ? '' : 's'}`,
+      testingRunId: timeSeriesHeatmapDraft.testingRunId,
+      start: effectiveStart,
+      end: effectiveEnd,
+      timestamp: source.timestamp,
+      sampling: source.sampling,
+      includeReference: false,
+      heatmapConfig: { ...timeSeriesHeatmapDraft.heatmapConfig },
+      sources: [source],
+      traces: selectedTrace ? [{ ...selectedTrace, ...source }] : undefined,
+      derivedFromPlotId: heatmapDerivationPlot.id,
+      autoStartHeatmap: timeSeriesHeatmapDraft.mode === 'range',
+      heatmapFps: timeSeriesHeatmapDraft.fps,
+      heatmapScaleMode: timeSeriesHeatmapDraft.scaleMode,
+    };
+    setPlots((current) => {
+      const sourceIndex = current.findIndex((plot) => plot.id === heatmapDerivationPlot.id);
+      const lastDerivedIndex = current.reduce(
+        (last, plot, index) => plot.derivedFromPlotId === heatmapDerivationPlot.id ? Math.max(last, index) : last,
+        sourceIndex,
+      );
+      const next = [...current];
+      next.splice(Math.max(0, lastDerivedIndex + 1), 0, derivedPlot);
+      return next;
+    });
+    setTimeSeriesHeatmapDraft(null);
+    notifications.show({
+      color: 'green',
+      title: timeSeriesHeatmapDraft.mode === 'single' ? 'Heatmap added' : 'Heatmap video queued',
+      message: 'The new block was inserted directly below its source time series.',
+    });
+  }
 
   function resolveTestingRun(modelId: number, metric: string): { run: TestingRun | null; duplicateCount: number } {
     if (!selectedInferenceDatasetId || !selectedRoiKey) return { run: null, duplicateCount: 0 };
@@ -3965,6 +4272,7 @@ export function AnalysisPage({ active = true }: { active?: boolean }) {
                   )
                 }
                 onRemove={() => setPlots((current) => current.filter((item) => item.id !== plot.id))}
+                onHeatmapSelection={(mode, start, end) => beginHeatmapDerivation(plot, plotData.results, mode, start, end)}
               />
             ) : (
               <Paper key={plot.id} withBorder p="md" radius="sm">
@@ -3977,6 +4285,191 @@ export function AnalysisPage({ active = true }: { active?: boolean }) {
           })}
         </Stack>
       )}
+      <Modal
+        opened={timeSeriesHeatmapDraft !== null}
+        onClose={() => setTimeSeriesHeatmapDraft(null)}
+        title={timeSeriesHeatmapDraft?.mode === 'single' ? 'Create heatmap from data point' : 'Create heatmap video from time range'}
+        size="xl"
+      >
+        {timeSeriesHeatmapDraft && (
+          <Stack gap="md">
+            <Alert color={heatmapDerivationError ? 'yellow' : 'blue'}>
+              {heatmapDerivationError ?? (
+                timeSeriesHeatmapDraft.mode === 'single'
+                  ? `Selected timestamp: ${artifactTimestamp(effectiveHeatmapDerivationResults[0].timestamp)}`
+                  : `Selected range: ${artifactTimestamp(effectiveHeatmapDerivationResults[0].timestamp)} – ${artifactTimestamp(effectiveHeatmapDerivationResults[effectiveHeatmapDerivationResults.length - 1].timestamp)} · ${effectiveHeatmapDerivationResults.length} visible frames`
+              )}
+            </Alert>
+
+            <SimpleGrid cols={{ base: 1, md: timeSeriesHeatmapDraft.mode === 'range' ? 3 : 1 }}>
+              <Select
+                label="Inference source"
+                data={heatmapDerivationSources}
+                value={timeSeriesHeatmapDraft.testingRunId}
+                onChange={(value) => setTimeSeriesHeatmapDraft((current) => current ? { ...current, testingRunId: value ?? '' } : current)}
+                allowDeselect={false}
+              />
+              {timeSeriesHeatmapDraft.mode === 'range' && (
+                <>
+                  <NumberInput
+                    label="Sampling rate"
+                    description="Render every Nth source frame"
+                    min={1}
+                    value={timeSeriesHeatmapDraft.sampling}
+                    onChange={(value) => setTimeSeriesHeatmapDraft((current) => current ? { ...current, sampling: valueAsNumber(value, 1) } : current)}
+                  />
+                  <NumberInput
+                    label="Video FPS"
+                    min={1}
+                    max={60}
+                    value={timeSeriesHeatmapDraft.fps}
+                    onChange={(value) => setTimeSeriesHeatmapDraft((current) => current ? { ...current, fps: valueAsNumber(value, 8) } : current)}
+                  />
+                </>
+              )}
+            </SimpleGrid>
+
+            <SimpleGrid cols={{ base: 1, md: 3 }}>
+              <Select
+                label="Residual source"
+                data={[
+                  { value: 'pixel_residual', label: 'Pixel residual' },
+                  { value: 'ssim_residual', label: 'SSIM residual' },
+                ]}
+                value={timeSeriesHeatmapDraft.heatmapConfig.residual_source}
+                onChange={(value) => patchDerivedHeatmapConfig({ residual_source: (value ?? 'pixel_residual') as 'pixel_residual' | 'ssim_residual' })}
+              />
+              <Select
+                label="Error calculation"
+                data={[
+                  { value: 'squared', label: 'Squared error' },
+                  { value: 'absolute', label: 'Absolute error' },
+                ]}
+                value={timeSeriesHeatmapDraft.heatmapConfig.error_mode}
+                disabled={timeSeriesHeatmapDraft.heatmapConfig.residual_source === 'ssim_residual'}
+                onChange={(value) => patchDerivedHeatmapConfig({ error_mode: (value ?? 'squared') as 'squared' | 'absolute' })}
+              />
+              {timeSeriesHeatmapDraft.mode === 'range' && (
+                <Select
+                  label="Video color scale"
+                  data={[
+                    { value: 'per_frame', label: 'Per-frame (auto)' },
+                    { value: 'shared', label: 'Shared (comparable)' },
+                  ]}
+                  value={timeSeriesHeatmapDraft.scaleMode}
+                  disabled={timeSeriesHeatmapDraft.heatmapConfig.fixed_ceiling_enabled}
+                  onChange={(value) => setTimeSeriesHeatmapDraft((current) => current ? { ...current, scaleMode: (value ?? 'per_frame') as 'per_frame' | 'shared' } : current)}
+                />
+              )}
+            </SimpleGrid>
+
+            <SimpleGrid cols={{ base: 1, md: 2 }}>
+              <Select
+                label="Visibility mode"
+                data={[
+                  { value: 'opacity', label: 'Maximum opacity' },
+                  { value: 'max_clip', label: 'Relative max clip' },
+                  { value: 'fixed_ceiling', label: 'Fixed error ceiling' },
+                ]}
+                value={heatmapDerivationVisibilityMode}
+                onChange={(value) => patchDerivedHeatmapConfig({
+                  fixed_ceiling_enabled: value === 'fixed_ceiling',
+                  max_clip_enabled: value === 'max_clip',
+                })}
+              />
+              {heatmapDerivationVisibilityMode === 'fixed_ceiling' ? (
+                <NumberInput
+                  label="Ceiling value"
+                  min={Number.EPSILON}
+                  decimalScale={8}
+                  value={timeSeriesHeatmapDraft.heatmapConfig.fixed_ceiling}
+                  onChange={(value) => patchDerivedHeatmapConfig({ fixed_ceiling: valueAsNumber(value, 1) })}
+                />
+              ) : heatmapDerivationVisibilityMode === 'max_clip' ? (
+                <NumberInput
+                  label="Max clip (%)"
+                  min={1}
+                  max={100}
+                  value={Math.round(timeSeriesHeatmapDraft.heatmapConfig.max_clip * 100)}
+                  onChange={(value) => patchDerivedHeatmapConfig({ max_clip: valueAsNumber(value, 33) / 100 })}
+                />
+              ) : (
+                <NumberInput
+                  label="Maximum opacity (%)"
+                  min={0}
+                  max={100}
+                  value={Math.round(timeSeriesHeatmapDraft.heatmapConfig.max_opacity * 100)}
+                  onChange={(value) => patchDerivedHeatmapConfig({ max_opacity: valueAsNumber(value, 55) / 100 })}
+                />
+              )}
+            </SimpleGrid>
+
+            <Button
+              variant="subtle"
+              leftSection={<SlidersHorizontal size={16} />}
+              rightSection={timeSeriesHeatmapDraft.advancedOpen ? <ChevronDown size={16} /> : <ChevronRight size={16} />}
+              onClick={() => setTimeSeriesHeatmapDraft((current) => current ? { ...current, advancedOpen: !current.advancedOpen } : current)}
+            >
+              Advanced heatmap parameters
+            </Button>
+            <Collapse in={timeSeriesHeatmapDraft.advancedOpen}>
+              <Stack gap="md">
+                <SimpleGrid cols={{ base: 1, md: 3 }}>
+                  <Switch
+                    label="Signed deviations"
+                    checked={timeSeriesHeatmapDraft.heatmapConfig.signed_deviations}
+                    disabled={timeSeriesHeatmapDraft.heatmapConfig.residual_source === 'ssim_residual'}
+                    onChange={(event) => patchDerivedHeatmapConfig({ signed_deviations: event.currentTarget.checked })}
+                  />
+                  <Switch
+                    label="Threshold"
+                    checked={timeSeriesHeatmapDraft.heatmapConfig.threshold_enabled}
+                    onChange={(event) => patchDerivedHeatmapConfig({ threshold_enabled: event.currentTarget.checked })}
+                  />
+                  {timeSeriesHeatmapDraft.heatmapConfig.threshold_enabled && (
+                    <NumberInput
+                      label="Threshold value"
+                      min={0}
+                      decimalScale={6}
+                      value={timeSeriesHeatmapDraft.heatmapConfig.threshold}
+                      onChange={(value) => patchDerivedHeatmapConfig({ threshold: valueAsNumber(value, 0) })}
+                    />
+                  )}
+                </SimpleGrid>
+                {timeSeriesHeatmapDraft.heatmapConfig.signed_deviations && (
+                  <SimpleGrid cols={{ base: 1, md: 2 }}>
+                    <NumberInput label="Positive weight" min={0} value={timeSeriesHeatmapDraft.heatmapConfig.positive_weight} onChange={(value) => patchDerivedHeatmapConfig({ positive_weight: valueAsNumber(value, 1) })} />
+                    <NumberInput label="Negative weight" min={0} value={timeSeriesHeatmapDraft.heatmapConfig.negative_weight} onChange={(value) => patchDerivedHeatmapConfig({ negative_weight: valueAsNumber(value, 1) })} />
+                  </SimpleGrid>
+                )}
+                {timeSeriesHeatmapDraft.heatmapConfig.residual_source === 'ssim_residual' && (
+                  <SimpleGrid cols={{ base: 1, md: 4 }}>
+                    <NumberInput label="SSIM window" min={3} step={2} value={timeSeriesHeatmapDraft.heatmapConfig.ssim_window_size} onChange={(value) => patchDerivedHeatmapConfig({ ssim_window_size: valueAsNumber(value, 11) })} />
+                    <NumberInput label="SSIM K1" min={0} decimalScale={4} value={timeSeriesHeatmapDraft.heatmapConfig.ssim_k1} onChange={(value) => patchDerivedHeatmapConfig({ ssim_k1: valueAsNumber(value, 0.01) })} />
+                    <NumberInput label="SSIM K2" min={0} decimalScale={4} value={timeSeriesHeatmapDraft.heatmapConfig.ssim_k2} onChange={(value) => patchDerivedHeatmapConfig({ ssim_k2: valueAsNumber(value, 0.03) })} />
+                    <NumberInput label="SSIM data range" min={Number.EPSILON} value={timeSeriesHeatmapDraft.heatmapConfig.ssim_data_range} onChange={(value) => patchDerivedHeatmapConfig({ ssim_data_range: valueAsNumber(value, 1) })} />
+                    <NumberInput label="SSIM alpha" min={0} value={timeSeriesHeatmapDraft.heatmapConfig.ssim_alpha} onChange={(value) => patchDerivedHeatmapConfig({ ssim_alpha: valueAsNumber(value, 1) })} />
+                    <NumberInput label="SSIM beta" min={0} value={timeSeriesHeatmapDraft.heatmapConfig.ssim_beta} onChange={(value) => patchDerivedHeatmapConfig({ ssim_beta: valueAsNumber(value, 1) })} />
+                    <NumberInput label="SSIM gamma" min={0} value={timeSeriesHeatmapDraft.heatmapConfig.ssim_gamma} onChange={(value) => patchDerivedHeatmapConfig({ ssim_gamma: valueAsNumber(value, 1) })} />
+                  </SimpleGrid>
+                )}
+              </Stack>
+            </Collapse>
+
+            <Group justify="flex-end">
+              <Button variant="default" onClick={() => setTimeSeriesHeatmapDraft(null)}>Cancel</Button>
+              <Button
+                color="red"
+                leftSection={<Flame size={16} />}
+                disabled={Boolean(heatmapDerivationError)}
+                onClick={finishHeatmapDerivation}
+              >
+                {timeSeriesHeatmapDraft.mode === 'single' ? 'Create heatmap' : 'Create and render video'}
+              </Button>
+            </Group>
+          </Stack>
+        )}
+      </Modal>
       <DetailModal detail={detailModal} onClose={() => setDetailModal(null)} />
     </Stack>
   );

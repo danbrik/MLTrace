@@ -100,6 +100,21 @@ def test_heatmap_range_renders_frames_and_dedups(tmp_path: Path, monkeypatch) ->
         assert again.id == run.id
         assert db.scalar(select(models.HeatmapRangeRun).where(models.HeatmapRangeRun.id != run.id)) is None
 
+        forced = heatmap_service.enqueue_heatmap_range(
+            db,
+            HeatmapRangeRunCreate(
+                testing_run_id=testing_run.id,
+                start_timestamp=datetime(2026, 4, 1, 12, 0, 0),
+                end_timestamp=datetime(2026, 4, 1, 12, 0, 20),
+                stride=1,
+                scale_mode="shared",
+                force_recompute=True,
+            ),
+            wake_scheduler=False,
+        )
+        assert forced.id != run.id
+        assert forced.config_signature == run.config_signature
+
         different_fps = heatmap_service.enqueue_heatmap_range(
             db,
             HeatmapRangeRunCreate(
