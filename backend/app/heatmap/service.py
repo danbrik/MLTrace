@@ -18,6 +18,7 @@ from app.database import data_dir
 from app.schemas import HeatmapRangeRunCreate, HeatmapRangeRunRead
 from app.testing.service import CURRENT_HEATMAP_RENDER_VERSION, _load_testing_run_for_heatmap, _utcnow
 from app.training.scheduler import next_queue_rank, scheduler
+from app.video import ensure_browser_mp4
 
 
 def _range_signature(
@@ -164,4 +165,7 @@ def video_path(db: Session, run_id: int) -> Path | None:
     if run is None or not run.video_path:
         return None
     path = Path(run.video_path)
-    return path if path.exists() else None
+    if not path.exists():
+        return None
+    ensure_browser_mp4(path)
+    return path

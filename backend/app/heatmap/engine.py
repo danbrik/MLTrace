@@ -36,7 +36,7 @@ from app.testing.service import (
     _to_nchw,
     _utcnow,
 )
-from app.video import add_timestamp_watermark
+from app.video import add_timestamp_watermark, finalize_browser_mp4
 
 logger = logging.getLogger("mltrace.heatmap")
 
@@ -232,6 +232,7 @@ def run_heatmap_range(run_id: int, abort_event: threading.Event | None = None) -
                     writer.write(cv2.cvtColor(stamped, cv2.COLOR_RGB2BGR))
             finally:
                 writer.release()
+            finalize_browser_mp4(video_path)
 
             run.status = "finished"
             run.ended_at = _utcnow()

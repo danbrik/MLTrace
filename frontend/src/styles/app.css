@@ -292,9 +292,29 @@ body {
 }
 
 .analysis-heatmap-video-frame {
-  width: min(100%, 860px);
-  max-height: 68vh;
+  width: min(100%, 1080px);
+  height: min(68vh, 720px);
+  min-height: 360px;
   margin-inline: auto;
+}
+
+.inspect-video-player {
+  display: block;
+  width: 100%;
+  min-height: 360px;
+  max-height: 75vh;
+  aspect-ratio: 16 / 9;
+  margin-inline: auto;
+  border-radius: 8px;
+  background: #08111f;
+  object-fit: contain;
+}
+
+@media (max-width: 48em) {
+  .analysis-heatmap-video-frame,
+  .inspect-video-player {
+    min-height: 220px;
+  }
 }
 
 .analysis-relative-colorbar {

@@ -4,10 +4,80 @@ from __future__ import annotations
 
 from datetime import datetime
 from pathlib import Path
+import shutil
+import subprocess
+import threading
 
 import cv2
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
+
+
+_TRANSCODE_LOCK = threading.Lock()
+
+
+def _ready_marker(path: Path) -> Path:
+    return path.with_name(f"{path.name}.browser-ready")
+
+
+def _ffmpeg_executable() -> str | None:
+    executable = shutil.which("ffmpeg")
+    if executable:
+        return executable
+    try:
+        import imageio_ffmpeg
+
+        return imageio_ffmpeg.get_ffmpeg_exe()
+    except (ImportError, RuntimeError, OSError):
+        return None
+
+
+def finalize_browser_mp4(path: Path) -> None:
+    """Transcode an OpenCV MP4 to browser-safe H.264/YUV420p with faststart."""
+    ffmpeg = _ffmpeg_executable()
+    if ffmpeg is None:
+        raise ValueError("ffmpeg is required to create browser-compatible H.264 MP4 videos.")
+    marker = _ready_marker(path)
+    with _TRANSCODE_LOCK:
+        if marker.exists() and marker.stat().st_mtime >= path.stat().st_mtime:
+            return
+        output = path.with_name(f"{path.stem}.browser-tmp.mp4")
+        command = [
+            ffmpeg,
+            "-y",
+            "-loglevel",
+            "error",
+            "-i",
+            str(path),
+            "-an",
+            "-c:v",
+            "libx264",
+            "-preset",
+            "veryfast",
+            "-crf",
+            "20",
+            "-vf",
+            "pad=ceil(iw/2)*2:ceil(ih/2)*2",
+            "-pix_fmt",
+            "yuv420p",
+            "-movflags",
+            "+faststart",
+            str(output),
+        ]
+        result = subprocess.run(command, capture_output=True, text=True, check=False)
+        if result.returncode != 0:
+            output.unlink(missing_ok=True)
+            raise ValueError(f"Could not encode browser-compatible MP4: {result.stderr.strip()}")
+        output.replace(path)
+        marker.write_text("h264/yuv420p/faststart\n", encoding="utf-8")
+
+
+def ensure_browser_mp4(path: Path) -> None:
+    """One-time compatibility upgrade for MP4s created before H.264 support."""
+    marker = _ready_marker(path)
+    if marker.exists() and marker.stat().st_mtime >= path.stat().st_mtime:
+        return
+    finalize_browser_mp4(path)
 
 
 def timestamp_label(value: datetime) -> str:
@@ -53,3 +123,4 @@ def write_mp4(path: Path, frames: list[np.ndarray], fps: int) -> None:
             writer.write(cv2.cvtColor(np.asarray(frame, dtype=np.uint8), cv2.COLOR_RGB2BGR))
     finally:
         writer.release()
+    finalize_browser_mp4(path)

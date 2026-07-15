@@ -881,7 +881,13 @@ def create_app() -> FastAPI:
         path = heatmap_service.video_path(db, run_id)
         if path is None:
             raise HTTPException(status_code=404, detail="Heatmap MP4 not found.")
-        return FileResponse(path, media_type="video/mp4", filename=f"heatmap-run-{run_id}.mp4")
+        return FileResponse(
+            path,
+            media_type="video/mp4",
+            filename=f"heatmap-run-{run_id}.mp4",
+            content_disposition_type="inline",
+            headers={"Cache-Control": "no-store"},
+        )
 
     @app.get("/api/heatmap-ranges/{run_id}/log", response_model=TrainingRunLogResponse)
     def api_get_heatmap_range_log(run_id: int, db: Session = Depends(get_db)):
@@ -981,7 +987,7 @@ def create_app() -> FastAPI:
         path = inspect_service.inspect_preview_video_path(token)
         if path is None:
             raise HTTPException(status_code=404, detail="Inspect preview not found.")
-        return FileResponse(path, media_type="video/mp4")
+        return FileResponse(path, media_type="video/mp4", headers={"Cache-Control": "no-store"})
 
     @app.get("/api/inspect/artifacts", response_model=InspectArtifactRunPage)
     def api_list_inspect_artifacts(
@@ -1058,7 +1064,13 @@ def create_app() -> FastAPI:
         path = inspect_service.inspect_video_path(db, run_id)
         if path is None:
             raise HTTPException(status_code=404, detail="Video not found.")
-        return FileResponse(path, media_type="video/mp4", filename=f"inspect-run-{run_id}.mp4")
+        return FileResponse(
+            path,
+            media_type="video/mp4",
+            filename=f"inspect-run-{run_id}.mp4",
+            content_disposition_type="inline",
+            headers={"Cache-Control": "no-store"},
+        )
 
     @app.get("/api/inspect/runs/{run_id}/results.csv")
     def api_get_inspect_csv(run_id: int, db: Session = Depends(get_db)):

@@ -45,7 +45,7 @@ from app.training.data import (
     count_folder_range_images,
     enumerate_head_records_for_range,
 )
-from app.video import add_timestamp_watermark, write_mp4
+from app.video import add_timestamp_watermark, ensure_browser_mp4, write_mp4
 
 logger = logging.getLogger("mltrace.inspect")
 
@@ -548,7 +548,10 @@ def inspect_video_path(db: Session, run_id: int) -> Path | None:
     if run is None or not run.video_path:
         return None
     path = Path(run.video_path)
-    return path if path.exists() else None
+    if not path.exists():
+        return None
+    ensure_browser_mp4(path)
+    return path
 
 
 def inspect_csv_path(db: Session, run_id: int) -> Path | None:
@@ -579,7 +582,10 @@ def inspect_preview_video_path(token: str) -> Path | None:
     if len(token) != 64 or any(char not in "0123456789abcdef" for char in token):
         return None
     path = data_dir() / "inspect_previews" / token / "inspect.mp4"
-    return path if path.exists() else None
+    if not path.exists():
+        return None
+    ensure_browser_mp4(path)
+    return path
 
 
 def _artifact_from_inspect(run: models.InspectRun) -> InspectArtifactRunRead:

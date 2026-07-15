@@ -18,6 +18,10 @@ def test_timestamp_watermark_and_mp4(tmp_path: Path) -> None:
 
     path = tmp_path / "preview.mp4"
     write_mp4(path, [stamped, stamped], fps=7)
+    encoded = path.read_bytes()
+    assert b"avc1" in encoded  # H.264 sample entry used by browser MP4 players.
+    assert 0 <= encoded.find(b"moov") < encoded.find(b"mdat")  # faststart metadata first.
+    assert path.with_name(f"{path.name}.browser-ready").exists()
     capture = cv2.VideoCapture(str(path))
     try:
         assert capture.isOpened()

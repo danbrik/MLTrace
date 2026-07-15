@@ -19,7 +19,7 @@ from app.inspect.diagnostics import compute_diagnostic, write_diagnostic_artifac
 from app.preprocessing.pipeline import absolute_image_to_uint8, compile_pipeline
 from app.schemas import PreprocessingGraph
 from app.training.data import enumerate_training_dataset_image_records_for_range
-from app.video import add_timestamp_watermark
+from app.video import add_timestamp_watermark, finalize_browser_mp4
 
 logger = logging.getLogger("mltrace.inspect")
 
@@ -324,6 +324,8 @@ def run_inspect(run_id: int, abort_event: threading.Event | None = None) -> None
             if writer is not None:
                 writer.release()
                 writer = None
+            if run.analysis_mode not in {"energy", "optical_flow"}:
+                finalize_browser_mp4(video_path)
             run.status = "finished"
             run.ended_at = _utcnow()
             run.duration_seconds = round(time.perf_counter() - started, 3)

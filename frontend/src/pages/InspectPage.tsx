@@ -295,7 +295,7 @@ function ArtifactViewer({ artifact }: { artifact: InspectArtifactRun | null }) {
           </Group>
         </Group>
         {view === 'video' && artifact.has_video && (
-          <video src={artifactVideoUrl(artifact)} controls muted playsInline style={{ display: 'block', maxWidth: '100%', maxHeight: 'min(70vh, 720px)', margin: '0 auto', borderRadius: 6 }} />
+          <video src={artifactVideoUrl(artifact)} controls muted playsInline className="inspect-video-player" />
         )}
         {view === 'csv' && artifact.has_csv && (
           <Stack gap="sm">
@@ -1007,7 +1007,7 @@ export function InspectPage({ active = true }: { active?: boolean }) {
                     <Badge variant="light" color="gray">{preview.preview_frame_count} preview frames</Badge>
                     <Badge variant="light" color="gray">{preview.width}x{preview.height}, {preview.channels} ch</Badge>
                   </Group>
-                  {preview.preview_video_url && <video src={inspectPreviewVideoUrl(preview.preview_video_url)} controls muted playsInline style={{ display: 'block', maxWidth: '100%', maxHeight: 'min(70vh, 680px)', margin: '0 auto', borderRadius: 6 }} />}
+                  {preview.preview_video_url && <video src={inspectPreviewVideoUrl(preview.preview_video_url)} controls muted playsInline className="inspect-video-player" />}
                 </Stack>
               </Paper>
               {preview.plot_image_data_url && (

@@ -21,7 +21,7 @@ from PIL import Image, ImageDraw
 from app import models
 from app.inspect.contrast import to_intensity_16scale
 from app.preprocessing.pipeline import encode_absolute_image_data_url
-from app.video import add_timestamp_watermark
+from app.video import add_timestamp_watermark, finalize_browser_mp4
 
 TILE_COLORS = [
     (28, 126, 214),
@@ -337,6 +337,8 @@ def compute_diagnostic(
 
     if writer is not None:
         writer.release()
+        assert video_path is not None
+        finalize_browser_mp4(video_path)
 
     value_prefix = "energy_total" if mode == "energy" else "flow_selected"
     value_columns = [value_prefix] + [spec["key"] for spec in specs if spec["key"] != "total"]
