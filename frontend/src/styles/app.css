@@ -254,6 +254,25 @@ body {
   background: #ffffff;
 }
 
+.analysis-artifact-browser {
+  border-color: #d8c7ff;
+  background: linear-gradient(145deg, #ffffff 0%, #faf8ff 100%);
+}
+
+.analysis-saved-artifact-preview {
+  background: #f8fafc;
+}
+
+.analysis-saved-heatmap-image {
+  display: block;
+  width: min(100%, 1080px);
+  max-height: 72vh;
+  margin-inline: auto;
+  border-radius: 8px;
+  background: #08111f;
+  object-fit: contain;
+}
+
 .analysis-selected-row {
   background: #ebfbee !important;
 }

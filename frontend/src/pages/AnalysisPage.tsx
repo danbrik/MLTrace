@@ -24,7 +24,7 @@ import {
   Tooltip,
 } from '@mantine/core';
 import { notifications } from '@mantine/notifications';
-import { ArrowDown, ArrowUp, Check, ChevronDown, ChevronRight, Info, Pause, Pencil, Play, Plus, RotateCcw, Save, Search, Trash2, Upload } from 'lucide-react';
+import { ArrowDown, ArrowUp, Check, ChevronDown, ChevronRight, Film, Image, Info, Pause, Pencil, Play, Plus, RefreshCw, RotateCcw, Save, Search, Trash2, Upload } from 'lucide-react';
 import { memo, useCallback, useEffect, useMemo, useState } from 'react';
 import type React from 'react';
 
@@ -35,10 +35,13 @@ import {
   createHeatmapRange,
   deleteAnalysisLayout,
   getAnalysisLayout,
+  getHeatmap,
   getHeatmapRange,
   getTestingRunResults,
   heatmapRangeVideoUrl,
   listAnalysisLayouts,
+  listHeatmapRanges,
+  listHeatmaps,
   listMethodConfigurations,
   listPreprocessingPipelines,
   listTestingRuns,
@@ -57,6 +60,7 @@ import type {
   AnalysisLayout,
   HeatmapRangeRun,
   HeatmapRun,
+  HeatmapRunSummary,
   HeatmapVisualizationConfig,
   MethodConfiguration,
   PreprocessingPipeline,
@@ -1717,6 +1721,187 @@ const AnalysisPlotCard = memo(function AnalysisPlotCard({
   );
 });
 
+function artifactTimestamp(value: string): string {
+  return value.slice(0, 19).replace('T', ' ');
+}
+
+function heatmapErrorDescription(config: HeatmapVisualizationConfig): string {
+  const source = config.residual_source === 'ssim_residual' ? 'SSIM residual' : 'Pixel residual';
+  const error = config.residual_source === 'ssim_residual' ? '1 - SSIM' : `${config.error_mode} error`;
+  const modifiers = [config.signed_deviations ? 'signed' : '', config.threshold_enabled ? `threshold ${formatValue(config.threshold)}` : '']
+    .filter(Boolean)
+    .join(', ');
+  return `${source} · ${error}${modifiers ? ` · ${modifiers}` : ''}`;
+}
+
+function heatmapVisibilityDescription(config: HeatmapVisualizationConfig): string {
+  if (config.fixed_ceiling_enabled) return `Fixed ceiling ${formatValue(config.fixed_ceiling)} · ${Math.round(config.max_opacity * 100)}% opacity`;
+  if (config.max_clip_enabled) return `Max clip ${Math.round(config.max_clip * 100)}%`;
+  return `Maximum opacity ${Math.round(config.max_opacity * 100)}%`;
+}
+
+function heatmapStatusColor(status: string): string {
+  if (status === 'finished') return 'green';
+  if (status === 'running') return 'blue';
+  if (status === 'queued') return 'yellow';
+  if (status === 'failed') return 'red';
+  return 'gray';
+}
+
+function ExistingHeatmapArtifacts({
+  singles,
+  videos,
+  testingRunById,
+  intervalLabel,
+  refreshing,
+  onRefresh,
+}: {
+  singles: HeatmapRunSummary[];
+  videos: HeatmapRangeRun[];
+  testingRunById: Map<number, TestingRun>;
+  intervalLabel: string;
+  refreshing: boolean;
+  onRefresh: () => void;
+}) {
+  const [selectedSingle, setSelectedSingle] = useState<HeatmapRun | null>(null);
+  const [selectedVideo, setSelectedVideo] = useState<HeatmapRangeRun | null>(null);
+  const [loadingSingleId, setLoadingSingleId] = useState<number | null>(null);
+
+  async function openSingle(summary: HeatmapRunSummary) {
+    setSelectedVideo(null);
+    setLoadingSingleId(summary.id);
+    try {
+      setSelectedSingle(await getHeatmap(summary.id));
+    } catch (error) {
+      notifyError('Could not load saved heatmap', error);
+    } finally {
+      setLoadingSingleId(null);
+    }
+  }
+
+  function openVideo(video: HeatmapRangeRun) {
+    setSelectedSingle(null);
+    setSelectedVideo(video);
+  }
+
+  const total = singles.length + videos.length;
+  return (
+    <Paper withBorder p="md" radius="sm" className="analysis-artifact-browser">
+      <Stack gap="md">
+        <Group justify="space-between" align="flex-start" wrap="wrap">
+          <div>
+            <Group gap="xs">
+              <Text fw={700}>Existing heatmaps</Text>
+              <Badge variant="light" color="violet">{total}</Badge>
+            </Group>
+            <Text size="sm" c="dimmed">
+              Saved single heatmaps and videos matching the selected models, inference dataset and {intervalLabel}.
+            </Text>
+          </div>
+          <Button
+            variant="default"
+            size="compact-sm"
+            leftSection={<RefreshCw size={15} />}
+            loading={refreshing}
+            onClick={onRefresh}
+          >
+            Refresh
+          </Button>
+        </Group>
+
+        {total === 0 ? (
+          <Alert color="gray">No saved single heatmaps or heatmap videos match this selection and time range yet.</Alert>
+        ) : (
+          <ScrollArea>
+            <Table striped highlightOnHover verticalSpacing="sm" miw={1120}>
+              <Table.Thead>
+                <Table.Tr>
+                  <Table.Th>Heatmap mode</Table.Th>
+                  <Table.Th>Inference run</Table.Th>
+                  <Table.Th>Timestamp / range</Table.Th>
+                  <Table.Th>Sampling rate</Table.Th>
+                  <Table.Th>Error calculation</Table.Th>
+                  <Table.Th>Visibility</Table.Th>
+                  <Table.Th>Status</Table.Th>
+                  <Table.Th />
+                </Table.Tr>
+              </Table.Thead>
+              <Table.Tbody>
+                {singles.map((item) => (
+                  <Table.Tr key={`single-${item.id}`}>
+                    <Table.Td><Badge leftSection={<Image size={12} />} color="violet" variant="light">Single heatmap</Badge></Table.Td>
+                    <Table.Td>{testingRunById.get(item.testing_run_id)?.name ?? `Run #${item.testing_run_id}`}</Table.Td>
+                    <Table.Td>{artifactTimestamp(item.timestamp)}</Table.Td>
+                    <Table.Td>1 frame</Table.Td>
+                    <Table.Td>{heatmapErrorDescription(item.visualization_config)}</Table.Td>
+                    <Table.Td>{heatmapVisibilityDescription(item.visualization_config)}</Table.Td>
+                    <Table.Td><Badge color={heatmapStatusColor(item.status)} variant="light">{item.status}</Badge></Table.Td>
+                    <Table.Td>
+                      <Button size="compact-sm" variant="light" loading={loadingSingleId === item.id} onClick={() => openSingle(item)}>
+                        Show
+                      </Button>
+                    </Table.Td>
+                  </Table.Tr>
+                ))}
+                {videos.map((item) => {
+                  const progress = item.frame_count ? Math.min(100, (item.done_count / item.frame_count) * 100) : 0;
+                  return (
+                    <Table.Tr key={`video-${item.id}`}>
+                      <Table.Td><Badge leftSection={<Film size={12} />} color="blue" variant="light">Heatmap video</Badge></Table.Td>
+                      <Table.Td>{item.testing_run_name}</Table.Td>
+                      <Table.Td>{artifactTimestamp(item.start_timestamp)} – {artifactTimestamp(item.end_timestamp)}</Table.Td>
+                      <Table.Td>Every {item.stride} frame{item.stride === 1 ? '' : 's'} · {item.fps} FPS</Table.Td>
+                      <Table.Td>{heatmapErrorDescription(item.visualization_config)}</Table.Td>
+                      <Table.Td>{heatmapVisibilityDescription(item.visualization_config)} · {item.scale_mode === 'shared' ? 'shared scale' : 'per-frame scale'}</Table.Td>
+                      <Table.Td>
+                        <Stack gap={4} miw={90}>
+                          <Badge color={heatmapStatusColor(item.status)} variant="light">{item.status}</Badge>
+                          {(item.status === 'queued' || item.status === 'running') && <Progress value={progress} size="xs" animated={item.status === 'running'} />}
+                        </Stack>
+                      </Table.Td>
+                      <Table.Td>
+                        <Button size="compact-sm" variant="light" disabled={item.status !== 'finished' || !item.video_path} onClick={() => openVideo(item)}>
+                          Show
+                        </Button>
+                      </Table.Td>
+                    </Table.Tr>
+                  );
+                })}
+              </Table.Tbody>
+            </Table>
+          </ScrollArea>
+        )}
+
+        {selectedSingle && (
+          <Paper withBorder p="sm" radius="sm" className="analysis-saved-artifact-preview">
+            <Group justify="space-between" mb="sm">
+              <div>
+                <Text fw={700}>Single heatmap · {artifactTimestamp(selectedSingle.timestamp)}</Text>
+                <Text size="xs" c="dimmed">Maximum error {formatValue(selectedSingle.max_error)} · mean {formatValue(selectedSingle.mean_error)}</Text>
+              </div>
+              <Button size="compact-sm" variant="subtle" onClick={() => setSelectedSingle(null)}>Close</Button>
+            </Group>
+            <img className="analysis-saved-heatmap-image" src={selectedSingle.heatmap_image_data_url} alt={`Saved heatmap at ${selectedSingle.timestamp}`} />
+          </Paper>
+        )}
+
+        {selectedVideo && (
+          <Paper withBorder p="sm" radius="sm" className="analysis-saved-artifact-preview">
+            <Group justify="space-between" mb="sm">
+              <div>
+                <Text fw={700}>Heatmap video · {selectedVideo.testing_run_name}</Text>
+                <Text size="xs" c="dimmed">{artifactTimestamp(selectedVideo.start_timestamp)} – {artifactTimestamp(selectedVideo.end_timestamp)}</Text>
+              </div>
+              <Button size="compact-sm" variant="subtle" onClick={() => setSelectedVideo(null)}>Close</Button>
+            </Group>
+            <video className="inspect-video-player" src={heatmapRangeVideoUrl(selectedVideo.id)} controls preload="metadata" />
+          </Paper>
+        )}
+      </Stack>
+    </Paper>
+  );
+}
+
 function defaultDraft(): PlotDraft {
   return {
     plotType: 'timeseries',
@@ -1857,6 +2042,9 @@ export function AnalysisPage({ active = true }: { active?: boolean }) {
   const [trainingPipelines, setTrainingPipelines] = useState<TrainingPipeline[]>([]);
   const [preprocessingPipelines, setPreprocessingPipelines] = useState<PreprocessingPipeline[]>([]);
   const [methodConfigurations, setMethodConfigurations] = useState<MethodConfiguration[]>([]);
+  const [savedHeatmaps, setSavedHeatmaps] = useState<HeatmapRunSummary[]>([]);
+  const [savedHeatmapVideos, setSavedHeatmapVideos] = useState<HeatmapRangeRun[]>([]);
+  const [refreshingHeatmapArtifacts, setRefreshingHeatmapArtifacts] = useState(false);
   const [resultsByRunId, setResultsByRunId] = useState<Record<number, TestingRunResults>>({});
   const [loadingRunId, setLoadingRunId] = useState<number | null>(null);
   const [draft, setDraft] = useState<PlotDraft>(defaultDraft());
@@ -1886,7 +2074,7 @@ export function AnalysisPage({ active = true }: { active?: boolean }) {
   const [layoutDeleting, setLayoutDeleting] = useState(false);
 
   async function refresh() {
-    const [nextTestingRuns, nextTrainingRuns, nextDatasets, nextPipelines, nextPreprocessing, nextMethods, nextLayouts] =
+    const [nextTestingRuns, nextTrainingRuns, nextDatasets, nextPipelines, nextPreprocessing, nextMethods, nextLayouts, nextHeatmaps, nextHeatmapVideos] =
       await Promise.all([
         listTestingRuns(),
         listTrainingRuns(),
@@ -1895,6 +2083,8 @@ export function AnalysisPage({ active = true }: { active?: boolean }) {
         listPreprocessingPipelines(),
         listMethodConfigurations(),
         listAnalysisLayouts(),
+        listHeatmaps(),
+        listHeatmapRanges(),
       ]);
     setTestingRuns(nextTestingRuns);
     setTrainingRuns(nextTrainingRuns);
@@ -1903,12 +2093,37 @@ export function AnalysisPage({ active = true }: { active?: boolean }) {
     setPreprocessingPipelines(nextPreprocessing);
     setMethodConfigurations(nextMethods);
     setAnalysisLayouts(nextLayouts);
+    setSavedHeatmaps(nextHeatmaps);
+    setSavedHeatmapVideos(nextHeatmapVideos);
   }
+
+  const refreshHeatmapArtifacts = useCallback(async () => {
+    setRefreshingHeatmapArtifacts(true);
+    try {
+      const [nextHeatmaps, nextVideos] = await Promise.all([listHeatmaps(), listHeatmapRanges()]);
+      setSavedHeatmaps(nextHeatmaps);
+      setSavedHeatmapVideos(nextVideos);
+    } catch (error) {
+      notifyError('Could not refresh heatmap artifacts', error);
+    } finally {
+      setRefreshingHeatmapArtifacts(false);
+    }
+  }, []);
 
   useEffect(() => {
     if (!active) return;
     refresh().catch((error) => notifyError('Could not load testing runs', error));
   }, [active]);
+
+  useEffect(() => {
+    if (!active || draft.plotType !== 'heatmap' || !selectedInferenceDatasetId) return;
+    const timer = window.setInterval(() => {
+      if (savedHeatmapVideos.some((run) => run.status === 'queued' || run.status === 'running')) {
+        refreshHeatmapArtifacts();
+      }
+    }, 4000);
+    return () => window.clearInterval(timer);
+  }, [active, draft.plotType, refreshHeatmapArtifacts, savedHeatmapVideos, selectedInferenceDatasetId]);
 
   const finishedRuns = useMemo(
     () => testingRuns.filter((run) => run.status === 'finished' && (run.image_count ?? 0) > 0),
@@ -1919,6 +2134,7 @@ export function AnalysisPage({ active = true }: { active?: boolean }) {
   const trainingRunById = useMemo(() => new Map(trainingRuns.map((run) => [run.id, run])), [trainingRuns]);
   const trainingDatasetById = useMemo(() => new Map(trainingDatasets.map((dataset) => [dataset.id, dataset])), [trainingDatasets]);
   const trainingPipelineById = useMemo(() => new Map(trainingPipelines.map((pipeline) => [pipeline.id, pipeline])), [trainingPipelines]);
+  const testingRunById = useMemo(() => new Map(testingRuns.map((run) => [run.id, run])), [testingRuns]);
   const preprocessingById = useMemo(() => new Map(preprocessingPipelines.map((pipeline) => [pipeline.id, pipeline])), [preprocessingPipelines]);
   const methodById = useMemo(() => new Map(methodConfigurations.map((method) => [method.id, method])), [methodConfigurations]);
   const selectedLayout = selectedLayoutId ? analysisLayouts.find((layout) => layout.id === Number(selectedLayoutId)) ?? null : null;
@@ -2020,6 +2236,56 @@ export function AnalysisPage({ active = true }: { active?: boolean }) {
       .sort((left, right) => metricOrder(left) - metricOrder(right) || left.localeCompare(right))
       .map((metric) => ({ value: metric, label: metricLabel(metric) }));
   }, [finishedRuns, selectedInferenceDatasetId, selectedModelIds, selectedRoiKey]);
+
+  const heatmapArtifactTestingRunIds = useMemo(() => {
+    const metrics = new Set(selectedMetricKeys.map(normalizeMetricKey));
+    return new Set(
+      finishedRuns
+        .filter((run) => selectedModelIdSet.has(run.training_run_id))
+        .filter((run) => run.training_dataset_id === Number(selectedInferenceDatasetId))
+        .filter((run) => (run.roi_id === null ? 'none' : String(run.roi_id)) === selectedRoiKey)
+        .filter((run) => metrics.size === 0 || metrics.has(metricKeyForRun(run)))
+        .map((run) => run.id),
+    );
+  }, [finishedRuns, selectedInferenceDatasetId, selectedMetricKeys, selectedModelIdSet, selectedRoiKey]);
+
+  const heatmapArtifactInterval = useMemo(() => {
+    const point = draft.heatmapMode === 'single' ? draft.timestamp : null;
+    const rawStart = point || draft.start || selectedInferenceBounds.start;
+    const rawEnd = point || draft.end || selectedInferenceBounds.end || rawStart;
+    const start = rawStart ? new Date(rawStart).getTime() : Number.NEGATIVE_INFINITY;
+    const end = rawEnd ? new Date(rawEnd).getTime() : Number.POSITIVE_INFINITY;
+    return {
+      start: Math.min(start, end),
+      end: Math.max(start, end),
+      label: point
+        ? `timestamp ${artifactTimestamp(point)}`
+        : `range ${rawStart ? artifactTimestamp(rawStart) : 'start'} – ${rawEnd ? artifactTimestamp(rawEnd) : 'end'}`,
+    };
+  }, [draft.end, draft.heatmapMode, draft.start, draft.timestamp, selectedInferenceBounds.end, selectedInferenceBounds.start]);
+
+  const matchingSavedHeatmaps = useMemo(
+    () => savedHeatmaps
+      .filter((run) => heatmapArtifactTestingRunIds.has(run.testing_run_id))
+      .filter((run) => {
+        const timestamp = new Date(run.timestamp).getTime();
+        return timestamp >= heatmapArtifactInterval.start && timestamp <= heatmapArtifactInterval.end;
+      })
+      .sort((left, right) => new Date(right.timestamp).getTime() - new Date(left.timestamp).getTime()),
+    [heatmapArtifactInterval.end, heatmapArtifactInterval.start, heatmapArtifactTestingRunIds, savedHeatmaps],
+  );
+
+  const matchingSavedHeatmapVideos = useMemo(
+    () => savedHeatmapVideos
+      .filter((run) => heatmapArtifactTestingRunIds.has(run.testing_run_id))
+      .filter((run) => {
+        const start = new Date(run.start_timestamp).getTime();
+        const end = new Date(run.end_timestamp).getTime();
+        return start <= heatmapArtifactInterval.end && end >= heatmapArtifactInterval.start;
+      })
+      .sort((left, right) => new Date(right.created_at).getTime() - new Date(left.created_at).getTime()),
+    [heatmapArtifactInterval.end, heatmapArtifactInterval.start, heatmapArtifactTestingRunIds, savedHeatmapVideos],
+  );
 
   useEffect(() => {
     if (selectedInferenceDatasetId && !commonDatasetOptions.some((option) => option.value === selectedInferenceDatasetId)) {
@@ -3186,6 +3452,16 @@ export function AnalysisPage({ active = true }: { active?: boolean }) {
                         }}
                       />
                     </SimpleGrid>
+                    {draft.plotType === 'heatmap' && (
+                      <ExistingHeatmapArtifacts
+                        singles={matchingSavedHeatmaps}
+                        videos={matchingSavedHeatmapVideos}
+                        testingRunById={testingRunById}
+                        intervalLabel={heatmapArtifactInterval.label}
+                        refreshing={refreshingHeatmapArtifacts}
+                        onRefresh={refreshHeatmapArtifacts}
+                      />
+                    )}
                     {draft.plotType === 'timeseries' ? (
                       <Stack gap="md">
                         <SimpleGrid cols={{ base: 1, md: 3 }}>

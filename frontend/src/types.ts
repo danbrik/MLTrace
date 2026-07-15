@@ -699,6 +699,7 @@ export type HeatmapRunSummary = {
   mean_error: number;
   max_x: number;
   max_y: number;
+  visualization_config: HeatmapVisualizationConfig;
   config_signature: string;
   render_version: number;
   created_at: string;
