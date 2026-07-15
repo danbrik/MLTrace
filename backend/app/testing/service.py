@@ -50,7 +50,7 @@ from app.training.engine import _build_model, _to_nchw
 from app.training.scheduler import next_queue_rank, scheduler
 
 
-CURRENT_HEATMAP_RENDER_VERSION = 5
+CURRENT_HEATMAP_RENDER_VERSION = 6
 
 
 def _utcnow() -> datetime:

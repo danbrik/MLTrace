@@ -37,7 +37,7 @@ import {
   getAnalysisLayout,
   getHeatmapRange,
   getTestingRunResults,
-  heatmapRangeFrameUrl,
+  heatmapRangeVideoUrl,
   listAnalysisLayouts,
   listMethodConfigurations,
   listPreprocessingPipelines,
@@ -1442,8 +1442,6 @@ function HeatmapVideo({ plot, results }: { plot: AnalysisPlot; results: Combined
   const [job, setJob] = useState<HeatmapRangeRun | null>(null);
   const [starting, setStarting] = useState(false);
   const [videoError, setVideoError] = useState<string | null>(null);
-  const [frameIndex, setFrameIndex] = useState(0);
-  const [playing, setPlaying] = useState(false);
   const [fps, setFps] = useState(8);
   const fixedCeiling = plot.heatmapConfig.fixed_ceiling_enabled;
   const effectiveScaleMode: 'per_frame' | 'shared' = fixedCeiling ? 'per_frame' : scaleMode;
@@ -1452,8 +1450,6 @@ function HeatmapVideo({ plot, results }: { plot: AnalysisPlot; results: Combined
   useEffect(() => {
     setJob(null);
     setVideoError(null);
-    setFrameIndex(0);
-    setPlaying(false);
   }, [plot.id, params?.testing_run_id, params?.start_timestamp, params?.end_timestamp, params?.stride, params?.visualizationConfigKey, effectiveScaleMode]);
 
   const polling = job != null && (job.status === 'queued' || job.status === 'running');
@@ -1472,14 +1468,6 @@ function HeatmapVideo({ plot, results }: { plot: AnalysisPlot; results: Combined
   const frameCount = job?.frame_count ?? 0;
   const ready = job?.status === 'finished' && frameCount > 0;
 
-  useEffect(() => {
-    if (!ready || !playing || frameCount <= 1) return undefined;
-    const timer = window.setInterval(() => {
-      setFrameIndex((current) => (current + 1) % frameCount);
-    }, Math.max(33, 1000 / Math.max(1, fps)));
-    return () => window.clearInterval(timer);
-  }, [ready, playing, frameCount, fps]);
-
   async function startJob() {
     if (!params) return;
     setStarting(true);
@@ -1490,11 +1478,11 @@ function HeatmapVideo({ plot, results }: { plot: AnalysisPlot; results: Combined
         start_timestamp: params.start_timestamp,
         end_timestamp: params.end_timestamp,
         stride: params.stride,
+        fps,
         scale_mode: effectiveScaleMode,
         visualization_config: params.visualizationConfig,
       });
       setJob(created);
-      setFrameIndex(0);
     } catch (error) {
       setVideoError(errorMessage(error));
     } finally {
@@ -1535,6 +1523,16 @@ function HeatmapVideo({ plot, results }: { plot: AnalysisPlot; results: Combined
         <Badge variant="light" color="gray">{params.testingRunName}</Badge>
         <Badge variant="light">stride {params.stride}</Badge>
         <Badge variant="light" color="blue">{plot.heatmapConfig.error_mode} error</Badge>
+        <NumberInput
+          label="fps"
+          size="xs"
+          w={90}
+          min={1}
+          max={60}
+          value={fps}
+          disabled={polling}
+          onChange={(value) => setFps(Math.max(1, Math.min(60, Number(value) || 1)))}
+        />
         {plot.heatmapConfig.signed_deviations && <Badge variant="light" color="grape">signed</Badge>}
         {fixedCeiling && <Badge variant="light" color="gray">ceiling {formatMetric(plot.heatmapConfig.fixed_ceiling)}</Badge>}
         {!ready && (
@@ -1577,43 +1575,15 @@ function HeatmapVideo({ plot, results }: { plot: AnalysisPlot; results: Combined
 
       {ready && job && (
         <Stack gap="xs">
-          <Group justify="space-between" align="center">
-            <Group gap="xs">
-              <Button
-                size="compact-sm"
-                variant="light"
-                leftSection={playing ? <Pause size={14} /> : <Play size={14} />}
-                onClick={() => setPlaying((current) => !current)}
-              >
-                {playing ? 'Pause' : 'Play'}
-              </Button>
-              <Text size="xs" c="dimmed">Frame {frameIndex + 1}/{frameCount}</Text>
-            </Group>
-            <NumberInput
-              label="fps"
-              size="xs"
-              w={90}
-              min={1}
-              max={60}
-              value={fps}
-              onChange={(value) => setFps(Math.max(1, Math.min(60, Number(value) || 1)))}
-            />
-          </Group>
           <div className="analysis-heatmap-image-frame analysis-heatmap-video-frame">
-            <img
-              src={heatmapRangeFrameUrl(job.id, frameIndex)}
-              alt={`Heatmap frame ${frameIndex + 1}`}
+            <video
+              src={heatmapRangeVideoUrl(job.id)}
+              controls
+              muted
+              playsInline
               className="analysis-heatmap-image"
             />
           </div>
-          <input
-            type="range"
-            min={0}
-            max={frameCount - 1}
-            value={frameIndex}
-            className="analysis-frame-slider"
-            onChange={(event) => setFrameIndex(Number(event.currentTarget.value))}
-          />
           <Stack gap={3}>
             <Group gap="xs" align="center">
               <Text size="xs" c="dimmed">{job.visualization_config.signed_deviations ? '-1' : '0'}</Text>
@@ -1635,7 +1605,7 @@ function HeatmapVideo({ plot, results }: { plot: AnalysisPlot; results: Combined
                   : 'per-frame scale'} · absolute max{' '}
               {job.scale_mode === 'shared' && !job.visualization_config.fixed_ceiling_enabled
                 ? formatMetric(job.global_vmax)
-                : formatMetric(job.frame_max_errors?.[frameIndex])}
+                : 'per-frame scale'}
             </Text>
           </Stack>
         </Stack>

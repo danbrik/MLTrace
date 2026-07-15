@@ -25,6 +25,8 @@ from app.schemas import (
     HeatmapRunSummary,
     InspectPreviewRequest,
     InspectPreviewResponse,
+    InspectArtifactRunPage,
+    InspectCsvData,
     InspectRunCreate,
     InspectRunRead,
     MethodConfigurationCreate,
@@ -874,6 +876,13 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=404, detail="Frame not found.")
         return FileResponse(path, media_type="image/png")
 
+    @app.get("/api/heatmap-ranges/{run_id}/video.mp4")
+    def api_get_heatmap_range_video(run_id: int, db: Session = Depends(get_db)):
+        path = heatmap_service.video_path(db, run_id)
+        if path is None:
+            raise HTTPException(status_code=404, detail="Heatmap MP4 not found.")
+        return FileResponse(path, media_type="video/mp4", filename=f"heatmap-run-{run_id}.mp4")
+
     @app.get("/api/heatmap-ranges/{run_id}/log", response_model=TrainingRunLogResponse)
     def api_get_heatmap_range_log(run_id: int, db: Session = Depends(get_db)):
         log = heatmap_service.read_heatmap_range_log(db, run_id)
@@ -966,6 +975,38 @@ def create_app() -> FastAPI:
             return inspect_service.preview_inspect(db, payload)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.get("/api/inspect/previews/{token}.mp4")
+    def api_get_inspect_preview_video(token: str):
+        path = inspect_service.inspect_preview_video_path(token)
+        if path is None:
+            raise HTTPException(status_code=404, detail="Inspect preview not found.")
+        return FileResponse(path, media_type="video/mp4")
+
+    @app.get("/api/inspect/artifacts", response_model=InspectArtifactRunPage)
+    def api_list_inspect_artifacts(
+        page: int = Query(1, ge=1),
+        training_dataset_id: int | None = Query(None),
+        preprocessing_pipeline_id: int | None = Query(None),
+        mode: str | None = Query(None),
+        status: str | None = Query(None),
+        db: Session = Depends(get_db),
+    ):
+        return inspect_service.list_inspect_artifacts(
+            db,
+            page=page,
+            training_dataset_id=training_dataset_id,
+            preprocessing_pipeline_id=preprocessing_pipeline_id,
+            mode=mode,
+            status=status,
+        )
+
+    @app.get("/api/inspect/runs/{run_id}/csv-data", response_model=InspectCsvData)
+    def api_get_inspect_csv_data(run_id: int, db: Session = Depends(get_db)):
+        result = inspect_service.read_inspect_csv_data(db, run_id)
+        if result is None:
+            raise HTTPException(status_code=404, detail="CSV not found.")
+        return result
 
     @app.post("/api/inspect/runs", response_model=InspectRunRead)
     def api_create_inspect_run(payload: InspectRunCreate, db: Session = Depends(get_db)):

@@ -18,6 +18,7 @@ import threading
 import time
 from pathlib import Path
 
+import cv2
 import numpy as np
 from PIL import Image
 from sqlalchemy import select
@@ -35,6 +36,7 @@ from app.testing.service import (
     _to_nchw,
     _utcnow,
 )
+from app.video import add_timestamp_watermark
 
 logger = logging.getLogger("mltrace.heatmap")
 
@@ -140,6 +142,8 @@ def run_heatmap_range(run_id: int, abort_event: threading.Event | None = None) -
                 shutil.rmtree(frames_dir, ignore_errors=True)
             frames_dir.mkdir(parents=True, exist_ok=True)
             run.frames_dir = str(frames_dir)
+            video_path = frames_dir / "heatmap.mp4"
+            run.video_path = str(video_path)
             db.commit()
 
             evaluator = ArtifactEvaluator(training_run, testing_run.inference_config)
@@ -212,6 +216,22 @@ def run_heatmap_range(run_id: int, abort_event: threading.Event | None = None) -
                         visualization_config,
                     )
                 shutil.rmtree(tmp_dir, ignore_errors=True)
+
+            writer = cv2.VideoWriter(
+                str(video_path),
+                cv2.VideoWriter_fourcc(*"mp4v"),
+                float(max(1, run.fps)),
+                tuple(reversed(np.asarray(Image.open(frames_dir / "frame_00000.png")).shape[:2])),
+            )
+            if not writer.isOpened():
+                raise ValueError("Could not open heatmap MP4 video writer.")
+            try:
+                for index, record in enumerate(selected):
+                    rgb = np.asarray(Image.open(frames_dir / f"frame_{index:05d}.png").convert("RGB"))
+                    stamped = add_timestamp_watermark(rgb, record.timestamp)
+                    writer.write(cv2.cvtColor(stamped, cv2.COLOR_RGB2BGR))
+            finally:
+                writer.release()
 
             run.status = "finished"
             run.ended_at = _utcnow()

@@ -21,6 +21,7 @@ from PIL import Image, ImageDraw
 from app import models
 from app.inspect.contrast import to_intensity_16scale
 from app.preprocessing.pipeline import encode_absolute_image_data_url
+from app.video import add_timestamp_watermark
 
 TILE_COLORS = [
     (28, 126, 214),
@@ -327,8 +328,9 @@ def compute_diagnostic(
         }
         rows.append(row)
         if writer is not None and frames_dir is not None:
-            Image.fromarray(overlay).save(frames_dir / f"frame_{pair_index:05d}.png", format="PNG")
-            writer.write(cv2.cvtColor(overlay, cv2.COLOR_RGB2BGR))
+            stamped = add_timestamp_watermark(overlay, record.timestamp_parsed)
+            Image.fromarray(stamped).save(frames_dir / f"frame_{pair_index:05d}.png", format="PNG")
+            writer.write(cv2.cvtColor(stamped, cv2.COLOR_RGB2BGR))
         if progress_callback is not None:
             progress_callback(pair_index + 1)
         prev = current

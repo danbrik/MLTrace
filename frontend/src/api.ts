@@ -9,6 +9,8 @@ import type {
   HeatmapVisualizationConfig,
   InspectPreview,
   InspectRun,
+  InspectArtifactRunPage,
+  InspectCsvData,
   MethodConfiguration,
   MethodConfigurationPayload,
   MethodConfigurationSavePayload,
@@ -696,6 +698,7 @@ export function createHeatmapRange(payload: {
   start_timestamp: string;
   end_timestamp: string;
   stride?: number;
+  fps?: number;
   scale_mode?: 'per_frame' | 'shared';
   visualization_config?: HeatmapVisualizationConfig;
 }): Promise<HeatmapRangeRun> {
@@ -861,6 +864,10 @@ export function heatmapRangeFrameUrl(runId: number, index: number): string {
   return `${API_BASE_URL}/api/heatmap-ranges/${runId}/frames/${index}.png`;
 }
 
+export function heatmapRangeVideoUrl(runId: number): string {
+  return `${API_BASE_URL}/api/heatmap-ranges/${runId}/video.mp4`;
+}
+
 export function previewInspect(payload: {
   training_dataset_id: number;
   preprocessing_pipeline_id: number;
@@ -872,6 +879,7 @@ export function previewInspect(payload: {
   analysis_config?: Record<string, unknown> | null;
   roi_id?: number | null;
   generate_video?: boolean;
+  fps?: number;
   contrast_enabled?: boolean;
   contrast_reference_frames?: number;
   contrast_shift?: number;
@@ -958,6 +966,30 @@ export function inspectRunSummaryUrl(runId: number): string {
 
 export function inspectRunPlotPreviewUrl(runId: number): string {
   return `${API_BASE_URL}/api/inspect/runs/${runId}/plot-preview.png`;
+}
+
+export function inspectPreviewVideoUrl(relativeUrl: string): string {
+  return `${API_BASE_URL}${relativeUrl}`;
+}
+
+export function listInspectArtifacts(filters: {
+  page?: number;
+  training_dataset_id?: number | null;
+  preprocessing_pipeline_id?: number | null;
+  mode?: string | null;
+  status?: string | null;
+} = {}): Promise<InspectArtifactRunPage> {
+  const params = new URLSearchParams();
+  if (filters.page) params.set('page', String(filters.page));
+  if (filters.training_dataset_id != null) params.set('training_dataset_id', String(filters.training_dataset_id));
+  if (filters.preprocessing_pipeline_id != null) params.set('preprocessing_pipeline_id', String(filters.preprocessing_pipeline_id));
+  if (filters.mode) params.set('mode', filters.mode);
+  if (filters.status) params.set('status', filters.status);
+  return request<InspectArtifactRunPage>(`/api/inspect/artifacts?${params.toString()}`);
+}
+
+export function getInspectCsvData(runId: number): Promise<InspectCsvData> {
+  return request<InspectCsvData>(`/api/inspect/runs/${runId}/csv-data`);
 }
 
 export function getSchedulerSettings(): Promise<SchedulerSettings> {

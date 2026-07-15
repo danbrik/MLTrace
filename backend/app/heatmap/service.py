@@ -25,12 +25,13 @@ def _range_signature(
     start: datetime,
     end: datetime,
     stride: int,
+    fps: int,
     scale_mode: str,
     visualization_config: dict,
 ) -> str:
     config_json = json.dumps(visualization_config, sort_keys=True, separators=(",", ":"))
     raw = (
-        f"{testing_run_id}|{start.isoformat()}|{end.isoformat()}|{stride}|"
+        f"{testing_run_id}|{start.isoformat()}|{end.isoformat()}|{stride}|fps:{fps}|"
         f"{scale_mode}|{config_json}|render:{CURRENT_HEATMAP_RENDER_VERSION}"
     )
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
@@ -57,6 +58,7 @@ def enqueue_heatmap_range(
         payload.start_timestamp,
         payload.end_timestamp,
         payload.stride,
+        payload.fps,
         payload.scale_mode,
         visualization_config,
     )
@@ -78,6 +80,7 @@ def enqueue_heatmap_range(
         start_timestamp=payload.start_timestamp,
         end_timestamp=payload.end_timestamp,
         stride=payload.stride,
+        fps=payload.fps,
         scale_mode=payload.scale_mode,
         visualization_config=visualization_config,
         render_version=CURRENT_HEATMAP_RENDER_VERSION,
@@ -153,4 +156,12 @@ def frame_path(db: Session, run_id: int, index: int) -> Path | None:
     if run is None or not run.frames_dir:
         return None
     path = Path(run.frames_dir) / f"frame_{index:05d}.png"
+    return path if path.exists() else None
+
+
+def video_path(db: Session, run_id: int) -> Path | None:
+    run = db.get(models.HeatmapRangeRun, run_id)
+    if run is None or not run.video_path:
+        return None
+    path = Path(run.video_path)
     return path if path.exists() else None

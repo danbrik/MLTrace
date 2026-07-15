@@ -721,6 +721,7 @@ export type HeatmapRangeRun = {
   start_timestamp: string;
   end_timestamp: string;
   stride: number;
+  fps: number;
   scale_mode: 'per_frame' | 'shared';
   global_vmax: number | null;
   frame_max_errors: number[] | null;
@@ -728,6 +729,7 @@ export type HeatmapRangeRun = {
   render_version: number;
   frame_count: number | null;
   done_count: number;
+  video_path: string | null;
   config_signature: string;
   created_at: string;
   updated_at: string;
@@ -765,6 +767,7 @@ export type InspectPreview = {
   diagnostic_columns: string[];
   diagnostic_series: Array<Record<string, unknown>>;
   plot_image_data_url: string | null;
+  preview_video_url: string | null;
   contrast_enabled?: boolean;
   contrast_reference_frames_used?: number | null;
   contrast_diff_min?: number | null;
@@ -808,6 +811,43 @@ export type InspectRun = {
   preprocessing_pipeline_name: string;
   created_at: string;
   updated_at: string;
+};
+
+export type InspectArtifactRun = {
+  kind: 'inspect' | 'heatmap';
+  id: number;
+  mode: string;
+  status: string;
+  error_message: string | null;
+  training_dataset_id: number;
+  training_dataset_name: string;
+  preprocessing_pipeline_id: number;
+  preprocessing_pipeline_name: string;
+  start_timestamp: string;
+  end_timestamp: string;
+  stride: number;
+  fps: number;
+  frame_count: number | null;
+  done_count: number;
+  has_video: boolean;
+  has_csv: boolean;
+  has_summary: boolean;
+  created_at: string;
+  updated_at: string;
+};
+
+export type InspectArtifactRunPage = {
+  items: InspectArtifactRun[];
+  total: number;
+  page: number;
+  page_size: number;
+  pages: number;
+  active_total: number;
+};
+
+export type InspectCsvData = {
+  columns: Array<{ name: string; kind: 'number' | 'datetime' | 'text' }>;
+  rows: Array<Record<string, string | number | null>>;
 };
 
 export type AnalysisLayout = {

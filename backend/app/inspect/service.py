@@ -2,11 +2,16 @@ from __future__ import annotations
 
 import logging
 import os
+import hashlib
+import json
+import csv
+import math
 import shutil
 import signal
 import subprocess
 import sys
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
@@ -25,21 +30,60 @@ from app.preprocessing.pipeline import (
     image_metadata,
     compile_pipeline,
 )
-from app.schemas import InspectPreviewRequest, InspectPreviewResponse, InspectRunCreate, InspectRunRead, PreprocessingGraph
+from app.schemas import (
+    InspectArtifactRunPage,
+    InspectArtifactRunRead,
+    InspectCsvColumn,
+    InspectCsvData,
+    InspectPreviewRequest,
+    InspectPreviewResponse,
+    InspectRunCreate,
+    InspectRunRead,
+    PreprocessingGraph,
+)
 from app.training.data import (
     count_folder_range_images,
     enumerate_head_records_for_range,
 )
+from app.video import add_timestamp_watermark, write_mp4
 
 logger = logging.getLogger("mltrace.inspect")
 
 _BACKEND_DIR = Path(__file__).resolve().parents[2]
 _POLL_INTERVAL_SECONDS = 2.0
 _PREVIEW_FRAME_LIMIT = 30
+_PREVIEW_CACHE_MAX_AGE_SECONDS = 24 * 60 * 60
 
 
 def _utcnow() -> datetime:
     return datetime.utcnow()
+
+
+def _preview_cache(
+    payload: InspectPreviewRequest,
+    training_dataset: models.TrainingDataset,
+    preprocessing_pipeline: models.PreprocessingPipeline,
+) -> tuple[str, Path, str]:
+    signature = {
+        "request": payload.model_dump(mode="json"),
+        "dataset_updated_at": str(training_dataset.updated_at),
+        "pipeline_updated_at": str(preprocessing_pipeline.updated_at),
+    }
+    token = hashlib.sha256(
+        json.dumps(signature, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    root = data_dir() / "inspect_previews"
+    root.mkdir(parents=True, exist_ok=True)
+    now = time.time()
+    for child in root.iterdir():
+        try:
+            if now - child.stat().st_mtime > _PREVIEW_CACHE_MAX_AGE_SECONDS:
+                shutil.rmtree(child, ignore_errors=True) if child.is_dir() else child.unlink(missing_ok=True)
+        except OSError:
+            pass
+    artifact_dir = root / token
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+    return token, artifact_dir, f"/api/inspect/previews/{token}.mp4"
 
 
 def _worker_database_url(database_url: str) -> str:
@@ -118,6 +162,10 @@ def preview_inspect(db: Session, payload: InspectPreviewRequest) -> InspectPrevi
 
     graph = PreprocessingGraph.model_validate(preprocessing_pipeline.graph)
     compiled = compile_pipeline(graph)
+    token, preview_dir, preview_video_url = _preview_cache(
+        payload, training_dataset, preprocessing_pipeline
+    )
+    preview_video_path = preview_dir / "inspect.mp4"
 
     if analysis_mode in {"energy", "optical_flow"}:
         result = compute_diagnostic(
@@ -127,7 +175,8 @@ def preview_inspect(db: Session, payload: InspectPreviewRequest) -> InspectPrevi
             payload.analysis_config,
             roi,
             preview_limit=_PREVIEW_FRAME_LIMIT,
-            generate_video=bool(payload.generate_video),
+            artifact_dir=None if preview_video_path.exists() else preview_dir,
+            generate_video=not preview_video_path.exists(),
         )
         preview_data = result_to_preview_response(result)
         first = records[0]
@@ -158,13 +207,21 @@ def preview_inspect(db: Session, payload: InspectPreviewRequest) -> InspectPrevi
             generate_video=bool(payload.generate_video),
             image_data_url=preview_data["image_data_url"],
             plot_image_data_url=preview_data["plot_image_data_url"],
+            preview_video_url=preview_video_url,
             diagnostic_columns=preview_data["diagnostic_columns"],
             diagnostic_series=preview_data["diagnostic_series"],
         )
 
     if analysis_mode == "contrast_enhanced":
         return _preview_contrast(
-            payload, training_dataset, preprocessing_pipeline, records, compiled, total_selected
+            payload,
+            training_dataset,
+            preprocessing_pipeline,
+            records,
+            compiled,
+            total_selected,
+            preview_video_path,
+            preview_video_url,
         )
 
     head = records[:_PREVIEW_FRAME_LIMIT]
@@ -180,6 +237,12 @@ def preview_inspect(db: Session, payload: InspectPreviewRequest) -> InspectPrevi
     ]
     first = records[0]
     image = images[0]
+    if not preview_video_path.exists():
+        video_frames = [
+            add_timestamp_watermark(_preview_rgb(value), record.timestamp_parsed)
+            for record, value in zip(head, images)
+        ]
+        write_mp4(preview_video_path, video_frames, payload.fps)
     width, height, channels, dtype, value_min, value_max = image_metadata(image)
     return InspectPreviewResponse(
         training_dataset_id=training_dataset.id,
@@ -205,7 +268,21 @@ def preview_inspect(db: Session, payload: InspectPreviewRequest) -> InspectPrevi
         roi_id=roi.id if roi else None,
         roi_name=roi.name if roi else None,
         generate_video=bool(payload.generate_video),
+        preview_video_url=preview_video_url,
     )
+
+
+def _preview_rgb(image: np.ndarray) -> np.ndarray:
+    from app.preprocessing.pipeline import absolute_image_to_uint8
+
+    value = absolute_image_to_uint8(image)
+    if value.ndim == 2:
+        return np.stack([value] * 3, axis=-1)
+    if value.ndim == 3 and value.shape[2] == 1:
+        return np.repeat(value, 3, axis=2)
+    if value.ndim == 3 and value.shape[2] == 4:
+        return value[..., :3]
+    return value
 
 
 def _analysis_mode(payload: InspectPreviewRequest | InspectRunCreate) -> str:
@@ -221,6 +298,8 @@ def _preview_contrast(
     records,
     compiled,
     total_selected: int,
+    preview_video_path: Path,
+    preview_video_url: str,
 ) -> InspectPreviewResponse:
     reference_frames = max(1, int(payload.contrast_reference_frames))
     shift = float(payload.contrast_shift)
@@ -256,6 +335,7 @@ def _preview_contrast(
     diff_min = float("inf")
     diff_max = float("-inf")
     first_display: np.ndarray | None = None
+    video_frames: list[np.ndarray] = []
     for index in range(preview_count):
         record = records[index]
         diff = intensities[index] - reference
@@ -264,6 +344,9 @@ def _preview_contrast(
         display = enhance_to_uint8(intensities[index], reference, shift, vmax)
         if first_display is None:
             first_display = display
+        video_frames.append(
+            add_timestamp_watermark(np.stack([display] * 3, axis=-1), record.timestamp_parsed)
+        )
         preview_frames.append(
             {
                 "index": index,
@@ -275,6 +358,8 @@ def _preview_contrast(
 
     first = records[0]
     assert first_display is not None
+    if not preview_video_path.exists():
+        write_mp4(preview_video_path, video_frames, payload.fps)
     height, width = first_display.shape[:2]
     return InspectPreviewResponse(
         training_dataset_id=training_dataset.id,
@@ -299,6 +384,7 @@ def _preview_contrast(
         contrast_reference_frames_used=reference_used,
         contrast_diff_min=None if diff_min == float("inf") else diff_min,
         contrast_diff_max=None if diff_max == float("-inf") else diff_max,
+        preview_video_url=preview_video_url,
     )
 
 
@@ -482,6 +568,152 @@ def inspect_plot_preview_path(db: Session, run_id: int) -> Path | None:
         return None
     path = Path(run.plot_preview_path)
     return path if path.exists() else None
+
+
+def inspect_preview_video_path(token: str) -> Path | None:
+    if len(token) != 64 or any(char not in "0123456789abcdef" for char in token):
+        return None
+    path = data_dir() / "inspect_previews" / token / "inspect.mp4"
+    return path if path.exists() else None
+
+
+def _artifact_from_inspect(run: models.InspectRun) -> InspectArtifactRunRead:
+    return InspectArtifactRunRead(
+        kind="inspect",
+        id=run.id,
+        mode=run.analysis_mode,
+        status=run.status,
+        error_message=run.error_message,
+        training_dataset_id=run.training_dataset_id,
+        training_dataset_name=run.training_dataset_name,
+        preprocessing_pipeline_id=run.preprocessing_pipeline_id,
+        preprocessing_pipeline_name=run.preprocessing_pipeline_name,
+        start_timestamp=run.start_timestamp,
+        end_timestamp=run.end_timestamp,
+        stride=run.stride,
+        fps=run.fps,
+        frame_count=run.frame_count,
+        done_count=run.done_count,
+        has_video=bool(run.video_path and Path(run.video_path).exists()),
+        has_csv=bool(run.csv_path and Path(run.csv_path).exists()),
+        has_summary=bool(run.summary_json_path and Path(run.summary_json_path).exists()),
+        created_at=run.created_at,
+        updated_at=run.updated_at,
+    )
+
+
+def _artifact_from_heatmap(run: models.HeatmapRangeRun) -> InspectArtifactRunRead | None:
+    testing_run = run.testing_run
+    training_run = testing_run.training_run if testing_run else None
+    training_pipeline = training_run.training_pipeline if training_run else None
+    preprocessing = training_pipeline.preprocessing_pipeline if training_pipeline else None
+    if testing_run is None or preprocessing is None:
+        return None
+    return InspectArtifactRunRead(
+        kind="heatmap",
+        id=run.id,
+        mode="heatmap",
+        status=run.status,
+        error_message=run.error_message,
+        training_dataset_id=testing_run.training_dataset_id,
+        training_dataset_name=testing_run.training_dataset_name,
+        preprocessing_pipeline_id=preprocessing.id,
+        preprocessing_pipeline_name=testing_run.preprocessing_pipeline_name,
+        start_timestamp=run.start_timestamp,
+        end_timestamp=run.end_timestamp,
+        stride=run.stride,
+        fps=run.fps,
+        frame_count=run.frame_count,
+        done_count=run.done_count,
+        has_video=bool(run.video_path and Path(run.video_path).exists()),
+        has_csv=False,
+        has_summary=False,
+        created_at=run.created_at,
+        updated_at=run.updated_at,
+    )
+
+
+def list_inspect_artifacts(
+    db: Session,
+    *,
+    page: int = 1,
+    training_dataset_id: int | None = None,
+    preprocessing_pipeline_id: int | None = None,
+    mode: str | None = None,
+    status: str | None = None,
+) -> InspectArtifactRunPage:
+    inspect_rows = db.scalars(select(models.InspectRun)).all()
+    heatmap_rows = db.scalars(
+        select(models.HeatmapRangeRun).options(
+            selectinload(models.HeatmapRangeRun.testing_run)
+            .selectinload(models.TestingRun.training_run)
+            .selectinload(models.TrainingRun.training_pipeline)
+            .selectinload(models.TrainingPipeline.preprocessing_pipeline)
+        )
+    ).all()
+    items = [_artifact_from_inspect(row) for row in inspect_rows]
+    items.extend(
+        item for row in heatmap_rows if (item := _artifact_from_heatmap(row)) is not None
+    )
+    active_total = sum(item.status in {"queued", "running"} for item in items)
+    if training_dataset_id is not None:
+        items = [item for item in items if item.training_dataset_id == training_dataset_id]
+    if preprocessing_pipeline_id is not None:
+        items = [item for item in items if item.preprocessing_pipeline_id == preprocessing_pipeline_id]
+    if mode:
+        items = [item for item in items if item.mode == mode]
+    if status:
+        items = [item for item in items if item.status == status]
+    items.sort(key=lambda item: (item.created_at, item.id), reverse=True)
+    page_size = 15
+    total = len(items)
+    pages = max(1, math.ceil(total / page_size))
+    page = min(max(1, page), pages)
+    start = (page - 1) * page_size
+    return InspectArtifactRunPage(
+        items=items[start : start + page_size],
+        total=total,
+        page=page,
+        page_size=page_size,
+        pages=pages,
+        active_total=active_total,
+    )
+
+
+def read_inspect_csv_data(db: Session, run_id: int) -> InspectCsvData | None:
+    path = inspect_csv_path(db, run_id)
+    if path is None:
+        return None
+    with path.open(newline="", encoding="utf-8") as handle:
+        raw_rows = list(csv.DictReader(handle))
+    names = list(raw_rows[0].keys()) if raw_rows else []
+    columns: list[InspectCsvColumn] = []
+    kinds: dict[str, str] = {}
+    for name in names:
+        values = [row.get(name, "").strip() for row in raw_rows if row.get(name, "").strip()]
+        kind = "text"
+        if values:
+            try:
+                for value in values:
+                    float(value)
+                kind = "number"
+            except ValueError:
+                try:
+                    for value in values:
+                        datetime.fromisoformat(value.replace("Z", "+00:00"))
+                    kind = "datetime"
+                except ValueError:
+                    pass
+        kinds[name] = kind
+        columns.append(InspectCsvColumn(name=name, kind=kind))
+    rows: list[dict] = []
+    for raw in raw_rows:
+        row: dict = {}
+        for name in names:
+            value = raw.get(name, "").strip()
+            row[name] = None if not value else float(value) if kinds[name] == "number" else value
+        rows.append(row)
+    return InspectCsvData(columns=columns, rows=rows)
 
 
 class InspectQueue:

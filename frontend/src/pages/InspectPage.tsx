@@ -3,8 +3,11 @@ import {
   Alert,
   Badge,
   Button,
+  Collapse,
   Group,
   NumberInput,
+  MultiSelect,
+  Pagination,
   Paper,
   Progress,
   ScrollArea,
@@ -18,21 +21,23 @@ import {
   Tooltip,
 } from '@mantine/core';
 import { notifications } from '@mantine/notifications';
-import { Download, Eye, FileJson, FileVideo, ImageDown, Info, Pause, Play, RefreshCw, Save, Square, Trash2 } from 'lucide-react';
+import { ChevronDown, ChevronRight, Download, Eye, FileVideo, Info, RefreshCw, Save, Square, Trash2 } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { PointerEvent } from 'react';
-import type { ReactNode } from 'react';
 
 import {
   abortInspectRun,
+  abortHeatmapRange,
   createRoi,
   createInspectRun,
   deleteInspectRun,
+  deleteHeatmapRange,
+  getInspectCsvData,
+  heatmapRangeVideoUrl,
   inspectRunCsvUrl,
-  inspectRunFrameUrl,
-  inspectRunPlotPreviewUrl,
-  inspectRunSummaryUrl,
   inspectRunVideoUrl,
+  inspectPreviewVideoUrl,
+  listInspectArtifacts,
   listRois,
   listInspectRuns,
   listPreprocessingPipelines,
@@ -41,8 +46,9 @@ import {
 } from '../api';
 import { DateTime24Input } from '../components/DateTime24Input';
 import { StepCard } from '../components/StepCard';
+import { PlotlyChart } from '../components/PlotlyChart';
 import { usePendingIds } from '../hooks/usePendingIds';
-import type { InspectPreview, InspectRun, PreprocessingPipeline, RoiDefinition, TrainingDataset } from '../types';
+import type { InspectArtifactRun, InspectCsvData, InspectPreview, InspectRun, PreprocessingPipeline, RoiDefinition, TrainingDataset } from '../types';
 
 type InspectAnalysisMode = 'preprocessed_video' | 'contrast_enhanced' | 'energy' | 'optical_flow';
 type RoiPoint = { x: number; y: number };
@@ -205,273 +211,76 @@ function selectionSignature(values: {
   return JSON.stringify(values);
 }
 
-type InspectFrameSource = {
-  frameCount: number;
-  fps: number;
-  imageUrl: (index: number) => string;
-  timestamp?: (index: number) => string | null;
-};
-
-function InspectFramePlayer({
-  title,
-  source,
-  resetKey,
-  meta,
-  actions,
-}: {
-  title: string;
-  source: InspectFrameSource;
-  resetKey: string;
-  meta?: ReactNode;
-  actions?: ReactNode;
-}) {
-  const frameCount = source.frameCount;
-  const [frameIndex, setFrameIndex] = useState(0);
-  const [playing, setPlaying] = useState(false);
-  const frameIndexRef = useRef(0);
-  const animationRef = useRef<number | null>(null);
-  const lastFrameTimeRef = useRef<number | null>(null);
-
-  useEffect(() => {
-    setFrameIndex(0);
-    frameIndexRef.current = 0;
-    setPlaying(false);
-  }, [resetKey]);
-
-  useEffect(() => {
-    if (!playing || frameCount <= 1) {
-      if (animationRef.current !== null) {
-        window.cancelAnimationFrame(animationRef.current);
-        animationRef.current = null;
-      }
-      lastFrameTimeRef.current = null;
-      return undefined;
-    }
-
-    const frameDuration = 1000 / Math.max(1, source.fps);
-    const tick = (now: number) => {
-      const last = lastFrameTimeRef.current;
-      if (last === null) {
-        lastFrameTimeRef.current = now;
-      } else {
-        const elapsedFrames = Math.floor((now - last) / frameDuration);
-        if (elapsedFrames > 0) {
-          frameIndexRef.current = (frameIndexRef.current + elapsedFrames) % frameCount;
-          setFrameIndex(frameIndexRef.current);
-          lastFrameTimeRef.current = last + elapsedFrames * frameDuration;
-        }
-      }
-      animationRef.current = window.requestAnimationFrame(tick);
-    };
-    animationRef.current = window.requestAnimationFrame(tick);
-    return () => {
-      if (animationRef.current !== null) {
-        window.cancelAnimationFrame(animationRef.current);
-        animationRef.current = null;
-      }
-      lastFrameTimeRef.current = null;
-    };
-  }, [playing, frameCount, source.fps]);
-
-  if (frameCount <= 0) return null;
-
-  return (
-    <Paper withBorder p="md" radius="sm">
-      <Stack gap="sm">
-        <Group justify="space-between" align="center" wrap="wrap">
-          <Group gap="xs">
-            <Text fw={700}>{title}</Text>
-            {meta}
-          </Group>
-          <Group gap="xs">{actions}</Group>
-        </Group>
-
-        <Group gap="xs" align="center">
-          <Button
-            size="compact-sm"
-            variant="light"
-            leftSection={playing ? <Pause size={14} /> : <Play size={14} />}
-            onClick={() => setPlaying((current) => !current)}
-          >
-            {playing ? 'Pause frames' : 'Play frames'}
-          </Button>
-          <Text size="xs" c="dimmed">
-            Frame {frameIndex + 1}/{frameCount}
-            {source.timestamp?.(frameIndex) ? ` · ${formatTimestamp(source.timestamp(frameIndex) ?? null)}` : ''}
-          </Text>
-        </Group>
-        <div style={{ display: 'flex', justifyContent: 'center', width: '100%' }}>
-          <img
-            src={source.imageUrl(frameIndex)}
-            alt={`Inspect frame ${frameIndex + 1}`}
-            style={{
-              display: 'block',
-              maxWidth: '100%',
-              maxHeight: 'min(70vh, 680px)',
-              width: 'auto',
-              height: 'auto',
-              borderRadius: 6,
-            }}
-          />
-        </div>
-        <input
-          type="range"
-          min={0}
-          max={Math.max(0, frameCount - 1)}
-          value={frameIndex}
-          onChange={(event) => {
-            const next = Number(event.currentTarget.value);
-            frameIndexRef.current = next;
-            setFrameIndex(next);
-          }}
-        />
-      </Stack>
-    </Paper>
-  );
+function artifactVideoUrl(artifact: InspectArtifactRun): string {
+  return artifact.kind === 'heatmap' ? heatmapRangeVideoUrl(artifact.id) : inspectRunVideoUrl(artifact.id);
 }
 
-function InspectRunPlayer({ run }: { run: InspectRun }) {
-  const frameCount = run.frame_count ?? 0;
-  const [frameIndex, setFrameIndex] = useState(0);
-  const [playing, setPlaying] = useState(false);
-  const videoRef = useRef<HTMLVideoElement | null>(null);
-  const animationRef = useRef<number | null>(null);
-
-  function syncFromVideo() {
-    const video = videoRef.current;
-    if (!video) return;
-    const next = Math.min(frameCount - 1, Math.max(0, Math.floor(video.currentTime * Math.max(1, run.fps))));
-    setFrameIndex(next);
-  }
-
-  async function togglePlayback() {
-    const video = videoRef.current;
-    if (!video) return;
-    if (playing) {
-      video.pause();
-      syncFromVideo();
-      setPlaying(false);
-      return;
-    }
-    await video.play();
-    setPlaying(true);
-  }
+function ArtifactViewer({ artifact }: { artifact: InspectArtifactRun | null }) {
+  const [view, setView] = useState<'video' | 'csv'>('video');
+  const [csvData, setCsvData] = useState<InspectCsvData | null>(null);
+  const [csvLoading, setCsvLoading] = useState(false);
+  const [xColumn, setXColumn] = useState<string | null>(null);
+  const [yColumns, setYColumns] = useState<string[]>([]);
 
   useEffect(() => {
-    if (!playing) {
-      if (animationRef.current !== null) {
-        window.cancelAnimationFrame(animationRef.current);
-        animationRef.current = null;
-      }
-      return undefined;
-    }
-    const tick = () => {
-      syncFromVideo();
-      animationRef.current = window.requestAnimationFrame(tick);
-    };
-    animationRef.current = window.requestAnimationFrame(tick);
-    return () => {
-      if (animationRef.current !== null) {
-        window.cancelAnimationFrame(animationRef.current);
-        animationRef.current = null;
-      }
-    };
-  }, [playing, frameCount, run.fps]);
+    setView(artifact?.has_video ? 'video' : 'csv');
+    setCsvData(null);
+    setXColumn(null);
+    setYColumns([]);
+  }, [artifact?.kind, artifact?.id]);
 
-  if (run.status !== 'finished' || frameCount <= 0) return null;
+  useEffect(() => {
+    if (!artifact || view !== 'csv' || !artifact.has_csv || csvData || csvLoading) return;
+    setCsvLoading(true);
+    getInspectCsvData(artifact.id)
+      .then(setCsvData)
+      .catch((error) => notifications.show({ color: 'red', title: 'CSV load failed', message: error instanceof Error ? error.message : 'Unknown error' }))
+      .finally(() => setCsvLoading(false));
+  }, [artifact, view, csvData, csvLoading]);
+
+  if (!artifact) return null;
+  const viewOptions = [
+    ...(artifact.has_video ? [{ value: 'video', label: 'MP4' }] : []),
+    ...(artifact.has_csv ? [{ value: 'csv', label: 'CSV plot' }] : []),
+  ];
+  const numericColumns = csvData?.columns.filter((column) => column.kind === 'number') ?? [];
+  const plotData = yColumns.map((column) => ({
+    type: 'scatter' as const,
+    mode: 'lines' as const,
+    name: column,
+    x: csvData?.rows.map((row, index) => xColumn ? row[xColumn] : index) ?? [],
+    y: csvData?.rows.map((row) => row[column]) ?? [],
+  }));
 
   return (
     <Paper withBorder p="md" radius="sm">
       <Stack gap="sm">
-        <Group justify="space-between" align="center" wrap="wrap">
+        <Group justify="space-between" align="flex-end" wrap="wrap">
           <Group gap="xs">
-            <Text fw={700}>{run.training_dataset_name}</Text>
-            <Badge variant="light">{run.preprocessing_pipeline_name}</Badge>
-            <Badge variant="light" color="gray">
-              {frameCount} frames · {run.fps} fps
-            </Badge>
+            <Text fw={700}>{artifact.training_dataset_name}</Text>
+            <Badge variant="light">{artifact.preprocessing_pipeline_name}</Badge>
+            <Badge variant="light" color="cyan">{artifact.mode.replaceAll('_', ' ')}</Badge>
           </Group>
           <Group gap="xs">
-            <Button
-              size="compact-sm"
-              component="a"
-              href={inspectRunVideoUrl(run.id)}
-              download={`inspect-run-${run.id}.mp4`}
-              leftSection={<Download size={14} />}
-            >
-              Download MP4
-            </Button>
-            <Button
-              size="compact-sm"
-              variant="light"
-              component="a"
-              href={inspectRunFrameUrl(run.id, frameIndex)}
-              download={`inspect-run-${run.id}-frame-${String(frameIndex + 1).padStart(5, '0')}.png`}
-              leftSection={<ImageDown size={14} />}
-            >
-              Download PNG
-            </Button>
+            {viewOptions.length > 1 && <Select size="xs" data={viewOptions} value={view} onChange={(value) => setView((value ?? 'video') as 'video' | 'csv')} />}
+            {artifact.has_video && <Button size="compact-sm" component="a" href={artifactVideoUrl(artifact)} download leftSection={<Download size={14} />}>MP4</Button>}
+            {artifact.has_csv && <Button size="compact-sm" variant="light" component="a" href={inspectRunCsvUrl(artifact.id)} download leftSection={<Download size={14} />}>CSV</Button>}
           </Group>
         </Group>
-
-        <Group gap="xs" align="center">
-          <Button
-            size="compact-sm"
-            variant="light"
-            leftSection={playing ? <Pause size={14} /> : <Play size={14} />}
-            onClick={() => {
-              togglePlayback().catch((error) => {
-                notifications.show({
-                  color: 'red',
-                  title: 'Playback failed',
-                  message: error instanceof Error ? error.message : 'Unknown error',
-                });
-              });
-            }}
-          >
-            {playing ? 'Pause' : 'Play'}
-          </Button>
-          <Text size="xs" c="dimmed">
-            Frame {frameIndex + 1}/{frameCount}
-          </Text>
-        </Group>
-        <div style={{ display: 'flex', justifyContent: 'center', width: '100%' }}>
-          <video
-            ref={videoRef}
-            src={inspectRunVideoUrl(run.id)}
-            muted
-            playsInline
-            onEnded={() => {
-              setPlaying(false);
-              syncFromVideo();
-            }}
-            onLoadedMetadata={syncFromVideo}
-            style={{
-              display: 'block',
-              maxWidth: '100%',
-              maxHeight: 'min(70vh, 680px)',
-              width: 'auto',
-              height: 'auto',
-              borderRadius: 6,
-            }}
-          />
-        </div>
-        <input
-          type="range"
-          min={0}
-          max={Math.max(0, frameCount - 1)}
-          value={frameIndex}
-          onChange={(event) => {
-            const next = Number(event.currentTarget.value);
-            const video = videoRef.current;
-            if (video) {
-              video.currentTime = next / Math.max(1, run.fps);
-              video.pause();
-            }
-            setPlaying(false);
-            setFrameIndex(next);
-          }}
-        />
+        {view === 'video' && artifact.has_video && (
+          <video src={artifactVideoUrl(artifact)} controls muted playsInline style={{ display: 'block', maxWidth: '100%', maxHeight: 'min(70vh, 720px)', margin: '0 auto', borderRadius: 6 }} />
+        )}
+        {view === 'csv' && artifact.has_csv && (
+          <Stack gap="sm">
+            <Group grow align="flex-end">
+              <Select label="X column" data={(csvData?.columns ?? []).map((column) => ({ value: column.name, label: `${column.name} (${column.kind})` }))} value={xColumn} onChange={setXColumn} searchable disabled={csvLoading} />
+              <MultiSelect label="Y columns" data={numericColumns.map((column) => ({ value: column.name, label: column.name }))} value={yColumns} onChange={setYColumns} searchable disabled={csvLoading} />
+            </Group>
+            {csvLoading && <Progress value={100} animated />}
+            {csvData && (!xColumn || yColumns.length === 0) && <Alert color="blue">Choose one X column and at least one numeric Y column.</Alert>}
+            {csvData && xColumn && yColumns.length > 0 && <PlotlyChart data={plotData} layout={{ title: { text: `${artifact.mode.replaceAll('_', ' ')} · run ${artifact.id}` }, xaxis: { title: { text: xColumn } }, yaxis: { title: { text: 'Value' } }, hovermode: 'x unified' }} height={480} />}
+          </Stack>
+        )}
       </Stack>
     </Paper>
   );
@@ -482,6 +291,18 @@ export function InspectPage({ active = true }: { active?: boolean }) {
   const [preprocessingPipelines, setPreprocessingPipelines] = useState<PreprocessingPipeline[]>([]);
   const [rois, setRois] = useState<RoiDefinition[]>([]);
   const [runs, setRuns] = useState<InspectRun[]>([]);
+  const [artifactItems, setArtifactItems] = useState<InspectArtifactRun[]>([]);
+  const [artifactTotal, setArtifactTotal] = useState(0);
+  const [artifactPages, setArtifactPages] = useState(1);
+  const [artifactActiveTotal, setArtifactActiveTotal] = useState(0);
+  const [artifactPage, setArtifactPage] = useState(1);
+  const [artifactModeFilter, setArtifactModeFilter] = useState<string | null>(null);
+  const [artifactDatasetFilter, setArtifactDatasetFilter] = useState<number | null>(null);
+  const [artifactPipelineFilter, setArtifactPipelineFilter] = useState<number | null>(null);
+  const [artifactStatusFilter, setArtifactStatusFilter] = useState<string | null>(null);
+  const [artifactsOpen, setArtifactsOpen] = useState(true);
+  const [selectedArtifact, setSelectedArtifact] = useState<InspectArtifactRun | null>(null);
+  const [matchingArtifacts, setMatchingArtifacts] = useState<InspectArtifactRun[]>([]);
   const [trainingDatasetId, setTrainingDatasetId] = useState<number | null>(null);
   const [preprocessingPipelineId, setPreprocessingPipelineId] = useState<number | null>(null);
   const [start, setStart] = useState('');
@@ -520,6 +341,21 @@ export function InspectPage({ active = true }: { active?: boolean }) {
   const [runLoading, setRunLoading] = useState(false);
   const rowActions = usePendingIds();
 
+  async function refreshArtifacts() {
+    const result = await listInspectArtifacts({
+      page: artifactPage,
+      training_dataset_id: artifactDatasetFilter,
+      preprocessing_pipeline_id: artifactPipelineFilter,
+      mode: artifactModeFilter,
+      status: artifactStatusFilter,
+    });
+    setArtifactItems(result.items);
+    setArtifactTotal(result.total);
+    setArtifactPages(result.pages);
+    setArtifactActiveTotal(result.active_total);
+    if (result.page !== artifactPage) setArtifactPage(result.page);
+  }
+
   async function refresh() {
     const [nextDatasets, nextPipelines, nextRois, nextRuns] = await Promise.all([
       listTrainingDatasets(),
@@ -531,6 +367,7 @@ export function InspectPage({ active = true }: { active?: boolean }) {
     setPreprocessingPipelines(nextPipelines);
     setRois(nextRois);
     setRuns(nextRuns);
+    await refreshArtifacts();
   }
 
   useEffect(() => {
@@ -546,13 +383,39 @@ export function InspectPage({ active = true }: { active?: boolean }) {
 
   useEffect(() => {
     if (!active) return;
-    const hasActive = runs.some((run) => run.status === 'queued' || run.status === 'running');
+    refreshArtifacts().catch(() => undefined);
+  }, [active, artifactPage, artifactModeFilter, artifactDatasetFilter, artifactPipelineFilter, artifactStatusFilter]);
+
+  useEffect(() => {
+    if (!active || trainingDatasetId == null || preprocessingPipelineId == null) {
+      setMatchingArtifacts([]);
+      return;
+    }
+    let cancelled = false;
+    (async () => {
+      const all: InspectArtifactRun[] = [];
+      let page = 1;
+      let pages = 1;
+      do {
+        const result = await listInspectArtifacts({ page, training_dataset_id: trainingDatasetId, preprocessing_pipeline_id: preprocessingPipelineId });
+        all.push(...result.items);
+        pages = result.pages;
+        page += 1;
+      } while (page <= pages);
+      if (!cancelled) setMatchingArtifacts(all);
+    })().catch(() => { if (!cancelled) setMatchingArtifacts([]); });
+    return () => { cancelled = true; };
+  }, [active, trainingDatasetId, preprocessingPipelineId, artifactItems]);
+
+  useEffect(() => {
+    if (!active) return;
+    const hasActive = artifactActiveTotal > 0 || runs.some((run) => run.status === 'queued' || run.status === 'running');
     if (!hasActive) return;
     const timer = window.setInterval(() => {
-      listInspectRuns().then(setRuns).catch(() => undefined);
-    }, 1500);
+      Promise.all([listInspectRuns().then(setRuns), refreshArtifacts()]).catch(() => undefined);
+    }, 3000);
     return () => window.clearInterval(timer);
-  }, [active, runs]);
+  }, [active, runs, artifactActiveTotal, artifactPage, artifactModeFilter, artifactDatasetFilter, artifactPipelineFilter, artifactStatusFilter]);
 
   const selectedDataset = trainingDatasets.find((dataset) => dataset.id === trainingDatasetId) ?? null;
   const selectedPipeline = preprocessingPipelines.find((pipeline) => pipeline.id === preprocessingPipelineId) ?? null;
@@ -706,6 +569,7 @@ export function InspectPage({ active = true }: { active?: boolean }) {
         analysis_config: analysisConfig,
         roi_id: roiEnabled ? selectedRoiId : null,
         generate_video: generateVideo,
+        fps,
         contrast_enabled: analysisMode === 'contrast_enhanced',
         contrast_reference_frames: contrastReferenceFrames,
         contrast_shift: contrastShift,
@@ -752,6 +616,7 @@ export function InspectPage({ active = true }: { active?: boolean }) {
         contrast_ma_radius: contrastMaRadius,
       });
       setRuns((current) => [created, ...current.filter((run) => run.id !== created.id)]);
+      await refreshArtifacts();
       notifications.show({ color: 'green', title: 'Inspect run queued', message: created.training_dataset_name });
     } catch (error) {
       notifications.show({
@@ -764,34 +629,23 @@ export function InspectPage({ active = true }: { active?: boolean }) {
     }
   }
 
-  async function handleAbort(run: InspectRun) {
-    await rowActions.runPending(`abort:${run.id}`, async () => {
-      const updated = await abortInspectRun(run.id);
-      setRuns((current) => current.map((item) => (item.id === updated.id ? updated : item)));
-    }).catch((error) => {
-      notifications.show({
-        color: 'red',
-        title: 'Abort failed',
-        message: error instanceof Error ? error.message : 'Unknown error',
-      });
-    });
+  async function handleArtifactAbort(run: InspectArtifactRun) {
+    await rowActions.runPending(`artifact-abort:${run.kind}:${run.id}`, async () => {
+      if (run.kind === 'heatmap') await abortHeatmapRange(run.id);
+      else await abortInspectRun(run.id);
+      await refreshArtifacts();
+    }).catch((error) => notifications.show({ color: 'red', title: 'Abort failed', message: error instanceof Error ? error.message : 'Unknown error' }));
   }
 
-  async function handleDelete(run: InspectRun) {
-    if (!window.confirm(`Delete inspect run ${run.id}?`)) return;
-    await rowActions.runPending(`delete:${run.id}`, async () => {
-      await deleteInspectRun(run.id);
-      setRuns((current) => current.filter((item) => item.id !== run.id));
-    }).catch((error) => {
-      notifications.show({
-        color: 'red',
-        title: 'Delete failed',
-        message: error instanceof Error ? error.message : 'Unknown error',
-      });
-    });
+  async function handleArtifactDelete(run: InspectArtifactRun) {
+    if (!window.confirm(`Delete ${run.kind} run ${run.id}?`)) return;
+    await rowActions.runPending(`artifact-delete:${run.kind}:${run.id}`, async () => {
+      if (run.kind === 'heatmap') await deleteHeatmapRange(run.id);
+      else await deleteInspectRun(run.id);
+      if (selectedArtifact?.kind === run.kind && selectedArtifact.id === run.id) setSelectedArtifact(null);
+      await refreshArtifacts();
+    }).catch((error) => notifications.show({ color: 'red', title: 'Delete failed', message: error instanceof Error ? error.message : 'Unknown error' }));
   }
-
-  const latestFinished = runs.find((run) => run.status === 'finished') ?? null;
 
   return (
     <Stack gap="lg">
@@ -831,6 +685,34 @@ export function InspectPage({ active = true }: { active?: boolean }) {
               }}
             />
           </Group>
+
+          {trainingDatasetId != null && preprocessingPipelineId != null && (
+            <Paper withBorder p="sm" radius="sm">
+              <Stack gap="xs">
+                <Group justify="space-between">
+                  <Text fw={600} size="sm">Available artifacts for this combination</Text>
+                  <Badge variant="light">{matchingArtifacts.length}</Badge>
+                </Group>
+                {matchingArtifacts.length === 0 ? (
+                  <Text size="sm" c="dimmed">No Inspect or heatmap artifacts yet.</Text>
+                ) : (
+                  <Group gap="xs">
+                    {matchingArtifacts.map((artifact) => (
+                      <Button
+                        key={`${artifact.kind}:${artifact.id}`}
+                        size="compact-sm"
+                        variant="light"
+                        disabled={artifact.status !== 'finished' || (!artifact.has_video && !artifact.has_csv)}
+                        onClick={() => setSelectedArtifact(artifact)}
+                      >
+                        {artifact.mode.replaceAll('_', ' ')} · #{artifact.id} · {artifact.status}
+                      </Button>
+                    ))}
+                  </Group>
+                )}
+              </Stack>
+            </Paper>
+          )}
 
           {selectedDataset && (
             <Alert color="blue" title="Dataset bounds">
@@ -1047,35 +929,18 @@ export function InspectPage({ active = true }: { active?: boolean }) {
 
           {preview && (
             <Stack gap="md">
-              <InspectFramePlayer
-                title="Preview"
-                resetKey={previewSignature || `${trainingDatasetId ?? ''}:${preprocessingPipelineId ?? ''}:${start}:${end}:${stride}`}
-                source={{
-                  frameCount: preview.preview_frames?.length || 1,
-                  fps,
-                  imageUrl: (index) => preview.preview_frames?.[index]?.image_data_url ?? preview.image_data_url,
-                  timestamp: (index) => preview.preview_frames?.[index]?.timestamp ?? preview.first_timestamp,
-                }}
-                meta={
-                  <>
-                    <Badge variant="light" color={previewFresh ? 'green' : 'yellow'}>
-                      {previewFresh ? 'Preview current' : 'Preview stale'}
-                    </Badge>
+              <Paper withBorder p="md" radius="sm">
+                <Stack gap="sm">
+                  <Group gap="xs">
+                    <Text fw={700}>Preview MP4</Text>
+                    <Badge variant="light" color={previewFresh ? 'green' : 'yellow'}>{previewFresh ? 'Preview current' : 'Preview stale'}</Badge>
                     <Badge variant="light">{preview.selected_images} selected images</Badge>
-                    <Badge variant="light" color="gray">
-                      {preview.preview_frame_count ?? 1} preview frames
-                    </Badge>
-                    <Badge variant="light" color="gray">
-                      {preview.width}x{preview.height}, {preview.channels} ch, {preview.dtype}
-                    </Badge>
-                  </>
-                }
-                actions={
-                  <Button size="compact-sm" variant="light" component="a" href={preview.image_data_url} download="inspect-preview-frame.png" leftSection={<ImageDown size={14} />}>
-                    Download PNG
-                  </Button>
-                }
-              />
+                    <Badge variant="light" color="gray">{preview.preview_frame_count} preview frames</Badge>
+                    <Badge variant="light" color="gray">{preview.width}x{preview.height}, {preview.channels} ch</Badge>
+                  </Group>
+                  {preview.preview_video_url && <video src={inspectPreviewVideoUrl(preview.preview_video_url)} controls muted playsInline style={{ display: 'block', maxWidth: '100%', maxHeight: 'min(70vh, 680px)', margin: '0 auto', borderRadius: 6 }} />}
+                </Stack>
+              </Paper>
               {preview.plot_image_data_url && (
                 <Paper withBorder p="md" radius="sm">
                   <Stack gap="sm">
@@ -1092,157 +957,68 @@ export function InspectPage({ active = true }: { active?: boolean }) {
         </Stack>
       </StepCard>
 
-      {latestFinished?.video_path && <InspectRunPlayer run={latestFinished} />}
+      <ArtifactViewer artifact={selectedArtifact} />
 
-      <StepCard title="Inspect runs" color="cyan">
-        <Stack gap="md">
-          <Group justify="flex-end">
-            <Button variant="light" leftSection={<RefreshCw size={16} />} onClick={refresh}>
-              Refresh
-            </Button>
+      <StepCard
+        title={`Inspect runs (${artifactTotal})`}
+        color="cyan"
+        action={
+          <Group gap="xs">
+            <Button size="compact-sm" variant="subtle" leftSection={<RefreshCw size={14} />} onClick={() => refreshArtifacts()}>Refresh</Button>
+            <ActionIcon variant="subtle" aria-label={artifactsOpen ? 'Collapse Inspect runs' : 'Expand Inspect runs'} onClick={() => setArtifactsOpen((current) => !current)}>
+              {artifactsOpen ? <ChevronDown size={18} /> : <ChevronRight size={18} />}
+            </ActionIcon>
           </Group>
-          <ScrollArea>
-            <Table striped verticalSpacing="sm" miw={1080}>
-              <Table.Thead>
-                <Table.Tr>
-                  <Table.Th>Status</Table.Th>
-                  <Table.Th>Mode</Table.Th>
-                  <Table.Th>Train/Test Dataset</Table.Th>
-                  <Table.Th>Preprocessing</Table.Th>
-                  <Table.Th>Range</Table.Th>
-                  <Table.Th>Stride</Table.Th>
-                  <Table.Th>FPS</Table.Th>
-                  <Table.Th>Progress</Table.Th>
-                  <Table.Th>Artifacts</Table.Th>
-                  <Table.Th />
-                </Table.Tr>
-              </Table.Thead>
-              <Table.Tbody>
-                {runs.map((run) => {
-                  const busy = run.status === 'queued' || run.status === 'running';
-                  return (
-                    <Table.Tr key={run.id}>
-                      <Table.Td>
-                        <Stack gap={4}>
-                          <Badge color={statusColor(run.status)} variant="light">
-                            {run.status}
-                          </Badge>
-                          {run.error_message && (
-                            <Text size="xs" c="red">
-                              {run.error_message}
-                            </Text>
-                          )}
-                        </Stack>
-                      </Table.Td>
-                      <Table.Td>
-                        <Badge variant="light" color={run.analysis_mode === 'energy' ? 'orange' : run.analysis_mode === 'optical_flow' ? 'cyan' : run.analysis_mode === 'contrast_enhanced' ? 'grape' : 'blue'}>
-                          {run.analysis_mode.replaceAll('_', ' ')}
-                        </Badge>
-                      </Table.Td>
+        }
+      >
+        <Collapse in={artifactsOpen}>
+          <Stack gap="md">
+            <Group grow align="flex-end">
+              <Select label="Mode" clearable data={[
+                { value: 'preprocessed_video', label: 'Preprocessed video' },
+                { value: 'contrast_enhanced', label: 'Contrast enhanced' },
+                { value: 'energy', label: 'Energy' },
+                { value: 'optical_flow', label: 'Optical flow' },
+                { value: 'heatmap', label: 'Heatmap' },
+              ]} value={artifactModeFilter} onChange={(value) => { setArtifactModeFilter(value); setArtifactPage(1); }} />
+              <Select label="Train/Test Dataset" clearable searchable data={trainingDatasets.map((item) => ({ value: String(item.id), label: item.name }))} value={artifactDatasetFilter == null ? null : String(artifactDatasetFilter)} onChange={(value) => { setArtifactDatasetFilter(value ? Number(value) : null); setArtifactPage(1); }} />
+              <Select label="Preprocessing" clearable searchable data={preprocessingPipelines.map((item) => ({ value: String(item.id), label: item.name }))} value={artifactPipelineFilter == null ? null : String(artifactPipelineFilter)} onChange={(value) => { setArtifactPipelineFilter(value ? Number(value) : null); setArtifactPage(1); }} />
+              <Select label="Status" clearable data={['queued', 'running', 'finished', 'failed', 'aborted']} value={artifactStatusFilter} onChange={(value) => { setArtifactStatusFilter(value); setArtifactPage(1); }} />
+            </Group>
+            <ScrollArea>
+              <Table striped verticalSpacing="sm" miw={1050}>
+                <Table.Thead><Table.Tr>
+                  <Table.Th>Status</Table.Th><Table.Th>Mode</Table.Th><Table.Th>Dataset</Table.Th><Table.Th>Preprocessing</Table.Th><Table.Th>Range</Table.Th><Table.Th>Progress</Table.Th><Table.Th>Artifacts</Table.Th><Table.Th />
+                </Table.Tr></Table.Thead>
+                <Table.Tbody>
+                  {artifactItems.map((run) => {
+                    const busy = run.status === 'queued' || run.status === 'running';
+                    return <Table.Tr key={`${run.kind}:${run.id}`}>
+                      <Table.Td><Badge color={statusColor(run.status)} variant="light">{run.status}</Badge>{run.error_message && <Text size="xs" c="red">{run.error_message}</Text>}</Table.Td>
+                      <Table.Td><Badge variant="light" color={run.kind === 'heatmap' ? 'red' : 'cyan'}>{run.mode.replaceAll('_', ' ')}</Badge></Table.Td>
                       <Table.Td>{run.training_dataset_name}</Table.Td>
-                      <Table.Td>
-                        <Group gap={6} wrap="nowrap">
-                          <Text size="sm">{run.preprocessing_pipeline_name}</Text>
-                          {(run.contrast_enabled || run.analysis_mode === 'contrast_enhanced') && (
-                            <Badge size="xs" color="grape" variant="light">
-                              contrast
-                            </Badge>
-                          )}
-                        </Group>
-                      </Table.Td>
-                      <Table.Td>
-                        {run.status === 'finished' ? (
-                          <Group gap={4} wrap="nowrap">
-                            {run.csv_path && (
-                              <Button size="compact-sm" variant="light" component="a" href={inspectRunCsvUrl(run.id)} download={`inspect-run-${run.id}-results.csv`}>
-                                CSV
-                              </Button>
-                            )}
-                            {run.summary_json_path && (
-                              <Button size="compact-sm" variant="light" component="a" href={inspectRunSummaryUrl(run.id)} download={`inspect-run-${run.id}-summary.json`} leftSection={<FileJson size={12} />}>
-                                JSON
-                              </Button>
-                            )}
-                            {run.plot_preview_path && (
-                              <Button size="compact-sm" variant="light" component="a" href={inspectRunPlotPreviewUrl(run.id)} target="_blank">
-                                Plot
-                              </Button>
-                            )}
-                            {run.video_path && (
-                              <Button size="compact-sm" variant="light" component="a" href={inspectRunVideoUrl(run.id)} download={`inspect-run-${run.id}.mp4`}>
-                                MP4
-                              </Button>
-                            )}
-                          </Group>
-                        ) : '—'}
-                      </Table.Td>
-                      <Table.Td>
-                        <Text size="sm">{formatTimestamp(run.start_timestamp)}</Text>
-                        <Text size="sm">{formatTimestamp(run.end_timestamp)}</Text>
-                      </Table.Td>
-                      <Table.Td>{run.stride}</Table.Td>
-                      <Table.Td>{run.fps}</Table.Td>
-                      <Table.Td>
-                        <Stack gap={4}>
-                          <Text size="xs">{progressLabel(run)}</Text>
-                          {run.frame_count ? (
-                            <Progress value={(run.done_count / run.frame_count) * 100} size="sm" />
-                          ) : null}
-                        </Stack>
-                      </Table.Td>
-                      <Table.Td>
-                        <Group gap="xs" justify="flex-end" wrap="nowrap">
-                          {run.status === 'finished' && (
-                            <>
-                              {run.video_path && (
-                                <Tooltip label="Download MP4">
-                                  <ActionIcon variant="subtle" component="a" href={inspectRunVideoUrl(run.id)} download={`inspect-run-${run.id}.mp4`}>
-                                    <Download size={18} />
-                                  </ActionIcon>
-                                </Tooltip>
-                              )}
-                              {run.frames_dir && (
-                                <Tooltip label="Open first frame">
-                                  <ActionIcon variant="subtle" component="a" href={inspectRunFrameUrl(run.id, 0)} target="_blank">
-                                    <ImageDown size={18} />
-                                  </ActionIcon>
-                                </Tooltip>
-                              )}
-                            </>
-                          )}
-                          {busy && (
-                            <Tooltip label="Abort">
-                              <ActionIcon
-                                color="yellow"
-                                variant="subtle"
-                                loading={rowActions.isPending(`abort:${run.id}`)}
-                                onClick={() => handleAbort(run)}
-                              >
-                                <Square size={18} />
-                              </ActionIcon>
-                            </Tooltip>
-                          )}
-                          <Tooltip label="Delete">
-                            <ActionIcon
-                              color="red"
-                              variant="subtle"
-                              loading={rowActions.isPending(`delete:${run.id}`)}
-                              disabled={busy}
-                              onClick={() => handleDelete(run)}
-                            >
-                              <Trash2 size={18} />
-                            </ActionIcon>
-                          </Tooltip>
-                        </Group>
-                      </Table.Td>
-                    </Table.Tr>
-                  );
-                })}
-              </Table.Tbody>
-            </Table>
-          </ScrollArea>
-          {runs.length === 0 && <Alert color="blue">Inspect runs will appear here.</Alert>}
-        </Stack>
+                      <Table.Td>{run.preprocessing_pipeline_name}</Table.Td>
+                      <Table.Td><Text size="xs">{formatTimestamp(run.start_timestamp)}</Text><Text size="xs">{formatTimestamp(run.end_timestamp)}</Text></Table.Td>
+                      <Table.Td><Text size="xs">{run.done_count}{run.frame_count ? ` / ${run.frame_count}` : ''}</Text>{run.frame_count ? <Progress value={(run.done_count / run.frame_count) * 100} size="xs" /> : null}</Table.Td>
+                      <Table.Td><Group gap={4} wrap="nowrap">
+                        {run.has_video && <Button size="compact-xs" variant="light" component="a" href={artifactVideoUrl(run)} download>MP4</Button>}
+                        {run.has_csv && <Button size="compact-xs" variant="light" component="a" href={inspectRunCsvUrl(run.id)} download>CSV</Button>}
+                        {run.status === 'finished' && !run.has_video && run.kind === 'heatmap' && <Text size="xs" c="orange">Re-render MP4 in Analysis</Text>}
+                      </Group></Table.Td>
+                      <Table.Td><Group gap={4} justify="flex-end" wrap="nowrap">
+                        {run.status === 'finished' && (run.has_video || run.has_csv) && <Button size="compact-xs" onClick={() => setSelectedArtifact(run)}>Load</Button>}
+                        {busy && <ActionIcon color="yellow" variant="subtle" loading={rowActions.isPending(`artifact-abort:${run.kind}:${run.id}`)} onClick={() => handleArtifactAbort(run)}><Square size={16} /></ActionIcon>}
+                        <ActionIcon color="red" variant="subtle" disabled={busy} loading={rowActions.isPending(`artifact-delete:${run.kind}:${run.id}`)} onClick={() => handleArtifactDelete(run)}><Trash2 size={16} /></ActionIcon>
+                      </Group></Table.Td>
+                    </Table.Tr>;
+                  })}
+                </Table.Tbody>
+              </Table>
+            </ScrollArea>
+            {artifactItems.length === 0 && <Alert color="blue">No runs match the combined filters.</Alert>}
+            {artifactPages > 1 && <Group justify="center"><Pagination total={artifactPages} value={artifactPage} onChange={setArtifactPage} /></Group>}
+          </Stack>
+        </Collapse>
       </StepCard>
     </Stack>
   );

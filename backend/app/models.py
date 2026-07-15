@@ -591,6 +591,7 @@ class HeatmapRangeRun(Base):
     start_timestamp: Mapped[datetime] = mapped_column(DateTime(timezone=False), nullable=False)
     end_timestamp: Mapped[datetime] = mapped_column(DateTime(timezone=False), nullable=False)
     stride: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    fps: Mapped[int] = mapped_column(Integer, nullable=False, default=8)
     scale_mode: Mapped[str] = mapped_column(String(16), nullable=False, default="per_frame")
     global_vmax: Mapped[float | None] = mapped_column(Float)
     frame_max_errors: Mapped[list | None] = mapped_column(json_type())
@@ -601,6 +602,7 @@ class HeatmapRangeRun(Base):
     frame_count: Mapped[int | None] = mapped_column(Integer)
     done_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     frames_dir: Mapped[str | None] = mapped_column(Text)
+    video_path: Mapped[str | None] = mapped_column(Text)
 
     # Dedup signature includes source range, scale mode, visualization config,
     # and render version.

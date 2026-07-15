@@ -73,6 +73,10 @@ def test_heatmap_range_renders_frames_and_dedups(tmp_path: Path, monkeypatch) ->
         assert run.global_vmax is not None  # shared scale recorded a ceiling
         assert run.frame_max_errors is not None
         assert len(run.frame_max_errors) == 3
+        assert run.fps == 8
+        assert run.video_path is not None
+        assert Path(run.video_path).exists()
+        assert Path(run.video_path).stat().st_size > 0
 
         frames_dir = data_root / "heatmap_ranges" / str(run.id)
         pngs = sorted(frames_dir.glob("frame_*.png"))
@@ -95,6 +99,20 @@ def test_heatmap_range_renders_frames_and_dedups(tmp_path: Path, monkeypatch) ->
         )
         assert again.id == run.id
         assert db.scalar(select(models.HeatmapRangeRun).where(models.HeatmapRangeRun.id != run.id)) is None
+
+        different_fps = heatmap_service.enqueue_heatmap_range(
+            db,
+            HeatmapRangeRunCreate(
+                testing_run_id=testing_run.id,
+                start_timestamp=datetime(2026, 4, 1, 12, 0, 0),
+                end_timestamp=datetime(2026, 4, 1, 12, 0, 20),
+                stride=1,
+                fps=12,
+                scale_mode="shared",
+            ),
+            wake_scheduler=False,
+        )
+        assert different_fps.id != run.id
 
         different_config = heatmap_service.enqueue_heatmap_range(
             db,

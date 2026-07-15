@@ -19,6 +19,7 @@ from app.inspect.diagnostics import compute_diagnostic, write_diagnostic_artifac
 from app.preprocessing.pipeline import absolute_image_to_uint8, compile_pipeline
 from app.schemas import PreprocessingGraph
 from app.training.data import enumerate_training_dataset_image_records_for_range
+from app.video import add_timestamp_watermark
 
 logger = logging.getLogger("mltrace.inspect")
 
@@ -85,8 +86,9 @@ def _render_passthrough(
                 f"expected {expected_size[0]}x{expected_size[1]}, got {width}x{height} "
                 f"for {record.file_name}."
             )
-        _write_frame(frames_dir / f"frame_{index:05d}.png", rgb)
-        writer.write(cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR))
+        stamped = add_timestamp_watermark(rgb, record.timestamp_parsed)
+        _write_frame(frames_dir / f"frame_{index:05d}.png", stamped)
+        writer.write(cv2.cvtColor(stamped, cv2.COLOR_RGB2BGR))
         run.done_count = index + 1
         if index == 0 or (index + 1) % 10 == 0:
             db.commit()
@@ -176,8 +178,9 @@ def _render_contrast(
     def write_output(gray_frame: np.ndarray) -> None:
         nonlocal written
         rgb = _gray_to_rgb(gray_frame)
-        _write_frame(frames_dir / f"frame_{written:05d}.png", rgb)
-        writer.write(cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR))
+        stamped = add_timestamp_watermark(rgb, records[written].timestamp_parsed)
+        _write_frame(frames_dir / f"frame_{written:05d}.png", stamped)
+        writer.write(cv2.cvtColor(stamped, cv2.COLOR_RGB2BGR))
         written += 1
         run.done_count = written
 

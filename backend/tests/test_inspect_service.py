@@ -141,6 +141,63 @@ def test_inspect_preview_uses_clipped_rules_and_extra_stride(tmp_path: Path) -> 
         db.close()
 
 
+def test_inspect_artifact_pagination_filters_and_csv_types(tmp_path: Path) -> None:
+    SessionLocal = make_db()
+    db = SessionLocal()
+    try:
+        training_dataset, preprocessing = seed_inspect_fixture(db, tmp_path / "images")
+        start = datetime(2026, 2, 4, 15, 30, 0)
+        for index in range(16):
+            db.add(models.InspectRun(
+                training_dataset_id=training_dataset.id,
+                preprocessing_pipeline_id=preprocessing.id,
+                status="finished" if index != 0 else "running",
+                start_timestamp=start,
+                end_timestamp=start + timedelta(seconds=10),
+                stride=1,
+                fps=12,
+                content_mode="final_preprocessed_output",
+                analysis_mode="energy" if index % 2 else "optical_flow",
+                analysis_config={},
+                generate_video=False,
+                done_count=index,
+                training_dataset_name=training_dataset.name,
+                preprocessing_pipeline_name=preprocessing.name,
+            ))
+        db.commit()
+
+        first = inspect_service.list_inspect_artifacts(db, page=1)
+        second = inspect_service.list_inspect_artifacts(db, page=2)
+        assert first.total == 16
+        assert len(first.items) == 15
+        assert len(second.items) == 1
+        running = inspect_service.list_inspect_artifacts(db, status="running")
+        assert running.total == 1
+        assert running.items[0].status == "running"
+        energy = inspect_service.list_inspect_artifacts(db, mode="energy")
+        assert energy.total == 8
+
+        csv_path = tmp_path / "results.csv"
+        csv_path.write_text(
+            'timestamp,value,label\n2026-07-15T12:00:00,1.5,"a,b"\n2026-07-15T12:00:01,2.5,c\n',
+            encoding="utf-8",
+        )
+        row = db.query(models.InspectRun).first()
+        row.csv_path = str(csv_path)
+        db.commit()
+        data = inspect_service.read_inspect_csv_data(db, row.id)
+        assert data is not None
+        assert {column.name: column.kind for column in data.columns} == {
+            "timestamp": "datetime",
+            "value": "number",
+            "label": "text",
+        }
+        assert data.rows[0]["value"] == 1.5
+        assert data.rows[0]["label"] == "a,b"
+    finally:
+        db.close()
+
+
 def test_inspect_preview_compiles_pipeline_once(tmp_path: Path, monkeypatch) -> None:
     SessionLocal = make_db()
     db = SessionLocal()

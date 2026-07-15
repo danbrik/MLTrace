@@ -281,6 +281,7 @@ class InspectPreviewRequest(BaseModel):
     analysis_config: dict | None = None
     roi_id: int | None = None
     generate_video: bool = True
+    fps: int = Field(default=12, ge=1, le=60)
 
     contrast_enabled: bool = False
     contrast_reference_frames: int = Field(default=100, ge=1)
@@ -324,6 +325,7 @@ class InspectPreviewResponse(BaseModel):
     diagnostic_columns: list[str] = []
     diagnostic_series: list[dict] = []
     plot_image_data_url: str | None = None
+    preview_video_url: str | None = None
     contrast_enabled: bool = False
     contrast_reference_frames_used: int | None = None
     contrast_diff_min: float | None = None
@@ -1173,6 +1175,7 @@ class HeatmapRangeRunCreate(BaseModel):
     start_timestamp: datetime
     end_timestamp: datetime
     stride: int = Field(default=1, ge=1)
+    fps: int = Field(default=8, ge=1, le=60)
     scale_mode: Literal["per_frame", "shared"] = "per_frame"
     visualization_config: HeatmapVisualizationConfig = Field(default_factory=HeatmapVisualizationConfig)
 
@@ -1195,6 +1198,7 @@ class HeatmapRangeRunRead(BaseModel):
     start_timestamp: datetime
     end_timestamp: datetime
     stride: int
+    fps: int
     scale_mode: str
     global_vmax: float | None
     frame_max_errors: list[float] | None
@@ -1202,9 +1206,52 @@ class HeatmapRangeRunRead(BaseModel):
     render_version: int
     frame_count: int | None
     done_count: int
+    video_path: str | None
     config_signature: str
     created_at: datetime
     updated_at: datetime
+
+
+class InspectArtifactRunRead(BaseModel):
+    kind: Literal["inspect", "heatmap"]
+    id: int
+    mode: str
+    status: str
+    error_message: str | None
+    training_dataset_id: int
+    training_dataset_name: str
+    preprocessing_pipeline_id: int
+    preprocessing_pipeline_name: str
+    start_timestamp: datetime
+    end_timestamp: datetime
+    stride: int
+    fps: int
+    frame_count: int | None
+    done_count: int
+    has_video: bool
+    has_csv: bool
+    has_summary: bool
+    created_at: datetime
+    updated_at: datetime
+
+
+class InspectArtifactRunPage(BaseModel):
+    items: list[InspectArtifactRunRead]
+    total: int
+    page: int
+    page_size: int
+    pages: int
+    active_total: int
+
+
+class InspectCsvColumn(BaseModel):
+    name: str
+    kind: Literal["number", "datetime", "text"]
+
+
+class InspectCsvData(BaseModel):
+    columns: list[InspectCsvColumn]
+    rows: list[dict]
 
 
 class SchedulerSettingsRead(BaseModel):
