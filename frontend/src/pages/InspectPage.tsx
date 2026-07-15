@@ -4,6 +4,7 @@ import {
   Badge,
   Button,
   Collapse,
+  Divider,
   Group,
   NumberInput,
   MultiSelect,
@@ -12,6 +13,7 @@ import {
   Progress,
   ScrollArea,
   Select,
+  SimpleGrid,
   Stack,
   Switch,
   Table,
@@ -213,6 +215,31 @@ function selectionSignature(values: {
 
 function artifactVideoUrl(artifact: InspectArtifactRun): string {
   return artifact.kind === 'heatmap' ? heatmapRangeVideoUrl(artifact.id) : inspectRunVideoUrl(artifact.id);
+}
+
+function artifactFromInspectRun(run: InspectRun): InspectArtifactRun {
+  return {
+    kind: 'inspect',
+    id: run.id,
+    mode: run.analysis_mode,
+    status: run.status,
+    error_message: run.error_message,
+    training_dataset_id: run.training_dataset_id,
+    training_dataset_name: run.training_dataset_name,
+    preprocessing_pipeline_id: run.preprocessing_pipeline_id,
+    preprocessing_pipeline_name: run.preprocessing_pipeline_name,
+    start_timestamp: run.start_timestamp,
+    end_timestamp: run.end_timestamp,
+    stride: run.stride,
+    fps: run.fps,
+    frame_count: run.frame_count,
+    done_count: run.done_count,
+    has_video: Boolean(run.video_path),
+    has_csv: Boolean(run.csv_path),
+    has_summary: Boolean(run.summary_json_path),
+    created_at: run.created_at,
+    updated_at: run.updated_at,
+  };
 }
 
 function ArtifactViewer({ artifact }: { artifact: InspectArtifactRun | null }) {
@@ -615,8 +642,23 @@ export function InspectPage({ active = true }: { active?: boolean }) {
         contrast_vmax: contrastVmax,
         contrast_ma_radius: contrastMaRadius,
       });
+      const queuedArtifact = artifactFromInspectRun(created);
+      const matchesRunFilters =
+        (!artifactModeFilter || queuedArtifact.mode === artifactModeFilter)
+        && (artifactDatasetFilter == null || queuedArtifact.training_dataset_id === artifactDatasetFilter)
+        && (artifactPipelineFilter == null || queuedArtifact.preprocessing_pipeline_id === artifactPipelineFilter)
+        && (!artifactStatusFilter || queuedArtifact.status === artifactStatusFilter);
       setRuns((current) => [created, ...current.filter((run) => run.id !== created.id)]);
-      await refreshArtifacts();
+      if (matchesRunFilters) {
+        setArtifactItems((current) => [queuedArtifact, ...current.filter((run) => run.kind !== 'inspect' || run.id !== created.id)].slice(0, 15));
+        setArtifactTotal((current) => current + 1);
+      }
+      setArtifactActiveTotal((current) => current + 1);
+      if (created.training_dataset_id === trainingDatasetId && created.preprocessing_pipeline_id === preprocessingPipelineId) {
+        setMatchingArtifacts((current) => [queuedArtifact, ...current.filter((run) => run.kind !== 'inspect' || run.id !== created.id)]);
+      }
+      setRunLoading(false);
+      refreshArtifacts().catch(() => undefined);
       notifications.show({ color: 'green', title: 'Inspect run queued', message: created.training_dataset_name });
     } catch (error) {
       notifications.show({
@@ -624,7 +666,6 @@ export function InspectPage({ active = true }: { active?: boolean }) {
         title: 'Inspect run failed',
         message: error instanceof Error ? error.message : 'Unknown error',
       });
-    } finally {
       setRunLoading(false);
     }
   }
@@ -656,9 +697,15 @@ export function InspectPage({ active = true }: { active?: boolean }) {
         </Text>
       </div>
 
-      <StepCard title="Inspect source" color="blue">
+      <StepCard title="Inspect source" subtitle="Choose the source, define the range, then configure one diagnostic." color="blue">
         <Stack gap="md">
-          <Group grow align="flex-end">
+          <Paper withBorder p="md" radius="md" bg="var(--mantine-color-blue-0)">
+            <Stack gap="sm">
+              <div>
+                <Text fw={700}>1. Source combination</Text>
+                <Text size="xs" c="dimmed">Select the dataset and preprocessing pipeline whose existing and new artifacts you want to inspect.</Text>
+              </div>
+              <SimpleGrid cols={{ base: 1, sm: 2 }} spacing="md">
             <Select
               label="Train/Test Dataset"
               placeholder="Select dataset rules"
@@ -684,10 +731,12 @@ export function InspectPage({ active = true }: { active?: boolean }) {
                 markPreviewStale();
               }}
             />
-          </Group>
+              </SimpleGrid>
+            </Stack>
+          </Paper>
 
           {trainingDatasetId != null && preprocessingPipelineId != null && (
-            <Paper withBorder p="sm" radius="sm">
+            <Paper withBorder p="md" radius="md">
               <Stack gap="xs">
                 <Group justify="space-between">
                   <Text fw={600} size="sm">Available artifacts for this combination</Text>
@@ -714,14 +763,19 @@ export function InspectPage({ active = true }: { active?: boolean }) {
             </Paper>
           )}
 
-          {selectedDataset && (
-            <Alert color="blue" title="Dataset bounds">
-              {selectedDataset.name}: {formatTimestamp(selectedDataset.start_timestamp)} to{' '}
-              {formatTimestamp(selectedDataset.end_timestamp)}
-            </Alert>
-          )}
-
-          <Group grow align="flex-start">
+          <Paper withBorder p="md" radius="md">
+            <Stack gap="sm">
+              <div>
+                <Text fw={700}>2. Time range &amp; video output</Text>
+                <Text size="xs" c="dimmed">The selected range is queued immediately; exact frame counting happens in the background worker.</Text>
+              </div>
+              {selectedDataset && (
+                <Alert color="blue" title="Dataset bounds">
+                  {selectedDataset.name}: {formatTimestamp(selectedDataset.start_timestamp)} to{' '}
+                  {formatTimestamp(selectedDataset.end_timestamp)}
+                </Alert>
+              )}
+              <SimpleGrid cols={{ base: 1, sm: 2, lg: 4 }} spacing="md">
             <DateTime24Input
               label="Start"
               value={start}
@@ -760,10 +814,17 @@ export function InspectPage({ active = true }: { active?: boolean }) {
               value={fps}
               onChange={(value) => setFps(Math.max(1, Math.min(60, Number(value) || 1)))}
             />
-          </Group>
+              </SimpleGrid>
+            </Stack>
+          </Paper>
 
-          <Paper withBorder p="md" radius="sm">
+          <Paper withBorder p="md" radius="md">
             <Stack gap="md">
+              <div>
+                <Text fw={700}>3. Analysis method</Text>
+                <Text size="xs" c="dimmed">Only controls relevant to the selected method are shown below.</Text>
+              </div>
+              <Divider />
               <Select
                 label={<InfoLabel label="Inspect method" info="Choose the diagnostic generated from the selected dataset and preprocessing pipeline. Energy and optical flow primarily produce CSV/plot outputs; video is optional." />}
                 data={[
@@ -907,7 +968,13 @@ export function InspectPage({ active = true }: { active?: boolean }) {
             </Stack>
           </Paper>
 
-          <Group justify="flex-end">
+          <Paper withBorder p="md" radius="md" bg="var(--mantine-color-gray-0)">
+          <Group justify="space-between" align="center" wrap="wrap">
+            <div>
+              <Text fw={700}>4. Preview or queue run</Text>
+              <Text size="xs" c="dimmed">Queued runs appear immediately below so you can configure the next range.</Text>
+            </div>
+            <Group gap="sm">
             <Button
               leftSection={<Eye size={18} />}
               variant="light"
@@ -925,7 +992,9 @@ export function InspectPage({ active = true }: { active?: boolean }) {
             >
               Run
             </Button>
+            </Group>
           </Group>
+          </Paper>
 
           {preview && (
             <Stack gap="md">

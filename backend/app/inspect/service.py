@@ -438,12 +438,17 @@ def create_inspect_run(db: Session, payload: InspectRunCreate) -> InspectRunRead
     if payload.roi_id is not None and roi is None:
         raise ValueError(f"ROI does not exist: {payload.roi_id}")
 
-    # Cheap count only — the worker enumerates the authoritative frame list. This
-    # keeps "Run" instant instead of blocking on a full filesystem enumeration.
-    estimated_frames = _estimate_frame_count(
-        training_dataset, payload.start_timestamp, payload.end_timestamp, max(1, payload.stride)
+    # Enqueue must stay constant-time. Even the timestamp-index based counter can
+    # be slow for large folders, so only validate that the requested range
+    # overlaps at least one saved dataset rule. The worker computes the exact
+    # frame count after the run is already visible in Inspect runs.
+    has_overlapping_rule = any(
+        rule.folder is not None
+        and max(rule.start_timestamp, payload.start_timestamp)
+        <= min(rule.end_timestamp, payload.end_timestamp)
+        for rule in training_dataset.rules
     )
-    if estimated_frames == 0:
+    if not has_overlapping_rule:
         raise ValueError("No images in selected range.")
     run = models.InspectRun(
         training_dataset_id=training_dataset.id,
@@ -464,7 +469,7 @@ def create_inspect_run(db: Session, payload: InspectRunCreate) -> InspectRunRead
         contrast_shift=float(payload.contrast_shift),
         contrast_vmax=float(payload.contrast_vmax),
         contrast_ma_radius=max(0, int(payload.contrast_ma_radius)),
-        frame_count=estimated_frames,
+        frame_count=None,
         done_count=0,
         device="CPU",
         training_dataset_name=training_dataset.name,

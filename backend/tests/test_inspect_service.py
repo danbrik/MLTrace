@@ -307,6 +307,7 @@ def test_create_inspect_run_enqueues_without_full_enumeration(tmp_path: Path, mo
             raise AssertionError("create_inspect_run must not enumerate the full range")
 
         monkeypatch.setattr(inspect_data, "enumerate_training_dataset_image_records_for_range", boom)
+        monkeypatch.setattr(inspect_service, "_estimate_frame_count", boom)
 
         run = inspect_service.create_inspect_run(
             db,
@@ -320,7 +321,7 @@ def test_create_inspect_run_enqueues_without_full_enumeration(tmp_path: Path, mo
             ),
         )
         assert run.status == "queued"
-        assert run.frame_count and run.frame_count > 0  # cheap estimate, no enumeration
+        assert run.frame_count is None  # authoritative count is populated by the worker
     finally:
         db.close()
 
