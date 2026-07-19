@@ -17,6 +17,55 @@ export type DatasetFolder = {
   } | null;
 };
 
+export type Project = {
+  id: string;
+  name: string;
+  description: string;
+  created_at: string;
+  last_opened_at: string | null;
+};
+
+export type ProjectGpuUsage = {
+  project_id: string;
+  project_name: string;
+  gpu_memory_mb: number;
+  running_jobs: number;
+  queued_jobs: number;
+  gpu_slots: number;
+};
+
+export type GpuDeviceUsage = {
+  index: number;
+  uuid: string;
+  name: string;
+  utilization_percent: number;
+  memory_used_mb: number;
+  memory_total_mb: number;
+  temperature_c: number | null;
+  mltrace_memory_mb: number;
+  projects: ProjectGpuUsage[];
+};
+
+export type GpuSnapshot = {
+  captured_at: string;
+  available: boolean;
+  error: string | null;
+  devices: GpuDeviceUsage[];
+  mltrace_memory_mb: number;
+  running_jobs: number;
+  queued_jobs: number;
+  gpu_slots: number;
+  projects: ProjectGpuUsage[];
+};
+
+export type SchedulerJobWithProject = {
+  project_id: string;
+  project_name: string;
+  kind: 'train' | 'test' | 'heatmap';
+  queue_rank: number | null;
+  run: TrainingRun | TestingRun | HeatmapRangeRun;
+};
+
 export type Dataset = {
   id: number;
   name: string;

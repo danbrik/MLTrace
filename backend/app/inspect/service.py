@@ -22,7 +22,8 @@ from sqlalchemy.engine import make_url
 from sqlalchemy.orm import Session, selectinload
 
 from app import models
-from app.database import SessionLocal, data_dir
+from app.database import SessionLocal, data_dir, project_context
+from app.projects import get_project, list_projects
 from app.inspect.diagnostics import compute_diagnostic, result_to_preview_response
 from app.inspect.contrast import enhance_to_uint8, to_intensity_16scale
 from app.preprocessing.pipeline import (
@@ -741,6 +742,7 @@ class InspectQueue:
         self._lock = threading.Lock()
         self._process: subprocess.Popen | None = None
         self._run_id: int | None = None
+        self._project_id: str | None = None
 
     def start(self) -> None:
         if self._thread and self._thread.is_alive():
@@ -760,7 +762,11 @@ class InspectQueue:
 
     def request_abort(self, run_id: int, pid: int | None) -> None:
         with self._lock:
-            proc = self._process if self._run_id == run_id else None
+            proc = (
+                self._process
+                if self._process is not None and self._run_id == run_id and (pid is None or self._process.pid == pid)
+                else None
+            )
         target_pid = proc.pid if proc is not None else pid
         if target_pid is None:
             return
@@ -782,58 +788,76 @@ class InspectQueue:
             self._wake.clear()
 
     def _reconcile_startup(self) -> None:
-        db = SessionLocal()
-        try:
-            for run in db.scalars(select(models.InspectRun).where(models.InspectRun.status == "running")).all():
-                run.status = "failed"
-                run.ended_at = _utcnow()
-                run.error_message = run.error_message or "Inspect worker was interrupted by API restart."
-            db.commit()
-        finally:
-            db.close()
+        for project in list_projects():
+            with project_context(project.database_url, project.artifact_dir):
+                db = SessionLocal()
+                try:
+                    for run in db.scalars(select(models.InspectRun).where(models.InspectRun.status == "running")).all():
+                        run.status = "failed"
+                        run.ended_at = _utcnow()
+                        run.error_message = run.error_message or "Inspect worker was interrupted by API restart."
+                    db.commit()
+                finally:
+                    db.close()
 
     def _tick(self) -> None:
-        db = SessionLocal()
-        try:
+        with self._lock:
+            proc = self._process
+            run_id = self._run_id
+            project_id = self._project_id
+        if proc is not None and proc.poll() is not None:
+            project = get_project(project_id or "")
+            if project is not None:
+                with project_context(project.database_url, project.artifact_dir):
+                    db = SessionLocal()
+                    try:
+                        run = db.get(models.InspectRun, run_id)
+                        if run is not None and run.status == "running":
+                            run.status = "failed"
+                            run.ended_at = _utcnow()
+                            run.error_message = run.error_message or "Worker exited without reporting a result."
+                            db.commit()
+                    finally:
+                        db.close()
             with self._lock:
-                proc = self._process
-                run_id = self._run_id
-            if proc is not None and proc.poll() is not None:
-                with self._lock:
-                    self._process = None
-                    self._run_id = None
-                run = db.get(models.InspectRun, run_id)
-                if run is not None and run.status == "running":
-                    run.status = "failed"
-                    run.ended_at = _utcnow()
-                    run.error_message = run.error_message or "Worker exited without reporting a result."
-                    db.commit()
-
-            with self._lock:
-                busy = self._process is not None
-            if busy:
+                self._process = None
+                self._run_id = None
+                self._project_id = None
+        with self._lock:
+            if self._process is not None:
                 return
+        candidates: list[tuple[datetime, int, object]] = []
+        for project in list_projects():
+            with project_context(project.database_url, project.artifact_dir):
+                db = SessionLocal()
+                try:
+                    run = db.scalar(select(models.InspectRun).where(models.InspectRun.status == "queued").order_by(
+                        models.InspectRun.enqueued_at.asc(), models.InspectRun.id.asc()
+                    ))
+                    if run is not None:
+                        candidates.append((run.enqueued_at or datetime.min, run.id, project))
+                finally:
+                    db.close()
+        if not candidates:
+            return
+        _, selected_id, project = min(candidates, key=lambda item: (item[0], item[1]))
+        with project_context(project.database_url, project.artifact_dir):
+            db = SessionLocal()
+            try:
+                run = db.get(models.InspectRun, selected_id)
+                if run is not None and run.status == "queued":
+                    self._launch(db, project, run)
+            finally:
+                db.close()
 
-            run = db.scalar(
-                select(models.InspectRun)
-                .where(models.InspectRun.status == "queued")
-                .order_by(models.InspectRun.enqueued_at.asc(), models.InspectRun.id.asc())
-            )
-            if run is None:
-                return
-            self._launch(db, run)
-        finally:
-            db.close()
-
-    def _launch(self, db: Session, run: models.InspectRun) -> None:
-        from app.config import get_settings
-
-        artifact_dir = data_dir() / "inspect_runs" / str(run.id)
+    def _launch(self, db: Session, project, run: models.InspectRun) -> None:
+        artifact_dir = Path(project.artifact_dir) / "inspect_runs" / str(run.id)
         artifact_dir.mkdir(parents=True, exist_ok=True)
         log_path = artifact_dir / "worker.log"
         env = os.environ.copy()
         env["CUDA_VISIBLE_DEVICES"] = ""
-        env["DATABASE_URL"] = _worker_database_url(get_settings().database_url)
+        env["DATABASE_URL"] = _worker_database_url(project.database_url)
+        env["MLTRACE_PROJECT_ID"] = project.id
 
         with open(log_path, "a", encoding="utf-8") as parent_log:
             parent_log.write(f"{_utcnow().isoformat()} inspect queue: launching run {run.id} on CPU\n")
@@ -863,6 +887,7 @@ class InspectQueue:
         with self._lock:
             self._process = proc
             self._run_id = run.id
+            self._project_id = project.id
         logger.info("Launched inspect run %s on CPU (pid %s)", run.id, proc.pid)
 
 

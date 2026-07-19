@@ -1213,6 +1213,14 @@ class HeatmapRangeRunRead(BaseModel):
     updated_at: datetime
 
 
+class SchedulerJobWithProjectRead(BaseModel):
+    project_id: str
+    project_name: str
+    kind: Literal["train", "test", "heatmap"]
+    queue_rank: int | None = None
+    run: TrainingRunRead | TestingRunRead | HeatmapRangeRunRead
+
+
 class InspectArtifactRunRead(BaseModel):
     kind: Literal["inspect", "heatmap"]
     id: int
@@ -1264,6 +1272,52 @@ class SchedulerSettingsRead(BaseModel):
 class SchedulerSettingsUpdate(BaseModel):
     max_gpu_slots: int = Field(ge=1)
     only_gpu: bool = False
+
+
+class ProjectCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=100)
+    description: str = Field(min_length=1, max_length=500)
+
+
+class ProjectRead(BaseModel):
+    id: str
+    name: str
+    description: str
+    created_at: datetime
+    last_opened_at: datetime | None = None
+
+
+class ProjectGpuUsageRead(BaseModel):
+    project_id: str
+    project_name: str
+    gpu_memory_mb: int = 0
+    running_jobs: int = 0
+    queued_jobs: int = 0
+    gpu_slots: int = 0
+
+
+class GpuDeviceUsageRead(BaseModel):
+    index: int
+    uuid: str
+    name: str
+    utilization_percent: float
+    memory_used_mb: int
+    memory_total_mb: int
+    temperature_c: float | None = None
+    mltrace_memory_mb: int = 0
+    projects: list[ProjectGpuUsageRead] = Field(default_factory=list)
+
+
+class GpuSnapshotRead(BaseModel):
+    captured_at: datetime
+    available: bool
+    error: str | None = None
+    devices: list[GpuDeviceUsageRead] = Field(default_factory=list)
+    mltrace_memory_mb: int = 0
+    running_jobs: int = 0
+    queued_jobs: int = 0
+    gpu_slots: int = 0
+    projects: list[ProjectGpuUsageRead] = Field(default_factory=list)
 
 
 class RegistryItemRef(BaseModel):

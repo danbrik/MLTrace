@@ -2,14 +2,24 @@ from contextlib import asynccontextmanager
 import logging
 import time
 
-from fastapi import Depends, FastAPI, HTTPException, Query, Request
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.config import get_settings
-from app.database import SessionLocal, get_db, vacuum_database
+from app.database import SessionLocal, get_db, project_context, vacuum_database
+from app.projects import (
+    create_project,
+    get_project,
+    initialize_catalog,
+    list_projects,
+    mark_project_opened,
+    migrate_all_projects,
+    serialize_project,
+    list_queue_entries,
+)
 from app.schemas import (
     DatasetConnectionTestRequest,
     DatasetConnectionTestResponse,
@@ -56,6 +66,10 @@ from app.schemas import (
     RoiPreviewResponse,
     SchedulerSettingsRead,
     SchedulerSettingsUpdate,
+    ProjectCreate,
+    ProjectRead,
+    GpuSnapshotRead,
+    SchedulerJobWithProjectRead,
     SchedulerJobMoveRequest,
     SchedulerJobMoveResponse,
     TestingRunBulkCreate,
@@ -152,11 +166,15 @@ async def lifespan(app: FastAPI):
     # worker subprocesses survive an API restart and are reconciled on startup.
     from app.modeling.defaults import ensure_default_method_configurations
 
-    db = SessionLocal()
-    try:
-        ensure_default_method_configurations(db)
-    finally:
-        db.close()
+    initialize_catalog()
+    migrate_all_projects()
+    for project in list_projects():
+        with project_context(project.database_url, project.artifact_dir):
+            db = SessionLocal()
+            try:
+                ensure_default_method_configurations(db)
+            finally:
+                db.close()
     scheduler.start()
     optimization_service.optimization_loop.start()
     inspect_service.inspect_queue.start()
@@ -180,6 +198,34 @@ def create_app() -> FastAPI:
     )
 
     @app.middleware("http")
+    async def select_project_database(request: Request, call_next):
+        path = request.url.path
+        is_global = (
+            path == "/api/health"
+            or path == "/api/projects"
+            or path.startswith("/api/projects/")
+            or path.startswith("/api/system/")
+            or path == "/api/scheduler/settings"
+            or path == "/api/scheduler/jobs"
+        )
+        needs_project = path.startswith("/api/") and not is_global
+        # Existing unit tests override the database dependency with an isolated
+        # in-memory database and intentionally do not participate in the catalog.
+        if get_db in app.dependency_overrides:
+            return await call_next(request)
+        if not needs_project:
+            return await call_next(request)
+        project_id = request.headers.get("X-MLTrace-Project-ID") or request.query_params.get("project_id")
+        if not project_id:
+            return JSONResponse(status_code=400, content={"detail": "X-MLTrace-Project-ID header is required."})
+        project = get_project(project_id)
+        if project is None:
+            return JSONResponse(status_code=404, content={"detail": "Project not found."})
+        request.state.project = project
+        with project_context(project.database_url, project.artifact_dir):
+            return await call_next(request)
+
+    @app.middleware("http")
     async def log_slow_api_requests(request: Request, call_next):
         started = time.perf_counter()
         response = await call_next(request)
@@ -191,6 +237,39 @@ def create_app() -> FastAPI:
     @app.get("/api/health")
     def health() -> dict[str, str]:
         return {"status": "ok"}
+
+    @app.get("/api/projects", response_model=list[ProjectRead])
+    def api_list_projects():
+        initialize_catalog()
+        return [serialize_project(project) for project in list_projects()]
+
+    @app.post("/api/projects", response_model=ProjectRead)
+    def api_create_project(payload: ProjectCreate):
+        initialize_catalog()
+        try:
+            return serialize_project(create_project(payload.name, payload.description))
+        except ValueError as exc:
+            raise HTTPException(status_code=409 if "already exists" in str(exc) else 400, detail=str(exc)) from exc
+
+    @app.get("/api/projects/{project_id}", response_model=ProjectRead)
+    def api_get_project(project_id: str):
+        project = get_project(project_id)
+        if project is None:
+            raise HTTPException(status_code=404, detail="Project not found.")
+        return serialize_project(project)
+
+    @app.post("/api/projects/{project_id}/opened", response_model=ProjectRead)
+    def api_mark_project_opened(project_id: str):
+        project = mark_project_opened(project_id)
+        if project is None:
+            raise HTTPException(status_code=404, detail="Project not found.")
+        return serialize_project(project)
+
+    @app.get("/api/system/gpu-usage", response_model=GpuSnapshotRead)
+    def api_gpu_usage(refresh: bool = False):
+        from app.gpu_monitor import gpu_snapshot
+        initialize_catalog()
+        return gpu_snapshot(force=refresh)
 
     @app.get("/api/cache/revisions", response_model=CacheRevisionsRead)
     def api_cache_revisions(db: Session = Depends(get_db)):
@@ -1108,10 +1187,64 @@ def create_app() -> FastAPI:
     def api_update_scheduler_settings(payload: SchedulerSettingsUpdate):
         return update_scheduler_settings(payload.max_gpu_slots, payload.only_gpu)
 
+    @app.get("/api/scheduler/jobs", response_model=list[SchedulerJobWithProjectRead])
+    def api_list_scheduler_jobs(
+        scope: str = Query(default="project", pattern="^(project|all)$"),
+        x_mltrace_project_id: str | None = Header(default=None, alias="X-MLTrace-Project-ID"),
+    ):
+        initialize_catalog()
+        if scope == "project" and not x_mltrace_project_id:
+            raise HTTPException(status_code=400, detail="X-MLTrace-Project-ID header is required for project scope.")
+        selected_projects = list_projects() if scope == "all" else [get_project(x_mltrace_project_id or "")]
+        if any(project is None for project in selected_projects):
+            raise HTTPException(status_code=404, detail="Project not found.")
+        global_ranks = {
+            (entry.project_id, entry.kind, entry.run_id): entry.queue_rank for entry in list_queue_entries()
+        }
+        jobs: list[dict] = []
+        for project in selected_projects:
+            assert project is not None
+            with project_context(project.database_url, project.artifact_dir):
+                db = SessionLocal()
+                try:
+                    groups = (
+                        ("train", training_service.list_training_runs(db)),
+                        ("test", testing_service.list_testing_runs(db)),
+                        ("heatmap", heatmap_service.list_heatmap_ranges(db)),
+                    )
+                    for kind, runs in groups:
+                        for run in runs:
+                            payload = run.model_dump() if hasattr(run, "model_dump") else run
+                            rank = global_ranks.get((project.id, kind, run.id))
+                            if rank is not None and isinstance(payload, dict):
+                                payload["queue_rank"] = rank
+                            jobs.append({
+                                "project_id": project.id,
+                                "project_name": project.name,
+                                "kind": kind,
+                                "queue_rank": rank,
+                                "run": payload,
+                            })
+                finally:
+                    db.close()
+        jobs.sort(key=lambda item: (
+            item["run"].get("status") != "queued" if isinstance(item["run"], dict) else True,
+            item["queue_rank"] if item["queue_rank"] is not None else 2**31,
+            str(item["run"].get("created_at", "")) if isinstance(item["run"], dict) else "",
+        ))
+        return jobs
+
     @app.post("/api/scheduler/jobs/{kind}/{run_id}/move", response_model=SchedulerJobMoveResponse)
-    def api_move_scheduler_job(kind: str, run_id: int, payload: SchedulerJobMoveRequest, db: Session = Depends(get_db)):
+    def api_move_scheduler_job(
+        kind: str,
+        run_id: int,
+        payload: SchedulerJobMoveRequest,
+        request: Request,
+        db: Session = Depends(get_db),
+    ):
         try:
-            run = move_queued_job(db, kind, run_id, payload.direction)
+            project = getattr(request.state, "project", None)
+            run = move_queued_job(db, kind, run_id, payload.direction, project.id if project else None)
         except ValueError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
         if run is None:

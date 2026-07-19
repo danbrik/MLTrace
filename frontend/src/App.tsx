@@ -14,7 +14,7 @@ import {
   Route,
   Workflow,
 } from 'lucide-react';
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import type React from 'react';
 
 import { PageErrorBoundary } from './components/PageErrorBoundary';
@@ -26,9 +26,12 @@ import { MethodsPage } from './pages/ModelsPage';
 import { OptimizationPage } from './pages/OptimizationPage';
 import { PreprocessingPipelinesPage } from './pages/PreprocessingPipelinesPage';
 import { SchedulerPage } from './pages/SchedulerPage';
+import { ProjectsPage } from './pages/ProjectsPage';
 import { TrainingDatasetsPage } from './pages/TrainingDatasetsPage';
 import { TrainingPipelinesPage } from './pages/TrainingPipelinesPage';
 import { TestingRunsPage } from './pages/TestingRunsPage';
+import { getProject, setActiveProject } from './api';
+import type { Project } from './types';
 
 type Page =
   | 'datasets'
@@ -44,8 +47,53 @@ type Page =
   | 'data-manager';
 
 export function App() {
-  const [page, setPage] = useState<Page>('datasets');
+  const [location, setLocation] = useState(window.location.pathname);
+  const match = location.match(/^\/projects\/([^/]+)(?:\/([^/]+))?\/?$/);
+  const projectId = match?.[1] ?? null;
+  // Set the request context during render so child page effects cannot issue a
+  // project-scoped request before the parent effect runs on a direct URL load.
+  setActiveProject(projectId);
+  const requestedPage = match?.[2] as Page | undefined;
+  const page: Page = requestedPage && [
+    'datasets', 'training-datasets', 'preprocessing', 'methods', 'training-pipelines', 'testing',
+    'inspect', 'optimization', 'analysis', 'scheduler', 'data-manager',
+  ].includes(requestedPage) ? requestedPage : 'datasets';
+  const [project, setProject] = useState<Project | null>(null);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+
+  useEffect(() => {
+    const update = () => setLocation(window.location.pathname);
+    window.addEventListener('popstate', update);
+    return () => window.removeEventListener('popstate', update);
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    setActiveProject(projectId);
+    if (!projectId) {
+      setProject(null);
+      return undefined;
+    }
+    getProject(projectId)
+      .then((value) => { if (!cancelled) setProject(value); })
+      .catch(() => {
+        if (!cancelled) navigate('/');
+      });
+    return () => { cancelled = true; };
+  }, [projectId]);
+
+  function navigate(path: string) {
+    window.history.pushState({}, '', path);
+    setLocation(path);
+  }
+
+  function setPage(next: Page) {
+    if (projectId) navigate(`/projects/${projectId}/${next}`);
+  }
+
+  if (!projectId) {
+    return <ProjectsPage onOpen={(selected) => navigate(`/projects/${selected.id}/datasets`)} />;
+  }
 
   const navItems: Array<{ id: Page; label: string; icon: React.ReactNode }> = [
     { id: 'datasets', label: 'Datasets', icon: <Database size={18} /> },
@@ -72,9 +120,12 @@ export function App() {
           <Box>
             <Title order={2}>MLTrace</Title>
             <Text size="xs" c="dimmed">
-              Dataset catalog, preprocessing, and method registry
+              {project?.name ?? 'Loading project…'}
             </Text>
           </Box>
+          <Button variant="subtle" onClick={() => { setActiveProject(null); navigate('/'); }}>
+            Leave project
+          </Button>
         </Group>
       </AppShell.Header>
 

@@ -14,7 +14,8 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session, selectinload
 
 from app import models, services
-from app.database import SessionLocal
+from app.database import SessionLocal, project_context
+from app.projects import list_projects
 from app.schemas import (
     MethodConfigurationCreate,
     OptimizationPromoteRequest,
@@ -797,27 +798,29 @@ class OptimizationLoop:
             self._wake.clear()
 
     def tick(self) -> None:
-        db = SessionLocal()
-        try:
-            for study in db.scalars(_study_query().where(models.OptimizationStudy.status == "running")).all():
-                _ensure_trials(db, study)
-                active = sum(1 for trial in study.trials if trial.status in ACTIVE_TRIAL_STATUSES)
-                for trial in sorted(study.trials, key=lambda item: item.number):
-                    if trial.status == "waiting" and active >= study.max_parallel_trials:
-                        break
-                    previous = trial.status
-                    if trial.status in {"waiting", "materializing", "training", "testing"}:
-                        _process_trial(db, study, trial)
-                    if previous == "waiting" and trial.status in ACTIVE_TRIAL_STATUSES:
-                        active += 1
-                db.refresh(study)
-                _update_best_trial(study)
-                if study.trials and all(trial.status in {"finished", "failed", "aborted"} for trial in study.trials):
-                    study.status = "finished" if any(trial.status == "finished" for trial in study.trials) else "failed"
-                    study.ended_at = _utcnow()
-                db.commit()
-        finally:
-            db.close()
+        for project in list_projects():
+            with project_context(project.database_url, project.artifact_dir):
+                db = SessionLocal()
+                try:
+                    for study in db.scalars(_study_query().where(models.OptimizationStudy.status == "running")).all():
+                        _ensure_trials(db, study)
+                        active = sum(1 for trial in study.trials if trial.status in ACTIVE_TRIAL_STATUSES)
+                        for trial in sorted(study.trials, key=lambda item: item.number):
+                            if trial.status == "waiting" and active >= study.max_parallel_trials:
+                                break
+                            previous = trial.status
+                            if trial.status in {"waiting", "materializing", "training", "testing"}:
+                                _process_trial(db, study, trial)
+                            if previous == "waiting" and trial.status in ACTIVE_TRIAL_STATUSES:
+                                active += 1
+                        db.refresh(study)
+                        _update_best_trial(study)
+                        if study.trials and all(trial.status in {"finished", "failed", "aborted"} for trial in study.trials):
+                            study.status = "finished" if any(trial.status == "finished" for trial in study.trials) else "failed"
+                            study.ended_at = _utcnow()
+                        db.commit()
+                finally:
+                    db.close()
 
 
 optimization_loop = OptimizationLoop()

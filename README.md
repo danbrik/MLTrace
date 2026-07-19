@@ -1,6 +1,6 @@
 # MLTrace
 
-MLTrace is a local, single-user platform for image anomaly-detection experiments. It manages the full experiment context around reconstruction-based methods: indexed image datasets, train/inference dataset definitions, preprocessing pipelines, reusable method architectures, training pipelines, queued training/testing runs, ROI scoring, heatmaps, and analysis plots.
+MLTrace is a local, single-user platform for isolated image anomaly-detection projects. It manages the full experiment context around reconstruction-based methods: indexed image datasets, train/inference dataset definitions, preprocessing pipelines, reusable method architectures, training pipelines, queued training/testing runs, ROI scoring, heatmaps, and analysis plots.
 
 Images stay at their original filesystem paths. MLTrace stores metadata, rules, configurations, run records, logs, and generated artifacts.
 
@@ -125,21 +125,25 @@ VITE_API_BASE_URL=http://192.168.0.50:8000
 
 ## Database And Persistent Data
 
-The default SQLite database is stored at:
+The platform catalog is stored at `.mltrace/catalog.db`. Every newly created project receives its own database and artifact directory:
 
 ```text
-.mltrace/mltrace.db
+.mltrace/projects/<project-uuid>/mltrace.db
 ```
 
-The same `.mltrace/` directory also stores:
+On the first start after upgrading, an existing `.mltrace/mltrace.db` is registered as `Default Project` without moving either the database or its artifacts.
+
+The shared `.mltrace/` directory also stores:
 
 - scheduler settings: `.mltrace/scheduler_settings.json`
-- training artifacts/logs: `.mltrace/runs/<run_id>/`
-- testing artifacts/logs: `.mltrace/testing_runs/<run_id>/`
+- per-project training artifacts/logs: `.mltrace/projects/<project-uuid>/runs/<run_id>/`
+- per-project testing artifacts/logs: `.mltrace/projects/<project-uuid>/testing_runs/<run_id>/`
 
 For a new deployment, treat `.mltrace/` as persistent application state. Do not delete it unless you intentionally want to remove the local database, scheduler preferences, run logs, and generated artifacts.
 
-For Postgres:
+The multi-project mode provisions SQLite databases. Automatic Postgres database/schema provisioning is not supported in this version.
+
+For legacy single-database Postgres development:
 
 ```bash
 source .venv/bin/activate
@@ -217,7 +221,11 @@ Scheduler behavior:
 - if GPUs are available, each worker gets one `CUDA_VISIBLE_DEVICES` slot
 - if `only_gpu` is enabled and no GPU is available, queued training/testing jobs wait
 
+The queue is global across all projects. The Scheduler page can switch between the current project's jobs and all projects. Its collapsible live GPU panel refreshes `nvidia-smi` data every minute and attributes known MLTrace worker memory, slots, and jobs to their projects. If `nvidia-smi` is unavailable, project job counts remain visible.
+
 If a backend process restarts, already running worker subprocesses continue where possible; the scheduler reconciles running jobs on startup.
+
+All project-scoped API requests require the `X-MLTrace-Project-ID` header. Project catalog, health, global scheduler settings, and GPU-usage endpoints are global.
 
 ## Core Workflows
 

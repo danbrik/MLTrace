@@ -17,6 +17,9 @@ import type {
   MethodTorchCheckResponse,
   MethodDefinition,
   MethodValidationResponse,
+  Project,
+  GpuSnapshot,
+  SchedulerJobWithProject,
   ModelLayerDefinition,
   OptimizationSplit,
   OptimizationSplitPayload,
@@ -50,7 +53,7 @@ import type {
   TrainingRun,
   TrainingRunFilters,
 } from './types';
-import { cachedResource, invalidateResources, setResourceRevision, type ResourceKey } from './resourceCache';
+import { cachedResource, invalidateAllResources, invalidateResources, setResourceRevision, type ResourceKey } from './resourceCache';
 
 const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL ?? '').trim().replace(/\/+$/, '');
 const STATIC_TTL_MS = 24 * 60 * 60 * 1000;
@@ -60,6 +63,24 @@ const RUN_TTL_MS = 1500;
 let revisionsCache: { value?: Record<string, string>; expiresAt: number; inFlight?: Promise<Record<string, string>> } = {
   expiresAt: 0,
 };
+
+let activeProjectId: string | null = null;
+
+export function setActiveProject(projectId: string | null): void {
+  if (activeProjectId === projectId) return;
+  activeProjectId = projectId;
+  revisionsCache = { expiresAt: 0 };
+  invalidateAllResources();
+}
+
+export function getActiveProject(): string | null {
+  return activeProjectId;
+}
+
+function projectMediaUrl(path: string): string {
+  const separator = path.includes('?') ? '&' : '?';
+  return `${API_BASE_URL}${path}${activeProjectId ? `${separator}project_id=${encodeURIComponent(activeProjectId)}` : ''}`;
+}
 
 /** Error carrying the HTTP status and the raw `detail` payload (string or object). */
 export class ApiError extends Error {
@@ -74,7 +95,7 @@ export class ApiError extends Error {
   }
 }
 
-async function request<T>(path: string, options?: RequestInit, timeoutMs?: number): Promise<T> {
+async function request<T>(path: string, options?: RequestInit, timeoutMs?: number, projectId?: string | null): Promise<T> {
   const controller = timeoutMs ? new AbortController() : null;
   const timeout = controller
     ? window.setTimeout(() => controller.abort(), timeoutMs)
@@ -83,11 +104,12 @@ async function request<T>(path: string, options?: RequestInit, timeoutMs?: numbe
   let response: Response;
   try {
     response = await fetch(`${API_BASE_URL}${path}`, {
+      ...options,
       headers: {
         'Content-Type': 'application/json',
+        ...((projectId ?? activeProjectId) ? { 'X-MLTrace-Project-ID': projectId ?? activeProjectId ?? '' } : {}),
         ...options?.headers,
       },
-      ...options,
       signal: controller?.signal ?? options?.signal,
     });
   } catch (error) {
@@ -120,6 +142,30 @@ async function request<T>(path: string, options?: RequestInit, timeoutMs?: numbe
   }
 
   return response.json() as Promise<T>;
+}
+
+export function listProjects(): Promise<Project[]> {
+  return request<Project[]>('/api/projects', undefined, undefined, null);
+}
+
+export function getProject(projectId: string): Promise<Project> {
+  return request<Project>(`/api/projects/${projectId}`, undefined, undefined, null);
+}
+
+export function createProject(payload: { name: string; description: string }): Promise<Project> {
+  return request<Project>('/api/projects', { method: 'POST', body: JSON.stringify(payload) }, undefined, null);
+}
+
+export function markProjectOpened(projectId: string): Promise<Project> {
+  return request<Project>(`/api/projects/${projectId}/opened`, { method: 'POST' }, undefined, null);
+}
+
+export function getGpuUsage(refresh = false): Promise<GpuSnapshot> {
+  return request<GpuSnapshot>(`/api/system/gpu-usage?refresh=${refresh ? 'true' : 'false'}`, undefined, undefined, null);
+}
+
+export function listSchedulerJobs(scope: 'project' | 'all'): Promise<SchedulerJobWithProject[]> {
+  return request<SchedulerJobWithProject[]>(`/api/scheduler/jobs?scope=${scope}`);
 }
 
 async function cacheRevisions(): Promise<Record<string, string>> {
@@ -552,8 +598,8 @@ export function getTrainingRun(runId: number): Promise<TrainingRun> {
   return request<TrainingRun>(`/api/training-runs/${runId}`);
 }
 
-export function getTrainingRunLog(runId: number): Promise<{ log: string }> {
-  return request<{ log: string }>(`/api/training-runs/${runId}/log`);
+export function getTrainingRunLog(runId: number, projectId?: string): Promise<{ log: string }> {
+  return request<{ log: string }>(`/api/training-runs/${runId}/log`, undefined, undefined, projectId);
 }
 
 export function enqueueTrainingRun(trainingPipelineId: number): Promise<TrainingRun> {
@@ -566,22 +612,22 @@ export function enqueueTrainingRun(trainingPipelineId: number): Promise<Training
   });
 }
 
-export function abortTrainingRun(runId: number): Promise<TrainingRun> {
-  return request<TrainingRun>(`/api/training-runs/${runId}/abort`, { method: 'POST' }).then((run) => {
+export function abortTrainingRun(runId: number, projectId?: string): Promise<TrainingRun> {
+  return request<TrainingRun>(`/api/training-runs/${runId}/abort`, { method: 'POST' }, undefined, projectId).then((run) => {
     invalidate(['trainingRuns']);
     return run;
   });
 }
 
-export function restartTrainingRun(runId: number): Promise<TrainingRun> {
-  return request<TrainingRun>(`/api/training-runs/${runId}/restart`, { method: 'POST' }).then((run) => {
+export function restartTrainingRun(runId: number, projectId?: string): Promise<TrainingRun> {
+  return request<TrainingRun>(`/api/training-runs/${runId}/restart`, { method: 'POST' }, undefined, projectId).then((run) => {
     invalidate(['trainingRuns']);
     return run;
   });
 }
 
-export async function deleteTrainingRun(runId: number): Promise<void> {
-  await request<void>(`/api/training-runs/${runId}`, { method: 'DELETE' });
+export async function deleteTrainingRun(runId: number, projectId?: string): Promise<void> {
+  await request<void>(`/api/training-runs/${runId}`, { method: 'DELETE' }, undefined, projectId);
   invalidate(['trainingRuns', 'trainingPipelines']);
 }
 
@@ -716,20 +762,20 @@ export function getHeatmapRange(runId: number): Promise<HeatmapRangeRun> {
   return request<HeatmapRangeRun>(`/api/heatmap-ranges/${runId}`);
 }
 
-export function abortHeatmapRange(runId: number): Promise<HeatmapRangeRun> {
-  return request<HeatmapRangeRun>(`/api/heatmap-ranges/${runId}/abort`, { method: 'POST' }).then((run) => {
+export function abortHeatmapRange(runId: number, projectId?: string): Promise<HeatmapRangeRun> {
+  return request<HeatmapRangeRun>(`/api/heatmap-ranges/${runId}/abort`, { method: 'POST' }, undefined, projectId).then((run) => {
     invalidate(['heatmapRanges']);
     return run;
   });
 }
 
-export async function deleteHeatmapRange(runId: number): Promise<void> {
-  await request<void>(`/api/heatmap-ranges/${runId}`, { method: 'DELETE' });
+export async function deleteHeatmapRange(runId: number, projectId?: string): Promise<void> {
+  await request<void>(`/api/heatmap-ranges/${runId}`, { method: 'DELETE' }, undefined, projectId);
   invalidate(['heatmapRanges']);
 }
 
-export function getHeatmapRangeLog(runId: number): Promise<{ log: string }> {
-  return request<{ log: string }>(`/api/heatmap-ranges/${runId}/log`);
+export function getHeatmapRangeLog(runId: number, projectId?: string): Promise<{ log: string }> {
+  return request<{ log: string }>(`/api/heatmap-ranges/${runId}/log`, undefined, undefined, projectId);
 }
 
 export function listAnalysisLayouts(): Promise<AnalysisLayout[]> {
@@ -862,11 +908,11 @@ export function promoteOptimizationTrial(
 
 /** URL for one rendered overlay frame PNG (served directly, not via fetch). */
 export function heatmapRangeFrameUrl(runId: number, index: number): string {
-  return `${API_BASE_URL}/api/heatmap-ranges/${runId}/frames/${index}.png`;
+  return projectMediaUrl(`/api/heatmap-ranges/${runId}/frames/${index}.png`);
 }
 
 export function heatmapRangeVideoUrl(runId: number): string {
-  return `${API_BASE_URL}/api/heatmap-ranges/${runId}/video.mp4`;
+  return projectMediaUrl(`/api/heatmap-ranges/${runId}/video.mp4`);
 }
 
 export function previewInspect(payload: {
@@ -950,27 +996,27 @@ export function getInspectRunLog(runId: number): Promise<{ log: string }> {
 }
 
 export function inspectRunFrameUrl(runId: number, index: number): string {
-  return `${API_BASE_URL}/api/inspect/runs/${runId}/frames/${index}.png`;
+  return projectMediaUrl(`/api/inspect/runs/${runId}/frames/${index}.png`);
 }
 
 export function inspectRunVideoUrl(runId: number): string {
-  return `${API_BASE_URL}/api/inspect/runs/${runId}/video.mp4`;
+  return projectMediaUrl(`/api/inspect/runs/${runId}/video.mp4`);
 }
 
 export function inspectRunCsvUrl(runId: number): string {
-  return `${API_BASE_URL}/api/inspect/runs/${runId}/results.csv`;
+  return projectMediaUrl(`/api/inspect/runs/${runId}/results.csv`);
 }
 
 export function inspectRunSummaryUrl(runId: number): string {
-  return `${API_BASE_URL}/api/inspect/runs/${runId}/summary.json`;
+  return projectMediaUrl(`/api/inspect/runs/${runId}/summary.json`);
 }
 
 export function inspectRunPlotPreviewUrl(runId: number): string {
-  return `${API_BASE_URL}/api/inspect/runs/${runId}/plot-preview.png`;
+  return projectMediaUrl(`/api/inspect/runs/${runId}/plot-preview.png`);
 }
 
 export function inspectPreviewVideoUrl(relativeUrl: string): string {
-  return `${API_BASE_URL}${relativeUrl}`;
+  return projectMediaUrl(relativeUrl);
 }
 
 export function listInspectArtifacts(filters: {
@@ -1004,7 +1050,7 @@ export function updateSchedulerSettings(payload: { max_gpu_slots: number; only_g
   });
 }
 
-export function moveSchedulerJob(kind: 'train' | 'test' | 'heatmap', runId: number, direction: 'up' | 'down'): Promise<{
+export function moveSchedulerJob(kind: 'train' | 'test' | 'heatmap', runId: number, direction: 'up' | 'down', projectId?: string): Promise<{
   kind: 'train' | 'test' | 'heatmap';
   run_id: number;
   queue_rank: number | null;
@@ -1012,32 +1058,32 @@ export function moveSchedulerJob(kind: 'train' | 'test' | 'heatmap', runId: numb
   return request<{ kind: 'train' | 'test' | 'heatmap'; run_id: number; queue_rank: number | null }>(`/api/scheduler/jobs/${kind}/${runId}/move`, {
     method: 'POST',
     body: JSON.stringify({ direction }),
-  }).then((response) => {
+  }, undefined, projectId).then((response) => {
     invalidate(['trainingRuns', 'testingRuns', 'heatmapRanges']);
     return response;
   });
 }
 
-export function getTestingRunLog(runId: number): Promise<{ log: string }> {
-  return request<{ log: string }>(`/api/testing-runs/${runId}/log`);
+export function getTestingRunLog(runId: number, projectId?: string): Promise<{ log: string }> {
+  return request<{ log: string }>(`/api/testing-runs/${runId}/log`, undefined, undefined, projectId);
 }
 
-export function abortTestingRun(runId: number): Promise<TestingRun> {
-  return request<TestingRun>(`/api/testing-runs/${runId}/abort`, { method: 'POST' }).then((run) => {
+export function abortTestingRun(runId: number, projectId?: string): Promise<TestingRun> {
+  return request<TestingRun>(`/api/testing-runs/${runId}/abort`, { method: 'POST' }, undefined, projectId).then((run) => {
     invalidate(['testingRuns']);
     return run;
   });
 }
 
-export function restartTestingRun(runId: number): Promise<TestingRun> {
-  return request<TestingRun>(`/api/testing-runs/${runId}/restart`, { method: 'POST' }).then((run) => {
+export function restartTestingRun(runId: number, projectId?: string): Promise<TestingRun> {
+  return request<TestingRun>(`/api/testing-runs/${runId}/restart`, { method: 'POST' }, undefined, projectId).then((run) => {
     invalidate(['testingRuns']);
     return run;
   });
 }
 
-export async function deleteTestingRun(runId: number): Promise<void> {
-  await request<void>(`/api/testing-runs/${runId}`, { method: 'DELETE' });
+export async function deleteTestingRun(runId: number, projectId?: string): Promise<void> {
+  await request<void>(`/api/testing-runs/${runId}`, { method: 'DELETE' }, undefined, projectId);
   invalidate(['testingRuns']);
 }
 

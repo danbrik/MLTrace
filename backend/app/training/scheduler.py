@@ -31,7 +31,16 @@ from sqlalchemy.engine import make_url
 
 from app import models
 from app.config import get_settings
-from app.database import SessionLocal, data_dir
+from app.database import SessionLocal, project_context
+from app.projects import (
+    ROOT_DIR,
+    ensure_queue_entry,
+    get_project,
+    list_projects,
+    list_queue_entries,
+    move_queue_entry,
+    remove_queue_entry,
+)
 
 logger = logging.getLogger("mltrace.scheduler")
 
@@ -48,7 +57,7 @@ _KINDS: dict[str, dict] = {
 
 
 def _settings_path() -> Path:
-    return data_dir() / "scheduler_settings.json"
+    return ROOT_DIR / "scheduler_settings.json"
 
 
 def detect_gpu_count() -> int:
@@ -160,7 +169,7 @@ def next_queue_rank(db) -> int:
     return (max((int(run.queue_rank or 0) for _, run in rows), default=0) + 1)
 
 
-def move_queued_job(db, kind: str, run_id: int, direction: str):
+def move_queued_job(db, kind: str, run_id: int, direction: str, project_id: str | None = None):
     if kind not in _KINDS:
         raise ValueError(f"Unsupported scheduler job kind: {kind}")
     if direction not in {"up", "down"}:
@@ -172,19 +181,23 @@ def move_queued_job(db, kind: str, run_id: int, direction: str):
     if run.status != "queued":
         raise ValueError("Only queued scheduler jobs can be moved.")
 
-    normalize_queue_ranks(db)
-    rows = _queue_rows(db)
-    index = next((idx for idx, item in enumerate(rows) if item[0] == kind and item[1].id == run_id), -1)
-    if index < 0:
-        raise ValueError("Queued scheduler job was not found in the queue.")
-    target = index - 1 if direction == "up" else index + 1
-    if target < 0 or target >= len(rows):
-        raise ValueError("Scheduler job is already at the queue boundary.")
-
-    other = rows[target][1]
-    run.queue_rank, other.queue_rank = other.queue_rank, run.queue_rank
-    db.commit()
-    db.refresh(run)
+    if project_id:
+        run.queue_rank = move_queue_entry(project_id, kind, run_id, direction)
+        db.commit()
+        db.refresh(run)
+    else:
+        normalize_queue_ranks(db)
+        rows = _queue_rows(db)
+        index = next((idx for idx, item in enumerate(rows) if item[0] == kind and item[1].id == run_id), -1)
+        if index < 0:
+            raise ValueError("Queued scheduler job was not found in the queue.")
+        target = index - 1 if direction == "up" else index + 1
+        if target < 0 or target >= len(rows):
+            raise ValueError("Scheduler job is already at the queue boundary.")
+        other = rows[target][1]
+        run.queue_rank, other.queue_rank = other.queue_rank, run.queue_rank
+        db.commit()
+        db.refresh(run)
     scheduler.wake()
     return run
 
@@ -192,7 +205,7 @@ def move_queued_job(db, kind: str, run_id: int, direction: str):
 class JobScheduler:
     def __init__(self) -> None:
         # Keyed by (kind, run_id).
-        self._processes: dict[tuple[str, int], subprocess.Popen] = {}
+        self._processes: dict[tuple[str, str, int], subprocess.Popen] = {}
         self._lock = threading.Lock()
         self._thread: threading.Thread | None = None
         self._stop = threading.Event()
@@ -215,14 +228,23 @@ class JobScheduler:
 
     def wake(self) -> None:
         """Nudge the loop to dispatch immediately (e.g. right after enqueue)."""
+        from app.gpu_monitor import invalidate_gpu_snapshot
+        invalidate_gpu_snapshot()
+        try:
+            self._sync_global_queue()
+        except Exception:  # tests and very early startup may not have a catalog yet
+            logger.debug("Global queue sync deferred until scheduler tick", exc_info=True)
         self._wake.set()
 
     # -- abort ---------------------------------------------------------------
 
     def request_abort(self, kind: str, run_id: int, pid: int | None) -> None:
         """Signal a running worker to stop (SIGTERM). Safe across API restarts."""
+        from app.gpu_monitor import invalidate_gpu_snapshot
+        invalidate_gpu_snapshot()
         with self._lock:
-            proc = self._processes.get((kind, run_id))
+            proc = next((candidate for (project_id, candidate_kind, candidate_id), candidate in self._processes.items()
+                         if candidate_kind == kind and candidate_id == run_id and (pid is None or candidate.pid == pid)), None)
         if proc is not None and proc.poll() is None:
             proc.terminate()
             return
@@ -237,18 +259,20 @@ class JobScheduler:
     def _reconcile_on_startup(self) -> None:
         """After an API restart we lost the Popen handles. Mark jobs whose worker
         process is gone as failed; leave still-alive detached workers running."""
-        db = SessionLocal()
-        try:
-            for spec in _KINDS.values():
-                model = spec["model"]
-                for run in db.scalars(select(model).where(model.status == "running")):
-                    if not _pid_alive(run.pid):
-                        run.status = "failed"
-                        run.ended_at = datetime.utcnow()
-                        run.error_message = "Worker process was not running after a server restart."
-            db.commit()
-        finally:
-            db.close()
+        for project in list_projects():
+            with project_context(project.database_url, project.artifact_dir):
+                db = SessionLocal()
+                try:
+                    for spec in _KINDS.values():
+                        model = spec["model"]
+                        for run in db.scalars(select(model).where(model.status == "running")):
+                            if not _pid_alive(run.pid):
+                                run.status = "failed"
+                                run.ended_at = datetime.utcnow()
+                                run.error_message = "Worker process was not running after a server restart."
+                    db.commit()
+                finally:
+                    db.close()
 
     def _busy_gpus(self, db) -> set[int]:
         busy: set[int] = set()
@@ -288,59 +312,99 @@ class JobScheduler:
             self._wake.clear()
 
     def _tick(self) -> None:
+        self._sync_global_queue()
         scheduler_settings = get_scheduler_settings()
         detected_gpus = int(scheduler_settings["detected_gpu_count"])
         only_gpu = bool(scheduler_settings["only_gpu"])
         limit = max(1, int(scheduler_settings["max_gpu_slots"]))
-        db = SessionLocal()
-        try:
-            # Reap finished processes; mark crashed workers (no terminal status) failed.
-            with self._lock:
-                finished = [key for key, proc in self._processes.items() if proc.poll() is not None]
-                for key in finished:
-                    self._processes.pop(key, None)
-            for kind, run_id in finished:
-                model = _KINDS[kind]["model"]
-                run = db.get(model, run_id)
-                if run is not None and run.status == "running":
-                    run.status = "failed"
-                    run.ended_at = datetime.utcnow()
-                    run.error_message = run.error_message or "Worker exited without reporting a result."
-            if finished:
-                db.commit()
+        with self._lock:
+            finished = [key for key, proc in self._processes.items() if proc.poll() is not None]
+            for key in finished:
+                self._processes.pop(key, None)
+        for project_id, kind, run_id in finished:
+            project = get_project(project_id)
+            if project is None:
+                continue
+            with project_context(project.database_url, project.artifact_dir):
+                db = SessionLocal()
+                try:
+                    run = db.get(_KINDS[kind]["model"], run_id)
+                    if run is not None and run.status == "running":
+                        run.status = "failed"
+                        run.ended_at = datetime.utcnow()
+                        run.error_message = run.error_message or "Worker exited without reporting a result."
+                        db.commit()
+                finally:
+                    db.close()
 
-            busy = self._busy_gpus(db)
-            active = self._active_count(db)
+        busy: set[int] = set()
+        active = 0
+        for project in list_projects():
+            with project_context(project.database_url, project.artifact_dir):
+                db = SessionLocal()
+                try:
+                    busy.update(self._busy_gpus(db))
+                    active += self._active_count(db)
+                finally:
+                    db.close()
+        if active >= limit or (only_gpu and detected_gpus <= 0):
+            return
+        gpu_limit = min(limit, detected_gpus) if detected_gpus > 0 else 0
+        for entry in list_queue_entries():
             if active >= limit:
-                return
-            if only_gpu and detected_gpus <= 0:
-                return
+                break
+            project = get_project(entry.project_id)
+            if project is None:
+                remove_queue_entry(entry.project_id, entry.kind, entry.run_id)
+                continue
+            with project_context(project.database_url, project.artifact_dir):
+                db = SessionLocal()
+                try:
+                    run = db.get(_KINDS[entry.kind]["model"], entry.run_id)
+                    if run is None or run.status != "queued":
+                        remove_queue_entry(entry.project_id, entry.kind, entry.run_id)
+                        continue
+                    gpu = self._free_gpu(busy, gpu_limit) if gpu_limit > 0 else None
+                    if gpu is None and (only_gpu or detected_gpus > 0):
+                        break
+                    self._launch(db, project, entry.kind, run, gpu)
+                    if gpu is not None:
+                        busy.add(gpu)
+                    active += 1
+                finally:
+                    db.close()
 
-            gpu_limit = min(limit, detected_gpus) if detected_gpus > 0 else 0
+    def _sync_global_queue(self) -> None:
+        candidates: list[tuple[datetime, str, str, int]] = []
+        for project in list_projects():
+            with project_context(project.database_url, project.artifact_dir):
+                db = SessionLocal()
+                try:
+                    for kind, spec in _KINDS.items():
+                        for run in db.scalars(select(spec["model"]).where(spec["model"].status == "queued")):
+                            candidates.append((
+                                getattr(run, "enqueued_at", None) or datetime.min,
+                                project.id,
+                                kind,
+                                run.id,
+                            ))
+                finally:
+                    db.close()
+        for enqueued_at, project_id, kind, run_id in sorted(candidates):
+            ensure_queue_entry(project_id, kind, run_id, enqueued_at)
 
-            for kind, run in self._queued_jobs(db):
-                if active >= limit:
-                    break
-                gpu = self._free_gpu(busy, gpu_limit) if gpu_limit > 0 else None
-                if gpu is None and (only_gpu or detected_gpus > 0):
-                    break
-                self._launch(db, kind, run, gpu)
-                if gpu is not None:
-                    busy.add(gpu)
-                active += 1
-        finally:
-            db.close()
-
-    def _launch(self, db, kind: str, run, gpu_index: int | None) -> None:
+    def _launch(self, db, project, kind: str, run, gpu_index: int | None) -> None:
         spec = _KINDS[kind]
-        artifact_dir = data_dir() / spec["subdir"] / str(run.id)
+        artifact_dir = Path(project.artifact_dir) / spec["subdir"] / str(run.id)
         artifact_dir.mkdir(parents=True, exist_ok=True)
         log_path = artifact_dir / "worker.log"
         device_label = f"GPU:{gpu_index}" if gpu_index is not None else "CPU"
 
         env = os.environ.copy()
         env["CUDA_VISIBLE_DEVICES"] = "" if gpu_index is None else str(gpu_index)
-        env["DATABASE_URL"] = _worker_database_url(get_settings().database_url)
+        env["DATABASE_URL"] = _worker_database_url(project.database_url)
+        env["MLTRACE_PROJECT_ID"] = project.id
+        env["MLTRACE_ARTIFACT_DIR"] = project.artifact_dir
 
         with open(log_path, "a", encoding="utf-8") as parent_log:
             parent_log.write(
@@ -370,9 +434,12 @@ class JobScheduler:
         run.log_path = str(log_path)
         run.error_message = None
         db.commit()
+        remove_queue_entry(project.id, kind, run.id)
+        from app.gpu_monitor import invalidate_gpu_snapshot
+        invalidate_gpu_snapshot()
 
         with self._lock:
-            self._processes[(kind, run.id)] = proc
+            self._processes[(project.id, kind, run.id)] = proc
         logger.info("Launched %s run %s on %s (pid %s)", kind, run.id, f"GPU {gpu_index}" if gpu_index is not None else "CPU", proc.pid)
 
 

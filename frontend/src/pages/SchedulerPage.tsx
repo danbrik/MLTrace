@@ -1,5 +1,6 @@
 import {
   ActionIcon,
+  Accordion,
   Alert,
   Badge,
   Button,
@@ -9,6 +10,7 @@ import {
   Paper,
   Progress,
   ScrollArea,
+  SegmentedControl,
   Select,
   Stack,
   Switch,
@@ -35,6 +37,7 @@ import {
   deleteTrainingRun,
   getHeatmapRangeLog,
   getSchedulerSettings,
+  getGpuUsage,
   getTestingRunLog,
   getTrainingRunLog,
   listHeatmapRanges,
@@ -45,6 +48,7 @@ import {
   listTestingRuns,
   listTrainingPipelines,
   listTrainingRuns,
+  listSchedulerJobs,
   moveSchedulerJob,
   restartTestingRun,
   restartTrainingRun,
@@ -63,6 +67,8 @@ import type {
   TestingRun,
   TrainingPipeline,
   TrainingRun,
+  GpuSnapshot,
+  SchedulerJobWithProject,
 } from '../types';
 
 const TERMINAL = new Set(['finished', 'failed', 'aborted']);
@@ -84,8 +90,10 @@ function notifyError(title: string, error: unknown) {
   notifications.show({ color: 'red', title, message: error instanceof Error ? error.message : 'Unknown error' });
 }
 
-function jobKey(job: SchedulerJob): string {
-  return `${job.kind}-${job.run.id}`;
+type DisplayJob = SchedulerJob & { project_id?: string; project_name?: string };
+
+function jobKey(job: DisplayJob): string {
+  return `${job.project_id ?? 'current'}-${job.kind}-${job.run.id}`;
 }
 
 function jobName(job: SchedulerJob): string {
@@ -173,7 +181,7 @@ function ProgressCell({ job }: { job: SchedulerJob }) {
   );
 }
 
-function LogModal({ job, onClose }: { job: SchedulerJob | null; onClose: () => void }) {
+function LogModal({ job, onClose }: { job: DisplayJob | null; onClose: () => void }) {
   const [log, setLog] = useState('');
   useEffect(() => {
     if (!job) return undefined;
@@ -181,7 +189,7 @@ function LogModal({ job, onClose }: { job: SchedulerJob | null; onClose: () => v
     const load = () => {
       const fetcher =
         job.kind === 'train' ? getTrainingRunLog : job.kind === 'heatmap' ? getHeatmapRangeLog : getTestingRunLog;
-      fetcher(job.run.id)
+      fetcher(job.run.id, job.project_id)
         .then((result) => {
           if (!cancelled) setLog(result.log);
         })
@@ -219,6 +227,9 @@ export function SchedulerPage({ active = true }: { active?: boolean }) {
   const [heatmaps, setHeatmaps] = useState<HeatmapRunSummary[]>([]);
   const [heatmapRanges, setHeatmapRanges] = useState<HeatmapRangeRun[]>([]);
   const [schedulerSettings, setSchedulerSettings] = useState<SchedulerSettings | null>(null);
+  const [gpuUsage, setGpuUsage] = useState<GpuSnapshot | null>(null);
+  const [scope, setScope] = useState<'project' | 'all'>('project');
+  const [globalJobs, setGlobalJobs] = useState<SchedulerJobWithProject[]>([]);
   const [settingsDraft, setSettingsDraft] = useState<{ max_gpu_slots: number; only_gpu: boolean } | null>(null);
   const [savingSettings, setSavingSettings] = useState(false);
   const [clearingHeatmaps, setClearingHeatmaps] = useState(false);
@@ -229,10 +240,14 @@ export function SchedulerPage({ active = true }: { active?: boolean }) {
   const [statusFilter, setStatusFilter] = useState<string | null>(null);
   const [methodFilter, setMethodFilter] = useState<string | null>(null);
 
-  const [logJob, setLogJob] = useState<SchedulerJob | null>(null);
+  const [logJob, setLogJob] = useState<DisplayJob | null>(null);
   const [detailJob, setDetailJob] = useState<SchedulerJob | null>(null);
 
   async function refreshRuns() {
+    if (scope === 'all') {
+      setGlobalJobs(await listSchedulerJobs('all'));
+      return;
+    }
     const [nextTraining, nextTesting, nextHeatmaps, nextHeatmapRanges] = await Promise.all([
       listTrainingRuns(),
       listTestingRuns(),
@@ -243,6 +258,10 @@ export function SchedulerPage({ active = true }: { active?: boolean }) {
     setTestingRuns(nextTesting);
     setHeatmaps(nextHeatmaps);
     setHeatmapRanges(nextHeatmapRanges);
+  }
+
+  async function refreshGpu(force = false) {
+    setGpuUsage(await getGpuUsage(force));
   }
 
   async function refreshSchedulerSettings() {
@@ -268,13 +287,18 @@ export function SchedulerPage({ active = true }: { active?: boolean }) {
     if (!active) return undefined;
     refreshReferences().catch(() => undefined);
     refreshSchedulerSettings().catch(() => undefined);
+    refreshGpu(true).catch(() => undefined);
     refreshRuns().catch((error) => notifyError('Could not load scheduler', error));
     const interval = window.setInterval(() => {
       refreshRuns().catch(() => undefined);
     }, 2000);
-    return () => window.clearInterval(interval);
+    const gpuInterval = window.setInterval(() => refreshGpu().catch(() => undefined), 60_000);
+    return () => {
+      window.clearInterval(interval);
+      window.clearInterval(gpuInterval);
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [active]);
+  }, [active, scope]);
 
   const pipelineById = useMemo(() => new Map(pipelines.map((p) => [p.id, p])), [pipelines]);
   const preprocessingById = useMemo(() => new Map(preprocessing.map((p) => [p.id, p])), [preprocessing]);
@@ -282,8 +306,16 @@ export function SchedulerPage({ active = true }: { active?: boolean }) {
   const methodByType = useMemo(() => new Map(methodDefs.map((d) => [d.type, d])), [methodDefs]);
   const trainingRunById = useMemo(() => new Map(trainingRuns.map((r) => [r.id, r])), [trainingRuns]);
 
-  const jobs = useMemo<SchedulerJob[]>(() => {
-    const list: SchedulerJob[] = [
+  const jobs = useMemo<DisplayJob[]>(() => {
+    if (scope === 'all') {
+      return globalJobs.map((job) => ({
+        kind: job.kind,
+        run: job.run,
+        project_id: job.project_id,
+        project_name: job.project_name,
+      })) as DisplayJob[];
+    }
+    const list: DisplayJob[] = [
       ...trainingRuns.map((run) => ({ kind: 'train' as const, run })),
       ...testingRuns.map((run) => ({ kind: 'test' as const, run })),
       ...heatmapRanges.map((run) => ({ kind: 'heatmap' as const, run })),
@@ -300,7 +332,7 @@ export function SchedulerPage({ active = true }: { active?: boolean }) {
       if (aQueued !== bQueued) return aQueued ? -1 : 1;
       return (b.run.created_at ?? '').localeCompare(a.run.created_at ?? '');
     });
-  }, [trainingRuns, testingRuns, heatmapRanges]);
+  }, [trainingRuns, testingRuns, heatmapRanges, globalJobs, scope]);
 
   const queuedJobs = useMemo(() => jobs.filter((job) => job.run.status === 'queued'), [jobs]);
   const queueIndexByKey = useMemo(
@@ -335,36 +367,38 @@ export function SchedulerPage({ active = true }: { active?: boolean }) {
     });
   }
 
-  function handleAbort(job: SchedulerJob) {
+  function handleAbort(job: DisplayJob) {
     const action =
       job.kind === 'train'
-        ? () => abortTrainingRun(job.run.id)
+        ? () => abortTrainingRun(job.run.id, job.project_id)
         : job.kind === 'heatmap'
-          ? () => abortHeatmapRange(job.run.id)
-          : () => abortTestingRun(job.run.id);
+          ? () => abortHeatmapRange(job.run.id, job.project_id)
+          : () => abortTestingRun(job.run.id, job.project_id);
     withRefresh(`abort:${jobKey(job)}`, action, 'Could not abort');
   }
 
-  function handleRestart(job: SchedulerJob) {
+  function handleRestart(job: DisplayJob) {
     if (job.kind === 'heatmap') return; // heatmap videos are not restartable; re-render from Analysis
-    const action = job.kind === 'train' ? () => restartTrainingRun(job.run.id) : () => restartTestingRun(job.run.id);
+    const action = job.kind === 'train'
+      ? () => restartTrainingRun(job.run.id, job.project_id)
+      : () => restartTestingRun(job.run.id, job.project_id);
     withRefresh(`restart:${jobKey(job)}`, action, 'Could not restart');
   }
 
-  function handleDelete(job: SchedulerJob) {
+  function handleDelete(job: DisplayJob) {
     const label = job.kind === 'train' ? 'training run' : job.kind === 'heatmap' ? 'heatmap video' : 'inference';
     if (!window.confirm(`Remove ${label} "${jobName(job)}"?`)) return;
     const action =
       job.kind === 'train'
-        ? () => deleteTrainingRun(job.run.id)
+        ? () => deleteTrainingRun(job.run.id, job.project_id)
         : job.kind === 'heatmap'
-          ? () => deleteHeatmapRange(job.run.id)
-          : () => deleteTestingRun(job.run.id);
+          ? () => deleteHeatmapRange(job.run.id, job.project_id)
+          : () => deleteTestingRun(job.run.id, job.project_id);
     withRefresh(`delete:${jobKey(job)}`, action, 'Could not remove');
   }
 
-  function handleMove(job: SchedulerJob, direction: 'up' | 'down') {
-    withRefresh(`move-${direction}:${jobKey(job)}`, () => moveSchedulerJob(job.kind, job.run.id, direction), 'Could not move job');
+  function handleMove(job: DisplayJob, direction: 'up' | 'down') {
+    withRefresh(`move-${direction}:${jobKey(job)}`, () => moveSchedulerJob(job.kind, job.run.id, direction, job.project_id), 'Could not move job');
   }
 
   async function handleSaveSettings() {
@@ -405,6 +439,53 @@ export function SchedulerPage({ active = true }: { active?: boolean }) {
           All training and inference jobs across the GPU queue — queued, running, finished, failed, aborted.
         </Text>
       </div>
+
+      <Accordion variant="contained">
+        <Accordion.Item value="gpu-live">
+          <Accordion.Control>
+            <Group justify="space-between" pr="md">
+              <div>
+                <Text fw={700}>Live GPU usage</Text>
+                <Text size="xs" c="dimmed">
+                  {gpuUsage
+                    ? `MLTrace uses ${gpuUsage.mltrace_memory_mb} MiB across ${gpuUsage.gpu_slots} GPU slots · ${gpuUsage.running_jobs} running · ${gpuUsage.queued_jobs} queued`
+                    : 'Loading NVIDIA and MLTrace usage…'}
+                </Text>
+              </div>
+              {gpuUsage && <Badge color={gpuUsage.available ? 'green' : 'gray'}>{gpuUsage.available ? 'nvidia-smi live' : 'unavailable'}</Badge>}
+            </Group>
+          </Accordion.Control>
+          <Accordion.Panel>
+            <Stack gap="md">
+              {gpuUsage?.error && <Alert color="yellow">{gpuUsage.error}</Alert>}
+              {gpuUsage && (
+                <Text size="xs" c="dimmed">Snapshot {new Date(gpuUsage.captured_at).toLocaleString()} · refreshed every minute</Text>
+              )}
+              {gpuUsage?.devices.map((device) => (
+                <Paper key={device.uuid} withBorder p="sm">
+                  <Group justify="space-between">
+                    <Text fw={600}>GPU {device.index} · {device.name}</Text>
+                    <Group gap="xs">
+                      <Badge variant="light">{device.utilization_percent}% utilization</Badge>
+                      <Badge variant="light" color="grape">{device.memory_used_mb}/{device.memory_total_mb} MiB</Badge>
+                      <Badge variant="light" color="blue">MLTrace {device.mltrace_memory_mb} MiB</Badge>
+                      {device.temperature_c != null && <Badge variant="light" color="orange">{device.temperature_c} °C</Badge>}
+                    </Group>
+                  </Group>
+                </Paper>
+              ))}
+              {gpuUsage && gpuUsage.projects.length > 0 && (
+                <Table striped withTableBorder>
+                  <Table.Thead><Table.Tr><Table.Th>Project</Table.Th><Table.Th>GPU memory</Table.Th><Table.Th>Slots</Table.Th><Table.Th>Running</Table.Th><Table.Th>Queued</Table.Th></Table.Tr></Table.Thead>
+                  <Table.Tbody>{gpuUsage.projects.map((usage) => (
+                    <Table.Tr key={usage.project_id}><Table.Td>{usage.project_name}</Table.Td><Table.Td>{usage.gpu_memory_mb} MiB</Table.Td><Table.Td>{usage.gpu_slots}</Table.Td><Table.Td>{usage.running_jobs}</Table.Td><Table.Td>{usage.queued_jobs}</Table.Td></Table.Tr>
+                  ))}</Table.Tbody>
+                </Table>
+              )}
+            </Stack>
+          </Accordion.Panel>
+        </Accordion.Item>
+      </Accordion>
 
       <Paper withBorder p="md" radius="sm" style={{ borderLeft: '4px solid var(--mantine-color-blue-5)' }}>
         <Stack gap="md">
@@ -453,6 +534,14 @@ export function SchedulerPage({ active = true }: { active?: boolean }) {
 
       <Paper withBorder p="md" radius="sm">
         <Stack gap="md">
+          <Group justify="space-between">
+            <Text fw={600}>Job visibility</Text>
+            <SegmentedControl
+              value={scope}
+              onChange={(value) => setScope(value as 'project' | 'all')}
+              data={[{ value: 'project', label: 'Current project' }, { value: 'all', label: 'All projects' }]}
+            />
+          </Group>
           <Group grow>
             <TextInput
               placeholder="Search by name or method"
@@ -489,6 +578,7 @@ export function SchedulerPage({ active = true }: { active?: boolean }) {
               <Table.Thead>
                 <Table.Tr>
                   <Table.Th>Type</Table.Th>
+                  {scope === 'all' && <Table.Th>Project</Table.Th>}
                   <Table.Th>Name</Table.Th>
                   <Table.Th>Method</Table.Th>
                   <Table.Th>Status</Table.Th>
@@ -522,6 +612,7 @@ export function SchedulerPage({ active = true }: { active?: boolean }) {
                           {job.kind === 'train' ? 'Training' : job.kind === 'heatmap' ? 'Heatmap' : 'Inference'}
                         </Badge>
                       </Table.Td>
+                      {scope === 'all' && <Table.Td><Badge variant="outline">{job.project_name}</Badge></Table.Td>}
                       <Table.Td>{jobName(job)}</Table.Td>
                       <Table.Td>
                         <Text size="sm">{jobMethodType(job)}</Text>
