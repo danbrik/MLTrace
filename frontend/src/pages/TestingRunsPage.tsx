@@ -60,6 +60,13 @@ const SCORE_METRIC_OPTIONS = [
   { value: 'mae', label: 'MAE' },
   { value: 'ssim_distance', label: 'SSIM distance' },
 ];
+const SCORE_AGGREGATION_OPTIONS = [
+  { value: 'mean', label: 'Mean' },
+  { value: 'p95', label: 'P95' },
+  { value: 'p99', label: 'P99' },
+  { value: 'p99.9', label: 'P99.9' },
+  { value: 'max', label: 'Max' },
+];
 
 function notifyError(title: string, error: unknown) {
   notifications.show({ color: 'red', title, message: error instanceof Error ? error.message : 'Unknown error' });
@@ -401,6 +408,7 @@ export function TestingRunsPage({ active = true, onRunQueued }: { active?: boole
   const [runName, setRunName] = useState('');
   const [, setRunNameTouched] = useState(false);
   const [scoreMetric, setScoreMetric] = useState('mse');
+  const [scoreAggregation, setScoreAggregation] = useState('mean');
   const [roiName, setRoiName] = useState('');
   const [preview, setPreview] = useState<RoiPreview | null>(null);
   const [points, setPoints] = useState<RoiPoint[] | null>(null);
@@ -537,6 +545,8 @@ export function TestingRunsPage({ active = true, onRunQueued }: { active?: boole
   useEffect(() => {
     const defaultMetric = selectedMethodConfiguration?.inference_config?.error_metric;
     setScoreMetric(typeof defaultMetric === 'string' ? defaultMetric : 'mse');
+    const defaultAggregation = selectedMethodConfiguration?.inference_config?.frame_score_aggregation;
+    setScoreAggregation(typeof defaultAggregation === 'string' ? defaultAggregation : 'mean');
   }, [selectedMethodConfiguration?.id]);
 
   function toggleModel(runId: number) {
@@ -633,7 +643,7 @@ export function TestingRunsPage({ active = true, onRunQueued }: { active?: boole
         training_dataset_ids: selectedDatasetIds,
         roi_id: roiEnabled && selectedRoiId ? Number(selectedRoiId) : null,
         name_prefix: runName.trim() || null,
-        inference_config: { error_metric: scoreMetric },
+        inference_config: { error_metric: scoreMetric, frame_score_aggregation: scoreAggregation },
       });
       setRunName('');
       setRunNameTouched(false);
@@ -914,6 +924,26 @@ export function TestingRunsPage({ active = true, onRunQueued }: { active?: boole
                 onChange={(value) => setScoreMetric(value ?? 'mse')}
                 allowDeselect={false}
                 w={190}
+              />
+              <Select
+                label={
+                  <Group gap={4}>
+                    <Text span>Score aggregation</Text>
+                    <Tooltip
+                      label="How the per-pixel error map becomes one score per frame. Mean averages every pixel and dilutes small defects. Percentiles read the error at the worst 5/1/0.1 percent of pixels, so pick one whose pixel budget is smaller than the expected defect area. Max is sensitive to single outliers such as border artefacts."
+                      multiline
+                      w={320}
+                      withArrow
+                    >
+                      <Info size={14} />
+                    </Tooltip>
+                  </Group>
+                }
+                data={SCORE_AGGREGATION_OPTIONS}
+                value={scoreAggregation}
+                onChange={(value) => setScoreAggregation(value ?? 'mean')}
+                allowDeselect={false}
+                w={170}
               />
               <Button
                 leftSection={<Play size={16} />}

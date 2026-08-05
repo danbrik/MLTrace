@@ -33,6 +33,7 @@ from app.testing.service import (
 from app.training.data import enumerate_training_dataset_image_records
 from app.training.data import enumerate_training_dataset_clip_samples
 from app.training.engine import _to_nchw
+from app.metrics.aggregation import normalize_aggregation
 from app.metrics.ssim import ssim_distance_map_np
 
 logger = logging.getLogger("mltrace.testing")
@@ -73,14 +74,9 @@ def _clip_tensor_from_paths(graph: PreprocessingGraph, paths: list[str]) -> "np.
 
 
 def _aggregate(values, aggregation: str) -> float:
-    import numpy as np
+    from app.metrics.aggregation import aggregate_score
 
-    flat = np.asarray(values, dtype=np.float64).reshape(-1)
-    if flat.size == 0:
-        return 0.0
-    if aggregation == "p95":
-        return float(np.percentile(flat, 95))
-    return float(np.mean(flat))
+    return aggregate_score(values, aggregation)
 
 
 def _residual(left, right, mode: str):
@@ -199,7 +195,7 @@ def run_testing(run_id: int, abort_event: threading.Event | None = None) -> None
                 inference_config = {**(pipeline.method_configuration.inference_config or {}), **(run.inference_config or {})}
                 error_metric = str(inference_config.get("error_metric") or ("mse" if str(inference_config.get("residual_mode", "absolute")) == "squared" else "mae"))
                 residual_mode = str(inference_config.get("residual_mode", "absolute"))
-                aggregation = str(inference_config.get("frame_score_aggregation", "mean"))
+                aggregation = normalize_aggregation(inference_config.get("frame_score_aggregation"))
 
                 def _prep_clip(clip):
                     input_paths = [frame.file_path for frame in clip.input_frames]

@@ -189,6 +189,7 @@ type PlotSourceConfig = {
 
 type PlotTraceConfig = PlotSourceConfig & {
   metric: string;
+  aggregation?: string;
   modelLabel: string;
   legendLabel: string;
   color: string;
@@ -446,6 +447,31 @@ function metricOrder(metric: string): number {
   return 10;
 }
 
+function normalizeAggregationKey(aggregation: string): string {
+  return aggregation.trim().toLowerCase() || 'mean';
+}
+
+function aggregationKeyForRun(run: TestingRun): string {
+  const configured = run.inference_config?.frame_score_aggregation;
+  return typeof configured === 'string' && configured.trim() ? normalizeAggregationKey(configured) : 'mean';
+}
+
+function aggregationLabel(aggregation: string): string {
+  const normalized = normalizeAggregationKey(aggregation);
+  if (normalized === 'mean') return 'Mean';
+  if (normalized === 'max') return 'Max';
+  return normalized.toUpperCase();
+}
+
+// Sortiert mean vor allen Perzentilen und max ans Ende.
+function aggregationOrder(aggregation: string): number {
+  const normalized = normalizeAggregationKey(aggregation);
+  if (normalized === 'mean') return -1;
+  if (normalized === 'max') return 1000;
+  const percentile = Number(normalized.replace(/^p/, ''));
+  return Number.isFinite(percentile) ? percentile : 500;
+}
+
 function traceToSource(trace: PlotTraceConfig): PlotSourceConfig {
   return {
     testingRunId: trace.testingRunId,
@@ -464,9 +490,18 @@ function sourceTraceKey(source: PlotSourceConfig): string {
   return `${source.testingRunId}`;
 }
 
-function traceLabelForRun(run: TestingRun, metric: string, multipleMetrics: boolean): string {
+function traceLabelForRun(
+  run: TestingRun,
+  metric: string,
+  multipleMetrics: boolean,
+  aggregation: string,
+  multipleAggregations: boolean,
+): string {
   const modelLabel = run.training_pipeline_name || run.training_run_name || `Training run #${run.training_run_id}`;
-  return multipleMetrics ? `${modelLabel} · ${metricLabel(metric)}` : modelLabel;
+  const parts = [modelLabel];
+  if (multipleMetrics) parts.push(metricLabel(metric));
+  if (multipleAggregations) parts.push(aggregationLabel(aggregation));
+  return parts.join(' · ');
 }
 
 function filterAndSampleResults(
@@ -2162,6 +2197,7 @@ type AnalysisBoardLayout = {
   selectedModelIds?: string[];
   selectedInferenceDatasetId?: string | null;
   selectedMetricKeys?: string[];
+  selectedAggregationKeys?: string[];
   selectedRoiKey: string | null;
   selectedSources: PlotSourceConfig[];
   addPlotOpen: boolean;
@@ -2223,6 +2259,7 @@ function restoreTraces(value: unknown): PlotTraceConfig[] {
     return {
       ...source,
       metric: normalizeMetricKey(String(trace.metric ?? 'mse')),
+      aggregation: normalizeAggregationKey(String(trace.aggregation ?? 'mean')),
       modelLabel: String(trace.modelLabel ?? trace.legendLabel ?? `Source ${index + 1}`),
       legendLabel: String(trace.legendLabel ?? trace.modelLabel ?? `Source ${index + 1}`),
       color: String(trace.color ?? TRACE_COLORS[index % TRACE_COLORS.length]),
@@ -2264,6 +2301,9 @@ function restoreBoardLayout(value: Record<string, unknown>): AnalysisBoardLayout
     selectedMetricKeys: Array.isArray(value.selectedMetricKeys)
       ? value.selectedMetricKeys.map((metric) => normalizeMetricKey(String(metric))).filter(Boolean)
       : [],
+    selectedAggregationKeys: Array.isArray(value.selectedAggregationKeys)
+      ? value.selectedAggregationKeys.map((aggregation) => normalizeAggregationKey(String(aggregation))).filter(Boolean)
+      : [],
     selectedRoiKey: value.selectedRoiKey === null || value.selectedRoiKey === undefined ? null : String(value.selectedRoiKey),
     selectedSources: restoreSources(value.selectedSources),
     addPlotOpen: typeof value.addPlotOpen === 'boolean' ? value.addPlotOpen : true,
@@ -2294,6 +2334,7 @@ export function AnalysisPage({ active = true }: { active?: boolean }) {
   const [selectedModelIds, setSelectedModelIds] = useState<string[]>([]);
   const [selectedInferenceDatasetId, setSelectedInferenceDatasetId] = useState<string | null>(null);
   const [selectedMetricKeys, setSelectedMetricKeys] = useState<string[]>([]);
+  const [selectedAggregationKeys, setSelectedAggregationKeys] = useState<string[]>([]);
   const [selectedRoiKey, setSelectedRoiKey] = useState<string | null>('none');
   const [selectedSources, setSelectedSources] = useState<PlotSourceConfig[]>([]);
   const [plotPreview, setPlotPreview] = useState<PlotPreview | null>(null);
@@ -2475,17 +2516,43 @@ export function AnalysisPage({ active = true }: { active?: boolean }) {
       .map((metric) => ({ value: metric, label: metricLabel(metric) }));
   }, [finishedRuns, selectedInferenceDatasetId, selectedModelIds, selectedRoiKey]);
 
+  const aggregationOptionsForSelection = useMemo(() => {
+    if (!selectedInferenceDatasetId || !selectedRoiKey || selectedModelIds.length === 0) return [];
+    if (selectedMetricKeys.length === 0) return [];
+    const metrics = new Set(selectedMetricKeys.map(normalizeMetricKey));
+    const modelIds = selectedModelIds.map(Number);
+    // Nur Aggregationen anbieten, die fuer jedes Modell und jede gewaehlte Metrik als Lauf existieren.
+    const sets = modelIds.flatMap((modelId) =>
+      [...metrics].map((metric) => {
+        const aggregations = new Set<string>();
+        for (const run of finishedRuns) {
+          if (run.training_run_id !== modelId || run.training_dataset_id !== Number(selectedInferenceDatasetId)) continue;
+          if ((run.roi_id === null ? 'none' : String(run.roi_id)) !== selectedRoiKey) continue;
+          if (metricKeyForRun(run) !== metric) continue;
+          aggregations.add(aggregationKeyForRun(run));
+        }
+        return aggregations;
+      }),
+    );
+    return [...(sets[0] ?? new Set<string>())]
+      .filter((aggregation) => sets.every((set) => set.has(aggregation)))
+      .sort((left, right) => aggregationOrder(left) - aggregationOrder(right) || left.localeCompare(right))
+      .map((aggregation) => ({ value: aggregation, label: aggregationLabel(aggregation) }));
+  }, [finishedRuns, selectedInferenceDatasetId, selectedMetricKeys, selectedModelIds, selectedRoiKey]);
+
   const heatmapArtifactTestingRunIds = useMemo(() => {
     const metrics = new Set(selectedMetricKeys.map(normalizeMetricKey));
+    const aggregations = new Set(selectedAggregationKeys.map(normalizeAggregationKey));
     return new Set(
       finishedRuns
         .filter((run) => selectedModelIdSet.has(run.training_run_id))
         .filter((run) => run.training_dataset_id === Number(selectedInferenceDatasetId))
         .filter((run) => (run.roi_id === null ? 'none' : String(run.roi_id)) === selectedRoiKey)
         .filter((run) => metrics.size === 0 || metrics.has(metricKeyForRun(run)))
+        .filter((run) => aggregations.size === 0 || aggregations.has(aggregationKeyForRun(run)))
         .map((run) => run.id),
     );
-  }, [finishedRuns, selectedInferenceDatasetId, selectedMetricKeys, selectedModelIdSet, selectedRoiKey]);
+  }, [finishedRuns, selectedAggregationKeys, selectedInferenceDatasetId, selectedMetricKeys, selectedModelIdSet, selectedRoiKey]);
 
   const heatmapArtifactInterval = useMemo(() => {
     const point = draft.heatmapMode === 'single' ? draft.timestamp : null;
@@ -2529,6 +2596,7 @@ export function AnalysisPage({ active = true }: { active?: boolean }) {
     if (selectedInferenceDatasetId && !commonDatasetOptions.some((option) => option.value === selectedInferenceDatasetId)) {
       setSelectedInferenceDatasetId(null);
       setSelectedMetricKeys([]);
+      setSelectedAggregationKeys([]);
       resetSelectionPreview();
     }
   }, [commonDatasetOptions, selectedInferenceDatasetId]);
@@ -2537,6 +2605,7 @@ export function AnalysisPage({ active = true }: { active?: boolean }) {
     if (!roiOptionsForSelection.some((option) => option.value === selectedRoiKey)) {
       setSelectedRoiKey('none');
       setSelectedMetricKeys([]);
+      setSelectedAggregationKeys([]);
       resetSelectionPreview();
     }
   }, [roiOptionsForSelection, selectedRoiKey]);
@@ -2550,6 +2619,16 @@ export function AnalysisPage({ active = true }: { active?: boolean }) {
       return metricOptionsForSelection[0]?.value ? [metricOptionsForSelection[0].value] : [];
     });
   }, [metricOptionsForSelection]);
+
+  useEffect(() => {
+    const validAggregations = new Set(aggregationOptionsForSelection.map((option) => option.value));
+    setSelectedAggregationKeys((current) => {
+      const filtered = current.filter((aggregation) => validAggregations.has(aggregation));
+      if (filtered.length > 0) return filtered;
+      if (validAggregations.has('mean')) return ['mean'];
+      return aggregationOptionsForSelection[0]?.value ? [aggregationOptionsForSelection[0].value] : [];
+    });
+  }, [aggregationOptionsForSelection]);
 
   const fetchResults = useCallback(
     async (runId: number) => {
@@ -2577,6 +2656,7 @@ export function AnalysisPage({ active = true }: { active?: boolean }) {
       selectedModelIds,
       selectedInferenceDatasetId,
       selectedMetricKeys,
+      selectedAggregationKeys,
       selectedRoiKey,
       selectedSources,
       addPlotOpen,
@@ -2607,6 +2687,7 @@ export function AnalysisPage({ active = true }: { active?: boolean }) {
       setSelectedModelIds(restored.selectedModelIds ?? []);
       setSelectedInferenceDatasetId(restored.selectedInferenceDatasetId ?? null);
       setSelectedMetricKeys(restored.selectedMetricKeys ?? []);
+      setSelectedAggregationKeys(restored.selectedAggregationKeys ?? []);
       setSelectedRoiKey(restored.selectedRoiKey ?? 'none');
       setSelectedSources(restored.selectedSources);
       clearPreview();
@@ -3063,13 +3144,14 @@ export function AnalysisPage({ active = true }: { active?: boolean }) {
     });
   }
 
-  function resolveTestingRun(modelId: number, metric: string): { run: TestingRun | null; duplicateCount: number } {
+  function resolveTestingRun(modelId: number, metric: string, aggregation: string): { run: TestingRun | null; duplicateCount: number } {
     if (!selectedInferenceDatasetId || !selectedRoiKey) return { run: null, duplicateCount: 0 };
     const candidates = finishedRuns
       .filter((run) => run.training_run_id === modelId)
       .filter((run) => run.training_dataset_id === Number(selectedInferenceDatasetId))
       .filter((run) => (run.roi_id === null ? 'none' : String(run.roi_id)) === selectedRoiKey)
       .filter((run) => metricKeyForRun(run) === metric)
+      .filter((run) => aggregationKeyForRun(run) === aggregation)
       .sort((left, right) => {
         const leftTime = new Date(left.ended_at ?? left.updated_at ?? left.created_at).getTime();
         const rightTime = new Date(right.ended_at ?? right.updated_at ?? right.created_at).getTime();
@@ -3094,6 +3176,7 @@ export function AnalysisPage({ active = true }: { active?: boolean }) {
   function buildPlotSubtitle(metrics: string[], start: string, end: string, sampling: number): string {
     const parts = [
       `Metrics: ${metrics.map(metricLabel).join(', ')}`,
+      `Aggregation: ${selectedAggregationKeys.map(aggregationLabel).join(', ')}`,
       `Range: ${start.replace('T', ' ')} to ${end.replace('T', ' ')}`,
       `Sampling: every ${sampling}`,
     ];
@@ -3139,8 +3222,12 @@ export function AnalysisPage({ active = true }: { active?: boolean }) {
       notifications.show({ color: 'yellow', title: 'Select metrics', message: 'Select one or more metrics for the plot.' });
       return;
     }
-    if (draft.plotType === 'heatmap' && (selectedModelIds.length > 1 || selectedMetricKeys.length > 1)) {
-      notifications.show({ color: 'yellow', title: 'Heatmap needs one source', message: 'Heatmaps currently support one model and one metric. Use time series for multi-model comparisons.' });
+    if (selectedAggregationKeys.length === 0) {
+      notifications.show({ color: 'yellow', title: 'Select aggregation', message: 'Select one or more score aggregations for the plot.' });
+      return;
+    }
+    if (draft.plotType === 'heatmap' && (selectedModelIds.length > 1 || selectedMetricKeys.length > 1 || selectedAggregationKeys.length > 1)) {
+      notifications.show({ color: 'yellow', title: 'Heatmap needs one source', message: 'Heatmaps currently support one model, one metric and one aggregation. Use time series for multi-source comparisons.' });
       return;
     }
     const start = draft.start || selectedInferenceBounds.start;
@@ -3156,25 +3243,34 @@ export function AnalysisPage({ active = true }: { active?: boolean }) {
     try {
       for (const modelId of selectedModelIds) {
         for (const metric of selectedMetricKeys) {
-          const { run, duplicateCount } = resolveTestingRun(Number(modelId), metric);
-          if (!run) {
-            throw new Error(`No finished ${metricLabel(metric)} inference run found for ${selectedModelLabel(modelId)}.`);
+          for (const aggregation of selectedAggregationKeys) {
+            const { run, duplicateCount } = resolveTestingRun(Number(modelId), metric, aggregation);
+            if (!run) {
+              throw new Error(
+                `No finished ${metricLabel(metric)} / ${aggregationLabel(aggregation)} inference run found for ${selectedModelLabel(modelId)}.`,
+              );
+            }
+            if (duplicateCount > 0) {
+              duplicateNotes.push(`${selectedModelLabel(modelId)} / ${metricLabel(metric)} / ${aggregationLabel(aggregation)}: newest run used, ${duplicateCount} older duplicate${duplicateCount === 1 ? '' : 's'} ignored.`);
+            }
+            const previousTrace = plotPreview?.traces.find(
+              (trace) => trace.testingRunId === String(run.id) && trace.metric === metric && (trace.aggregation ?? 'mean') === aggregation,
+            );
+            traces.push({
+              testingRunId: String(run.id),
+              metric,
+              aggregation,
+              modelLabel: selectedModelLabel(modelId),
+              legendLabel:
+                previousTrace?.legendLabel
+                ?? traceLabelForRun(run, metric, selectedMetricKeys.length > 1, aggregation, selectedAggregationKeys.length > 1),
+              color: previousTrace?.color ?? TRACE_COLORS[traces.length % TRACE_COLORS.length],
+              start,
+              end,
+              sampling,
+              timestamp: draft.timestamp ?? start,
+            });
           }
-          if (duplicateCount > 0) {
-            duplicateNotes.push(`${selectedModelLabel(modelId)} / ${metricLabel(metric)}: newest run used, ${duplicateCount} older duplicate${duplicateCount === 1 ? '' : 's'} ignored.`);
-          }
-          const previousTrace = plotPreview?.traces.find((trace) => trace.testingRunId === String(run.id) && trace.metric === metric);
-          traces.push({
-            testingRunId: String(run.id),
-            metric,
-            modelLabel: selectedModelLabel(modelId),
-            legendLabel: previousTrace?.legendLabel ?? traceLabelForRun(run, metric, selectedMetricKeys.length > 1),
-            color: previousTrace?.color ?? TRACE_COLORS[traces.length % TRACE_COLORS.length],
-            start,
-            end,
-            sampling,
-            timestamp: draft.timestamp ?? start,
-          });
         }
       }
       if (draft.plotType !== 'heatmap' || draft.heatmapMode !== 'single') {
@@ -3285,6 +3381,7 @@ export function AnalysisPage({ active = true }: { active?: boolean }) {
       return {
         ...source,
         metric,
+        aggregation: run ? aggregationKeyForRun(run) : 'mean',
         modelLabel: run?.training_pipeline_name ?? `Source ${sourceIndex + 1}`,
         legendLabel: run?.training_pipeline_name ?? `Source ${sourceIndex + 1}`,
         color: TRACE_COLORS[sourceIndex % TRACE_COLORS.length],
@@ -3299,6 +3396,7 @@ export function AnalysisPage({ active = true }: { active?: boolean }) {
     setSelectedInferenceDatasetId(firstRun ? String(firstRun.training_dataset_id) : null);
     setSelectedRoiKey(firstRun?.roi_id === null || firstRun?.roi_id === undefined ? 'none' : String(firstRun.roi_id));
     setSelectedMetricKeys([...new Set(traces.map((trace) => trace.metric))]);
+    setSelectedAggregationKeys([...new Set(traces.map((trace) => trace.aggregation ?? 'mean'))]);
     setPlotPreview({
       title: plot.title,
       subtitle: plot.subtitle,
@@ -3585,6 +3683,7 @@ export function AnalysisPage({ active = true }: { active?: boolean }) {
                       setSelectedModelIds(values);
                       setSelectedInferenceDatasetId(null);
                       setSelectedMetricKeys([]);
+                      setSelectedAggregationKeys([]);
                       setSelectedRoiKey('none');
                       setSelectedSources([]);
                       resetSelectionPreview();
@@ -3635,6 +3734,7 @@ export function AnalysisPage({ active = true }: { active?: boolean }) {
                                       );
                                       setSelectedInferenceDatasetId(null);
                                       setSelectedMetricKeys([]);
+                                      setSelectedAggregationKeys([]);
                                       setSelectedRoiKey('none');
                                       setSelectedSources([]);
                                       resetSelectionPreview();
@@ -3725,6 +3825,7 @@ export function AnalysisPage({ active = true }: { active?: boolean }) {
                                       onClick={() => {
                                         setSelectedInferenceDatasetId(option.value);
                                         setSelectedMetricKeys([]);
+                                        setSelectedAggregationKeys([]);
                                         setSelectedRoiKey('none');
                                         setSelectedSources([]);
                                         resetSelectionPreview();
@@ -3767,6 +3868,7 @@ export function AnalysisPage({ active = true }: { active?: boolean }) {
                       onChange={(value) => {
                         setSelectedRoiKey(value ?? 'none');
                         setSelectedMetricKeys([]);
+                        setSelectedAggregationKeys([]);
                         setSelectedSources([]);
                         resetSelectionPreview();
                       }}
@@ -3813,6 +3915,32 @@ export function AnalysisPage({ active = true }: { active?: boolean }) {
                       clearable
                       onChange={(values) => {
                         setSelectedMetricKeys(values.map(normalizeMetricKey));
+                        setSelectedSources([]);
+                        markPreviewStale();
+                      }}
+                    />
+                    <MultiSelect
+                      label={
+                        <Group gap={4}>
+                          <Text span size="sm" fw={500}>Score aggregation</Text>
+                          <Tooltip
+                            label="How each inference run reduced its per-pixel error map to one score per frame. Only aggregations that already exist as finished runs for every selected model and metric are listed."
+                            multiline
+                            w={320}
+                            withArrow
+                          >
+                            <Info size={14} />
+                          </Tooltip>
+                        </Group>
+                      }
+                      placeholder={aggregationOptionsForSelection.length === 0 ? 'No inference runs available' : 'Select one or more aggregations'}
+                      data={aggregationOptionsForSelection}
+                      value={selectedAggregationKeys}
+                      disabled={aggregationOptionsForSelection.length === 0}
+                      searchable
+                      clearable
+                      onChange={(values) => {
+                        setSelectedAggregationKeys(values.map(normalizeAggregationKey));
                         setSelectedSources([]);
                         markPreviewStale();
                       }}
@@ -4315,6 +4443,7 @@ export function AnalysisPage({ active = true }: { active?: boolean }) {
                                 onChange={(value) => updatePreviewTrace(index, { color: value })}
                               />
                               <TextInput label="Metric" value={metricLabel(trace.metric)} disabled />
+                              <TextInput label="Aggregation" value={aggregationLabel(trace.aggregation ?? 'mean')} disabled />
                             </SimpleGrid>
                           ))}
                         </Stack>

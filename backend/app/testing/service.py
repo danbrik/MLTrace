@@ -16,6 +16,7 @@ from sqlalchemy.orm import Session, selectinload
 
 from app import models
 from app.database import data_dir
+from app.metrics.aggregation import aggregate_score, normalize_aggregation
 from app.metrics.ssim import ssim_distance_map_np, ssim_settings_from_config
 from app.modeling.fast_anogan import build_fast_anogan_modules, fast_anogan_forward
 from app.preprocessing.pipeline import (
@@ -248,9 +249,13 @@ def _score_map(left: np.ndarray, right: np.ndarray, metric: str, config: dict | 
     return values, {}
 
 
+def _aggregation_from_config(config: dict | None) -> str:
+    return normalize_aggregation((config or {}).get("frame_score_aggregation"))
+
+
 def _score_array(left: np.ndarray, right: np.ndarray, metric: str, config: dict | None = None) -> tuple[float, dict]:
     values, metadata = _score_map(left, right, metric, config)
-    return float(np.mean(values)), metadata
+    return aggregate_score(values, _aggregation_from_config(config)), metadata
 
 
 def _mse_masked(left: np.ndarray, right: np.ndarray, mask: np.ndarray) -> float:
@@ -285,7 +290,7 @@ def _score_masked(
     selected = values[mask]
     if selected.size == 0:
         return None, metadata, "ROI/tile mask contains no pixels."
-    return float(np.mean(selected)), metadata, None
+    return aggregate_score(selected, _aggregation_from_config(config)), metadata, None
 
 
 def _validate_roi_size(image: np.ndarray, roi: models.RoiDefinition) -> tuple[int, int]:
@@ -675,6 +680,7 @@ class ArtifactEvaluator:
             roi_score, tile_scores, warnings = _roi_scores(source, reconstruction, roi, self.score_metric, self.inference_config)
         metadata = {
             "score_metric": self.score_metric,
+            "score_aggregation": _aggregation_from_config(self.inference_config),
             "ssim_parameters": ssim_metadata or None,
             "warnings": warnings,
         }

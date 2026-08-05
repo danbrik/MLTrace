@@ -366,7 +366,7 @@ def test_default_method_bootstrap_is_idempotent() -> None:
     Base.metadata.create_all(bind=engine)
     db = TestingSessionLocal()
     try:
-        assert ensure_default_method_configurations(db) == 9
+        assert ensure_default_method_configurations(db) == len(default_method_payloads())
         assert ensure_default_method_configurations(db) == 0
         rows = db.scalars(select(models.MethodConfiguration.name)).all()
         names = set(rows)
@@ -375,13 +375,15 @@ def test_default_method_bootstrap_is_idempotent() -> None:
             "AEDense d256 default",
             "AESpatial c16 default",
             "AESpatial c64 default",
+            "AEDense d256 384x240 default",
+            "AESpatial c64 384x240 default",
             "VAE Baur d128 default",
             "STAE reconstruction prediction default",
             "STAE Reconstruction paper default",
             "STAE Reconstruction + Future Prediction paper default",
             "fastAnoGAN paper default",
         } == names
-        assert len(rows) == 9
+        assert len(rows) == len(default_method_payloads())
     finally:
         db.close()
 
@@ -546,7 +548,7 @@ def test_default_bootstrap_repairs_only_unmodified_old_paper_stae_defaults() -> 
     try:
         old_payloads = _old_paper_payloads_by_name()
         create_method_configuration(db, old_payloads["STAE Reconstruction + Future Prediction paper default"])
-        assert ensure_default_method_configurations(db) == 8
+        assert ensure_default_method_configurations(db) == len(default_method_payloads()) - 1
         repaired = db.scalar(
             select(models.MethodConfiguration).where(
                 models.MethodConfiguration.name == "STAE Reconstruction + Future Prediction paper default"
@@ -575,7 +577,7 @@ def test_default_bootstrap_repairs_only_unmodified_old_paper_stae_defaults() -> 
         modified = _old_paper_payloads_by_name()["STAE Reconstruction + Future Prediction paper default"].model_copy(deep=True)
         modified.description = "User modified one-step STAE"
         create_method_configuration(db, modified)
-        assert ensure_default_method_configurations(db) == 8
+        assert ensure_default_method_configurations(db) == len(default_method_payloads()) - 1
         preserved = db.scalar(
             select(models.MethodConfiguration).where(
                 models.MethodConfiguration.name == "STAE Reconstruction + Future Prediction paper default"
