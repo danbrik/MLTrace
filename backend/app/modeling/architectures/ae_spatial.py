@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from app.metrics.aggregation import FRAME_SCORE_AGGREGATION_OPTIONS
 from app.modeling.architectures.common import validate_sequential_model_graph
 from app.modeling.architectures.ssim_schema import (
     SSIM_ERROR_METRIC_OPTIONS,
@@ -123,7 +124,7 @@ class AeSpatialArchitecture(BaseModelArchitecture):
             "frame_score_aggregation": {
                 "type": "string",
                 "label": "Frame score aggregation",
-                "enum": ["mean", "p95"],
+                "enum": FRAME_SCORE_AGGREGATION_OPTIONS,
                 "default": "mean",
             },
         },

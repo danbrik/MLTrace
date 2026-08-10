@@ -64,7 +64,9 @@ pip-wheel-metadata/
 sample_datasets/
 external_datasets/
 tools/setup_aebad_v_dataset.py
+tools/IRCSV2TIFF/*
 docs/local/*
+dataset/*
 
 # Java / Kotlin / Gradle
 .gradle/

@@ -18,6 +18,19 @@ ENCODER_CHANNELS = [32, 64, 128, 256, 256]
 BOTTLENECK_SPATIAL_SIZE = 8
 BOTTLENECK_FEATURES = 256 * BOTTLENECK_SPATIAL_SIZE * BOTTLENECK_SPATIAL_SIZE
 
+# Additional non-square variant for 384x240 sensor frames. Every encoder Conv2d
+# uses kernel 3 / stride 2 / padding 1 and every decoder ConvTranspose2d mirrors
+# it with output_padding 1, so the decoder only restores the input size exactly
+# when each stage halves an even number. 384 and 240 are both divisible by 16,
+# which is why this variant uses four downsampling stages instead of five.
+WIDE_INPUT_WIDTH = 384
+WIDE_INPUT_HEIGHT = 240
+WIDE_ENCODER_CHANNELS = [32, 64, 128, 256]
+WIDE_BOTTLENECK_CHANNELS = WIDE_ENCODER_CHANNELS[-1]
+WIDE_BOTTLENECK_HEIGHT = WIDE_INPUT_HEIGHT // 2 ** len(WIDE_ENCODER_CHANNELS)
+WIDE_BOTTLENECK_WIDTH = WIDE_INPUT_WIDTH // 2 ** len(WIDE_ENCODER_CHANNELS)
+WIDE_BOTTLENECK_FEATURES = WIDE_BOTTLENECK_CHANNELS * WIDE_BOTTLENECK_HEIGHT * WIDE_BOTTLENECK_WIDTH
+
 
 DEFAULT_TRAINING_CONFIG = {
     "epochs": 1000,
@@ -121,9 +134,9 @@ def _layer(layer_id: str, layer_type: str, **config) -> dict:
     return {"id": layer_id, "type": layer_type, "config": config}
 
 
-def _encoder_prefix() -> list[dict]:
+def _encoder_prefix(channels: list[int] | None = None) -> list[dict]:
     layers: list[dict] = []
-    for index, out_channels in enumerate(ENCODER_CHANNELS, start=1):
+    for index, out_channels in enumerate(channels or ENCODER_CHANNELS, start=1):
         layers.append(
             _layer(
                 f"enc-conv-{index}",
@@ -139,9 +152,11 @@ def _encoder_prefix() -> list[dict]:
     return layers
 
 
-def _decoder_upsampling_layers(prefix: str = "dec") -> list[dict]:
+def _decoder_upsampling_layers(prefix: str = "dec", channels: list[int] | None = None) -> list[dict]:
+    out_channels_sequence = channels or [256, 128, 64, 32, INPUT_CHANNELS]
+    last_index = len(out_channels_sequence)
     layers: list[dict] = []
-    for index, out_channels in enumerate([256, 128, 64, 32, INPUT_CHANNELS], start=1):
+    for index, out_channels in enumerate(out_channels_sequence, start=1):
         layers.append(
             _layer(
                 f"{prefix}-deconv-{index}",
@@ -154,7 +169,7 @@ def _decoder_upsampling_layers(prefix: str = "dec") -> list[dict]:
                 bias=True,
             )
         )
-        if index < 5:
+        if index < last_index:
             layers.append(_layer(f"{prefix}-relu-{index}", "ReLU", inplace=False))
     return layers
 
@@ -173,6 +188,78 @@ def _dense_graph(latent_dim: int) -> dict:
             _layer("dec-unflatten", "Unflatten", channels=256, height=BOTTLENECK_SPATIAL_SIZE, width=BOTTLENECK_SPATIAL_SIZE),
             *_decoder_upsampling_layers(),
         ],
+    }
+
+
+def _wide_decoder_channels() -> list[int]:
+    return [*reversed(WIDE_ENCODER_CHANNELS[:-1]), INPUT_CHANNELS]
+
+
+def _wide_dense_graph(latent_dim: int) -> dict:
+    return {
+        "builder_kind": "sequential_autoencoder",
+        "encoder": [
+            *_encoder_prefix(WIDE_ENCODER_CHANNELS),
+            _layer("enc-flatten", "Flatten", start_dim=1, end_dim=-1),
+            _layer("enc-latent", "Linear", out_features=latent_dim, bias=True),
+        ],
+        "latent": {"latent_dim": latent_dim, "bottleneck_kind": "dense"},
+        "decoder": [
+            _layer("dec-expand", "Linear", out_features=WIDE_BOTTLENECK_FEATURES, bias=True),
+            _layer(
+                "dec-unflatten",
+                "Unflatten",
+                channels=WIDE_BOTTLENECK_CHANNELS,
+                height=WIDE_BOTTLENECK_HEIGHT,
+                width=WIDE_BOTTLENECK_WIDTH,
+            ),
+            *_decoder_upsampling_layers(channels=_wide_decoder_channels()),
+        ],
+    }
+
+
+def _wide_spatial_graph(bottleneck_channels: int) -> dict:
+    return {
+        "builder_kind": "sequential_spatial_autoencoder",
+        "encoder": [
+            *_encoder_prefix(WIDE_ENCODER_CHANNELS),
+            _layer(
+                "enc-spatial-bottleneck",
+                "Conv2d",
+                out_channels=bottleneck_channels,
+                kernel_size=1,
+                stride=1,
+                padding=0,
+                bias=True,
+            ),
+        ],
+        "latent": {
+            "bottleneck_kind": "spatial",
+            "bottleneck_channels": bottleneck_channels,
+            "height": WIDE_BOTTLENECK_HEIGHT,
+            "width": WIDE_BOTTLENECK_WIDTH,
+        },
+        "decoder": [
+            _layer(
+                "dec-spatial-seed",
+                "Conv2d",
+                out_channels=WIDE_BOTTLENECK_CHANNELS,
+                kernel_size=1,
+                stride=1,
+                padding=0,
+                bias=True,
+            ),
+            *_decoder_upsampling_layers(channels=_wide_decoder_channels()),
+        ],
+    }
+
+
+def _wide_method_config() -> dict:
+    return {
+        "input_channels": INPUT_CHANNELS,
+        "input_width": WIDE_INPUT_WIDTH,
+        "input_height": WIDE_INPUT_HEIGHT,
+        "output_activation": "sigmoid",
     }
 
 
@@ -502,6 +589,7 @@ def _paper_stae_training_config(*, prediction_branch: bool) -> dict:
 
 def default_method_payloads() -> list[MethodConfigurationCreate]:
     channels = ", ".join(str(item) for item in ENCODER_CHANNELS)
+    wide_channels = ", ".join(str(item) for item in WIDE_ENCODER_CHANNELS)
     return [
         MethodConfigurationCreate(
             name="AEDense d64 default",
@@ -538,6 +626,32 @@ def default_method_payloads() -> list[MethodConfigurationCreate]:
             training_config=DEFAULT_TRAINING_CONFIG,
             inference_config=DEFAULT_INFERENCE_CONFIG,
             method_graph=_spatial_graph(64),
+        ),
+        MethodConfigurationCreate(
+            name="AEDense d256 384x240 default",
+            description=(
+                f"Dense autoencoder for non-square {WIDE_INPUT_WIDTH}x{WIDE_INPUT_HEIGHT}x{INPUT_CHANNELS} input, latent d=256, "
+                f"encoder channels [{wide_channels}] with four stride-2 stages, "
+                f"bottleneck {WIDE_BOTTLENECK_CHANNELS}x{WIDE_BOTTLENECK_HEIGHT}x{WIDE_BOTTLENECK_WIDTH}."
+            ),
+            method_type="ae_dense",
+            method_config={**_wide_method_config(), "latent_dim": 256},
+            training_config=DEFAULT_TRAINING_CONFIG,
+            inference_config=DEFAULT_INFERENCE_CONFIG,
+            method_graph=_wide_dense_graph(256),
+        ),
+        MethodConfigurationCreate(
+            name="AESpatial c64 384x240 default",
+            description=(
+                f"Spatial autoencoder for non-square {WIDE_INPUT_WIDTH}x{WIDE_INPUT_HEIGHT}x{INPUT_CHANNELS} input, "
+                f"z=64x{WIDE_BOTTLENECK_HEIGHT}x{WIDE_BOTTLENECK_WIDTH}, "
+                f"encoder channels [{wide_channels}] with four stride-2 stages."
+            ),
+            method_type="ae_spatial",
+            method_config={**_wide_method_config(), "bottleneck_channels": 64},
+            training_config=DEFAULT_TRAINING_CONFIG,
+            inference_config=DEFAULT_INFERENCE_CONFIG,
+            method_graph=_wide_spatial_graph(64),
         ),
         MethodConfigurationCreate(
             name="VAE Baur d128 default",
