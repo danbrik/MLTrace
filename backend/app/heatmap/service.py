@@ -28,12 +28,15 @@ def _range_signature(
     stride: int,
     fps: int,
     scale_mode: str,
+    stae_view: str,
+    prediction_horizon: int,
     visualization_config: dict,
 ) -> str:
     config_json = json.dumps(visualization_config, sort_keys=True, separators=(",", ":"))
     raw = (
         f"{testing_run_id}|{start.isoformat()}|{end.isoformat()}|{stride}|fps:{fps}|"
-        f"{scale_mode}|{config_json}|render:{CURRENT_HEATMAP_RENDER_VERSION}"
+        f"{scale_mode}|stae:{stae_view}:{prediction_horizon}|{config_json}|"
+        f"render:{CURRENT_HEATMAP_RENDER_VERSION}"
     )
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
@@ -52,6 +55,15 @@ def enqueue_heatmap_range(
         raise ValueError("Heatmap videos can only be rendered for finished testing runs.")
     if payload.end_timestamp < payload.start_timestamp:
         raise ValueError("end_timestamp must not be before start_timestamp.")
+    training_run = testing_run.training_run
+    if training_run is None:
+        raise ValueError("Training run no longer exists.")
+    configuration = training_run.training_pipeline.method_configuration
+    is_stae = configuration.builder_kind == "spatiotemporal_autoencoder"
+    stae_view = payload.stae_view if is_stae else "reconstruction"
+    prediction_horizon = payload.prediction_horizon if is_stae else 1
+    if is_stae and stae_view == "prediction" and not (configuration.method_config or {}).get("prediction_branch"):
+        raise ValueError("This STAE model has no future prediction branch.")
 
     visualization_config = payload.visualization_config.model_dump(mode="json")
     signature = _range_signature(
@@ -61,6 +73,8 @@ def enqueue_heatmap_range(
         payload.stride,
         payload.fps,
         payload.scale_mode,
+        stae_view,
+        prediction_horizon,
         visualization_config,
     )
     # Dedup: reuse an existing job with the same configuration unless it failed/aborted
@@ -85,6 +99,8 @@ def enqueue_heatmap_range(
         stride=payload.stride,
         fps=payload.fps,
         scale_mode=payload.scale_mode,
+        stae_view=stae_view,
+        prediction_horizon=prediction_horizon,
         visualization_config=visualization_config,
         render_version=CURRENT_HEATMAP_RENDER_VERSION,
         done_count=0,

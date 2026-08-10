@@ -6,6 +6,7 @@ import hashlib
 import json
 import shutil
 import time
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -62,6 +63,121 @@ def _testing_run_dir(run_id: int) -> Path:
     path = data_dir() / "testing_runs" / str(run_id)
     path.mkdir(parents=True, exist_ok=True)
     return path
+
+
+@dataclass(frozen=True)
+class StaeHeatmapSample:
+    """Preprocessed tensors and frame metadata needed for one STAE heatmap."""
+
+    clip: np.ndarray
+    input_frames: tuple[dict, ...]
+    future_clip: np.ndarray | None
+    future_frames: tuple[dict, ...]
+
+
+def _stae_frame_entries(result: models.TestingRunResult, key: str) -> tuple[dict, ...]:
+    metadata = result.result_metadata or {}
+    if metadata.get("sample_kind") != "clip":
+        raise ValueError(
+            "This STAE testing result has no clip metadata. Rerun inference before generating heatmaps."
+        )
+    frames = metadata.get(key) or []
+    entries = tuple(
+        frame
+        for frame in frames
+        if isinstance(frame, dict) and isinstance(frame.get("path"), str) and frame.get("path")
+    )
+    return entries
+
+
+def prepare_stae_heatmap_sample(
+    graph: PreprocessingGraph,
+    result: models.TestingRunResult,
+    *,
+    stae_view: str = "reconstruction",
+) -> StaeHeatmapSample:
+    """Build the C,T,H,W model input for a stored STAE testing result."""
+
+    input_frames = _stae_frame_entries(result, "input_frames")
+    if not input_frames:
+        raise ValueError(
+            "This STAE testing result has no stored input frame paths. Rerun inference before generating heatmaps."
+        )
+    clip = np.ascontiguousarray(
+        np.stack([_to_nchw(run_pipeline_array(graph, frame["path"])) for frame in input_frames], axis=1)
+    )
+
+    future_frames: tuple[dict, ...] = ()
+    future_clip = None
+    if stae_view == "prediction":
+        future_frames = _stae_frame_entries(result, "future_frames")
+        if not future_frames:
+            raise ValueError(
+                "This STAE testing result has no stored future frames. Rerun inference with a prediction-enabled STAE."
+            )
+        future_clip = np.ascontiguousarray(
+            np.stack([_to_nchw(run_pipeline_array(graph, frame["path"])) for frame in future_frames], axis=1)
+        )
+
+    return StaeHeatmapSample(
+        clip=clip,
+        input_frames=input_frames,
+        future_clip=future_clip,
+        future_frames=future_frames,
+    )
+
+
+def _stae_frame_timestamp(frame: dict, fallback: datetime) -> datetime:
+    value = frame.get("timestamp")
+    if isinstance(value, str):
+        try:
+            return datetime.fromisoformat(value)
+        except ValueError:
+            pass
+    return fallback
+
+
+def stae_heatmap_pair(
+    sample: StaeHeatmapSample,
+    output: dict,
+    *,
+    stae_view: str = "reconstruction",
+    prediction_horizon: int = 1,
+    fallback_timestamp: datetime,
+) -> tuple[np.ndarray, np.ndarray, str, datetime]:
+    """Select one source/output frame from a C,T,H,W STAE result."""
+
+    if stae_view == "prediction":
+        prediction = output.get("prediction")
+        if prediction is None or sample.future_clip is None or not sample.future_frames:
+            raise ValueError("This STAE model/result has no future prediction output.")
+        if prediction.ndim != 4 or prediction.shape[1] < 1:
+            raise ValueError(f"STAE prediction output must be C,T,H,W, got {prediction.shape}.")
+        horizon_index = min(
+            max(1, int(prediction_horizon)),
+            len(sample.future_frames),
+            int(sample.future_clip.shape[1]),
+            int(prediction.shape[1]),
+        ) - 1
+        frame = sample.future_frames[horizon_index]
+        return (
+            _as_image(sample.future_clip[:, horizon_index]),
+            _as_image(prediction[:, horizon_index]),
+            str(frame["path"]),
+            _stae_frame_timestamp(frame, fallback_timestamp),
+        )
+
+    reconstruction = output.get("reconstruction")
+    if reconstruction is None or reconstruction.ndim != 4 or reconstruction.shape[1] < 1:
+        shape = None if reconstruction is None else reconstruction.shape
+        raise ValueError(f"STAE reconstruction output must be C,T,H,W, got {shape}.")
+    frame = sample.input_frames[-1]
+    return (
+        _as_image(sample.clip[:, -1]),
+        _as_image(reconstruction[:, -1]),
+        str(frame["path"]),
+        _stae_frame_timestamp(frame, fallback_timestamp),
+    )
 
 
 def _roi_geometry(roi: models.RoiDefinition | None) -> dict | None:
@@ -1145,6 +1261,16 @@ def compute_heatmap_run(db: Session, payload: HeatmapRunCreate) -> HeatmapRunRea
             testing_run = _load_testing_run_for_heatmap(db, payload.testing_run_id)
             if testing_run is None:
                 raise ValueError(f"Testing run does not exist: {payload.testing_run_id}")
+            training_run = testing_run.training_run
+            if (
+                training_run is not None
+                and training_run.training_pipeline.method_configuration.builder_kind
+                == "spatiotemporal_autoencoder"
+            ):
+                raise ValueError(
+                    "STAE heatmaps require a timestamp with a stored clip result. "
+                    "Select a timestamp from the inference result series or rerun inference."
+                )
             direct_image_path = _direct_heatmap_image_path(db, testing_run, timestamp)
         else:
             result_id = result.id
@@ -1234,35 +1360,21 @@ def compute_heatmap_run(db: Session, payload: HeatmapRunCreate) -> HeatmapRunRea
         preprocessing = training_run.training_pipeline.preprocessing_pipeline
         evaluator = ArtifactEvaluator(training_run, testing_run.inference_config)
         graph = PreprocessingGraph.model_validate(preprocessing.graph)
-        if (
-            result is not None
-            and (result.result_metadata or {}).get("sample_kind") == "clip"
-            and training_run.training_pipeline.method_configuration.builder_kind == "spatiotemporal_autoencoder"
-        ):
-            input_frames = (result.result_metadata or {}).get("input_frames") or []
-            paths = [str(frame.get("path")) for frame in input_frames if isinstance(frame, dict) and frame.get("path")]
-            if not paths:
-                raise ValueError("STAE heatmap result has no stored input frame paths.")
-            clip = np.stack([_to_nchw(run_pipeline_array(graph, path)) for path in paths], axis=1)
-            output = evaluator.reconstruct_clip_batch([clip])[0]
-            if payload.stae_view == "prediction":
-                future_frames = (result.result_metadata or {}).get("future_frames") or []
-                future_paths = [
-                    str(frame.get("path"))
-                    for frame in future_frames
-                    if isinstance(frame, dict) and frame.get("path")
-                ]
-                prediction = output.get("prediction")
-                if prediction is None or not future_paths:
-                    raise ValueError("This STAE result has no stored future prediction frames.")
-                horizon_index = min(max(1, payload.prediction_horizon), len(future_paths), int(prediction.shape[1])) - 1
-                future_clip = np.stack([_to_nchw(run_pipeline_array(graph, path)) for path in future_paths], axis=1)
-                source = _as_image(future_clip[:, horizon_index])
-                reconstruction = _as_image(prediction[:, horizon_index])
-                image_path = future_paths[horizon_index]
-            else:
-                source = _as_image(clip[:, -1])
-                reconstruction = _as_image(output["reconstruction"][:, -1])
+        if training_run.training_pipeline.method_configuration.builder_kind == "spatiotemporal_autoencoder":
+            if result is None:
+                raise ValueError(
+                    "STAE heatmaps require a stored clip result. Rerun inference before generating heatmaps."
+                )
+            sample = prepare_stae_heatmap_sample(graph, result, stae_view=payload.stae_view)
+            output = evaluator.reconstruct_clip_batch([sample.clip])[0]
+            source, reconstruction, image_path, _source_timestamp = stae_heatmap_pair(
+                sample,
+                output,
+                stae_view=payload.stae_view,
+                prediction_horizon=payload.prediction_horizon,
+                fallback_timestamp=timestamp,
+            )
+            row.image_path = image_path
         else:
             image = run_pipeline_array(graph, image_path)
             reconstruction = evaluator.reconstruct(image)

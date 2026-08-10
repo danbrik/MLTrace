@@ -1568,9 +1568,15 @@ function HeatmapVideo({ plot, results }: { plot: AnalysisPlot; results: Combined
       stride: Math.max(1, Math.floor(source.sampling || 1)),
       testingRunName: results[0].testingRunName,
       visualizationConfig: plot.heatmapConfig,
-      visualizationConfigKey: heatmapConfigKey(plot.heatmapConfig),
+      visualizationConfigKey: heatmapConfigKey(
+        plot.heatmapConfig,
+        plot.staeHeatmapView,
+        plot.predictionHorizon,
+      ),
+      staeView: plot.staeHeatmapView,
+      predictionHorizon: plot.predictionHorizon,
     };
-  }, [plot.heatmapConfig, plot.sources, results]);
+  }, [plot.heatmapConfig, plot.predictionHorizon, plot.sources, plot.staeHeatmapView, results]);
 
   const [scaleMode, setScaleMode] = useState<'per_frame' | 'shared'>(plot.heatmapScaleMode ?? 'per_frame');
   const [job, setJob] = useState<HeatmapRangeRun | null>(null);
@@ -1615,6 +1621,8 @@ function HeatmapVideo({ plot, results }: { plot: AnalysisPlot; results: Combined
         stride: params.stride,
         fps,
         scale_mode: effectiveScaleMode,
+        stae_view: params.staeView,
+        prediction_horizon: params.predictionHorizon,
         visualization_config: params.visualizationConfig,
         force_recompute: job?.status === 'finished' && !job.video_path,
       });
@@ -1999,6 +2007,8 @@ function ExistingHeatmapArtifacts({
         stride: video.stride,
         fps: video.fps,
         scale_mode: video.scale_mode,
+        stae_view: video.stae_view,
+        prediction_horizon: video.prediction_horizon,
         visualization_config: video.visualization_config,
         force_recompute: true,
       });
@@ -2416,6 +2426,11 @@ export function AnalysisPage({ active = true }: { active?: boolean }) {
   const testingRunById = useMemo(() => new Map(testingRuns.map((run) => [run.id, run])), [testingRuns]);
   const preprocessingById = useMemo(() => new Map(preprocessingPipelines.map((pipeline) => [pipeline.id, pipeline])), [preprocessingPipelines]);
   const methodById = useMemo(() => new Map(methodConfigurations.map((method) => [method.id, method])), [methodConfigurations]);
+  const selectedTestingRun = selectedRunId === null ? null : testingRunById.get(selectedRunId) ?? null;
+  const selectedTrainingRun = selectedTestingRun
+    ? trainingRunById.get(selectedTestingRun.training_run_id) ?? null
+    : null;
+  const selectedRunIsStae = selectedTrainingRun?.builder_kind === 'spatiotemporal_autoencoder';
   const selectedLayout = selectedLayoutId ? analysisLayouts.find((layout) => layout.id === Number(selectedLayoutId)) ?? null : null;
   const layoutNameTrimmed = layoutName.trim();
   const layoutNameExistsForCreate = analysisLayouts.some(
@@ -2856,16 +2871,24 @@ export function AnalysisPage({ active = true }: { active?: boolean }) {
     if (draft.plotType === 'heatmap' && draft.heatmapMode === 'single') {
       const run = testingRuns.find((item) => item.id === selectedRunId);
       const bounds = sourceBounds(run ? trainingDatasetById.get(run.training_dataset_id) : null);
-      setDraft((current) => {
-        if (current.testingRunId !== String(selectedRunId)) return current;
-        return {
-          ...current,
-          title: current.title || `Heatmap · ${run?.name ?? `Testing run #${selectedRunId}`}`,
-          start: current.start || bounds.start,
-          end: current.end || bounds.end,
-          timestamp: current.timestamp ?? bounds.start,
-        };
-      });
+      const initialize = (firstResultTimestamp?: string) =>
+        setDraft((current) => {
+          if (current.testingRunId !== String(selectedRunId)) return current;
+          return {
+            ...current,
+            title: current.title || `Heatmap · ${run?.name ?? `Testing run #${selectedRunId}`}`,
+            start: current.start || bounds.start,
+            end: current.end || bounds.end,
+            timestamp: current.timestamp ?? firstResultTimestamp ?? bounds.start,
+          };
+        });
+      if (selectedRunIsStae) {
+        fetchResults(selectedRunId)
+          .then((data) => initialize(data.results[0]?.timestamp))
+          .catch((error) => notifyError('Could not load STAE testing results', error));
+      } else {
+        initialize();
+      }
       return;
     }
     fetchResults(selectedRunId)
@@ -2887,7 +2910,7 @@ export function AnalysisPage({ active = true }: { active?: boolean }) {
         });
       })
       .catch((error) => notifyError('Could not load testing results', error));
-  }, [draft.heatmapMode, draft.plotType, fetchResults, plotPreview, selectedRunId, testingRuns, trainingDatasetById]);
+  }, [draft.heatmapMode, draft.plotType, fetchResults, plotPreview, selectedRunId, selectedRunIsStae, testingRuns, trainingDatasetById]);
 
   useEffect(() => {
     if (draft.plotType === 'heatmap' && draft.heatmapMode === 'single') return;
@@ -4193,7 +4216,7 @@ export function AnalysisPage({ active = true }: { active?: boolean }) {
                       }}
                     />
                   </SimpleGrid>
-                  {combinedDraftResults.some((result) => result.result_metadata?.sample_kind === 'clip') && (
+                  {selectedRunIsStae && (
                     <SimpleGrid cols={{ base: 1, md: 3 }}>
                       <Select
                         label={<InfoLabel label="STAE view" info="Reconstruction compares the last input frame with its reconstruction. Prediction compares a future target frame with the predicted future frame." />}

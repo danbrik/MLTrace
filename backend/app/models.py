@@ -593,6 +593,8 @@ class HeatmapRangeRun(Base):
     stride: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     fps: Mapped[int] = mapped_column(Integer, nullable=False, default=8)
     scale_mode: Mapped[str] = mapped_column(String(16), nullable=False, default="per_frame")
+    stae_view: Mapped[str] = mapped_column(String(32), nullable=False, default="reconstruction")
+    prediction_horizon: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     global_vmax: Mapped[float | None] = mapped_column(Float)
     frame_max_errors: Mapped[list | None] = mapped_column(json_type())
     visualization_config: Mapped[dict] = mapped_column(json_type(), nullable=False, default=dict)

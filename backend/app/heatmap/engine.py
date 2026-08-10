@@ -35,6 +35,8 @@ from app.testing.service import (
     _pixel_error_map,
     _to_nchw,
     _utcnow,
+    prepare_stae_heatmap_sample,
+    stae_heatmap_pair,
 )
 from app.video import add_timestamp_watermark, finalize_browser_mp4
 
@@ -151,6 +153,10 @@ def run_heatmap_range(run_id: int, abort_event: threading.Event | None = None) -
             graph = PreprocessingGraph.model_validate(
                 training_run.training_pipeline.preprocessing_pipeline.graph
             )
+            is_stae = (
+                training_run.training_pipeline.method_configuration.builder_kind
+                == "spatiotemporal_autoencoder"
+            )
             # A fixed ceiling already provides one stable scale for every frame;
             # the shared two-pass renderer would only repeat work.
             shared = run.scale_mode == "shared" and not visualization_config.fixed_ceiling_enabled
@@ -160,6 +166,7 @@ def run_heatmap_range(run_id: int, abort_event: threading.Event | None = None) -
 
             global_vmax = 0.0
             frame_max_errors: list[float] = []
+            frame_timestamps = []
             done = 0
 
             # Pass 1: reconstruct (batched) + error map. per_frame renders the PNG
@@ -168,12 +175,33 @@ def run_heatmap_range(run_id: int, abort_event: threading.Event | None = None) -
             for batch_index, batch in enumerate(_chunks(selected, _BATCH_SIZE)):
                 if abort_event.is_set():
                     raise AbortedError()
-                images = [run_pipeline_array(graph, record.image_path) for record in batch]
-                sources = [
-                    image if evaluator.mean_image is not None else _as_image(_to_nchw(image))
-                    for image in images
-                ]
-                reconstructions = evaluator.reconstruct_batch(images)
+                if is_stae:
+                    samples = [
+                        prepare_stae_heatmap_sample(graph, record, stae_view=run.stae_view)
+                        for record in batch
+                    ]
+                    outputs = evaluator.reconstruct_clip_batch([sample.clip for sample in samples])
+                    pairs = [
+                        stae_heatmap_pair(
+                            sample,
+                            output,
+                            stae_view=run.stae_view,
+                            prediction_horizon=run.prediction_horizon,
+                            fallback_timestamp=record.timestamp,
+                        )
+                        for record, sample, output in zip(batch, samples, outputs)
+                    ]
+                    sources = [pair[0] for pair in pairs]
+                    reconstructions = [pair[1] for pair in pairs]
+                    batch_timestamps = [pair[3] for pair in pairs]
+                else:
+                    images = [run_pipeline_array(graph, record.image_path) for record in batch]
+                    sources = [
+                        image if evaluator.mean_image is not None else _as_image(_to_nchw(image))
+                        for image in images
+                    ]
+                    reconstructions = evaluator.reconstruct_batch(images)
+                    batch_timestamps = [record.timestamp for record in batch]
                 for offset, _record in enumerate(batch):
                     error_map = _pixel_error_map(
                         sources[offset], reconstructions[offset], visualization_config
@@ -191,6 +219,7 @@ def run_heatmap_range(run_id: int, abort_event: threading.Event | None = None) -
                         _write_frame_png(
                             sources[offset], error_map, None, frame_path, visualization_config
                         )
+                    frame_timestamps.append(batch_timestamps[offset])
                     done += 1
                 if batch_index % _COMMIT_EVERY == 0:
                     run.done_count = done
@@ -226,9 +255,9 @@ def run_heatmap_range(run_id: int, abort_event: threading.Event | None = None) -
             if not writer.isOpened():
                 raise ValueError("Could not open heatmap MP4 video writer.")
             try:
-                for index, record in enumerate(selected):
+                for index, timestamp in enumerate(frame_timestamps):
                     rgb = np.asarray(Image.open(frames_dir / f"frame_{index:05d}.png").convert("RGB"))
-                    stamped = add_timestamp_watermark(rgb, record.timestamp)
+                    stamped = add_timestamp_watermark(rgb, timestamp)
                     writer.write(cv2.cvtColor(stamped, cv2.COLOR_RGB2BGR))
             finally:
                 writer.release()

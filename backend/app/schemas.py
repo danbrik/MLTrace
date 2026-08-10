@@ -1264,6 +1264,8 @@ class HeatmapRangeRunCreate(BaseModel):
     stride: int = Field(default=1, ge=1)
     fps: int = Field(default=8, ge=1, le=60)
     scale_mode: Literal["per_frame", "shared"] = "per_frame"
+    stae_view: Literal["reconstruction", "prediction"] = "reconstruction"
+    prediction_horizon: int = Field(default=1, ge=1)
     visualization_config: HeatmapVisualizationConfig = Field(default_factory=HeatmapVisualizationConfig)
     force_recompute: bool = False
 
@@ -1288,6 +1290,8 @@ class HeatmapRangeRunRead(BaseModel):
     stride: int
     fps: int
     scale_mode: str
+    stae_view: Literal["reconstruction", "prediction"]
+    prediction_horizon: int
     global_vmax: float | None
     frame_max_errors: list[float] | None
     visualization_config: HeatmapVisualizationConfig

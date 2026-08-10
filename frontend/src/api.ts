@@ -747,6 +747,8 @@ export function createHeatmapRange(payload: {
   stride?: number;
   fps?: number;
   scale_mode?: 'per_frame' | 'shared';
+  stae_view?: 'reconstruction' | 'prediction';
+  prediction_horizon?: number;
   visualization_config?: HeatmapVisualizationConfig;
   force_recompute?: boolean;
 }): Promise<HeatmapRangeRun> {

@@ -41,6 +41,9 @@ import type { Dataset, DatasetFolder, TrainingDataset, TrainingDatasetPreview, T
 
 type RuleRow = TrainingDatasetRuleInput & {
   localId: string;
+  inputMode: 'range' | 'time-point';
+  centerTimestamp: string;
+  rangeMinutes: number;
 };
 
 type FolderChoice = {
@@ -116,14 +119,57 @@ function generatedTrainingDatasetName(rules: RuleRow[]): string {
   return `${formatNameTimestamp(starts[0])} to ${formatNameTimestamp(ends[ends.length - 1])}`;
 }
 
-function newRule(folderChoices: FolderChoice[]): RuleRow | null {
+function parseNaiveDateTime(value: string): number | null {
+  const match = value.match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2}))?/);
+  if (!match) return null;
+  return Date.UTC(
+    Number(match[1]),
+    Number(match[2]) - 1,
+    Number(match[3]),
+    Number(match[4]),
+    Number(match[5]),
+    Number(match[6] ?? '0'),
+  );
+}
+
+function formatNaiveDateTime(value: number): string {
+  const date = new Date(value);
+  const pad = (part: number) => String(part).padStart(2, '0');
+  return `${date.getUTCFullYear()}-${pad(date.getUTCMonth() + 1)}-${pad(date.getUTCDate())}T${pad(
+    date.getUTCHours(),
+  )}:${pad(date.getUTCMinutes())}:${pad(date.getUTCSeconds())}`;
+}
+
+function timePointRange(
+  centerTimestamp: string,
+  rangeMinutes: number,
+  choice: FolderChoice | undefined,
+): Pick<TrainingDatasetRuleInput, 'start_timestamp' | 'end_timestamp'> {
+  const center = parseNaiveDateTime(centerTimestamp);
+  if (center == null || !Number.isFinite(rangeMinutes) || rangeMinutes < 1 || !choice) {
+    return { start_timestamp: '', end_timestamp: '' };
+  }
+
+  const rangeMilliseconds = rangeMinutes * 60_000;
+  const requestedStart = formatNaiveDateTime(center - rangeMilliseconds);
+  const requestedEnd = formatNaiveDateTime(center + rangeMilliseconds);
+  return {
+    start_timestamp: requestedStart < choice.min ? choice.min : requestedStart,
+    end_timestamp: requestedEnd > choice.max ? choice.max : requestedEnd,
+  };
+}
+
+function newRule(folderChoices: FolderChoice[], inputMode: RuleRow['inputMode'] = 'range'): RuleRow | null {
   const choice = folderChoices[0];
   if (!choice) return null;
   return {
     localId: crypto.randomUUID(),
+    inputMode,
+    centerTimestamp: '',
+    rangeMinutes: 30,
     folder_id: choice.folder.id,
-    start_timestamp: choice.min,
-    end_timestamp: choice.max,
+    start_timestamp: inputMode === 'range' ? choice.min : '',
+    end_timestamp: inputMode === 'range' ? choice.max : '',
     stride: 1,
   };
 }
@@ -200,18 +246,21 @@ export function TrainingDatasetsPage({ active = true }: { active?: boolean }) {
     [folderChoices],
   );
 
-  useEffect(() => {
-    if (rules.length === 0 && folderChoices.length > 0) {
-      const rule = newRule(folderChoices);
-      if (rule) setRules([rule]);
-    }
-  }, [folderChoices, rules.length]);
-
   const invalidRules = useMemo(
     () =>
       rules.filter((rule) => {
         const choice = folderChoiceById.get(rule.folder_id);
         if (!choice) return true;
+        if (
+          rule.inputMode === 'time-point' &&
+          (!rule.centerTimestamp ||
+            rule.centerTimestamp < choice.min ||
+            rule.centerTimestamp > choice.max ||
+            !Number.isFinite(rule.rangeMinutes) ||
+            rule.rangeMinutes < 1)
+        ) {
+          return true;
+        }
         return (
           !rule.start_timestamp ||
           !rule.end_timestamp ||
@@ -301,20 +350,45 @@ export function TrainingDatasetsPage({ active = true }: { active?: boolean }) {
     );
   }
 
+  function updateTimePointRule(
+    localId: string,
+    patch: Partial<Pick<RuleRow, 'centerTimestamp' | 'rangeMinutes'>>,
+  ) {
+    if (isReadOnly) return;
+    setPreview(null);
+    setRules((current) =>
+      current.map((rule) => {
+        if (rule.localId !== localId) return rule;
+        const next = { ...rule, ...patch };
+        const choice = folderChoiceById.get(next.folder_id);
+        return { ...next, ...timePointRange(next.centerTimestamp, next.rangeMinutes, choice) };
+      }),
+    );
+  }
+
   function handleFolderChange(localId: string, folderId: string | null) {
     if (!folderId) return;
     const choice = folderChoiceById.get(Number(folderId));
     if (!choice) return;
-    updateRule(localId, {
-      folder_id: choice.folder.id,
-      start_timestamp: choice.min,
-      end_timestamp: choice.max,
-    });
+    if (isReadOnly) return;
+    setPreview(null);
+    setRules((current) =>
+      current.map((rule) => {
+        if (rule.localId !== localId) return rule;
+        return {
+          ...rule,
+          folder_id: choice.folder.id,
+          centerTimestamp: '',
+          start_timestamp: rule.inputMode === 'range' ? choice.min : '',
+          end_timestamp: rule.inputMode === 'range' ? choice.max : '',
+        };
+      }),
+    );
   }
 
-  function handleAddRule() {
+  function handleAddRule(inputMode: RuleRow['inputMode']) {
     if (isReadOnly) return;
-    const rule = newRule(folderChoices);
+    const rule = newRule(folderChoices, inputMode);
     if (!rule) return;
     setRules((current) => [...current, rule]);
     setPreview(null);
@@ -327,7 +401,15 @@ export function TrainingDatasetsPage({ active = true }: { active?: boolean }) {
   }
 
   function rulesPayload(): TrainingDatasetRuleInput[] {
-    return rules.map(({ localId: _localId, ...rule }) => rule);
+    return rules.map(
+      ({
+        localId: _localId,
+        inputMode: _inputMode,
+        centerTimestamp: _centerTimestamp,
+        rangeMinutes: _rangeMinutes,
+        ...rule
+      }) => rule,
+    );
   }
 
   async function handlePreview() {
@@ -381,8 +463,7 @@ export function TrainingDatasetsPage({ active = true }: { active?: boolean }) {
     setUsageLabel('train');
     setNotes('');
     setPreview(null);
-    const rule = newRule(folderChoices);
-    setRules(rule ? [rule] : []);
+    setRules([]);
   }
 
   function applyLoadedDataset(details: TrainingDataset) {
@@ -395,6 +476,9 @@ export function TrainingDatasetsPage({ active = true }: { active?: boolean }) {
     setRules(
       details.rules.map((rule) => ({
         localId: crypto.randomUUID(),
+        inputMode: 'range',
+        centerTimestamp: '',
+        rangeMinutes: 30,
         folder_id: rule.folder_id,
         start_timestamp: toInputDateTime(rule.start_timestamp),
         end_timestamp: toInputDateTime(rule.end_timestamp),
@@ -543,8 +627,8 @@ export function TrainingDatasetsPage({ active = true }: { active?: boolean }) {
       <div>
         <Title order={2}>Train/Test Datasets</Title>
         <Text c="dimmed" size="sm">
-          Save reusable dataset rules from indexed folders, time ranges, and sampling stride. Labels are filters only;
-          train sets can still be used for testing and test sets can still be used for training.
+          Save reusable dataset rules from indexed folders, start/end ranges, or time-point windows. Labels are
+          filters only; train sets can still be used for testing and test sets can still be used for training.
         </Text>
       </div>
 
@@ -614,10 +698,31 @@ export function TrainingDatasetsPage({ active = true }: { active?: boolean }) {
           {folderChoices.length > 0 && (
             <>
               <Group justify="space-between">
-                <Title order={4}>Selection ranges</Title>
-                <Button leftSection={<Plus size={18} />} variant="light" onClick={handleAddRule} disabled={isReadOnly}>
-                  Add range
-                </Button>
+                <div>
+                  <Title order={4}>Time selections</Title>
+                  <Text size="xs" c="dimmed">
+                    Add any number of selections per folder, and combine selections from multiple folders. Time-point
+                    windows are clipped to the available folder range at its boundaries.
+                  </Text>
+                </div>
+                <Group gap="xs">
+                  <Button
+                    leftSection={<Plus size={18} />}
+                    variant="light"
+                    onClick={() => handleAddRule('range')}
+                    disabled={isReadOnly}
+                  >
+                    Add start/end range
+                  </Button>
+                  <Button
+                    leftSection={<Plus size={18} />}
+                    variant="light"
+                    onClick={() => handleAddRule('time-point')}
+                    disabled={isReadOnly}
+                  >
+                    Add time-point window
+                  </Button>
+                </Group>
               </Group>
 
               <ScrollArea>
@@ -626,8 +731,7 @@ export function TrainingDatasetsPage({ active = true }: { active?: boolean }) {
                     <Table.Tr>
                       <Table.Th>Dataset / folder</Table.Th>
                       <Table.Th>Image data</Table.Th>
-                      <Table.Th>Start</Table.Th>
-                      <Table.Th>End</Table.Th>
+                      <Table.Th>Time selection</Table.Th>
                       <Table.Th>Allowed range</Table.Th>
                       <Table.Th>Stride</Table.Th>
                       <Table.Th>Preview</Table.Th>
@@ -658,24 +762,69 @@ export function TrainingDatasetsPage({ active = true }: { active?: boolean }) {
                             </Stack>
                           </Table.Td>
                           <Table.Td>
-                            <DateTime24Input
-                              min={choice?.min}
-                              max={choice?.max}
-                              error={invalid ? 'Out of range' : undefined}
-                              value={rule.start_timestamp}
-                              disabled={isReadOnly}
-                              onChange={(value) => updateRule(rule.localId, { start_timestamp: value })}
-                            />
-                          </Table.Td>
-                          <Table.Td>
-                            <DateTime24Input
-                              min={choice?.min}
-                              max={choice?.max}
-                              error={invalid ? 'Out of range' : undefined}
-                              value={rule.end_timestamp}
-                              disabled={isReadOnly}
-                              onChange={(value) => updateRule(rule.localId, { end_timestamp: value })}
-                            />
+                            {rule.inputMode === 'time-point' ? (
+                              <Stack gap="xs">
+                                <Badge variant="light" color="violet">
+                                  Time point ± minutes
+                                </Badge>
+                                <Group align="flex-start" wrap="nowrap">
+                                  <DateTime24Input
+                                    label="Time point"
+                                    min={choice?.min}
+                                    max={choice?.max}
+                                    error={invalid ? 'Enter a time inside the folder range' : undefined}
+                                    value={rule.centerTimestamp}
+                                    disabled={isReadOnly}
+                                    onChange={(value) =>
+                                      updateTimePointRule(rule.localId, { centerTimestamp: value })
+                                    }
+                                  />
+                                  <NumberInput
+                                    label="Range (± minutes)"
+                                    min={1}
+                                    allowDecimal={false}
+                                    value={rule.rangeMinutes}
+                                    error={rule.rangeMinutes < 1 ? 'Minimum 1 minute' : undefined}
+                                    disabled={isReadOnly}
+                                    onChange={(value) =>
+                                      updateTimePointRule(rule.localId, {
+                                        rangeMinutes: typeof value === 'number' ? value : 0,
+                                      })
+                                    }
+                                  />
+                                </Group>
+                                {rule.start_timestamp && rule.end_timestamp && (
+                                  <Text size="xs" c="dimmed">
+                                    Effective range: {formatTimestamp(rule.start_timestamp)} to{' '}
+                                    {formatTimestamp(rule.end_timestamp)}
+                                  </Text>
+                                )}
+                              </Stack>
+                            ) : (
+                              <Stack gap="xs">
+                                <Badge variant="light">Start / end</Badge>
+                                <Group align="flex-start" wrap="nowrap">
+                                  <DateTime24Input
+                                    label="Start"
+                                    min={choice?.min}
+                                    max={choice?.max}
+                                    error={invalid ? 'Out of range' : undefined}
+                                    value={rule.start_timestamp}
+                                    disabled={isReadOnly}
+                                    onChange={(value) => updateRule(rule.localId, { start_timestamp: value })}
+                                  />
+                                  <DateTime24Input
+                                    label="End"
+                                    min={choice?.min}
+                                    max={choice?.max}
+                                    error={invalid ? 'Out of range' : undefined}
+                                    value={rule.end_timestamp}
+                                    disabled={isReadOnly}
+                                    onChange={(value) => updateRule(rule.localId, { end_timestamp: value })}
+                                  />
+                                </Group>
+                              </Stack>
+                            )}
                           </Table.Td>
                           <Table.Td>
                             <Text size="xs" c="dimmed">
@@ -716,8 +865,9 @@ export function TrainingDatasetsPage({ active = true }: { active?: boolean }) {
               </ScrollArea>
 
               {invalidRules.length > 0 && (
-                <Alert color="red" title="Invalid time range">
-                  Start and end must stay inside the selected folder bounds.
+                <Alert color="red" title="Invalid time selection">
+                  Start/end values and time points must stay inside the selected folder bounds. A time-point window
+                  needs a range of at least one minute.
                 </Alert>
               )}
 

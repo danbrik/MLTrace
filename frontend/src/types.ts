@@ -773,6 +773,8 @@ export type HeatmapRangeRun = {
   stride: number;
   fps: number;
   scale_mode: 'per_frame' | 'shared';
+  stae_view: 'reconstruction' | 'prediction';
+  prediction_horizon: number;
   global_vmax: number | null;
   frame_max_errors: number[] | null;
   visualization_config: HeatmapVisualizationConfig;

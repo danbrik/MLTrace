@@ -264,6 +264,161 @@ def seed_finished_mean_image_run(db, tmp_path: Path):
     return run.id, test_set.id
 
 
+def seed_finished_stae_heatmap_run(db, tmp_path: Path):
+    training_run_id, test_set_id = seed_finished_mean_image_run(db, tmp_path)
+    training_run = db.get(models.TrainingRun, training_run_id)
+    method = training_run.training_pipeline.method_configuration
+    method.method_type = "spatiotemporal_autoencoder"
+    method.method_family = "spatiotemporal_reconstruction"
+    method.builder_kind = "spatiotemporal_autoencoder"
+    method.artifact_kind = "torch_state_dict"
+    method.method_config = {
+        "input_channels": 1,
+        "input_height": 6,
+        "input_width": 8,
+        "clip_length": 1,
+        "future_length": 2,
+        "prediction_branch": True,
+    }
+    training_run.method_type = "spatiotemporal_autoencoder"
+    training_run.method_family = "spatiotemporal_reconstruction"
+    training_run.builder_kind = "spatiotemporal_autoencoder"
+    training_run.artifact_kind = "torch_state_dict"
+
+    root = tmp_path / "test_images"
+    timestamps = [datetime(2026, 4, 1, 12, 0, index * 10) for index in range(3)]
+    paths = [str(root / f"frame_{timestamp:%Y%m%d_%H%M%S}.tiff") for timestamp in timestamps]
+    testing_run = models.TestingRun(
+        name="STAE test",
+        training_run_id=training_run.id,
+        training_dataset_id=test_set_id,
+        status="finished",
+        image_count=1,
+        expected_image_count=1,
+        training_run_name="STAE run",
+        training_pipeline_name=training_run.training_pipeline_name,
+        training_dataset_name="Test Set",
+        preprocessing_pipeline_name=training_run.preprocessing_pipeline_name,
+        method_type="spatiotemporal_autoencoder",
+        method_family="spatiotemporal_reconstruction",
+        training_mode="gradient",
+        artifact_kind="torch_state_dict",
+        artifact_path=training_run.artifact_path,
+        inference_config={},
+    )
+    db.add(testing_run)
+    db.flush()
+    result = models.TestingRunResult(
+        testing_run_id=testing_run.id,
+        position=0,
+        image_path=paths[0],
+        timestamp=timestamps[0],
+        score=0.0,
+        full_mse=0.0,
+        width=8,
+        height=6,
+        result_metadata={
+            "sample_kind": "clip",
+            "input_frames": [
+                {"path": paths[0], "timestamp": timestamps[0].isoformat(), "file_name": Path(paths[0]).name}
+            ],
+            "future_frames": [
+                {"path": paths[index], "timestamp": timestamps[index].isoformat(), "file_name": Path(paths[index]).name}
+                for index in (1, 2)
+            ],
+        },
+    )
+    db.add(result)
+    db.commit()
+    return training_run.id, test_set_id, testing_run.id, result.id
+
+
+class FakeStaeHeatmapEvaluator:
+    clip_shapes: list[tuple[int, ...]] = []
+
+    def __init__(self, *_args, **_kwargs) -> None:
+        self.mean_image = None
+
+    def reconstruct_batch(self, _images):
+        raise AssertionError("STAE heatmaps must not use 4D image reconstruction.")
+
+    def reconstruct_clip_batch(self, clips):
+        outputs = []
+        for clip in clips:
+            self.clip_shapes.append(tuple(clip.shape))
+            assert clip.ndim == 4
+            outputs.append(
+                {
+                    "reconstruction": clip.copy(),
+                    "prediction": np.zeros((clip.shape[0], 2, clip.shape[2], clip.shape[3]), dtype=clip.dtype),
+                }
+            )
+        return outputs
+
+
+def test_stae_single_heatmaps_use_clip_reconstruction_and_prediction(tmp_path: Path, monkeypatch) -> None:
+    db = make_db()
+    try:
+        _, _, testing_run_id, result_id = seed_finished_stae_heatmap_run(db, tmp_path)
+        FakeStaeHeatmapEvaluator.clip_shapes = []
+        monkeypatch.setattr(testing_service, "ArtifactEvaluator", FakeStaeHeatmapEvaluator)
+        monkeypatch.setattr(testing_service, "data_dir", lambda: tmp_path / "artifacts")
+
+        reconstruction = compute_heatmap_run(
+            db,
+            HeatmapRunCreate(testing_run_id=testing_run_id, testing_result_id=result_id),
+        )
+        prediction = compute_heatmap_run(
+            db,
+            HeatmapRunCreate(
+                testing_run_id=testing_run_id,
+                testing_result_id=result_id,
+                stae_view="prediction",
+                prediction_horizon=2,
+            ),
+        )
+
+        assert FakeStaeHeatmapEvaluator.clip_shapes == [(1, 1, 6, 8), (1, 1, 6, 8)]
+        assert reconstruction.image_path.endswith("frame_20260401_120000.tiff")
+        assert prediction.image_path.endswith("frame_20260401_120020.tiff")
+        assert reconstruction.config_signature != prediction.config_signature
+    finally:
+        db.close()
+
+
+def test_stae_single_heatmap_rejects_timestamp_without_clip_result(tmp_path: Path) -> None:
+    db = make_db()
+    try:
+        _, _, testing_run_id, _ = seed_finished_stae_heatmap_run(db, tmp_path)
+        with pytest.raises(ValueError, match="stored clip result"):
+            compute_heatmap_run(
+                db,
+                HeatmapRunCreate(
+                    testing_run_id=testing_run_id,
+                    timestamp=datetime(2026, 4, 1, 12, 0, 10),
+                ),
+            )
+    finally:
+        db.close()
+
+
+def test_stae_single_heatmap_rejects_legacy_result_without_clip_metadata(tmp_path: Path) -> None:
+    db = make_db()
+    try:
+        _, _, testing_run_id, result_id = seed_finished_stae_heatmap_run(db, tmp_path)
+        result = db.get(models.TestingRunResult, result_id)
+        result.result_metadata = {"sample_kind": "image"}
+        db.commit()
+
+        with pytest.raises(ValueError, match="Rerun inference"):
+            compute_heatmap_run(
+                db,
+                HeatmapRunCreate(testing_run_id=testing_run_id, testing_result_id=result_id),
+            )
+    finally:
+        db.close()
+
+
 def test_roi_preview_and_mean_image_testing_run(tmp_path: Path, monkeypatch) -> None:
     db = make_db()
     try:
