@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta
+import json
 from pathlib import Path
 
 import numpy as np
@@ -155,8 +156,7 @@ def test_temporal_dynamics_reuses_train_test_selection_and_caches(tmp_path: Path
             analysis_window_seconds=60,
             lags_seconds=[20, 40],
             distance_metric="mae",
-            downsample_width=16,
-            downsample_height=16,
+            stride=1,
             autocorrelation_max_lag_seconds=5,
         )
 
@@ -205,8 +205,7 @@ def test_temporal_dynamics_never_pairs_across_missing_frame_gap(tmp_path: Path) 
                 reference_timestamp=datetime(2026, 2, 4, 15, 30, 30),
                 analysis_window_seconds=60,
                 lags_seconds=[20],
-                downsample_width=16,
-                downsample_height=16,
+                stride=1,
                 autocorrelation_max_lag_seconds=5,
             ),
         )
@@ -215,6 +214,58 @@ def test_temporal_dynamics_never_pairs_across_missing_frame_gap(tmp_path: Path) 
         assert result.contiguous_segment_count == 2
         assert result.lag_statistics[0].pair_count == 2  # 00→20 and 40→60 only
         assert len(result.motion_signal) == 4
+    finally:
+        db.close()
+
+
+def test_temporal_dynamics_runs_in_inspect_queue_with_progress_and_stride(tmp_path: Path, monkeypatch) -> None:
+    SessionLocal = make_db()
+    db = SessionLocal()
+    try:
+        training_dataset, preprocessing = seed_inspect_fixture(db, tmp_path / "images", image_count=6)
+        created = inspect_service.create_inspect_run(
+            db,
+            InspectRunCreate(
+                training_dataset_id=training_dataset.id,
+                preprocessing_pipeline_id=preprocessing.id,
+                start_timestamp=datetime(2026, 2, 4, 15, 30, 0),
+                end_timestamp=datetime(2026, 2, 4, 15, 30, 50),
+                stride=2,
+                analysis_mode="temporal_dynamics",
+                analysis_config={
+                    "reference_timestamp": "2026-02-04T15:30:30",
+                    "analysis_window_seconds": 60,
+                    "lags_seconds": [40],
+                    "distance_metric": "mae",
+                    "autocorrelation_max_lag_seconds": 5,
+                    "autocorrelation_threshold": 0.2,
+                },
+                generate_video=False,
+            ),
+        )
+        monkeypatch.setattr(inspect_engine, "SessionLocal", SessionLocal)
+        monkeypatch.setattr(inspect_engine, "data_dir", lambda: tmp_path / "artifacts")
+
+        inspect_engine.run_inspect(created.id)
+
+        db.expire_all()
+        run = db.get(models.InspectRun, created.id)
+        assert run is not None
+        assert run.status == "finished"
+        assert run.analysis_mode == "temporal_dynamics"
+        assert run.frame_count is not None and run.frame_count > 0
+        assert run.done_count == run.frame_count
+        assert run.video_path is None
+        assert run.summary_json_path is not None
+        result = json.loads(Path(run.summary_json_path).read_text(encoding="utf-8"))
+        # Saved dataset stride 2 selects 00,20,40; analysis stride 2 keeps 00,40.
+        assert result["stride"] == 2
+        assert result["loaded_frame_count"] == 2
+        assert result["lag_statistics"][0]["pair_count"] == 1
+        artifact = inspect_service.list_inspect_artifacts(db, mode="temporal_dynamics").items[0]
+        assert artifact.has_summary is True
+        assert artifact.has_video is False
+        assert artifact.duration_seconds is not None
     finally:
         db.close()
 

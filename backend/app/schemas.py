@@ -277,7 +277,7 @@ class InspectPreviewRequest(BaseModel):
     end_timestamp: datetime
     stride: int = Field(default=1, ge=1)
     content_mode: Literal["final_preprocessed_output"] = "final_preprocessed_output"
-    analysis_mode: Literal["preprocessed_video", "contrast_enhanced", "energy", "optical_flow"] = "preprocessed_video"
+    analysis_mode: Literal["preprocessed_video", "contrast_enhanced", "energy", "optical_flow", "temporal_dynamics"] = "preprocessed_video"
     analysis_config: dict | None = None
     roi_id: int | None = None
     generate_video: bool = True
@@ -337,10 +337,9 @@ class TemporalDynamicsRequest(BaseModel):
     preprocessing_pipeline_id: int
     reference_timestamp: datetime
     analysis_window_seconds: int = Field(default=1800, ge=2, le=86400)
+    stride: int = Field(default=1, ge=1)
     lags_seconds: list[int] = Field(default=[1, 2, 4, 8, 16, 32, 64, 128], min_length=1, max_length=32)
     distance_metric: Literal["mae", "mse", "ssim"] = "mae"
-    downsample_width: int = Field(default=256, ge=16, le=2048)
-    downsample_height: int = Field(default=256, ge=16, le=2048)
     roi_id: int | None = None
     autocorrelation_max_lag_seconds: int = Field(default=128, ge=1, le=3600)
     autocorrelation_threshold: float = Field(default=0.2, ge=-1.0, le=1.0)
@@ -400,8 +399,9 @@ class TemporalDynamicsResponse(BaseModel):
     end_timestamp: datetime
     distance_metric: str
     distance_label: str
-    downsample_width: int
-    downsample_height: int
+    image_width: int
+    image_height: int
+    stride: int
     loaded_frame_count: int
     skipped_frame_count: int
     contiguous_segment_count: int
@@ -1324,6 +1324,8 @@ class InspectArtifactRunRead(BaseModel):
     fps: int
     frame_count: int | None
     done_count: int
+    started_at: datetime | None
+    duration_seconds: float | None
     has_video: bool
     has_csv: bool
     has_summary: bool

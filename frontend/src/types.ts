@@ -836,8 +836,9 @@ export type TemporalDynamicsResult = {
   end_timestamp: string;
   distance_metric: 'mae' | 'mse' | 'ssim';
   distance_label: string;
-  downsample_width: number;
-  downsample_height: number;
+  image_width: number;
+  image_height: number;
+  stride: number;
   loaded_frame_count: number;
   skipped_frame_count: number;
   contiguous_segment_count: number;
@@ -936,6 +937,8 @@ export type InspectArtifactRun = {
   fps: number;
   frame_count: number | null;
   done_count: number;
+  started_at: string | null;
+  duration_seconds: number | null;
   has_video: boolean;
   has_csv: boolean;
   has_summary: boolean;

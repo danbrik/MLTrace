@@ -135,6 +135,8 @@ def preview_inspect(db: Session, payload: InspectPreviewRequest) -> InspectPrevi
     if payload.end_timestamp < payload.start_timestamp:
         raise ValueError("end_timestamp must not be before start_timestamp.")
     analysis_mode = _analysis_mode(payload)
+    if analysis_mode == "temporal_dynamics":
+        raise ValueError("Temporal Dynamics runs through the Inspect queue and does not provide a preview.")
     roi = db.get(models.RoiDefinition, payload.roi_id) if payload.roi_id is not None else None
     if payload.roi_id is not None and roi is None:
         raise ValueError(f"ROI does not exist: {payload.roi_id}")
@@ -427,8 +429,15 @@ def create_inspect_run(db: Session, payload: InspectRunCreate) -> InspectRunRead
         raise ValueError("Contrast vmax must be greater than zero.")
     if payload.end_timestamp < payload.start_timestamp:
         raise ValueError("end_timestamp must not be before start_timestamp.")
-    if analysis_mode not in {"preprocessed_video", "contrast_enhanced", "energy", "optical_flow"}:
+    if analysis_mode not in {"preprocessed_video", "contrast_enhanced", "energy", "optical_flow", "temporal_dynamics"}:
         raise ValueError(f"Unsupported Inspect analysis mode: {analysis_mode}.")
+    if analysis_mode == "temporal_dynamics":
+        config = payload.analysis_config or {}
+        lags = config.get("lags_seconds") or []
+        if not lags or any(int(value) < 1 for value in lags):
+            raise ValueError("Temporal Dynamics requires positive lag values.")
+        if str(config.get("distance_metric", "mae")) not in {"mae", "mse", "ssim"}:
+            raise ValueError("Temporal Dynamics distance metric must be MAE, MSE, or SSIM.")
     training_dataset = _load_training_dataset(db, int(payload.training_dataset_id))
     if training_dataset is None:
         raise ValueError(f"Train/Test Dataset does not exist: {payload.training_dataset_id}")
@@ -464,7 +473,7 @@ def create_inspect_run(db: Session, payload: InspectRunCreate) -> InspectRunRead
         analysis_mode=analysis_mode,
         analysis_config=payload.analysis_config or {},
         roi_id=roi.id if roi else None,
-        generate_video=bool(payload.generate_video),
+        generate_video=False if analysis_mode == "temporal_dynamics" else bool(payload.generate_video),
         contrast_enabled=analysis_mode == "contrast_enhanced",
         contrast_reference_frames=max(1, int(payload.contrast_reference_frames)),
         contrast_shift=float(payload.contrast_shift),
@@ -606,6 +615,8 @@ def _artifact_from_inspect(run: models.InspectRun) -> InspectArtifactRunRead:
         fps=run.fps,
         frame_count=run.frame_count,
         done_count=run.done_count,
+        started_at=run.started_at,
+        duration_seconds=run.duration_seconds,
         has_video=bool(run.video_path and Path(run.video_path).exists()),
         has_csv=bool(run.csv_path and Path(run.csv_path).exists()),
         has_summary=bool(run.summary_json_path and Path(run.summary_json_path).exists()),
@@ -637,6 +648,8 @@ def _artifact_from_heatmap(run: models.HeatmapRangeRun) -> InspectArtifactRunRea
         fps=run.fps,
         frame_count=run.frame_count,
         done_count=run.done_count,
+        started_at=run.started_at,
+        duration_seconds=run.duration_seconds,
         has_video=bool(run.video_path and Path(run.video_path).exists()),
         has_csv=False,
         has_summary=False,

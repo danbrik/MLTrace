@@ -6,6 +6,7 @@ import shutil
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime
 from pathlib import Path
 
 import cv2
@@ -16,6 +17,7 @@ from app import models
 from app.database import SessionLocal, data_dir
 from app.inspect.contrast import StreamingMovingAverage, enhance_to_uint8, to_intensity_16scale
 from app.inspect.diagnostics import compute_diagnostic, write_diagnostic_artifacts
+from app.inspect.temporal_dynamics import analyze_temporal_dynamics_records
 from app.preprocessing.pipeline import absolute_image_to_uint8, compile_pipeline
 from app.schemas import PreprocessingGraph
 from app.training.data import enumerate_training_dataset_image_records_for_range
@@ -266,6 +268,67 @@ def _render_diagnostic(
     db.commit()
 
 
+def _render_temporal_dynamics(
+    run: models.InspectRun,
+    db: Session,
+    abort_event: threading.Event,
+    compiled,
+    records,
+    artifact_dir: Path,
+) -> None:
+    config = run.analysis_config or {}
+    raw_reference = config.get("reference_timestamp")
+    if isinstance(raw_reference, datetime):
+        reference_timestamp = raw_reference
+    elif raw_reference:
+        reference_timestamp = datetime.fromisoformat(str(raw_reference).replace("Z", "+00:00")).replace(tzinfo=None)
+    else:
+        reference_timestamp = run.start_timestamp + (run.end_timestamp - run.start_timestamp) / 2
+    lags = sorted({int(value) for value in config.get("lags_seconds", [1, 2, 4, 8, 16, 32, 64, 128]) if int(value) > 0})
+    max_autocorrelation_lag = max(1, int(config.get("autocorrelation_max_lag_seconds", max(128, *lags))))
+    last_commit_at = 0.0
+
+    def progress(done: int, total: int) -> None:
+        nonlocal last_commit_at
+        run.done_count = int(done)
+        run.frame_count = int(total)
+        now = time.monotonic()
+        if done >= total or done == 0 or now - last_commit_at >= 0.5:
+            db.commit()
+            last_commit_at = now
+
+    try:
+        result = analyze_temporal_dynamics_records(
+            training_dataset=run.training_dataset,
+            pipeline=run.preprocessing_pipeline,
+            roi=run.roi,
+            records=records,
+            compiled=compiled,
+            reference_timestamp=reference_timestamp,
+            lags_seconds=lags,
+            distance_metric=str(config.get("distance_metric", "mae")),
+            stride=max(1, int(run.stride)),
+            autocorrelation_max_lag_seconds=max_autocorrelation_lag,
+            autocorrelation_threshold=float(config.get("autocorrelation_threshold", 0.2)),
+            progress_callback=progress,
+            abort_event=abort_event,
+        )
+    except RuntimeError as exc:
+        if str(exc) == "aborted":
+            raise AbortedError() from exc
+        raise
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+    result_path = artifact_dir / "temporal_dynamics.json"
+    result_path.write_text(result.model_dump_json(indent=2), encoding="utf-8")
+    run.summary_json_path = str(result_path)
+    run.frames_dir = None
+    run.video_path = None
+    run.csv_path = None
+    run.plot_preview_path = None
+    run.done_count = run.frame_count or run.done_count
+    db.commit()
+
+
 
 def run_inspect(run_id: int, abort_event: threading.Event | None = None) -> None:
     abort_event = abort_event or threading.Event()
@@ -304,32 +367,38 @@ def run_inspect(run_id: int, abort_event: threading.Event | None = None) -> None
 
             artifact_dir = data_dir() / "inspect_runs" / str(run.id)
             frames_dir = artifact_dir / "frames"
-            if frames_dir.exists():
-                shutil.rmtree(frames_dir, ignore_errors=True)
-            frames_dir.mkdir(parents=True, exist_ok=True)
             video_path = artifact_dir / "inspect.mp4"
-            if video_path.exists():
-                video_path.unlink()
-            run.frames_dir = str(frames_dir)
-            run.video_path = str(video_path)
-            db.commit()
+            if run.analysis_mode == "temporal_dynamics":
+                run.frames_dir = None
+                run.video_path = None
+                db.commit()
+                _render_temporal_dynamics(run, db, abort_event, compiled, records, artifact_dir)
+            else:
+                if frames_dir.exists():
+                    shutil.rmtree(frames_dir, ignore_errors=True)
+                frames_dir.mkdir(parents=True, exist_ok=True)
+                if video_path.exists():
+                    video_path.unlink()
+                run.frames_dir = str(frames_dir)
+                run.video_path = str(video_path)
+                db.commit()
 
             if run.analysis_mode in {"energy", "optical_flow"}:
                 _render_diagnostic(run, db, abort_event, compiled, records, artifact_dir)
             elif run.contrast_enabled or run.analysis_mode == "contrast_enhanced":
                 writer = _render_contrast(run, db, abort_event, compiled, records, frames_dir, video_path)
-            else:
+            elif run.analysis_mode != "temporal_dynamics":
                 writer = _render_passthrough(run, db, abort_event, compiled, records, frames_dir, video_path)
 
             if writer is not None:
                 writer.release()
                 writer = None
-            if run.analysis_mode not in {"energy", "optical_flow"}:
+            if run.analysis_mode not in {"energy", "optical_flow", "temporal_dynamics"}:
                 finalize_browser_mp4(video_path)
             run.status = "finished"
             run.ended_at = _utcnow()
             run.duration_seconds = round(time.perf_counter() - started, 3)
-            if run.analysis_mode not in {"energy", "optical_flow"}:
+            if run.analysis_mode not in {"energy", "optical_flow", "temporal_dynamics"}:
                 run.done_count = len(records)
             db.commit()
             logger.info("Inspect run %s finished (%s frames)", run.id, len(records))

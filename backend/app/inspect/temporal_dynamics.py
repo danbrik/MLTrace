@@ -18,7 +18,6 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
 from typing import Any
 
-import cv2
 import numpy as np
 from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload
@@ -99,19 +98,20 @@ def _cache_put(key: str, value: dict[str, Any]) -> None:
             _cache.popitem(last=False)
 
 
-def _prepare_frame(compiled, record, width: int, height: int):
+def _prepare_frame(compiled, record):
     try:
         processed = compiled.run(record.file_path)
         frame = absolute_image_to_uint8(processed)
         original_shape = frame.shape
-        if frame.shape[:2] != (height, width):
-            frame = cv2.resize(frame, (width, height), interpolation=cv2.INTER_AREA)
         return record, frame, original_shape, None
     except Exception as exc:  # unreadable/missing files are reported and skipped
         return record, None, None, str(exc)
 
 
-def _effective_cadence_by_folder(training_dataset: models.TrainingDataset) -> dict[int, float]:
+def _effective_cadence_by_folder(
+    training_dataset: models.TrainingDataset,
+    extra_stride: int = 1,
+) -> dict[int, float]:
     candidates: dict[int, list[float]] = defaultdict(list)
     for rule in training_dataset.rules:
         summary = rule.folder.cadence_summary or {}
@@ -121,7 +121,9 @@ def _effective_cadence_by_folder(training_dataset: models.TrainingDataset) -> di
         except (TypeError, ValueError):
             continue
         if cadence > 0:
-            candidates[rule.folder_id].append(cadence * max(1, int(rule.stride)))
+            candidates[rule.folder_id].append(
+                cadence * max(1, int(rule.stride)) * max(1, int(extra_stride))
+            )
     return {folder_id: min(values) for folder_id, values in candidates.items() if values}
 
 
@@ -208,11 +210,13 @@ def _summary(lag_seconds: int, values: list[float]) -> dict[str, Any]:
     }
 
 
-def _motion_signal(records, frames, segments, mask):
+def _motion_signal(records, frames, segments, mask, progress_step=None, abort_event=None):
     public_rows: list[dict[str, Any]] = []
     internal_rows: list[tuple[int, float, float]] = []
     for segment_id, indices in enumerate(segments):
         for left, right in zip(indices, indices[1:]):
+            if abort_event is not None and abort_event.is_set():
+                raise RuntimeError("aborted")
             interval = (records[right].timestamp_parsed - records[left].timestamp_parsed).total_seconds()
             value = _distance(frames[left], frames[right], "mae", mask)
             public_rows.append({
@@ -222,12 +226,14 @@ def _motion_signal(records, frames, segments, mask):
                 "segment_id": segment_id,
             })
             internal_rows.append((segment_id, records[right].timestamp_parsed.timestamp(), value))
+            if progress_step is not None:
+                progress_step()
     order = np.argsort([row["timestamp"].timestamp() for row in public_rows]) if public_rows else []
     public_rows = [public_rows[int(index)] for index in order]
     return public_rows, internal_rows
 
 
-def _autocorrelation(motion_rows, max_lag: int):
+def _autocorrelation(motion_rows, max_lag: int, progress_step=None, abort_event=None):
     by_segment: dict[int, list[tuple[float, float]]] = defaultdict(list)
     for segment_id, timestamp, value in motion_rows:
         by_segment[segment_id].append((timestamp, value))
@@ -235,6 +241,8 @@ def _autocorrelation(motion_rows, max_lag: int):
         rows.sort()
     output = []
     for lag in range(1, max_lag + 1):
+        if abort_event is not None and abort_event.is_set():
+            raise RuntimeError("aborted")
         left_values: list[float] = []
         right_values: list[float] = []
         for rows in by_segment.values():
@@ -260,6 +268,8 @@ def _autocorrelation(motion_rows, max_lag: int):
             if denominator > 1e-12:
                 correlation = float(np.clip(np.sum(left_centered * right_centered) / denominator, -1.0, 1.0))
         output.append({"lag_seconds": lag, "autocorrelation": correlation, "pair_count": len(left_values)})
+        if progress_step is not None:
+            progress_step()
     return output
 
 
@@ -288,35 +298,46 @@ def _recommendation(relevant_seconds: int) -> tuple[int, int, int]:
     return sequence_length, stride, sequence_length * stride
 
 
-def analyze_temporal_dynamics(db: Session, payload: TemporalDynamicsRequest) -> TemporalDynamicsResponse:
-    training_dataset = _load_training_dataset(db, int(payload.training_dataset_id))
-    if training_dataset is None:
-        raise ValueError(f"Train/Test Dataset does not exist: {payload.training_dataset_id}")
-    pipeline = db.get(models.PreprocessingPipeline, int(payload.preprocessing_pipeline_id))
-    if pipeline is None:
-        raise ValueError(f"Preprocessing pipeline does not exist: {payload.preprocessing_pipeline_id}")
-    roi = db.get(models.RoiDefinition, payload.roi_id) if payload.roi_id is not None else None
-    if payload.roi_id is not None and roi is None:
-        raise ValueError(f"ROI does not exist: {payload.roi_id}")
-
-    half_window = timedelta(seconds=payload.analysis_window_seconds / 2.0)
-    start = payload.reference_timestamp - half_window
-    end = payload.reference_timestamp + half_window
-    records = enumerate_training_dataset_image_records_for_range(training_dataset, start, end)
+def analyze_temporal_dynamics_records(
+    *,
+    training_dataset: models.TrainingDataset,
+    pipeline: models.PreprocessingPipeline,
+    roi: models.RoiDefinition | None,
+    records,
+    compiled,
+    reference_timestamp,
+    lags_seconds: list[int],
+    distance_metric: str,
+    stride: int = 1,
+    autocorrelation_max_lag_seconds: int = 128,
+    autocorrelation_threshold: float = 0.2,
+    progress_callback=None,
+    abort_event=None,
+) -> TemporalDynamicsResponse:
+    """Analyze an already resolved Inspect range and report live work progress."""
     if len(records) < 2:
         raise ValueError("At least two images are required in the selected temporal analysis window.")
+    lags_seconds = sorted(set(int(value) for value in lags_seconds if int(value) > 0))
+    if not lags_seconds:
+        raise ValueError("At least one positive temporal lag is required.")
 
-    key = _stable_cache_key(payload, training_dataset, pipeline, roi, records)
-    cached = _cache_get(key)
-    if cached is not None:
-        return TemporalDynamicsResponse.model_validate(cached)
+    provisional_total = max(1, len(records) * (len(lags_seconds) + 2) + autocorrelation_max_lag_seconds)
+    done = 0
 
-    compiled = compile_pipeline(PreprocessingGraph.model_validate(pipeline.graph))
-    prepare = lambda record: _prepare_frame(
-        compiled, record, int(payload.downsample_width), int(payload.downsample_height)
-    )
-    with ThreadPoolExecutor(max_workers=min(_DECODE_WORKERS, len(records))) as pool:
-        loaded = list(pool.map(prepare, records))
+    def report(total: int = provisional_total) -> None:
+        if progress_callback is not None:
+            progress_callback(done, max(1, total))
+
+    loaded = []
+    workers = min(_DECODE_WORKERS, len(records))
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        for start_index in range(0, len(records), workers):
+            if abort_event is not None and abort_event.is_set():
+                raise RuntimeError("aborted")
+            chunk = records[start_index : start_index + workers]
+            loaded.extend(pool.map(lambda record: _prepare_frame(compiled, record), chunk))
+            done += len(chunk)
+            report()
 
     skipped = sum(1 for _, frame, _, _ in loaded if frame is None)
     valid = [(record, frame, shape) for record, frame, shape, _ in loaded if frame is not None]
@@ -331,31 +352,42 @@ def analyze_temporal_dynamics(db: Session, payload: TemporalDynamicsRequest) -> 
     records = [item[0] for item in valid]
     frames = [item[1] for item in valid]
 
-    source_mask, roi_meta = roi_union_mask(source_width, source_height, roi)
-    if source_mask.shape != (payload.downsample_height, payload.downsample_width):
-        mask = cv2.resize(
-            source_mask.astype(np.uint8),
-            (payload.downsample_width, payload.downsample_height),
-            interpolation=cv2.INTER_NEAREST,
-        ).astype(bool)
-    else:
-        mask = source_mask
+    mask, roi_meta = roi_union_mask(source_width, source_height, roi)
     if not np.any(mask):
-        raise ValueError("The selected ROI has no pixels after analysis downsampling.")
+        raise ValueError("The selected ROI has no pixels in the preprocessing output.")
 
-    cadence_by_folder = _effective_cadence_by_folder(training_dataset)
+    cadence_by_folder = _effective_cadence_by_folder(training_dataset, stride)
     segments, segment_cadences = _build_segments(records, cadence_by_folder)
+    lag_pairs = {
+        lag: _pairs_for_lag(records, segments, segment_cadences, lag)
+        for lag in lags_seconds
+    }
+    motion_pair_count = sum(max(0, len(indices) - 1) for indices in segments)
+    total = len(loaded) + sum(len(pairs) for pairs in lag_pairs.values()) + motion_pair_count + autocorrelation_max_lag_seconds
+    done = len(loaded)
+    report(total)
+
+    def progress_step() -> None:
+        nonlocal done
+        done += 1
+        report(total)
+
     lag_statistics: list[dict[str, Any]] = []
     examples: list[dict[str, Any]] = []
-    for lag in payload.lags_seconds:
-        pairs = _pairs_for_lag(records, segments, segment_cadences, lag)
-        values = [_distance(frames[left], frames[right], payload.distance_metric, mask) for left, right, _ in pairs]
+    for lag in lags_seconds:
+        pairs = lag_pairs[lag]
+        values: list[float] = []
+        for left, right, _ in pairs:
+            if abort_event is not None and abort_event.is_set():
+                raise RuntimeError("aborted")
+            values.append(_distance(frames[left], frames[right], distance_metric, mask))
+            progress_step()
         lag_statistics.append(_summary(lag, values))
         if pairs:
             example_index = min(
                 range(len(pairs)),
                 key=lambda index: abs(
-                    (records[pairs[index][0]].timestamp_parsed - payload.reference_timestamp).total_seconds()
+                    (records[pairs[index][0]].timestamp_parsed - reference_timestamp).total_seconds()
                 ),
             )
             left, right, _ = pairs[example_index]
@@ -378,47 +410,56 @@ def analyze_temporal_dynamics(db: Session, payload: TemporalDynamicsRequest) -> 
                 "difference_image_data_url": encode_absolute_image_data_url(difference_display),
             })
 
-    motion_signal, internal_motion = _motion_signal(records, frames, segments, mask)
-    autocorrelation = _autocorrelation(internal_motion, payload.autocorrelation_max_lag_seconds)
+    motion_signal, internal_motion = _motion_signal(
+        records, frames, segments, mask, progress_step, abort_event
+    )
+    autocorrelation = _autocorrelation(
+        internal_motion,
+        autocorrelation_max_lag_seconds,
+        progress_step,
+        abort_event,
+    )
     correlation_length = next(
         (
             int(row["lag_seconds"])
             for row in autocorrelation
             if row["autocorrelation"] is not None
-            and float(row["autocorrelation"]) < payload.autocorrelation_threshold
+            and float(row["autocorrelation"]) < autocorrelation_threshold
         ),
         None,
     )
     plateau_lag = _plateau_lag(lag_statistics)
     relevant_candidates = [value for value in (plateau_lag, correlation_length) if value is not None]
-    relevant_seconds = max(relevant_candidates) if relevant_candidates else max(payload.lags_seconds)
+    relevant_seconds = max(relevant_candidates) if relevant_candidates else max(lags_seconds)
     sequence_length, temporal_stride, covered_window = _recommendation(relevant_seconds)
     labels = {
         "mae": "Mean absolute difference (normalized intensity)",
         "mse": "Mean squared difference (normalized intensity)",
         "ssim": "Mean SSIM distance (1 - SSIM)",
     }
-    response = {
+    report(total)
+    return TemporalDynamicsResponse.model_validate({
         "training_dataset_id": training_dataset.id,
         "preprocessing_pipeline_id": pipeline.id,
         "training_dataset_name": training_dataset.name,
         "preprocessing_pipeline_name": pipeline.name,
         "roi_id": roi.id if roi else None,
         "roi_name": roi_meta["name"] if roi_meta else None,
-        "reference_timestamp": payload.reference_timestamp,
-        "start_timestamp": records[0].timestamp_parsed,
-        "end_timestamp": records[-1].timestamp_parsed,
-        "distance_metric": payload.distance_metric,
-        "distance_label": labels[payload.distance_metric],
-        "downsample_width": payload.downsample_width,
-        "downsample_height": payload.downsample_height,
+        "reference_timestamp": reference_timestamp,
+        "start_timestamp": min(record.timestamp_parsed for record in records),
+        "end_timestamp": max(record.timestamp_parsed for record in records),
+        "distance_metric": distance_metric,
+        "distance_label": labels[distance_metric],
+        "image_width": source_width,
+        "image_height": source_height,
+        "stride": max(1, int(stride)),
         "loaded_frame_count": len(frames),
         "skipped_frame_count": skipped,
         "contiguous_segment_count": len(segments),
         "lag_statistics": lag_statistics,
         "motion_signal": motion_signal,
         "autocorrelation": autocorrelation,
-        "autocorrelation_threshold": payload.autocorrelation_threshold,
+        "autocorrelation_threshold": autocorrelation_threshold,
         "estimated_correlation_length_seconds": correlation_length,
         "estimated_lag_plateau_seconds": plateau_lag,
         "estimated_relevant_time_scale_seconds": relevant_seconds,
@@ -427,8 +468,47 @@ def analyze_temporal_dynamics(db: Session, payload: TemporalDynamicsRequest) -> 
         "covered_time_window_seconds": covered_window,
         "comparison_examples": examples,
         "cached": False,
-    }
-    validated = TemporalDynamicsResponse.model_validate(response)
-    serialized = validated.model_dump(mode="python")
+    })
+
+
+def analyze_temporal_dynamics(db: Session, payload: TemporalDynamicsRequest) -> TemporalDynamicsResponse:
+    training_dataset = _load_training_dataset(db, int(payload.training_dataset_id))
+    if training_dataset is None:
+        raise ValueError(f"Train/Test Dataset does not exist: {payload.training_dataset_id}")
+    pipeline = db.get(models.PreprocessingPipeline, int(payload.preprocessing_pipeline_id))
+    if pipeline is None:
+        raise ValueError(f"Preprocessing pipeline does not exist: {payload.preprocessing_pipeline_id}")
+    roi = db.get(models.RoiDefinition, payload.roi_id) if payload.roi_id is not None else None
+    if payload.roi_id is not None and roi is None:
+        raise ValueError(f"ROI does not exist: {payload.roi_id}")
+
+    half_window = timedelta(seconds=payload.analysis_window_seconds / 2.0)
+    start = payload.reference_timestamp - half_window
+    end = payload.reference_timestamp + half_window
+    records = enumerate_training_dataset_image_records_for_range(
+        training_dataset, start, end, extra_stride=max(1, payload.stride)
+    )
+    if len(records) < 2:
+        raise ValueError("At least two images are required in the selected temporal analysis window.")
+    key = _stable_cache_key(payload, training_dataset, pipeline, roi, records)
+    cached = _cache_get(key)
+    if cached is not None:
+        return TemporalDynamicsResponse.model_validate(cached)
+
+    compiled = compile_pipeline(PreprocessingGraph.model_validate(pipeline.graph))
+    result = analyze_temporal_dynamics_records(
+        training_dataset=training_dataset,
+        pipeline=pipeline,
+        roi=roi,
+        records=records,
+        compiled=compiled,
+        reference_timestamp=payload.reference_timestamp,
+        lags_seconds=payload.lags_seconds,
+        distance_metric=payload.distance_metric,
+        stride=payload.stride,
+        autocorrelation_max_lag_seconds=payload.autocorrelation_max_lag_seconds,
+        autocorrelation_threshold=payload.autocorrelation_threshold,
+    )
+    serialized = result.model_dump(mode="python")
     _cache_put(key, serialized)
-    return validated
+    return result

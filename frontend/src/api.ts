@@ -923,7 +923,7 @@ export function previewInspect(payload: {
   end_timestamp: string;
   stride: number;
   content_mode?: 'final_preprocessed_output';
-  analysis_mode?: 'preprocessed_video' | 'contrast_enhanced' | 'energy' | 'optical_flow';
+  analysis_mode?: 'preprocessed_video' | 'contrast_enhanced' | 'energy' | 'optical_flow' | 'temporal_dynamics';
   analysis_config?: Record<string, unknown> | null;
   roi_id?: number | null;
   generate_video?: boolean;
@@ -945,10 +945,9 @@ export function runTemporalDynamicsAnalysis(payload: {
   preprocessing_pipeline_id: number;
   reference_timestamp: string;
   analysis_window_seconds: number;
+  stride: number;
   lags_seconds: number[];
   distance_metric: 'mae' | 'mse' | 'ssim';
-  downsample_width: number;
-  downsample_height: number;
   roi_id?: number | null;
   autocorrelation_max_lag_seconds?: number;
   autocorrelation_threshold?: number;
@@ -959,6 +958,10 @@ export function runTemporalDynamicsAnalysis(payload: {
   });
 }
 
+export function getTemporalDynamicsRunResult(runId: number): Promise<TemporalDynamicsResult> {
+  return request<TemporalDynamicsResult>(`/api/inspect/runs/${runId}/summary.json`);
+}
+
 export function createInspectRun(payload: {
   training_dataset_id: number;
   preprocessing_pipeline_id: number;
@@ -967,7 +970,7 @@ export function createInspectRun(payload: {
   stride: number;
   fps: number;
   content_mode?: 'final_preprocessed_output';
-  analysis_mode?: 'preprocessed_video' | 'contrast_enhanced' | 'energy' | 'optical_flow';
+  analysis_mode?: 'preprocessed_video' | 'contrast_enhanced' | 'energy' | 'optical_flow' | 'temporal_dynamics';
   analysis_config?: Record<string, unknown> | null;
   roi_id?: number | null;
   generate_video?: boolean;

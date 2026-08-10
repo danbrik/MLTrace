@@ -35,6 +35,7 @@ import {
   deleteInspectRun,
   deleteHeatmapRange,
   getInspectCsvData,
+  getTemporalDynamicsRunResult,
   heatmapRangeVideoUrl,
   inspectRunCsvUrl,
   inspectRunVideoUrl,
@@ -45,7 +46,6 @@ import {
   listPreprocessingPipelines,
   listTrainingDatasets,
   previewInspect,
-  runTemporalDynamicsAnalysis,
 } from '../api';
 import { DateTime24Input } from '../components/DateTime24Input';
 import { StepCard } from '../components/StepCard';
@@ -53,7 +53,7 @@ import { PlotlyChart } from '../components/PlotlyChart';
 import { usePendingIds } from '../hooks/usePendingIds';
 import type { InspectArtifactRun, InspectCsvData, InspectPreview, InspectRun, PreprocessingPipeline, RoiDefinition, TemporalDynamicsResult, TrainingDataset } from '../types';
 
-type InspectAnalysisMode = 'preprocessed_video' | 'contrast_enhanced' | 'energy' | 'optical_flow';
+type InspectAnalysisMode = 'preprocessed_video' | 'contrast_enhanced' | 'energy' | 'optical_flow' | 'temporal_dynamics';
 type RoiPoint = { x: number; y: number };
 
 const TILE_OPTIONS = [1, 2, 3, 4, 5].map((value) => ({ value: String(value), label: String(value) }));
@@ -85,6 +85,31 @@ function parseLagValues(value: string): number[] {
     .map(Number)
     .filter((lag) => Number.isInteger(lag) && lag > 0);
   return [...new Set(parsed)].sort((left, right) => left - right);
+}
+
+function centeredTimeRange(reference: string, windowMinutes: number): { start: string; end: string } {
+  const stable = /(?:Z|[+-]\d{2}:\d{2})$/.test(reference) ? reference : `${reference}Z`;
+  const center = new Date(stable).getTime();
+  const halfWindowMs = Math.max(1000, windowMinutes * 30_000);
+  return {
+    start: new Date(center - halfWindowMs).toISOString().slice(0, 19),
+    end: new Date(center + halfWindowMs).toISOString().slice(0, 19),
+  };
+}
+
+function formatDurationSeconds(seconds: number | null): string {
+  if (seconds == null || !Number.isFinite(seconds)) return 'estimating…';
+  if (seconds < 60) return `${Math.max(0, Math.round(seconds))} s`;
+  const minutes = Math.floor(seconds / 60);
+  return `${minutes} min ${Math.round(seconds % 60)} s`;
+}
+
+function estimatedRemainingSeconds(run: { status: string; started_at: string | null; done_count: number; frame_count: number | null }): number | null {
+  if (run.status !== 'running' || !run.started_at || !run.frame_count || run.done_count <= 0) return null;
+  const stableStarted = /(?:Z|[+-]\d{2}:\d{2})$/.test(run.started_at) ? run.started_at : `${run.started_at}Z`;
+  const started = new Date(stableStarted).getTime();
+  const elapsed = Math.max(0, (Date.now() - started) / 1000);
+  return elapsed * Math.max(0, run.frame_count - run.done_count) / run.done_count;
 }
 
 function statusColor(status: string): string {
@@ -256,6 +281,8 @@ function artifactFromInspectRun(run: InspectRun): InspectArtifactRun {
     fps: run.fps,
     frame_count: run.frame_count,
     done_count: run.done_count,
+    started_at: run.started_at,
+    duration_seconds: run.duration_seconds,
     has_video: Boolean(run.video_path),
     has_csv: Boolean(run.csv_path),
     has_summary: Boolean(run.summary_json_path),
@@ -367,7 +394,8 @@ function TemporalDynamicsResults({ result }: { result: TemporalDynamicsResult })
       <Group gap="xs">
         <Badge variant="light">{result.loaded_frame_count} frames</Badge>
         <Badge variant="light">{result.contiguous_segment_count} contiguous segments</Badge>
-        <Badge variant="light">{result.downsample_width}x{result.downsample_height}</Badge>
+        <Badge variant="light">Pipeline output {result.image_width}x{result.image_height}</Badge>
+        <Badge variant="light">Analysis stride {result.stride}</Badge>
         <Badge variant="light">{result.distance_metric.toUpperCase()}</Badge>
         {result.roi_name && <Badge variant="light" color="grape">ROI: {result.roi_name}</Badge>}
         {result.skipped_frame_count > 0 && <Badge variant="light" color="yellow">{result.skipped_frame_count} unreadable skipped</Badge>}
@@ -507,12 +535,11 @@ export function InspectPage({ active = true }: { active?: boolean }) {
   const [runLoading, setRunLoading] = useState(false);
   const [temporalReference, setTemporalReference] = useState('');
   const [temporalWindowMinutes, setTemporalWindowMinutes] = useState(30);
+  const [temporalStride, setTemporalStride] = useState(1);
   const [temporalLags, setTemporalLags] = useState('1, 2, 4, 8, 16, 32, 64, 128');
   const [temporalMetric, setTemporalMetric] = useState<'mae' | 'mse' | 'ssim'>('mae');
-  const [temporalDownsampleWidth, setTemporalDownsampleWidth] = useState(256);
-  const [temporalDownsampleHeight, setTemporalDownsampleHeight] = useState(256);
   const [temporalUseRoi, setTemporalUseRoi] = useState(false);
-  const [temporalLoading, setTemporalLoading] = useState(false);
+  const [temporalRunId, setTemporalRunId] = useState<number | null>(null);
   const [temporalResult, setTemporalResult] = useState<TemporalDynamicsResult | null>(null);
   const rowActions = usePendingIds();
 
@@ -593,11 +620,21 @@ export function InspectPage({ active = true }: { active?: boolean }) {
   }, [active, runs, artifactActiveTotal, artifactPage, artifactModeFilter, artifactDatasetFilter, artifactPipelineFilter, artifactStatusFilter]);
 
   const selectedDataset = trainingDatasets.find((dataset) => dataset.id === trainingDatasetId) ?? null;
-  const selectedPipeline = preprocessingPipelines.find((pipeline) => pipeline.id === preprocessingPipelineId) ?? null;
   const selectedRoi = rois.find((roi) => roi.id === selectedRoiId) ?? null;
   const minDate = toInputDateTime(selectedDataset?.start_timestamp ?? null);
   const maxDate = toInputDateTime(selectedDataset?.end_timestamp ?? null);
   const analysisConfig = useMemo<Record<string, unknown>>(() => {
+    if (analysisMode === 'temporal_dynamics') {
+      const lags = parseLagValues(temporalLags);
+      return {
+        reference_timestamp: temporalReference,
+        analysis_window_seconds: Math.max(2, Math.round(temporalWindowMinutes * 60)),
+        lags_seconds: lags,
+        distance_metric: temporalMetric,
+        autocorrelation_max_lag_seconds: Math.max(128, ...lags),
+        autocorrelation_threshold: 0.2,
+      };
+    }
     if (analysisMode === 'energy') {
       return {
         energy_variant: energyVariant,
@@ -647,6 +684,10 @@ export function InspectPage({ active = true }: { active?: boolean }) {
     flowPolySigma,
     flowPyrScale,
     flowWinSize,
+    temporalLags,
+    temporalMetric,
+    temporalReference,
+    temporalWindowMinutes,
   ]);
   const currentSignature = selectionSignature({
     trainingDatasetId,
@@ -666,9 +707,8 @@ export function InspectPage({ active = true }: { active?: boolean }) {
   });
   const previewFresh = Boolean(preview && previewSignature === currentSignature);
   const invalidRange = Boolean(start && end && end < start);
-  const canPreview = Boolean(trainingDatasetId && preprocessingPipelineId && start && end && !invalidRange);
+  const canPreview = analysisMode !== 'temporal_dynamics' && Boolean(trainingDatasetId && preprocessingPipelineId && start && end && !invalidRange);
   const roiReadyForRun = !roiEnabled || selectedRoiId !== null;
-  const canRun = canPreview && !runLoading && roiReadyForRun && (analysisMode !== 'contrast_enhanced' || contrastVmax > 0);
   const temporalLagValues = parseLagValues(temporalLags);
   const temporalLagsValid = temporalLagValues.length > 0 && temporalLagValues.length <= 32;
   const canRunTemporal = Boolean(
@@ -678,8 +718,22 @@ export function InspectPage({ active = true }: { active?: boolean }) {
     && temporalWindowMinutes > 0
     && temporalLagsValid
     && (!temporalUseRoi || selectedRoiId != null)
-    && !temporalLoading
+    && !runLoading
   );
+  const canRun = analysisMode === 'temporal_dynamics'
+    ? canRunTemporal
+    : Boolean(canPreview && !runLoading && roiReadyForRun && (analysisMode !== 'contrast_enhanced' || contrastVmax > 0));
+  const temporalCurrentRun = temporalRunId == null ? null : runs.find((run) => run.id === temporalRunId) ?? null;
+
+  useEffect(() => {
+    if (temporalCurrentRun?.status !== 'finished' || temporalResult) return;
+    getTemporalDynamicsRunResult(temporalCurrentRun.id)
+      .then((result) => {
+        setTemporalResult(result);
+        notifications.show({ color: 'green', title: 'Temporal analysis complete', message: `${result.loaded_frame_count} frames analyzed` });
+      })
+      .catch((error) => notifications.show({ color: 'red', title: 'Could not load temporal result', message: error instanceof Error ? error.message : 'Unknown error' }));
+  }, [temporalCurrentRun?.status, temporalCurrentRun?.id, temporalResult]);
 
   function handleDatasetChange(value: string | null) {
     const id = value ? Number(value) : null;
@@ -691,42 +745,6 @@ export function InspectPage({ active = true }: { active?: boolean }) {
     setTemporalResult(null);
     setPreview(null);
     setPreviewSignature('');
-  }
-
-  async function handleTemporalAnalysis() {
-    const lags = parseLagValues(temporalLags);
-    if (trainingDatasetId == null || preprocessingPipelineId == null || !temporalReference || lags.length === 0) return;
-    setTemporalLoading(true);
-    try {
-      const result = await runTemporalDynamicsAnalysis({
-        training_dataset_id: trainingDatasetId,
-        preprocessing_pipeline_id: preprocessingPipelineId,
-        reference_timestamp: temporalReference,
-        analysis_window_seconds: Math.max(2, Math.round(temporalWindowMinutes * 60)),
-        lags_seconds: lags,
-        distance_metric: temporalMetric,
-        downsample_width: temporalDownsampleWidth,
-        downsample_height: temporalDownsampleHeight,
-        roi_id: temporalUseRoi ? selectedRoiId : null,
-        autocorrelation_max_lag_seconds: Math.max(128, ...lags),
-        autocorrelation_threshold: 0.2,
-      });
-      setTemporalResult(result);
-      notifications.show({
-        color: 'green',
-        title: 'Temporal analysis complete',
-        message: `${result.loaded_frame_count} frames · ${result.contiguous_segment_count} contiguous segment(s)`,
-      });
-    } catch (error) {
-      setTemporalResult(null);
-      notifications.show({
-        color: 'red',
-        title: 'Temporal analysis failed',
-        message: error instanceof Error ? error.message : 'Unknown error',
-      });
-    } finally {
-      setTemporalLoading(false);
-    }
   }
 
   function markPreviewStale() {
@@ -822,17 +840,20 @@ export function InspectPage({ active = true }: { active?: boolean }) {
     if (!canRun || trainingDatasetId == null || preprocessingPipelineId == null) return;
     setRunLoading(true);
     try {
+      const temporalRange = analysisMode === 'temporal_dynamics'
+        ? centeredTimeRange(temporalReference, temporalWindowMinutes)
+        : null;
       const created = await createInspectRun({
         training_dataset_id: trainingDatasetId,
         preprocessing_pipeline_id: preprocessingPipelineId,
-        start_timestamp: start,
-        end_timestamp: end,
-        stride,
+        start_timestamp: temporalRange?.start ?? start,
+        end_timestamp: temporalRange?.end ?? end,
+        stride: analysisMode === 'temporal_dynamics' ? temporalStride : stride,
         fps,
         analysis_mode: analysisMode,
         analysis_config: analysisConfig,
-        roi_id: roiEnabled ? selectedRoiId : null,
-        generate_video: generateVideo,
+        roi_id: analysisMode === 'temporal_dynamics' ? (temporalUseRoi ? selectedRoiId : null) : (roiEnabled ? selectedRoiId : null),
+        generate_video: analysisMode === 'temporal_dynamics' ? false : generateVideo,
         contrast_enabled: analysisMode === 'contrast_enhanced',
         contrast_reference_frames: contrastReferenceFrames,
         contrast_shift: contrastShift,
@@ -846,6 +867,10 @@ export function InspectPage({ active = true }: { active?: boolean }) {
         && (artifactPipelineFilter == null || queuedArtifact.preprocessing_pipeline_id === artifactPipelineFilter)
         && (!artifactStatusFilter || queuedArtifact.status === artifactStatusFilter);
       setRuns((current) => [created, ...current.filter((run) => run.id !== created.id)]);
+      if (analysisMode === 'temporal_dynamics') {
+        setTemporalRunId(created.id);
+        setTemporalResult(null);
+      }
       if (matchesRunFilters) {
         setArtifactItems((current) => [queuedArtifact, ...current.filter((run) => run.kind !== 'inspect' || run.id !== created.id)].slice(0, 15));
         setArtifactTotal((current) => current + 1);
@@ -856,7 +881,7 @@ export function InspectPage({ active = true }: { active?: boolean }) {
       }
       setRunLoading(false);
       refreshArtifacts().catch(() => undefined);
-      notifications.show({ color: 'green', title: 'Inspect run queued', message: created.training_dataset_name });
+      notifications.show({ color: 'green', title: analysisMode === 'temporal_dynamics' ? 'Temporal analysis queued' : 'Inspect run queued', message: created.training_dataset_name });
     } catch (error) {
       notifications.show({
         color: 'red',
@@ -875,6 +900,26 @@ export function InspectPage({ active = true }: { active?: boolean }) {
     }).catch((error) => notifications.show({ color: 'red', title: 'Abort failed', message: error instanceof Error ? error.message : 'Unknown error' }));
   }
 
+  async function handleArtifactLoad(run: InspectArtifactRun) {
+    if (run.kind === 'inspect' && run.mode === 'temporal_dynamics' && run.has_summary) {
+      try {
+        const result = await getTemporalDynamicsRunResult(run.id);
+        setAnalysisMode('temporal_dynamics');
+        setTrainingDatasetId(result.training_dataset_id);
+        setPreprocessingPipelineId(result.preprocessing_pipeline_id);
+        setTemporalReference(toInputDateTime(result.reference_timestamp));
+        setTemporalStride(result.stride);
+        setTemporalRunId(run.id);
+        setTemporalResult(result);
+        setSelectedArtifact(null);
+      } catch (error) {
+        notifications.show({ color: 'red', title: 'Could not load temporal result', message: error instanceof Error ? error.message : 'Unknown error' });
+      }
+      return;
+    }
+    setSelectedArtifact(run);
+  }
+
   async function handleArtifactDelete(run: InspectArtifactRun) {
     if (!window.confirm(`Delete ${run.kind} run ${run.id}?`)) return;
     await rowActions.runPending(`artifact-delete:${run.kind}:${run.id}`, async () => {
@@ -890,11 +935,11 @@ export function InspectPage({ active = true }: { active?: boolean }) {
       <div>
         <Title order={2}>Inspect</Title>
         <Text c="dimmed" size="sm">
-          Render selected Train/Test dataset images through a preprocessing pipeline into a playable inspection video.
+          Inspect preprocessed image sequences with videos, diagnostics, and training-free temporal analysis.
         </Text>
       </div>
 
-      <StepCard title="Inspect source" subtitle="Choose the source, define the range, then configure one diagnostic." color="blue">
+      <StepCard title="Inspect source" subtitle="Choose the source and analysis method; only the required range and output controls are shown." color="blue">
         <Stack gap="md">
           <Paper withBorder p="md" radius="md" bg="var(--mantine-color-blue-0)">
             <Stack gap="sm">
@@ -949,8 +994,8 @@ export function InspectPage({ active = true }: { active?: boolean }) {
                         key={`${artifact.kind}:${artifact.id}`}
                         size="compact-sm"
                         variant="light"
-                        disabled={artifact.status !== 'finished' || (!artifact.has_video && !artifact.has_csv)}
-                        onClick={() => setSelectedArtifact(artifact)}
+                        disabled={artifact.status !== 'finished' || (!artifact.has_video && !artifact.has_csv && !artifact.has_summary)}
+                        onClick={() => void handleArtifactLoad(artifact)}
                       >
                         {artifact.mode.replaceAll('_', ' ')} · #{artifact.id} · {artifact.status}
                       </Button>
@@ -962,74 +1007,20 @@ export function InspectPage({ active = true }: { active?: boolean }) {
           )}
 
           <Paper withBorder p="md" radius="md">
-            <Stack gap="sm">
-              <div>
-                <Text fw={700}>2. Time range &amp; video output</Text>
-                <Text size="xs" c="dimmed">The selected range is queued immediately; exact frame counting happens in the background worker.</Text>
-              </div>
-              {selectedDataset && (
-                <Alert color="blue" title="Dataset bounds">
-                  {selectedDataset.name}: {formatTimestamp(selectedDataset.start_timestamp)} to{' '}
-                  {formatTimestamp(selectedDataset.end_timestamp)}
-                </Alert>
-              )}
-              <SimpleGrid cols={{ base: 1, sm: 2, lg: 4 }} spacing="md">
-            <DateTime24Input
-              label="Start"
-              value={start}
-              min={minDate}
-              max={maxDate}
-              error={invalidRange ? 'Invalid range' : undefined}
-              onChange={(value) => {
-                setStart(value);
-                markPreviewStale();
-              }}
-            />
-            <DateTime24Input
-              label="End"
-              value={end}
-              min={minDate}
-              max={maxDate}
-              error={invalidRange ? 'Invalid range' : undefined}
-              onChange={(value) => {
-                setEnd(value);
-                markPreviewStale();
-              }}
-            />
-            <NumberInput
-              label="Inspect stride"
-              min={1}
-              value={stride}
-              onChange={(value) => {
-                setStride(Math.max(1, Number(value) || 1));
-                markPreviewStale();
-              }}
-            />
-            <NumberInput
-              label="Video fps"
-              min={1}
-              max={60}
-              value={fps}
-              onChange={(value) => setFps(Math.max(1, Math.min(60, Number(value) || 1)))}
-            />
-              </SimpleGrid>
-            </Stack>
-          </Paper>
-
-          <Paper withBorder p="md" radius="md">
             <Stack gap="md">
               <div>
-                <Text fw={700}>3. Analysis method</Text>
+                <Text fw={700}>2. Analysis method</Text>
                 <Text size="xs" c="dimmed">Only controls relevant to the selected method are shown below.</Text>
               </div>
               <Divider />
               <Select
-                label={<InfoLabel label="Inspect method" info="Choose the diagnostic generated from the selected dataset and preprocessing pipeline. Energy and optical flow primarily produce CSV/plot outputs; video is optional." />}
+                label={<InfoLabel label="Inspect method" info="Choose the analysis generated from the selected Train/Test dataset and preprocessing pipeline. Only method-specific controls are shown." />}
                 data={[
                   { value: 'preprocessed_video', label: 'Preprocessed video' },
                   { value: 'contrast_enhanced', label: 'Contrast enhance' },
                   { value: 'energy', label: 'Energy' },
                   { value: 'optical_flow', label: 'Optical flow' },
+                  { value: 'temporal_dynamics', label: 'Temporal Dynamics Analysis' },
                 ]}
                 value={analysisMode}
                 onChange={(value) => {
@@ -1040,6 +1031,78 @@ export function InspectPage({ active = true }: { active?: boolean }) {
                   markPreviewStale();
                 }}
               />
+
+              {analysisMode === 'temporal_dynamics' && (
+                <Paper withBorder p="md" radius="sm" bg="var(--mantine-color-grape-0)">
+                  <Stack gap="md">
+                    <Text size="sm" c="dimmed">
+                      Uses the final preprocessing-pipeline output directly. No additional resize or downsampling is applied.
+                    </Text>
+                    <SimpleGrid cols={{ base: 1, sm: 2, lg: 4 }} spacing="md">
+                      <DateTime24Input
+                        label="Reference timestamp t"
+                        value={temporalReference}
+                        min={minDate}
+                        max={maxDate}
+                        onChange={(value) => { setTemporalReference(value); setTemporalResult(null); }}
+                      />
+                      <NumberInput
+                        label="Analysis period around t [minutes]"
+                        description="Total centered window (30 min = ±15 min)"
+                        min={1 / 30}
+                        step={1}
+                        decimalScale={2}
+                        value={temporalWindowMinutes}
+                        onChange={(value) => { setTemporalWindowMinutes(Math.max(1 / 30, Number(value) || 30)); setTemporalResult(null); }}
+                      />
+                      <NumberInput
+                        label="Analysis stride"
+                        description="Use every nth frame selected by the Train/Test dataset"
+                        min={1}
+                        value={temporalStride}
+                        onChange={(value) => { setTemporalStride(Math.max(1, Number(value) || 1)); setTemporalResult(null); }}
+                      />
+                      <Select
+                        label="Distance metric"
+                        data={[
+                          { value: 'mae', label: 'MAE' },
+                          { value: 'mse', label: 'MSE' },
+                          { value: 'ssim', label: 'SSIM distance (1 - SSIM)' },
+                        ]}
+                        value={temporalMetric}
+                        onChange={(value) => { setTemporalMetric((value ?? 'mae') as 'mae' | 'mse' | 'ssim'); setTemporalResult(null); }}
+                      />
+                    </SimpleGrid>
+                    <SimpleGrid cols={{ base: 1, sm: 2, lg: 3 }} spacing="md">
+                      <TextInput
+                        label="Lag values [seconds]"
+                        description="Comma or space separated"
+                        value={temporalLags}
+                        error={temporalLagsValid ? undefined : 'Enter 1–32 positive whole-second lag values.'}
+                        onChange={(event) => { setTemporalLags(event.currentTarget.value); setTemporalResult(null); }}
+                      />
+                      <Switch
+                        label="Use saved ROI"
+                        description="Aggregate the exact saved Inspect ROI across its tiles"
+                        checked={temporalUseRoi}
+                        onChange={(event) => { setTemporalUseRoi(event.currentTarget.checked); setTemporalResult(null); }}
+                      />
+                      <Select
+                        label="Temporal analysis ROI"
+                        placeholder="Choose saved ROI"
+                        disabled={!temporalUseRoi}
+                        searchable
+                        data={rois.map((roi) => ({ value: String(roi.id), label: roiLabel(roi) }))}
+                        value={selectedRoiId == null ? null : String(selectedRoiId)}
+                        onChange={(value) => { setSelectedRoiId(value ? Number(value) : null); setTemporalResult(null); }}
+                      />
+                    </SimpleGrid>
+                    <Text size="xs" c="dimmed">
+                      Missing frames and cadence gaps are skipped. Lag pairs never cross source folders or detected gaps.
+                    </Text>
+                  </Stack>
+                </Paper>
+              )}
 
               {(analysisMode === 'energy' || analysisMode === 'optical_flow') && (
                 <Switch
@@ -1166,14 +1229,60 @@ export function InspectPage({ active = true }: { active?: boolean }) {
             </Stack>
           </Paper>
 
+          {analysisMode !== 'temporal_dynamics' && <Paper withBorder p="md" radius="md">
+            <Stack gap="sm">
+              <div>
+                <Text fw={700}>3. Time range &amp; output</Text>
+                <Text size="xs" c="dimmed">The selected range is queued immediately; exact frame counting happens in the background worker.</Text>
+              </div>
+              {selectedDataset && (
+                <Alert color="blue" title="Dataset bounds">
+                  {selectedDataset.name}: {formatTimestamp(selectedDataset.start_timestamp)} to{' '}
+                  {formatTimestamp(selectedDataset.end_timestamp)}
+                </Alert>
+              )}
+              <SimpleGrid cols={{ base: 1, sm: 2, lg: 4 }} spacing="md">
+                <DateTime24Input
+                  label="Start"
+                  value={start}
+                  min={minDate}
+                  max={maxDate}
+                  error={invalidRange ? 'Invalid range' : undefined}
+                  onChange={(value) => { setStart(value); markPreviewStale(); }}
+                />
+                <DateTime24Input
+                  label="End"
+                  value={end}
+                  min={minDate}
+                  max={maxDate}
+                  error={invalidRange ? 'Invalid range' : undefined}
+                  onChange={(value) => { setEnd(value); markPreviewStale(); }}
+                />
+                <NumberInput
+                  label="Inspect stride"
+                  min={1}
+                  value={stride}
+                  onChange={(value) => { setStride(Math.max(1, Number(value) || 1)); markPreviewStale(); }}
+                />
+                {(analysisMode === 'preprocessed_video' || analysisMode === 'contrast_enhanced' || generateVideo) && <NumberInput
+                  label="Video fps"
+                  min={1}
+                  max={60}
+                  value={fps}
+                  onChange={(value) => setFps(Math.max(1, Math.min(60, Number(value) || 1)))}
+                />}
+              </SimpleGrid>
+            </Stack>
+          </Paper>}
+
           <Paper withBorder p="md" radius="md" bg="var(--mantine-color-gray-0)">
           <Group justify="space-between" align="center" wrap="wrap">
             <div>
-              <Text fw={700}>4. Preview or queue run</Text>
-              <Text size="xs" c="dimmed">Queued runs appear immediately below so you can configure the next range.</Text>
+              <Text fw={700}>{analysisMode === 'temporal_dynamics' ? '3. Queue temporal analysis' : '4. Preview or queue run'}</Text>
+              <Text size="xs" c="dimmed">The queued job appears immediately in Inspect runs with live progress and estimated remaining time.</Text>
             </div>
             <Group gap="sm">
-            <Button
+            {analysisMode !== 'temporal_dynamics' && <Button
               leftSection={<Eye size={18} />}
               variant="light"
               loading={previewLoading}
@@ -1181,21 +1290,21 @@ export function InspectPage({ active = true }: { active?: boolean }) {
               onClick={handlePreview}
             >
               Load preview
-            </Button>
+            </Button>}
             <Button
-              leftSection={<FileVideo size={18} />}
+              leftSection={analysisMode === 'temporal_dynamics' ? undefined : <FileVideo size={18} />}
               loading={runLoading}
               disabled={!canRun}
               onClick={handleRun}
             >
-              Run
+              {analysisMode === 'temporal_dynamics' ? 'Run Temporal Analysis' : 'Run'}
             </Button>
             </Group>
           </Group>
           </Paper>
 
-          {preview && (
-            <Stack gap="md">
+          {preview && analysisMode !== 'temporal_dynamics' && (
+            <Stack gap="md" style={{ order: 5 }}>
               <Paper withBorder p="md" radius="sm">
                 <Stack gap="sm">
                   <Group gap="xs">
@@ -1221,94 +1330,36 @@ export function InspectPage({ active = true }: { active?: boolean }) {
               )}
             </Stack>
           )}
-        </Stack>
-      </StepCard>
 
-      <StepCard
-        title="Temporal Dynamics Analysis"
-        subtitle="Estimate the useful 3D-CNN time scale without training a model. Uses the selected Source Combination Train/Test dataset and preprocessing pipeline."
-        color="grape"
-      >
-        <Stack gap="md">
-          <Paper withBorder p="md" radius="md" bg="var(--mantine-color-grape-0)">
-            <Stack gap="sm">
-              <Group justify="space-between" wrap="wrap">
-                <div>
-                  <Text fw={700}>Analysis source</Text>
-                  <Text size="xs" c="dimmed">Every frame passes through the current preprocessing pipeline once; all metrics then reuse the same normalized images and optional saved ROI.</Text>
-                </div>
-                <Group gap="xs">
-                  <Badge variant="light">{selectedDataset?.name ?? 'No Train/Test Dataset'}</Badge>
-                  <Badge variant="light" color="cyan">{selectedPipeline?.name ?? 'No Preprocessing Pipeline'}</Badge>
+          {analysisMode === 'temporal_dynamics' && temporalCurrentRun && (
+            <Paper withBorder p="md" radius="sm" style={{ order: 5 }}>
+              <Stack gap="sm">
+                <Group justify="space-between" wrap="wrap">
+                  <Group gap="xs">
+                    <Text fw={700}>Temporal Dynamics run #{temporalCurrentRun.id}</Text>
+                    <Badge color={statusColor(temporalCurrentRun.status)} variant="light">{temporalCurrentRun.status}</Badge>
+                  </Group>
+                  <Text size="sm" c="dimmed">
+                    {temporalCurrentRun.status === 'finished'
+                      ? `Completed in ${formatDurationSeconds(temporalCurrentRun.duration_seconds)}`
+                      : `Estimated remaining: ${formatDurationSeconds(estimatedRemainingSeconds(temporalCurrentRun))}`}
+                  </Text>
                 </Group>
-              </Group>
-              <SimpleGrid cols={{ base: 1, sm: 2, lg: 4 }} spacing="md">
-                <DateTime24Input
-                  label="Reference timestamp t"
-                  value={temporalReference}
-                  min={minDate}
-                  max={maxDate}
-                  onChange={(value) => { setTemporalReference(value); setTemporalResult(null); }}
+                <Progress
+                  value={temporalCurrentRun.frame_count ? Math.min(100, temporalCurrentRun.done_count / temporalCurrentRun.frame_count * 100) : 0}
+                  animated={temporalCurrentRun.status === 'queued' || temporalCurrentRun.status === 'running'}
                 />
-                <NumberInput
-                  label="Analysis period around t [minutes]"
-                  description="Total centered window (30 min = ±15 min)"
-                  min={1 / 30}
-                  step={1}
-                  decimalScale={2}
-                  value={temporalWindowMinutes}
-                  onChange={(value) => { setTemporalWindowMinutes(Math.max(1 / 30, Number(value) || 30)); setTemporalResult(null); }}
-                />
-                <Select
-                  label="Distance metric"
-                  data={[
-                    { value: 'mae', label: 'MAE' },
-                    { value: 'mse', label: 'MSE' },
-                    { value: 'ssim', label: 'SSIM distance (1 - SSIM)' },
-                  ]}
-                  value={temporalMetric}
-                  onChange={(value) => { setTemporalMetric((value ?? 'mae') as 'mae' | 'mse' | 'ssim'); setTemporalResult(null); }}
-                />
-                <TextInput
-                  label="Lag values [seconds]"
-                  description="Comma or space separated"
-                  value={temporalLags}
-                  error={temporalLagsValid ? undefined : 'Enter 1–32 positive whole-second lag values.'}
-                  onChange={(event) => { setTemporalLags(event.currentTarget.value); setTemporalResult(null); }}
-                />
-              </SimpleGrid>
-              <SimpleGrid cols={{ base: 1, sm: 2, lg: 4 }} spacing="md">
-                <NumberInput label="Downsample width" min={16} max={2048} value={temporalDownsampleWidth} onChange={(value) => { setTemporalDownsampleWidth(Math.max(16, Number(value) || 256)); setTemporalResult(null); }} />
-                <NumberInput label="Downsample height" min={16} max={2048} value={temporalDownsampleHeight} onChange={(value) => { setTemporalDownsampleHeight(Math.max(16, Number(value) || 256)); setTemporalResult(null); }} />
-                <Switch
-                  label="Use saved ROI"
-                  description="Same Inspect ROI geometry, aggregated across tiles"
-                  checked={temporalUseRoi}
-                  onChange={(event) => { setTemporalUseRoi(event.currentTarget.checked); setTemporalResult(null); }}
-                />
-                <Select
-                  label="Temporal analysis ROI"
-                  placeholder="Choose saved ROI"
-                  disabled={!temporalUseRoi}
-                  searchable
-                  data={rois.map((roi) => ({ value: String(roi.id), label: roiLabel(roi) }))}
-                  value={selectedRoiId == null ? null : String(selectedRoiId)}
-                  onChange={(value) => { setSelectedRoiId(value ? Number(value) : null); setTemporalResult(null); }}
-                />
-              </SimpleGrid>
-              <Group justify="space-between" align="center" wrap="wrap">
                 <Text size="xs" c="dimmed">
-                  Missing/unreadable frames are skipped. Pairing is timestamp-based and never crosses detected source folders or cadence gaps.
+                  {temporalCurrentRun.done_count}{temporalCurrentRun.frame_count ? ` / ${temporalCurrentRun.frame_count} work units` : ' · preparing frame index'}
                 </Text>
-                <Button loading={temporalLoading} disabled={!canRunTemporal} onClick={handleTemporalAnalysis}>
-                  Run Temporal Analysis
-                </Button>
-              </Group>
-            </Stack>
-          </Paper>
+                {temporalCurrentRun.error_message && <Alert color="red">{temporalCurrentRun.error_message}</Alert>}
+              </Stack>
+            </Paper>
+          )}
 
-          {temporalLoading && <Progress value={100} animated />}
-          {temporalResult && <TemporalDynamicsResults result={temporalResult} />}
+          {analysisMode === 'temporal_dynamics' && temporalResult && (
+            <div style={{ order: 6 }}><TemporalDynamicsResults result={temporalResult} /></div>
+          )}
         </Stack>
       </StepCard>
 
@@ -1334,6 +1385,7 @@ export function InspectPage({ active = true }: { active?: boolean }) {
                 { value: 'contrast_enhanced', label: 'Contrast enhanced' },
                 { value: 'energy', label: 'Energy' },
                 { value: 'optical_flow', label: 'Optical flow' },
+                { value: 'temporal_dynamics', label: 'Temporal dynamics' },
                 { value: 'heatmap', label: 'Heatmap' },
               ]} value={artifactModeFilter} onChange={(value) => { setArtifactModeFilter(value); setArtifactPage(1); }} />
               <Select label="Train/Test Dataset" clearable searchable data={trainingDatasets.map((item) => ({ value: String(item.id), label: item.name }))} value={artifactDatasetFilter == null ? null : String(artifactDatasetFilter)} onChange={(value) => { setArtifactDatasetFilter(value ? Number(value) : null); setArtifactPage(1); }} />
@@ -1354,14 +1406,20 @@ export function InspectPage({ active = true }: { active?: boolean }) {
                       <Table.Td>{run.training_dataset_name}</Table.Td>
                       <Table.Td>{run.preprocessing_pipeline_name}</Table.Td>
                       <Table.Td><Text size="xs">{formatTimestamp(run.start_timestamp)}</Text><Text size="xs">{formatTimestamp(run.end_timestamp)}</Text></Table.Td>
-                      <Table.Td><Text size="xs">{run.done_count}{run.frame_count ? ` / ${run.frame_count}` : ''}</Text>{run.frame_count ? <Progress value={(run.done_count / run.frame_count) * 100} size="xs" /> : null}</Table.Td>
+                      <Table.Td>
+                        <Text size="xs">{run.done_count}{run.frame_count ? ` / ${run.frame_count}` : ''}</Text>
+                        {run.frame_count ? <Progress value={(run.done_count / run.frame_count) * 100} size="xs" animated={busy} /> : null}
+                        {run.status === 'running' && <Text size="xs" c="dimmed">ETA {formatDurationSeconds(estimatedRemainingSeconds(run))}</Text>}
+                        {run.status === 'finished' && run.duration_seconds != null && <Text size="xs" c="dimmed">{formatDurationSeconds(run.duration_seconds)}</Text>}
+                      </Table.Td>
                       <Table.Td><Group gap={4} wrap="nowrap">
                         {run.has_video && <Button size="compact-xs" variant="light" component="a" href={artifactVideoUrl(run)} download>MP4</Button>}
                         {run.has_csv && <Button size="compact-xs" variant="light" component="a" href={inspectRunCsvUrl(run.id)} download>CSV</Button>}
+                        {run.mode === 'temporal_dynamics' && run.has_summary && <Badge variant="light" color="grape">Results</Badge>}
                         {run.status === 'finished' && !run.has_video && run.kind === 'heatmap' && <Text size="xs" c="orange">Re-render MP4 in Analysis</Text>}
                       </Group></Table.Td>
                       <Table.Td><Group gap={4} justify="flex-end" wrap="nowrap">
-                        {run.status === 'finished' && (run.has_video || run.has_csv) && <Button size="compact-xs" onClick={() => setSelectedArtifact(run)}>Load</Button>}
+                        {run.status === 'finished' && (run.has_video || run.has_csv || run.has_summary) && <Button size="compact-xs" onClick={() => void handleArtifactLoad(run)}>Load</Button>}
                         {busy && <ActionIcon color="yellow" variant="subtle" loading={rowActions.isPending(`artifact-abort:${run.kind}:${run.id}`)} onClick={() => handleArtifactAbort(run)}><Square size={16} /></ActionIcon>}
                         <ActionIcon color="red" variant="subtle" disabled={busy} loading={rowActions.isPending(`artifact-delete:${run.kind}:${run.id}`)} onClick={() => handleArtifactDelete(run)}><Trash2 size={16} /></ActionIcon>
                       </Group></Table.Td>
