@@ -332,6 +332,93 @@ class InspectPreviewResponse(BaseModel):
     contrast_diff_max: float | None = None
 
 
+class TemporalDynamicsRequest(BaseModel):
+    training_dataset_id: int
+    preprocessing_pipeline_id: int
+    reference_timestamp: datetime
+    analysis_window_seconds: int = Field(default=1800, ge=2, le=86400)
+    lags_seconds: list[int] = Field(default=[1, 2, 4, 8, 16, 32, 64, 128], min_length=1, max_length=32)
+    distance_metric: Literal["mae", "mse", "ssim"] = "mae"
+    downsample_width: int = Field(default=256, ge=16, le=2048)
+    downsample_height: int = Field(default=256, ge=16, le=2048)
+    roi_id: int | None = None
+    autocorrelation_max_lag_seconds: int = Field(default=128, ge=1, le=3600)
+    autocorrelation_threshold: float = Field(default=0.2, ge=-1.0, le=1.0)
+
+    @field_validator("lags_seconds")
+    @classmethod
+    def validate_lags(cls, value: list[int]):
+        parsed = sorted(set(int(lag) for lag in value))
+        if not parsed or parsed[0] < 1:
+            raise ValueError("Lag values must be positive whole seconds.")
+        return parsed
+
+
+class TemporalLagStatistics(BaseModel):
+    lag_seconds: int
+    pair_count: int
+    mean: float | None
+    median: float | None
+    std: float | None
+    p25: float | None
+    p75: float | None
+
+
+class TemporalMotionPoint(BaseModel):
+    timestamp: datetime
+    difference: float
+    interval_seconds: float
+    segment_id: int
+
+
+class TemporalAutocorrelationPoint(BaseModel):
+    lag_seconds: int
+    autocorrelation: float | None
+    pair_count: int
+
+
+class TemporalComparisonExample(BaseModel):
+    lag_seconds: int
+    reference_timestamp: datetime
+    comparison_timestamp: datetime
+    actual_lag_seconds: float
+    difference: float
+    reference_image_data_url: str
+    comparison_image_data_url: str
+    difference_image_data_url: str
+
+
+class TemporalDynamicsResponse(BaseModel):
+    training_dataset_id: int
+    preprocessing_pipeline_id: int
+    training_dataset_name: str
+    preprocessing_pipeline_name: str
+    roi_id: int | None
+    roi_name: str | None
+    reference_timestamp: datetime
+    start_timestamp: datetime
+    end_timestamp: datetime
+    distance_metric: str
+    distance_label: str
+    downsample_width: int
+    downsample_height: int
+    loaded_frame_count: int
+    skipped_frame_count: int
+    contiguous_segment_count: int
+    lag_statistics: list[TemporalLagStatistics]
+    motion_signal: list[TemporalMotionPoint]
+    autocorrelation: list[TemporalAutocorrelationPoint]
+    autocorrelation_threshold: float
+    estimated_correlation_length_seconds: int | None
+    estimated_lag_plateau_seconds: int | None
+    estimated_relevant_time_scale_seconds: int
+    recommended_sequence_length: int
+    recommended_temporal_stride: int
+    covered_time_window_seconds: int
+    comparison_examples: list[TemporalComparisonExample]
+    cached: bool = False
+
+
 class InspectRunCreate(InspectPreviewRequest):
     fps: int = Field(default=12, ge=1, le=60)
 

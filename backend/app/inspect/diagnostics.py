@@ -133,6 +133,23 @@ def _mask_specs(width: int, height: int, roi: models.RoiDefinition | None) -> tu
     }
 
 
+def roi_union_mask(
+    width: int,
+    height: int,
+    roi: models.RoiDefinition | None,
+) -> tuple[np.ndarray, dict[str, Any] | None]:
+    """Return the same full-image/ROI mask used by Inspect diagnostics.
+
+    Tiled ROIs are combined so consumers that need one aggregate score still
+    honor the exact saved quadrilateral geometry.
+    """
+    specs, metadata = _mask_specs(width, height, roi)
+    mask = np.zeros((height, width), dtype=bool)
+    for spec in specs:
+        mask |= spec["mask"]
+    return mask, metadata
+
+
 def _aggregate(values: np.ndarray, aggregation: str, normalize_by_pixels: bool) -> float:
     if values.size == 0:
         return float("nan")

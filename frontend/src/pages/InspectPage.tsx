@@ -45,12 +45,13 @@ import {
   listPreprocessingPipelines,
   listTrainingDatasets,
   previewInspect,
+  runTemporalDynamicsAnalysis,
 } from '../api';
 import { DateTime24Input } from '../components/DateTime24Input';
 import { StepCard } from '../components/StepCard';
 import { PlotlyChart } from '../components/PlotlyChart';
 import { usePendingIds } from '../hooks/usePendingIds';
-import type { InspectArtifactRun, InspectCsvData, InspectPreview, InspectRun, PreprocessingPipeline, RoiDefinition, TrainingDataset } from '../types';
+import type { InspectArtifactRun, InspectCsvData, InspectPreview, InspectRun, PreprocessingPipeline, RoiDefinition, TemporalDynamicsResult, TrainingDataset } from '../types';
 
 type InspectAnalysisMode = 'preprocessed_video' | 'contrast_enhanced' | 'energy' | 'optical_flow';
 type RoiPoint = { x: number; y: number };
@@ -63,6 +64,27 @@ function toInputDateTime(value: string | null): string {
 
 function formatTimestamp(value: string | null): string {
   return value ? value.replace('T', ' ').slice(0, 19) : 'n/a';
+}
+
+function midpointTimestamp(start: string | null, end: string | null): string {
+  if (!start) return '';
+  if (!end) return toInputDateTime(start);
+  // Dataset timestamps are timezone-naive wall times. Append Z only for the
+  // arithmetic so toISOString does not apply the browser's local UTC offset.
+  const asStableIso = (value: string) => /(?:Z|[+-]\d{2}:\d{2})$/.test(value) ? value : `${value}Z`;
+  const startMs = new Date(asStableIso(start)).getTime();
+  const endMs = new Date(asStableIso(end)).getTime();
+  if (!Number.isFinite(startMs) || !Number.isFinite(endMs)) return toInputDateTime(start);
+  return new Date(startMs + (endMs - startMs) / 2).toISOString().slice(0, 19);
+}
+
+function parseLagValues(value: string): number[] {
+  const parsed = value
+    .split(/[\s,;]+/)
+    .filter(Boolean)
+    .map(Number)
+    .filter((lag) => Number.isInteger(lag) && lag > 0);
+  return [...new Set(parsed)].sort((left, right) => left - right);
 }
 
 function statusColor(status: string): string {
@@ -313,6 +335,123 @@ function ArtifactViewer({ artifact }: { artifact: InspectArtifactRun | null }) {
   );
 }
 
+function TemporalDynamicsResults({ result }: { result: TemporalDynamicsResult }) {
+  const lagRows = result.lag_statistics.filter((row) => row.mean != null);
+  const lagX = lagRows.map((row) => row.lag_seconds);
+  const correlationLabel = result.estimated_correlation_length_seconds == null
+    ? 'Not reached or not estimable in the analyzed range'
+    : `${result.estimated_correlation_length_seconds} seconds`;
+  const number = (value: number | null) => value == null ? 'n/a' : value.toPrecision(5);
+  const motionSegments = [...new Set(result.motion_signal.map((row) => row.segment_id))].map((segmentId) => ({
+    segmentId,
+    rows: result.motion_signal.filter((row) => row.segment_id === segmentId),
+  }));
+
+  return (
+    <Stack gap="lg">
+      <Alert color="cyan" title="Temporal dynamics summary">
+        <Stack gap={4}>
+          <Text size="sm">Estimated relevant time scale: <strong>{result.estimated_relevant_time_scale_seconds} s</strong></Text>
+          <Text size="sm">Estimated temporal correlation length: <strong>{correlationLabel}</strong></Text>
+          <Text size="sm">
+            Recommended prototype configuration: <strong>{result.recommended_sequence_length} frames</strong>, temporal stride{' '}
+            <strong>{result.recommended_temporal_stride}</strong>, covered time window approximately{' '}
+            <strong>{result.covered_time_window_seconds} s</strong>.
+          </Text>
+          <Text size="xs" c="dimmed">
+            Heuristic only: the relevant scale conservatively combines the lag-curve plateau and the first motion autocorrelation below {result.autocorrelation_threshold}. This is not hyperparameter optimization.
+          </Text>
+        </Stack>
+      </Alert>
+
+      <Group gap="xs">
+        <Badge variant="light">{result.loaded_frame_count} frames</Badge>
+        <Badge variant="light">{result.contiguous_segment_count} contiguous segments</Badge>
+        <Badge variant="light">{result.downsample_width}x{result.downsample_height}</Badge>
+        <Badge variant="light">{result.distance_metric.toUpperCase()}</Badge>
+        {result.roi_name && <Badge variant="light" color="grape">ROI: {result.roi_name}</Badge>}
+        {result.skipped_frame_count > 0 && <Badge variant="light" color="yellow">{result.skipped_frame_count} unreadable skipped</Badge>}
+        {result.cached && <Badge variant="light" color="green">cached result</Badge>}
+      </Group>
+
+      <Paper withBorder p="md" radius="sm">
+        <Stack gap="sm">
+          <Text fw={700}>Image difference over temporal lag</Text>
+          <PlotlyChart
+            data={[
+              { type: 'scatter' as const, mode: 'lines' as const, x: lagX, y: lagRows.map((row) => row.p75), line: { width: 0 }, hoverinfo: 'skip' as const, showlegend: false },
+              { type: 'scatter' as const, mode: 'lines' as const, x: lagX, y: lagRows.map((row) => row.p25), fill: 'tonexty' as const, fillcolor: 'rgba(34, 139, 230, 0.18)', line: { width: 0 }, name: '25–75 percentile' },
+              { type: 'scatter' as const, mode: 'lines+markers' as const, x: lagX, y: lagRows.map((row) => row.mean), name: 'Mean', line: { color: '#1971c2', width: 3 } },
+            ]}
+            layout={{ xaxis: { title: { text: 'Temporal Lag [seconds]' }, type: 'log', dtick: 0.30103 }, yaxis: { title: { text: result.distance_label } }, hovermode: 'x unified' }}
+            height={380}
+          />
+          <ScrollArea>
+            <Table striped withTableBorder miw={760}>
+              <Table.Thead><Table.Tr><Table.Th>Lag [s]</Table.Th><Table.Th>Pairs</Table.Th><Table.Th>Mean</Table.Th><Table.Th>Median</Table.Th><Table.Th>Std</Table.Th><Table.Th>P25</Table.Th><Table.Th>P75</Table.Th></Table.Tr></Table.Thead>
+              <Table.Tbody>{result.lag_statistics.map((row) => <Table.Tr key={row.lag_seconds}><Table.Td>{row.lag_seconds}</Table.Td><Table.Td>{row.pair_count}</Table.Td><Table.Td>{number(row.mean)}</Table.Td><Table.Td>{number(row.median)}</Table.Td><Table.Td>{number(row.std)}</Table.Td><Table.Td>{number(row.p25)}</Table.Td><Table.Td>{number(row.p75)}</Table.Td></Table.Tr>)}</Table.Tbody>
+            </Table>
+          </ScrollArea>
+        </Stack>
+      </Paper>
+
+      <Paper withBorder p="md" radius="sm">
+        <Stack gap="sm">
+          <Text fw={700}>Frame-to-frame motion signal</Text>
+          <PlotlyChart
+            data={motionSegments.map(({ segmentId, rows }, index) => ({ type: 'scatter' as const, mode: 'lines' as const, x: rows.map((row) => row.timestamp), y: rows.map((row) => row.difference), name: index === 0 ? 'Frame difference' : `Segment ${segmentId + 1}`, showlegend: index === 0 }))}
+            layout={{ xaxis: { title: { text: 'Time' } }, yaxis: { title: { text: 'Frame-to-frame image difference (MAE)' } }, hovermode: 'x unified' }}
+            height={360}
+          />
+        </Stack>
+      </Paper>
+
+      <Paper withBorder p="md" radius="sm">
+        <Stack gap="sm">
+          <Group justify="space-between" wrap="wrap">
+            <Text fw={700}>Motion autocorrelation</Text>
+            <Badge variant="light" color={result.estimated_correlation_length_seconds == null ? 'gray' : 'cyan'}>
+              Estimated temporal correlation length: {correlationLabel}
+            </Badge>
+          </Group>
+          <PlotlyChart
+            data={[{ type: 'scatter' as const, mode: 'lines' as const, x: result.autocorrelation.map((row) => row.lag_seconds), y: result.autocorrelation.map((row) => row.autocorrelation), name: 'Autocorrelation', connectgaps: false }]}
+            layout={{
+              xaxis: { title: { text: 'Lag [seconds]' } },
+              yaxis: { title: { text: 'Autocorrelation' }, range: [-1, 1] },
+              shapes: [{ type: 'line', x0: 1, x1: result.autocorrelation.at(-1)?.lag_seconds ?? 128, y0: result.autocorrelation_threshold, y1: result.autocorrelation_threshold, line: { color: '#fa5252', dash: 'dash' } }],
+              hovermode: 'x unified',
+            }}
+            height={360}
+          />
+          <Text size="xs" c="dimmed">The 0.2 threshold is a pragmatic orientation value, not a hard scientific boundary.</Text>
+        </Stack>
+      </Paper>
+
+      <div>
+        <Text fw={700} mb="sm">Visual pair checks</Text>
+        <SimpleGrid cols={{ base: 1, xl: 2 }} spacing="md">
+          {result.comparison_examples.map((example) => (
+            <Paper key={example.lag_seconds} withBorder p="md" radius="sm">
+              <Stack gap="sm">
+                <Group justify="space-between"><Text fw={600}>{example.lag_seconds} s lag</Text><Badge variant="light">difference {example.difference.toPrecision(4)}</Badge></Group>
+                <Text size="xs" c="dimmed">{formatTimestamp(example.reference_timestamp)} → {formatTimestamp(example.comparison_timestamp)} · actual {example.actual_lag_seconds.toFixed(2)} s</Text>
+                <SimpleGrid cols={3} spacing="xs">
+                  {[
+                    ['Reference I(t)', example.reference_image_data_url],
+                    ['Comparison I(t+k)', example.comparison_image_data_url],
+                    ['Absolute difference', example.difference_image_data_url],
+                  ].map(([label, source]) => <Stack key={label} gap={4}><Text size="xs" ta="center">{label}</Text><img src={source} alt={`${label}, ${example.lag_seconds} second lag`} style={{ width: '100%', borderRadius: 4 }} /></Stack>)}
+                </SimpleGrid>
+              </Stack>
+            </Paper>
+          ))}
+        </SimpleGrid>
+      </div>
+    </Stack>
+  );
+}
+
 export function InspectPage({ active = true }: { active?: boolean }) {
   const [trainingDatasets, setTrainingDatasets] = useState<TrainingDataset[]>([]);
   const [preprocessingPipelines, setPreprocessingPipelines] = useState<PreprocessingPipeline[]>([]);
@@ -366,6 +505,15 @@ export function InspectPage({ active = true }: { active?: boolean }) {
   const [previewSignature, setPreviewSignature] = useState('');
   const [previewLoading, setPreviewLoading] = useState(false);
   const [runLoading, setRunLoading] = useState(false);
+  const [temporalReference, setTemporalReference] = useState('');
+  const [temporalWindowMinutes, setTemporalWindowMinutes] = useState(30);
+  const [temporalLags, setTemporalLags] = useState('1, 2, 4, 8, 16, 32, 64, 128');
+  const [temporalMetric, setTemporalMetric] = useState<'mae' | 'mse' | 'ssim'>('mae');
+  const [temporalDownsampleWidth, setTemporalDownsampleWidth] = useState(256);
+  const [temporalDownsampleHeight, setTemporalDownsampleHeight] = useState(256);
+  const [temporalUseRoi, setTemporalUseRoi] = useState(false);
+  const [temporalLoading, setTemporalLoading] = useState(false);
+  const [temporalResult, setTemporalResult] = useState<TemporalDynamicsResult | null>(null);
   const rowActions = usePendingIds();
 
   async function refreshArtifacts() {
@@ -521,6 +669,17 @@ export function InspectPage({ active = true }: { active?: boolean }) {
   const canPreview = Boolean(trainingDatasetId && preprocessingPipelineId && start && end && !invalidRange);
   const roiReadyForRun = !roiEnabled || selectedRoiId !== null;
   const canRun = canPreview && !runLoading && roiReadyForRun && (analysisMode !== 'contrast_enhanced' || contrastVmax > 0);
+  const temporalLagValues = parseLagValues(temporalLags);
+  const temporalLagsValid = temporalLagValues.length > 0 && temporalLagValues.length <= 32;
+  const canRunTemporal = Boolean(
+    trainingDatasetId
+    && preprocessingPipelineId
+    && temporalReference
+    && temporalWindowMinutes > 0
+    && temporalLagsValid
+    && (!temporalUseRoi || selectedRoiId != null)
+    && !temporalLoading
+  );
 
   function handleDatasetChange(value: string | null) {
     const id = value ? Number(value) : null;
@@ -528,8 +687,46 @@ export function InspectPage({ active = true }: { active?: boolean }) {
     setTrainingDatasetId(id);
     setStart(toInputDateTime(dataset?.start_timestamp ?? null));
     setEnd(toInputDateTime(dataset?.end_timestamp ?? null));
+    setTemporalReference(midpointTimestamp(dataset?.start_timestamp ?? null, dataset?.end_timestamp ?? null));
+    setTemporalResult(null);
     setPreview(null);
     setPreviewSignature('');
+  }
+
+  async function handleTemporalAnalysis() {
+    const lags = parseLagValues(temporalLags);
+    if (trainingDatasetId == null || preprocessingPipelineId == null || !temporalReference || lags.length === 0) return;
+    setTemporalLoading(true);
+    try {
+      const result = await runTemporalDynamicsAnalysis({
+        training_dataset_id: trainingDatasetId,
+        preprocessing_pipeline_id: preprocessingPipelineId,
+        reference_timestamp: temporalReference,
+        analysis_window_seconds: Math.max(2, Math.round(temporalWindowMinutes * 60)),
+        lags_seconds: lags,
+        distance_metric: temporalMetric,
+        downsample_width: temporalDownsampleWidth,
+        downsample_height: temporalDownsampleHeight,
+        roi_id: temporalUseRoi ? selectedRoiId : null,
+        autocorrelation_max_lag_seconds: Math.max(128, ...lags),
+        autocorrelation_threshold: 0.2,
+      });
+      setTemporalResult(result);
+      notifications.show({
+        color: 'green',
+        title: 'Temporal analysis complete',
+        message: `${result.loaded_frame_count} frames · ${result.contiguous_segment_count} contiguous segment(s)`,
+      });
+    } catch (error) {
+      setTemporalResult(null);
+      notifications.show({
+        color: 'red',
+        title: 'Temporal analysis failed',
+        message: error instanceof Error ? error.message : 'Unknown error',
+      });
+    } finally {
+      setTemporalLoading(false);
+    }
   }
 
   function markPreviewStale() {
@@ -728,6 +925,7 @@ export function InspectPage({ active = true }: { active?: boolean }) {
               value={preprocessingPipelineId == null ? null : String(preprocessingPipelineId)}
               onChange={(value) => {
                 setPreprocessingPipelineId(value ? Number(value) : null);
+                setTemporalResult(null);
                 markPreviewStale();
               }}
             />
@@ -1023,6 +1221,94 @@ export function InspectPage({ active = true }: { active?: boolean }) {
               )}
             </Stack>
           )}
+        </Stack>
+      </StepCard>
+
+      <StepCard
+        title="Temporal Dynamics Analysis"
+        subtitle="Estimate the useful 3D-CNN time scale without training a model. Uses the selected Source Combination Train/Test dataset and preprocessing pipeline."
+        color="grape"
+      >
+        <Stack gap="md">
+          <Paper withBorder p="md" radius="md" bg="var(--mantine-color-grape-0)">
+            <Stack gap="sm">
+              <Group justify="space-between" wrap="wrap">
+                <div>
+                  <Text fw={700}>Analysis source</Text>
+                  <Text size="xs" c="dimmed">Every frame passes through the current preprocessing pipeline once; all metrics then reuse the same normalized images and optional saved ROI.</Text>
+                </div>
+                <Group gap="xs">
+                  <Badge variant="light">{selectedDataset?.name ?? 'No Train/Test Dataset'}</Badge>
+                  <Badge variant="light" color="cyan">{selectedPipeline?.name ?? 'No Preprocessing Pipeline'}</Badge>
+                </Group>
+              </Group>
+              <SimpleGrid cols={{ base: 1, sm: 2, lg: 4 }} spacing="md">
+                <DateTime24Input
+                  label="Reference timestamp t"
+                  value={temporalReference}
+                  min={minDate}
+                  max={maxDate}
+                  onChange={(value) => { setTemporalReference(value); setTemporalResult(null); }}
+                />
+                <NumberInput
+                  label="Analysis period around t [minutes]"
+                  description="Total centered window (30 min = ±15 min)"
+                  min={1 / 30}
+                  step={1}
+                  decimalScale={2}
+                  value={temporalWindowMinutes}
+                  onChange={(value) => { setTemporalWindowMinutes(Math.max(1 / 30, Number(value) || 30)); setTemporalResult(null); }}
+                />
+                <Select
+                  label="Distance metric"
+                  data={[
+                    { value: 'mae', label: 'MAE' },
+                    { value: 'mse', label: 'MSE' },
+                    { value: 'ssim', label: 'SSIM distance (1 - SSIM)' },
+                  ]}
+                  value={temporalMetric}
+                  onChange={(value) => { setTemporalMetric((value ?? 'mae') as 'mae' | 'mse' | 'ssim'); setTemporalResult(null); }}
+                />
+                <TextInput
+                  label="Lag values [seconds]"
+                  description="Comma or space separated"
+                  value={temporalLags}
+                  error={temporalLagsValid ? undefined : 'Enter 1–32 positive whole-second lag values.'}
+                  onChange={(event) => { setTemporalLags(event.currentTarget.value); setTemporalResult(null); }}
+                />
+              </SimpleGrid>
+              <SimpleGrid cols={{ base: 1, sm: 2, lg: 4 }} spacing="md">
+                <NumberInput label="Downsample width" min={16} max={2048} value={temporalDownsampleWidth} onChange={(value) => { setTemporalDownsampleWidth(Math.max(16, Number(value) || 256)); setTemporalResult(null); }} />
+                <NumberInput label="Downsample height" min={16} max={2048} value={temporalDownsampleHeight} onChange={(value) => { setTemporalDownsampleHeight(Math.max(16, Number(value) || 256)); setTemporalResult(null); }} />
+                <Switch
+                  label="Use saved ROI"
+                  description="Same Inspect ROI geometry, aggregated across tiles"
+                  checked={temporalUseRoi}
+                  onChange={(event) => { setTemporalUseRoi(event.currentTarget.checked); setTemporalResult(null); }}
+                />
+                <Select
+                  label="Temporal analysis ROI"
+                  placeholder="Choose saved ROI"
+                  disabled={!temporalUseRoi}
+                  searchable
+                  data={rois.map((roi) => ({ value: String(roi.id), label: roiLabel(roi) }))}
+                  value={selectedRoiId == null ? null : String(selectedRoiId)}
+                  onChange={(value) => { setSelectedRoiId(value ? Number(value) : null); setTemporalResult(null); }}
+                />
+              </SimpleGrid>
+              <Group justify="space-between" align="center" wrap="wrap">
+                <Text size="xs" c="dimmed">
+                  Missing/unreadable frames are skipped. Pairing is timestamp-based and never crosses detected source folders or cadence gaps.
+                </Text>
+                <Button loading={temporalLoading} disabled={!canRunTemporal} onClick={handleTemporalAnalysis}>
+                  Run Temporal Analysis
+                </Button>
+              </Group>
+            </Stack>
+          </Paper>
+
+          {temporalLoading && <Progress value={100} animated />}
+          {temporalResult && <TemporalDynamicsResults result={temporalResult} />}
         </Stack>
       </StepCard>
 

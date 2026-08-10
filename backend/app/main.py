@@ -39,6 +39,8 @@ from app.schemas import (
     InspectCsvData,
     InspectRunCreate,
     InspectRunRead,
+    TemporalDynamicsRequest,
+    TemporalDynamicsResponse,
     MethodConfigurationCreate,
     MethodConfigurationPayload,
     MethodConfigurationRead,
@@ -99,6 +101,7 @@ from app.analysis import service as analysis_service
 from app.heatmap import service as heatmap_service
 from app.registry import service as registry_service
 from app.inspect import service as inspect_service
+from app.inspect.temporal_dynamics import analyze_temporal_dynamics
 from app.optimization import service as optimization_service
 from app.testing import service as testing_service
 from app.testing.service import TestingConflict
@@ -1058,6 +1061,13 @@ def create_app() -> FastAPI:
     def api_preview_inspect(payload: InspectPreviewRequest, db: Session = Depends(get_db)):
         try:
             return inspect_service.preview_inspect(db, payload)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.post("/api/inspect/temporal-dynamics", response_model=TemporalDynamicsResponse)
+    def api_temporal_dynamics(payload: TemporalDynamicsRequest, db: Session = Depends(get_db)):
+        try:
+            return analyze_temporal_dynamics(db, payload)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 

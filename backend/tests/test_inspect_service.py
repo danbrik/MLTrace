@@ -4,6 +4,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 import numpy as np
+import pytest
 from PIL import Image
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
@@ -14,7 +15,8 @@ from app.database import Base
 from app.inspect.contrast import StreamingMovingAverage, moving_average_uint8
 from app.inspect import engine as inspect_engine
 from app.inspect import service as inspect_service
-from app.schemas import InspectPreviewRequest, InspectRunCreate
+from app.inspect.temporal_dynamics import analyze_temporal_dynamics
+from app.schemas import InspectPreviewRequest, InspectRunCreate, TemporalDynamicsRequest
 from app.training import data as inspect_data
 
 
@@ -137,6 +139,82 @@ def test_inspect_preview_uses_clipped_rules_and_extra_stride(tmp_path: Path) -> 
         assert preview.preview_frame_count == 2
         assert len(preview.preview_frames) == 2
         assert preview.preview_frames[0]["image_data_url"].startswith("data:image/png;base64,")
+    finally:
+        db.close()
+
+
+def test_temporal_dynamics_reuses_train_test_selection_and_caches(tmp_path: Path) -> None:
+    SessionLocal = make_db()
+    db = SessionLocal()
+    try:
+        training_dataset, preprocessing = seed_inspect_fixture(db, tmp_path / "images")
+        payload = TemporalDynamicsRequest(
+            training_dataset_id=training_dataset.id,
+            preprocessing_pipeline_id=preprocessing.id,
+            reference_timestamp=datetime(2026, 2, 4, 15, 30, 30),
+            analysis_window_seconds=60,
+            lags_seconds=[20, 40],
+            distance_metric="mae",
+            downsample_width=16,
+            downsample_height=16,
+            autocorrelation_max_lag_seconds=5,
+        )
+
+        result = analyze_temporal_dynamics(db, payload)
+
+        # The saved Train/Test rule stride is 2, so the available frames are
+        # 00, 20, and 40 seconds with intensity values 40, 42, and 44.
+        assert result.loaded_frame_count == 3
+        assert result.contiguous_segment_count == 1
+        assert result.lag_statistics[0].pair_count == 2
+        assert result.lag_statistics[0].mean == pytest.approx(2 / 255)
+        assert result.lag_statistics[1].pair_count == 1
+        assert result.lag_statistics[1].mean == pytest.approx(4 / 255)
+        assert len(result.motion_signal) == 2
+        assert len(result.comparison_examples) == 2
+        assert result.comparison_examples[0].reference_image_data_url.startswith("data:image/png;base64,")
+        assert result.recommended_sequence_length == 16
+        assert result.cached is False
+
+        cached = analyze_temporal_dynamics(db, payload)
+        assert cached.cached is True
+        assert cached.lag_statistics == result.lag_statistics
+    finally:
+        db.close()
+
+
+def test_temporal_dynamics_never_pairs_across_missing_frame_gap(tmp_path: Path) -> None:
+    SessionLocal = make_db()
+    db = SessionLocal()
+    try:
+        training_dataset, preprocessing = seed_inspect_fixture(db, tmp_path / "images", image_count=7)
+        rule = training_dataset.rules[0]
+        rule.stride = 1
+        rule.end_timestamp = datetime(2026, 2, 4, 15, 31, 0)
+        # Remove the 30-second frame: with a nominal 10-second cadence this
+        # creates two contiguous segments, not a valid 20-second bridge.
+        missing = tmp_path / "images" / "frame_20260204_153030.tif"
+        missing.unlink()
+        db.commit()
+
+        result = analyze_temporal_dynamics(
+            db,
+            TemporalDynamicsRequest(
+                training_dataset_id=training_dataset.id,
+                preprocessing_pipeline_id=preprocessing.id,
+                reference_timestamp=datetime(2026, 2, 4, 15, 30, 30),
+                analysis_window_seconds=60,
+                lags_seconds=[20],
+                downsample_width=16,
+                downsample_height=16,
+                autocorrelation_max_lag_seconds=5,
+            ),
+        )
+
+        assert result.loaded_frame_count == 6
+        assert result.contiguous_segment_count == 2
+        assert result.lag_statistics[0].pair_count == 2  # 00→20 and 40→60 only
+        assert len(result.motion_signal) == 4
     finally:
         db.close()
 

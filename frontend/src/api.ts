@@ -9,6 +9,7 @@ import type {
   HeatmapVisualizationConfig,
   InspectPreview,
   InspectRun,
+  TemporalDynamicsResult,
   InspectArtifactRunPage,
   InspectCsvData,
   MethodConfiguration,
@@ -936,6 +937,25 @@ export function previewInspect(payload: {
   return request<InspectPreview>('/api/inspect/preview', {
     method: 'POST',
     body: JSON.stringify({ content_mode: 'final_preprocessed_output', ...payload }),
+  });
+}
+
+export function runTemporalDynamicsAnalysis(payload: {
+  training_dataset_id: number;
+  preprocessing_pipeline_id: number;
+  reference_timestamp: string;
+  analysis_window_seconds: number;
+  lags_seconds: number[];
+  distance_metric: 'mae' | 'mse' | 'ssim';
+  downsample_width: number;
+  downsample_height: number;
+  roi_id?: number | null;
+  autocorrelation_max_lag_seconds?: number;
+  autocorrelation_threshold?: number;
+}): Promise<TemporalDynamicsResult> {
+  return request<TemporalDynamicsResult>('/api/inspect/temporal-dynamics', {
+    method: 'POST',
+    body: JSON.stringify(payload),
   });
 }
 

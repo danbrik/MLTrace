@@ -824,6 +824,63 @@ export type InspectPreview = {
   contrast_diff_max?: number | null;
 };
 
+export type TemporalDynamicsResult = {
+  training_dataset_id: number;
+  preprocessing_pipeline_id: number;
+  training_dataset_name: string;
+  preprocessing_pipeline_name: string;
+  roi_id: number | null;
+  roi_name: string | null;
+  reference_timestamp: string;
+  start_timestamp: string;
+  end_timestamp: string;
+  distance_metric: 'mae' | 'mse' | 'ssim';
+  distance_label: string;
+  downsample_width: number;
+  downsample_height: number;
+  loaded_frame_count: number;
+  skipped_frame_count: number;
+  contiguous_segment_count: number;
+  lag_statistics: Array<{
+    lag_seconds: number;
+    pair_count: number;
+    mean: number | null;
+    median: number | null;
+    std: number | null;
+    p25: number | null;
+    p75: number | null;
+  }>;
+  motion_signal: Array<{
+    timestamp: string;
+    difference: number;
+    interval_seconds: number;
+    segment_id: number;
+  }>;
+  autocorrelation: Array<{
+    lag_seconds: number;
+    autocorrelation: number | null;
+    pair_count: number;
+  }>;
+  autocorrelation_threshold: number;
+  estimated_correlation_length_seconds: number | null;
+  estimated_lag_plateau_seconds: number | null;
+  estimated_relevant_time_scale_seconds: number;
+  recommended_sequence_length: number;
+  recommended_temporal_stride: number;
+  covered_time_window_seconds: number;
+  comparison_examples: Array<{
+    lag_seconds: number;
+    reference_timestamp: string;
+    comparison_timestamp: string;
+    actual_lag_seconds: number;
+    difference: number;
+    reference_image_data_url: string;
+    comparison_image_data_url: string;
+    difference_image_data_url: string;
+  }>;
+  cached: boolean;
+};
+
 export type InspectRun = {
   id: number;
   training_dataset_id: number;
