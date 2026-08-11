@@ -1,4 +1,8 @@
 import type {
+  AnomalyDetectionConfig,
+  AnomalyDetectionRun,
+  AnomalyDetectionRunSummary,
+  AnomalyDetectionScoreSeries,
   CacheRevisions,
   Dataset,
   DatasetConnectionTest,
@@ -823,6 +827,36 @@ export function updateAnalysisLayout(
 export async function deleteAnalysisLayout(layoutId: number): Promise<void> {
   await request<void>(`/api/analysis/layouts/${layoutId}`, { method: 'DELETE' });
   invalidate(['analysisLayouts']);
+}
+
+export function listAnomalyDetectionRuns(): Promise<AnomalyDetectionRunSummary[]> {
+  return cachedList<AnomalyDetectionRunSummary[]>('anomalyDetectionRuns', '/api/anomaly-detection-runs', RUN_TTL_MS);
+}
+
+export function getAnomalyDetectionRun(runId: number, maxPoints = 8000): Promise<AnomalyDetectionRun> {
+  return request<AnomalyDetectionRun>(`/api/anomaly-detection-runs/${runId}?max_points=${maxPoints}`);
+}
+
+export function createAnomalyDetectionRun(payload: {
+  name: string;
+  testing_run_id: number;
+  score_series: AnomalyDetectionScoreSeries;
+  start_timestamp: string;
+  end_timestamp: string;
+  config: AnomalyDetectionConfig;
+}): Promise<AnomalyDetectionRun> {
+  return request<AnomalyDetectionRun>('/api/anomaly-detection-runs', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  }, 120_000).then((run) => {
+    invalidate(['anomalyDetectionRuns']);
+    return run;
+  });
+}
+
+export async function deleteAnomalyDetectionRun(runId: number): Promise<void> {
+  await request<void>(`/api/anomaly-detection-runs/${runId}`, { method: 'DELETE' });
+  invalidate(['anomalyDetectionRuns']);
 }
 
 export function listOptimizationStudies(): Promise<OptimizationStudy[]> {

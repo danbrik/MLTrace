@@ -475,6 +475,10 @@ class TestingRun(Base):
         cascade="all, delete-orphan",
         order_by="TestingRunResult.position",
     )
+    anomaly_detection_runs: Mapped[list["AnomalyDetectionRun"]] = relationship(
+        back_populates="testing_run",
+        cascade="all, delete-orphan",
+    )
 
 
 class TestingRunResult(Base):
@@ -483,6 +487,7 @@ class TestingRunResult(Base):
     __tablename__ = "testing_run_results"
     __table_args__ = (
         Index("ix_testing_run_results_run_position", "testing_run_id", "position"),
+        Index("ix_testing_run_results_run_timestamp", "testing_run_id", "timestamp"),
         Index("ix_testing_run_results_timestamp", "timestamp"),
         Index("ix_testing_run_results_score", "score"),
     )
@@ -502,6 +507,63 @@ class TestingRunResult(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=False), server_default=func.now())
 
     testing_run: Mapped[TestingRun] = relationship(back_populates="results")
+
+
+class AnomalyDetectionRun(Base):
+    """Saved causal anomaly detection over one testing-run score series."""
+
+    __tablename__ = "anomaly_detection_runs"
+    __table_args__ = (
+        Index("ix_anomaly_detection_runs_created_at", "created_at"),
+        Index("ix_anomaly_detection_runs_testing_run", "testing_run_id"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    testing_run_id: Mapped[int] = mapped_column(
+        ForeignKey("testing_runs.id", ondelete="CASCADE"), nullable=False
+    )
+    testing_run_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    score_series: Mapped[str] = mapped_column(String(32), nullable=False, default="score")
+    start_timestamp: Mapped[datetime] = mapped_column(DateTime(timezone=False), nullable=False)
+    end_timestamp: Mapped[datetime] = mapped_column(DateTime(timezone=False), nullable=False)
+    algorithm_version: Mapped[str] = mapped_column(String(32), nullable=False, default="robust_cusum_v1")
+    config: Mapped[dict] = mapped_column(json_type(), nullable=False)
+    point_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    warning_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    anomaly_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=False), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=False), server_default=func.now(), onupdate=func.now()
+    )
+
+    testing_run: Mapped[TestingRun] = relationship(back_populates="anomaly_detection_runs")
+    events: Mapped[list["AnomalyDetectionEvent"]] = relationship(
+        back_populates="run",
+        cascade="all, delete-orphan",
+        order_by="AnomalyDetectionEvent.warning_start",
+    )
+
+
+class AnomalyDetectionEvent(Base):
+    """One warning interval, optionally promoted to a confirmed anomaly."""
+
+    __tablename__ = "anomaly_detection_events"
+    __table_args__ = (Index("ix_anomaly_detection_events_run_start", "run_id", "warning_start"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    run_id: Mapped[int] = mapped_column(
+        ForeignKey("anomaly_detection_runs.id", ondelete="CASCADE"), nullable=False
+    )
+    warning_start: Mapped[datetime] = mapped_column(DateTime(timezone=False), nullable=False)
+    confirmed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=False))
+    end_timestamp: Mapped[datetime] = mapped_column(DateTime(timezone=False), nullable=False)
+    end_reason: Mapped[str] = mapped_column(String(32), nullable=False)
+    peak_timestamp: Mapped[datetime] = mapped_column(DateTime(timezone=False), nullable=False)
+    max_score: Mapped[float] = mapped_column(Float, nullable=False)
+    max_robust_z: Mapped[float] = mapped_column(Float, nullable=False)
+
+    run: Mapped[AnomalyDetectionRun] = relationship(back_populates="events")
 
 
 class HeatmapRun(Base):

@@ -13,6 +13,7 @@ export type ResourceKey =
   | 'heatmapRanges'
   | 'inspectRuns'
   | 'analysisLayouts'
+  | 'anomalyDetectionRuns'
   | 'optimizationStudies'
   | 'rois';
 

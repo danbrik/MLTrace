@@ -671,6 +671,72 @@ export type TestingRunResults = {
   decimated: boolean;
 };
 
+export type AnomalyDetectionScoreSeries = 'score' | 'full_mse' | 'roi_mse';
+
+export type AnomalyDetectionConfig = {
+  smoothing_half_life_minutes: number;
+  baseline_window_minutes: number;
+  warmup_minutes: number;
+  minimum_warmup_points: number;
+  warning_z: number;
+  high_z: number;
+  cusum_drift: number;
+  cusum_threshold: number;
+  confirmation_minutes: number;
+  recovery_z: number;
+  recovery_minutes: number;
+  preroll_minutes: number;
+  gap_multiplier: number;
+  minimum_gap_minutes: number;
+};
+
+export type AnomalyDetectionEvent = {
+  id: number;
+  warning_start: string;
+  confirmed_at: string | null;
+  end_timestamp: string;
+  end_reason: string;
+  peak_timestamp: string;
+  max_score: number;
+  max_robust_z: number;
+};
+
+export type AnomalyDetectionSeriesPoint = {
+  timestamp: string;
+  score: number;
+  smoothed: number;
+  baseline: number | null;
+  warning_threshold: number | null;
+  high_threshold: number | null;
+  robust_z: number | null;
+  cusum: number;
+  state: 'warmup' | 'normal' | 'warning' | 'confirmed';
+};
+
+export type AnomalyDetectionRunSummary = {
+  id: number;
+  name: string;
+  testing_run_id: number;
+  testing_run_name: string;
+  score_series: AnomalyDetectionScoreSeries;
+  start_timestamp: string;
+  end_timestamp: string;
+  algorithm_version: string;
+  config: AnomalyDetectionConfig;
+  point_count: number;
+  warning_count: number;
+  anomaly_count: number;
+  created_at: string;
+  updated_at: string;
+};
+
+export type AnomalyDetectionRun = AnomalyDetectionRunSummary & {
+  events: AnomalyDetectionEvent[];
+  series: AnomalyDetectionSeriesPoint[];
+  total: number;
+  decimated: boolean;
+};
+
 export type TestingRunResultImage = {
   testing_run_id: number;
   result_id: number;

@@ -1859,6 +1859,9 @@ def restart_testing_run(db: Session, run_id: int) -> TestingRunRead | None:
     if run.status in ("queued", "running"):
         raise ValueError("Run is already queued or running.")
     # Clear prior results/CSV and re-queue the same row (one history per config).
+    from app.anomaly_detection.service import delete_runs_for_testing_run
+
+    delete_runs_for_testing_run(db, run.id)
     db.execute(delete(models.TestingRunResult).where(models.TestingRunResult.testing_run_id == run.id))
     shutil.rmtree(_testing_run_dir(run.id), ignore_errors=True)
     _reset_testing_run_for_queue(db, run)

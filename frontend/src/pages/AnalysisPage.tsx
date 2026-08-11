@@ -203,6 +203,11 @@ type PlotPreview = {
   plot: AnalysisPlot;
 };
 
+type AutomaticPlotMetadata = {
+  title: string;
+  detailLines: string[];
+};
+
 type EditingPlotState = {
   plot: AnalysisPlot;
   index: number;
@@ -483,7 +488,17 @@ function traceToSource(trace: PlotTraceConfig): PlotSourceConfig {
 }
 
 function plotSources(plot: AnalysisPlot): PlotSourceConfig[] {
-  return plot.traces?.length ? plot.traces.map(traceToSource) : plot.sources;
+  if (plot.traces?.length) return plot.traces.map(traceToSource);
+  if (plot.sources.length > 0) return plot.sources;
+  return plot.testingRunId
+    ? [{
+        testingRunId: plot.testingRunId,
+        start: plot.start,
+        end: plot.end,
+        sampling: plot.sampling,
+        timestamp: plot.timestamp,
+      }]
+    : [];
 }
 
 function sourceTraceKey(source: PlotSourceConfig): string {
@@ -780,21 +795,6 @@ function defaultAnalyticsConfig(kind: AnalyticsKind): AnalyticsMethodConfig {
   return { kind, params: { ...definition.defaultParams } };
 }
 
-function analyticsSummary(configs: AnalyticsMethodConfig[]): string {
-  if (configs.length === 0) return 'Analytics: none';
-  return `Analytics: ${configs.map((config) => {
-    const params = config.params;
-    const details: string[] = [];
-    if (typeof params.alpha === 'number') details.push(`alpha=${params.alpha}`);
-    if (typeof params.beta === 'number') details.push(`beta=${params.beta}`);
-    if (typeof params.windowSamples === 'number' && params.windowMode === 'samples') details.push(`W=${params.windowSamples} samples`);
-    if (typeof params.windowMinutes === 'number' && params.windowMode === 'minutes') details.push(`W=${params.windowMinutes} min`);
-    if (typeof params.k === 'number') details.push(`k=${params.k}`);
-    if (typeof params.h === 'number') details.push(`h=${params.h}`);
-    return `${analyticsDefinition(config.kind).label}${details.length ? ` (${details.join(', ')})` : ''}`;
-  }).join(', ')}`;
-}
-
 function analyticsParamLabel(key: string): string {
   const labels: Record<string, string> = {
     alpha: 'Alpha',
@@ -873,6 +873,108 @@ function analyticsParamInfo(key: string): string {
     snr_ratio: 'Causal rolling signal-to-noise ratio as a unitless quotient: absolute local mean divided by local standard deviation.',
   };
   return infos[key] ?? 'Parameter used by this causal time-series analytics stage.';
+}
+
+function uniqueStrings(values: Array<string | null | undefined>): string[] {
+  return [...new Set(values.map((value) => value?.trim()).filter((value): value is string => Boolean(value)))];
+}
+
+function automaticValue(value: number | string | boolean): string {
+  if (typeof value === 'boolean') return value ? 'on' : 'off';
+  if (typeof value === 'number') return formatValue(value);
+  return value;
+}
+
+function scoreSeriesLabel(value: string): string {
+  const labels: Record<string, string> = {
+    score: 'Combined / primary score',
+    reconstruction: 'Reconstruction score',
+    prediction: 'Prediction score',
+    fast_combined: 'fastAnoGAN combined score',
+    fast_residual: 'fastAnoGAN pixel residual',
+    fast_feature: 'fastAnoGAN critic feature score',
+  };
+  if (value.startsWith('future+')) return `Future +${value.slice('future+'.length)}`;
+  return labels[value] ?? value.replaceAll('_', ' ');
+}
+
+function analyticsDetailLines(configs: AnalyticsMethodConfig[]): string[] {
+  if (configs.length === 0) return ['Analytics: none'];
+  return configs.map((config, index) => {
+    const params = Object.entries(config.params)
+      .map(([key, value]) => `${analyticsParamLabel(key)}=${automaticValue(value)}`)
+      .join(', ');
+    return `Analytics ${index + 1}: ${analyticsDefinition(config.kind).label}${params ? ` · ${params}` : ''}`;
+  });
+}
+
+function automaticPlotMetadata(plot: AnalysisPlot, testingRuns: TestingRun[]): AutomaticPlotMetadata {
+  const sources = plotSources(plot);
+  const runById = new Map(testingRuns.map((run) => [run.id, run]));
+  const runs = sources.map((source) => runById.get(Number(source.testingRunId)) ?? null);
+  const traces = plot.traces ?? [];
+
+  const modelLabels = uniqueStrings(sources.map((source) => {
+    const run = runById.get(Number(source.testingRunId));
+    const trace = traces.find((item) => item.testingRunId === source.testingRunId);
+    return run?.training_pipeline_name || run?.training_run_name || trace?.modelLabel || `Source run #${source.testingRunId}`;
+  }));
+  const datasetLabels = uniqueStrings(runs.map((run, index) => run?.training_dataset_name ?? `Inference dataset (source #${sources[index].testingRunId})`));
+  const roiLabels = uniqueStrings(runs.map((run, index) => run
+    ? (run.roi_name ?? (run.roi_id === null ? 'No ROI' : `ROI #${run.roi_id}`))
+    : `ROI (source #${sources[index].testingRunId})`));
+  const modelPart = modelLabels.length === 1 ? modelLabels[0] : modelLabels.length > 1 ? `${modelLabels.length} models` : 'Model unavailable';
+  const datasetPart = datasetLabels.length === 1
+    ? datasetLabels[0]
+    : datasetLabels.length > 1 ? `${datasetLabels.length} inference datasets` : 'Inference dataset unavailable';
+  const roiPart = roiLabels.length === 1 ? roiLabels[0] : roiLabels.length > 1 ? `${roiLabels.length} ROIs` : 'ROI unavailable';
+
+  const metrics = uniqueStrings(traces.length > 0
+    ? traces.map((trace) => metricLabel(trace.metric))
+    : runs.map((run) => run ? metricLabel(metricKeyForRun(run)) : null));
+  const aggregations = uniqueStrings(traces.length > 0
+    ? traces.map((trace) => aggregationLabel(trace.aggregation ?? 'mean'))
+    : runs.map((run) => run ? aggregationLabel(aggregationKeyForRun(run)) : null));
+  const sourceNames = uniqueStrings(sources.map((source) => runById.get(Number(source.testingRunId))?.name ?? `Testing run #${source.testingRunId}`));
+  const detailLines = [
+    `Sources: ${sourceNames.join(', ') || 'unavailable'} · Metrics: ${metrics.join(', ') || 'unavailable'} · Aggregations: ${aggregations.join(', ') || 'unavailable'}`,
+  ];
+
+  if (plot.plotType === 'heatmap' && plot.heatmapMode === 'single') {
+    detailLines.push(`Timestamp: ${artifactTimestamp(plot.timestamp ?? plot.start)} · Sampling: every 1 frame`);
+  } else {
+    detailLines.push(`Range: ${artifactTimestamp(plot.start)} – ${artifactTimestamp(plot.end)} · Sampling: every ${Math.max(1, plot.sampling)} frame${Math.max(1, plot.sampling) === 1 ? '' : 's'}`);
+  }
+
+  if (plot.plotType === 'timeseries') {
+    detailLines.push(`Score series: ${scoreSeriesLabel(plot.scoreSeries)} · Moving average: ${Math.max(1, plot.movingAverage)} · Panel height: ${plot.panelHeightPx}px · Intermediate panels: ${plot.showIntermediateAnalyticsPanels ? 'shown' : 'hidden'}`);
+    detailLines.push(...analyticsDetailLines(plot.timeseriesAnalytics));
+  } else {
+    const config = plot.heatmapConfig;
+    const residual = config.residual_source === 'ssim_residual' ? 'SSIM residual' : 'Pixel residual';
+    const error = config.residual_source === 'ssim_residual' ? '1 - SSIM' : `${config.error_mode} error`;
+    detailLines.push(`Heatmap: ${plot.heatmapMode === 'single' ? 'single image' : 'range video'} · Residual: ${residual} · Error: ${error}`);
+    detailLines.push(`Visualization: threshold ${config.threshold_enabled ? 'on' : 'off'} (${formatValue(config.threshold)}) · Max clip ${config.max_clip_enabled ? 'on' : 'off'} (${formatValue(config.max_clip * 100)}%) · Fixed ceiling ${config.fixed_ceiling_enabled ? 'on' : 'off'} (${formatValue(config.fixed_ceiling)}) · Max opacity ${formatValue(config.max_opacity * 100)}%`);
+    detailLines.push(`Signed deviations: ${config.signed_deviations ? 'on' : 'off'} · Positive weight ${formatValue(config.positive_weight)} · Negative weight ${formatValue(config.negative_weight)}`);
+    if (config.residual_source === 'ssim_residual') {
+      detailLines.push(`SSIM: window ${config.ssim_window_size} · alpha ${formatValue(config.ssim_alpha)} · beta ${formatValue(config.ssim_beta)} · gamma ${formatValue(config.ssim_gamma)} · K1 ${formatValue(config.ssim_k1)} · K2 ${formatValue(config.ssim_k2)} · data range ${formatValue(config.ssim_data_range)}`);
+    }
+    detailLines.push(`Reference: ${plot.includeReference ? 'shown' : 'hidden'} · Image size: ${plot.heatmapDisplaySize ?? DEFAULT_HEATMAP_DISPLAY_SIZE}px`);
+    if (plot.heatmapMode === 'range') {
+      detailLines.push(`Video: ${plot.heatmapFps ?? 8} fps · Color scale: ${config.fixed_ceiling_enabled ? 'fixed ceiling' : plot.heatmapScaleMode === 'shared' ? 'shared' : 'per-frame'}`);
+    }
+    const stae = runs.some((run) => run?.method_type === 'spatiotemporal_autoencoder' || run?.method_family === 'spatiotemporal_autoencoder');
+    if (stae || plot.staeHeatmapView === 'prediction') {
+      detailLines.push(`STAE: ${plot.staeHeatmapView === 'prediction' ? 'future prediction' : 'reconstruction'} · Prediction horizon: ${plot.predictionHorizon}`);
+    }
+  }
+
+  return { title: `${modelPart} · ${datasetPart} · ${roiPart}`, detailLines };
+}
+
+function withAutomaticPlotMetadata(plot: AnalysisPlot, testingRuns: TestingRun[]): AnalysisPlot {
+  const metadata = automaticPlotMetadata(plot, testingRuns);
+  return { ...plot, title: metadata.title, subtitle: metadata.detailLines.join('\n') };
 }
 
 function numberParam(config: AnalyticsMethodConfig, key: string, fallback: number): number {
@@ -1817,17 +1919,21 @@ const AnalysisPlotCard = memo(function AnalysisPlotCard({
     <Paper withBorder p="md" radius="sm">
       <Stack gap="md">
         <Group justify="space-between" align="flex-start">
-          <div>
-            <Group gap="xs">
-              <Title order={4} fw={500}>{plot.title}</Title>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <Group gap="xs" wrap="wrap">
+              <Title order={4} fw={500} style={{ overflowWrap: 'anywhere' }}>{plot.title}</Title>
               <Badge variant="light" color={plot.plotType === 'heatmap' ? 'red' : 'blue'}>
                 {plot.plotType === 'heatmap' ? 'Heatmap' : 'Time series'}
               </Badge>
             </Group>
             {plot.subtitle && (
-              <Text size="sm" c="dimmed" mt={2}>
-                {plot.subtitle}
-              </Text>
+              <Stack gap={1} mt={3}>
+                {plot.subtitle.split('\n').filter(Boolean).map((line, index) => (
+                  <Text key={`${index}:${line}`} size="sm" c="dimmed" style={{ overflowWrap: 'anywhere' }}>
+                    {line}
+                  </Text>
+                ))}
+              </Stack>
             )}
             <Text size="sm" c="dimmed">
               {results.length} result rows · {plotSources(plot).length} source{plotSources(plot).length === 1 ? '' : 's'}
@@ -2666,7 +2772,7 @@ export function AnalysisPage({ active = true }: { active?: boolean }) {
     return {
       version: 2,
       draft,
-      plots,
+      plots: plots.map((plot) => withAutomaticPlotMetadata(plot, testingRuns)),
       selectedPipelineId,
       selectedModelIds,
       selectedInferenceDatasetId,
@@ -2696,8 +2802,8 @@ export function AnalysisPage({ active = true }: { active?: boolean }) {
       setSelectedLayoutId(String(saved.id));
       setLayoutName(saved.name);
       setLayoutDescription(saved.description ?? '');
-      setDraft(restored.draft);
-      setPlots(restored.plots);
+      setDraft({ ...restored.draft, title: '', subtitle: '' });
+      setPlots(restored.plots.map((plot) => withAutomaticPlotMetadata(plot, testingRuns)));
       setSelectedPipelineId(restored.selectedPipelineId);
       setSelectedModelIds(restored.selectedModelIds ?? []);
       setSelectedInferenceDatasetId(restored.selectedInferenceDatasetId ?? null);
@@ -2876,7 +2982,6 @@ export function AnalysisPage({ active = true }: { active?: boolean }) {
           if (current.testingRunId !== String(selectedRunId)) return current;
           return {
             ...current,
-            title: current.title || `Heatmap · ${run?.name ?? `Testing run #${selectedRunId}`}`,
             start: current.start || bounds.start,
             end: current.end || bounds.end,
             timestamp: current.timestamp ?? firstResultTimestamp ?? bounds.start,
@@ -2902,7 +3007,6 @@ export function AnalysisPage({ active = true }: { active?: boolean }) {
           const last = data.results[data.results.length - 1];
           return {
             ...current,
-            title: current.title || `${current.plotType === 'heatmap' ? 'Heatmap' : 'Time series'} · ${data.testing_run.name}`,
             start: current.start || bounds.start || toDateTimeLocal(first.timestamp),
             end: current.end || bounds.end || toDateTimeLocal(last.timestamp),
             timestamp: current.timestamp ?? first.timestamp,
@@ -3115,9 +3219,7 @@ export function AnalysisPage({ active = true }: { active?: boolean }) {
     const selectedResults = effectiveHeatmapDerivationResults;
     const effectiveStart = selectedResults[0].timestamp;
     const effectiveEnd = selectedResults[selectedResults.length - 1].timestamp;
-    const run = testingRuns.find((item) => item.id === Number(timeSeriesHeatmapDraft.testingRunId));
     const selectedTrace = heatmapDerivationPlot.traces?.find((trace) => trace.testingRunId === timeSeriesHeatmapDraft.testingRunId);
-    const label = selectedTrace?.legendLabel ?? run?.name ?? `Testing run #${timeSeriesHeatmapDraft.testingRunId}`;
     const source: PlotSourceConfig = {
       testingRunId: timeSeriesHeatmapDraft.testingRunId,
       start: effectiveStart,
@@ -3125,15 +3227,13 @@ export function AnalysisPage({ active = true }: { active?: boolean }) {
       sampling: timeSeriesHeatmapDraft.mode === 'range' ? Math.max(1, Math.floor(timeSeriesHeatmapDraft.sampling)) : 1,
       timestamp: timeSeriesHeatmapDraft.mode === 'single' ? effectiveStart : null,
     };
-    const derivedPlot: AnalysisPlot = {
+    const derivedPlot = withAutomaticPlotMetadata({
       ...defaultDraft(),
       id: crypto.randomUUID(),
       plotType: 'heatmap',
       heatmapMode: timeSeriesHeatmapDraft.mode,
-      title: timeSeriesHeatmapDraft.mode === 'single' ? `Heatmap · ${label}` : `Heatmap video · ${label}`,
-      subtitle: timeSeriesHeatmapDraft.mode === 'single'
-        ? artifactTimestamp(effectiveStart)
-        : `${artifactTimestamp(effectiveStart)} – ${artifactTimestamp(effectiveEnd)} · every ${source.sampling} frame${source.sampling === 1 ? '' : 's'}`,
+      title: '',
+      subtitle: '',
       testingRunId: timeSeriesHeatmapDraft.testingRunId,
       start: effectiveStart,
       end: effectiveEnd,
@@ -3148,7 +3248,7 @@ export function AnalysisPage({ active = true }: { active?: boolean }) {
       heatmapFps: timeSeriesHeatmapDraft.fps,
       heatmapScaleMode: timeSeriesHeatmapDraft.scaleMode,
       heatmapDisplaySize: timeSeriesHeatmapDraft.displaySize,
-    };
+    }, testingRuns);
     setPlots((current) => {
       const sourceIndex = current.findIndex((plot) => plot.id === heatmapDerivationPlot.id);
       const lastDerivedIndex = current.reduce(
@@ -3185,32 +3285,6 @@ export function AnalysisPage({ active = true }: { active?: boolean }) {
 
   function selectedModelLabel(modelId: string): string {
     return analysableModelRows.find((row) => row.id === Number(modelId))?.label ?? `Training run #${modelId}`;
-  }
-
-  function autoPlotTitle(): string {
-    const modelPart = selectedModelIds.length === 1 ? selectedModelLabel(selectedModelIds[0]) : `${selectedModelIds.length} models`;
-    const datasetPart = selectedInferenceDataset?.name ?? 'Inference dataset';
-    const roiPart = selectedRoiKey && selectedRoiKey !== 'none'
-      ? ` · ${roiOptionsForSelection.find((option) => option.value === selectedRoiKey)?.label ?? `ROI #${selectedRoiKey}`}`
-      : '';
-    return `${modelPart} · ${datasetPart}${roiPart}`;
-  }
-
-  function buildPlotSubtitle(metrics: string[], start: string, end: string, sampling: number): string {
-    const parts = [
-      `Metrics: ${metrics.map(metricLabel).join(', ')}`,
-      `Aggregation: ${selectedAggregationKeys.map(aggregationLabel).join(', ')}`,
-      `Range: ${start.replace('T', ' ')} to ${end.replace('T', ' ')}`,
-      `Sampling: every ${sampling}`,
-    ];
-    if (draft.movingAverage > 1) parts.push(`Moving average: ${draft.movingAverage}`);
-    if (draft.plotType === 'timeseries') parts.push(analyticsSummary(draft.timeseriesAnalytics));
-    if (selectedRoiKey && selectedRoiKey !== 'none') {
-      parts.push(`ROI: ${roiOptionsForSelection.find((option) => option.value === selectedRoiKey)?.label ?? selectedRoiKey}`);
-    } else {
-      parts.push('ROI: No ROI');
-    }
-    return parts.join(' · ');
   }
 
   function markPreviewStale() {
@@ -3299,33 +3373,35 @@ export function AnalysisPage({ active = true }: { active?: boolean }) {
       if (draft.plotType !== 'heatmap' || draft.heatmapMode !== 'single') {
         await Promise.all(traces.map((trace) => fetchResults(Number(trace.testingRunId))));
       }
-      setDraft((current) => ({
-        ...current,
-        title: current.title,
-        subtitle: buildPlotSubtitle(selectedMetricKeys, start, end, sampling),
-        testingRunId: traces[0]?.testingRunId ?? current.testingRunId,
-        start,
-        end,
-        sampling,
-        timestamp: current.timestamp ?? traces[0]?.timestamp ?? start,
-        scoreSeries: 'score',
-      }));
-      const title = draft.title.trim() || autoPlotTitle();
-      const subtitle = buildPlotSubtitle(selectedMetricKeys, start, end, sampling);
-      const previewPlot: AnalysisPlot = {
+      const previewPlot = withAutomaticPlotMetadata({
         ...draft,
         id: editingPlot?.plot.id ?? 'preview',
-        title,
-        subtitle,
+        title: '',
+        subtitle: '',
         sources: traces.map(traceToSource),
         traces,
         testingRunId: traces[0]?.testingRunId ?? draft.testingRunId,
+        start,
+        end,
+        sampling,
         timestamp: draft.timestamp ?? traces[0]?.timestamp ?? start,
-      };
+        scoreSeries: 'score',
+      }, testingRuns);
+      setDraft((current) => ({
+        ...current,
+        title: previewPlot.title,
+        subtitle: previewPlot.subtitle,
+        testingRunId: previewPlot.testingRunId,
+        start,
+        end,
+        sampling,
+        timestamp: previewPlot.timestamp,
+        scoreSeries: previewPlot.scoreSeries,
+      }));
       setSelectedSources(traces.map(traceToSource));
       setPlotPreview({
-        title,
-        subtitle,
+        title: previewPlot.title,
+        subtitle: previewPlot.subtitle,
         traces,
         duplicateNotes,
         plot: previewPlot,
@@ -3342,14 +3418,17 @@ export function AnalysisPage({ active = true }: { active?: boolean }) {
     setPlotPreview((current) => {
       if (!current) return current;
       const traces = current.traces.map((trace, traceIndex) => (traceIndex === index ? { ...trace, ...patch } : trace));
+      const plot = withAutomaticPlotMetadata({
+        ...current.plot,
+        sources: traces.map(traceToSource),
+        traces,
+      }, testingRuns);
       return {
         ...current,
+        title: plot.title,
+        subtitle: plot.subtitle,
         traces,
-        plot: {
-          ...current.plot,
-          sources: traces.map(traceToSource),
-          traces,
-        },
+        plot,
       };
     });
   }
@@ -3370,11 +3449,11 @@ export function AnalysisPage({ active = true }: { active?: boolean }) {
         return;
       }
     }
-    const nextPlot: AnalysisPlot = {
+    const nextPlot = withAutomaticPlotMetadata({
       ...plotPreview.plot,
       id: editingPlot?.plot.id ?? crypto.randomUUID(),
       timestamp: plotPreview.plot.timestamp ?? availableResults[0]?.timestamp ?? plotPreview.traces[0]?.timestamp ?? null,
-    };
+    }, testingRuns);
     setPlots((current) => {
       if (!editingPlot) return [...current, nextPlot];
       const next = [...current];
@@ -3410,10 +3489,11 @@ export function AnalysisPage({ active = true }: { active?: boolean }) {
         color: TRACE_COLORS[sourceIndex % TRACE_COLORS.length],
       };
     });
+    const canonicalPlot = withAutomaticPlotMetadata({ ...plot, sources: traces.map(traceToSource), traces }, testingRuns);
     const firstRun = testingRuns.find((run) => run.id === Number(traces[0]?.testingRunId));
-    setEditingPlot({ plot, index });
+    setEditingPlot({ plot: canonicalPlot, index });
     setPlots((current) => current.filter((item) => item.id !== plot.id));
-    setDraft({ ...plot, traces: undefined } as PlotDraft);
+    setDraft({ ...canonicalPlot, traces: undefined } as PlotDraft);
     setSelectedSources(traces.map(traceToSource));
     setSelectedModelIds([...new Set(traces.map((trace) => testingRuns.find((run) => run.id === Number(trace.testingRunId))?.training_run_id).filter((id): id is number => typeof id === 'number').map(String))]);
     setSelectedInferenceDatasetId(firstRun ? String(firstRun.training_dataset_id) : null);
@@ -3421,15 +3501,11 @@ export function AnalysisPage({ active = true }: { active?: boolean }) {
     setSelectedMetricKeys([...new Set(traces.map((trace) => trace.metric))]);
     setSelectedAggregationKeys([...new Set(traces.map((trace) => trace.aggregation ?? 'mean'))]);
     setPlotPreview({
-      title: plot.title,
-      subtitle: plot.subtitle,
+      title: canonicalPlot.title,
+      subtitle: canonicalPlot.subtitle,
       traces,
       duplicateNotes: [],
-      plot: {
-        ...plot,
-        sources: traces.map(traceToSource),
-        traces,
-      },
+      plot: canonicalPlot,
     });
     setPlotPreviewStale(false);
     setAddPlotOpen(true);
@@ -3919,16 +3995,6 @@ export function AnalysisPage({ active = true }: { active?: boolean }) {
               {selectedInferenceDatasetId && selectedRoiKey && (
                 <StepCard index={4} title="Plot configuration" color="gray">
                   <Stack gap="md">
-                    <TextInput
-                      label="Plot title"
-                      placeholder={autoPlotTitle()}
-                      value={draft.title}
-                      onChange={(event) => {
-                        const value = event.currentTarget.value;
-                        setDraft((current) => ({ ...current, title: value }));
-                        markPreviewStale();
-                      }}
-                    />
                     <MultiSelect
                       label="Metrics"
                       placeholder="Select one or more metrics"
@@ -4420,8 +4486,14 @@ export function AnalysisPage({ active = true }: { active?: boolean }) {
                               <Text fw={700}>{editingPlot ? 'Editing plot preview' : 'Preloaded plot preview'}</Text>
                               {plotPreviewStale && <Badge color="yellow" variant="light">Preview stale</Badge>}
                             </Group>
-                            <Text size="sm" c="dimmed">{plotPreview.title}</Text>
-                            <Text size="xs" c="dimmed">{plotPreview.subtitle}</Text>
+                            <Text size="sm" fw={600} style={{ overflowWrap: 'anywhere' }}>{plotPreview.title}</Text>
+                            <Stack gap={1} mt={2}>
+                              {plotPreview.subtitle.split('\n').filter(Boolean).map((line, index) => (
+                                <Text key={`${index}:${line}`} size="xs" c="dimmed" style={{ overflowWrap: 'anywhere' }}>
+                                  {line}
+                                </Text>
+                              ))}
+                            </Stack>
                           </div>
                           {plotPreviewStale && (
                             <Alert color="yellow">
@@ -4512,24 +4584,25 @@ export function AnalysisPage({ active = true }: { active?: boolean }) {
         <Stack gap="md">
           {plots.map((plot) => {
             const plotData = plotResultsById.get(plot.id) ?? { hasAllData: false, results: [] };
+            const displayPlot = withAutomaticPlotMetadata(plot, testingRuns);
             return plotData.hasAllData ? (
               <AnalysisPlotCard
                 key={plot.id}
-                plot={plot}
+                plot={displayPlot}
                 results={plotData.results}
                 heatmapCache={heatmapCache}
                 loadingHeatmaps={loadingHeatmaps}
                 heatmapErrors={heatmapErrors}
                 ensureHeatmap={ensureHeatmap}
                 onMove={(direction) => movePlot(plot.id, direction)}
-                onEdit={() => editPlot(plot, plots.findIndex((item) => item.id === plot.id))}
+                onEdit={() => editPlot(displayPlot, plots.findIndex((item) => item.id === plot.id))}
                 onPatch={(patch) =>
                   setPlots((current) =>
-                    current.map((item) => (item.id === plot.id ? { ...item, ...patch } : item)),
+                    current.map((item) => (item.id === plot.id ? withAutomaticPlotMetadata({ ...item, ...patch }, testingRuns) : item)),
                   )
                 }
                 onRemove={() => setPlots((current) => current.filter((item) => item.id !== plot.id))}
-                onHeatmapSelection={(mode, start, end) => beginHeatmapDerivation(plot, plotData.results, mode, start, end)}
+                onHeatmapSelection={(mode, start, end) => beginHeatmapDerivation(displayPlot, plotData.results, mode, start, end)}
               />
             ) : (
               <Paper key={plot.id} withBorder p="md" radius="sm">

@@ -1141,6 +1141,97 @@ class TestingRunResultsResponse(BaseModel):
     decimated: bool = False
 
 
+class AnomalyDetectionConfig(BaseModel):
+    smoothing_half_life_minutes: float = Field(default=5.0, gt=0.0, le=1440.0)
+    baseline_window_minutes: float = Field(default=120.0, gt=0.0, le=43200.0)
+    warmup_minutes: float = Field(default=30.0, ge=0.0, le=43200.0)
+    minimum_warmup_points: int = Field(default=30, ge=3, le=100000)
+    warning_z: float = Field(default=3.0, gt=0.0, le=1000.0)
+    high_z: float = Field(default=5.0, gt=0.0, le=1000.0)
+    cusum_drift: float = Field(default=1.0, ge=0.0, le=1000.0)
+    cusum_threshold: float = Field(default=10.0, gt=0.0, le=1000000.0)
+    confirmation_minutes: float = Field(default=5.0, ge=0.0, le=43200.0)
+    recovery_z: float = Field(default=1.0, ge=-1000.0, le=1000.0)
+    recovery_minutes: float = Field(default=15.0, ge=0.0, le=43200.0)
+    preroll_minutes: float = Field(default=120.0, ge=0.0, le=43200.0)
+    gap_multiplier: float = Field(default=5.0, gt=1.0, le=1000.0)
+    minimum_gap_minutes: float = Field(default=15.0, gt=0.0, le=43200.0)
+
+    @model_validator(mode="after")
+    def validate_threshold_order(self):
+        if self.high_z < self.warning_z:
+            raise ValueError("high_z must be greater than or equal to warning_z.")
+        if self.recovery_z >= self.warning_z:
+            raise ValueError("recovery_z must be lower than warning_z.")
+        return self
+
+
+class AnomalyDetectionRunCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=255)
+    testing_run_id: int
+    score_series: Literal["score", "full_mse", "roi_mse"] = "score"
+    start_timestamp: datetime
+    end_timestamp: datetime
+    config: AnomalyDetectionConfig = Field(default_factory=AnomalyDetectionConfig)
+
+    @model_validator(mode="after")
+    def validate_time_range(self):
+        if self.end_timestamp < self.start_timestamp:
+            raise ValueError("end_timestamp must be after start_timestamp.")
+        return self
+
+
+class AnomalyDetectionEventRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    warning_start: datetime
+    confirmed_at: datetime | None
+    end_timestamp: datetime
+    end_reason: str
+    peak_timestamp: datetime
+    max_score: float
+    max_robust_z: float
+
+
+class AnomalyDetectionRunSummary(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    name: str
+    testing_run_id: int
+    testing_run_name: str
+    score_series: str
+    start_timestamp: datetime
+    end_timestamp: datetime
+    algorithm_version: str
+    config: AnomalyDetectionConfig
+    point_count: int
+    warning_count: int
+    anomaly_count: int
+    created_at: datetime
+    updated_at: datetime
+
+
+class AnomalyDetectionSeriesPoint(BaseModel):
+    timestamp: datetime
+    score: float
+    smoothed: float
+    baseline: float | None
+    warning_threshold: float | None
+    high_threshold: float | None
+    robust_z: float | None
+    cusum: float
+    state: Literal["warmup", "normal", "warning", "confirmed"]
+
+
+class AnomalyDetectionRunRead(AnomalyDetectionRunSummary):
+    events: list[AnomalyDetectionEventRead]
+    series: list[AnomalyDetectionSeriesPoint]
+    total: int
+    decimated: bool
+
+
 class TestingRunResultImageResponse(BaseModel):
     __test__: ClassVar[bool] = False
 

@@ -21,6 +21,9 @@ from app.projects import (
     list_queue_entries,
 )
 from app.schemas import (
+    AnomalyDetectionRunCreate,
+    AnomalyDetectionRunRead,
+    AnomalyDetectionRunSummary,
     DatasetConnectionTestRequest,
     DatasetConnectionTestResponse,
     DatasetCreate,
@@ -97,6 +100,7 @@ from app.schemas import (
     TrainingRunLogResponse,
     TrainingRunRead,
 )
+from app.anomaly_detection import service as anomaly_detection_service
 from app.analysis import service as analysis_service
 from app.heatmap import service as heatmap_service
 from app.registry import service as registry_service
@@ -310,6 +314,34 @@ def create_app() -> FastAPI:
     def api_delete_analysis_layout(layout_id: int, db: Session = Depends(get_db)):
         if not analysis_service.delete_analysis_layout(db, layout_id):
             raise HTTPException(status_code=404, detail="Analysis layout not found.")
+        return None
+
+    @app.get("/api/anomaly-detection-runs", response_model=list[AnomalyDetectionRunSummary])
+    def api_list_anomaly_detection_runs(db: Session = Depends(get_db)):
+        return anomaly_detection_service.list_runs(db)
+
+    @app.post("/api/anomaly-detection-runs", response_model=AnomalyDetectionRunRead)
+    def api_create_anomaly_detection_run(payload: AnomalyDetectionRunCreate, db: Session = Depends(get_db)):
+        try:
+            return anomaly_detection_service.create_run(db, payload)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.get("/api/anomaly-detection-runs/{run_id}", response_model=AnomalyDetectionRunRead)
+    def api_get_anomaly_detection_run(
+        run_id: int,
+        max_points: int = Query(default=8000, ge=2, le=50000),
+        db: Session = Depends(get_db),
+    ):
+        run = anomaly_detection_service.get_run(db, run_id, max_points=max_points)
+        if run is None:
+            raise HTTPException(status_code=404, detail="Anomaly detection run not found.")
+        return run
+
+    @app.delete("/api/anomaly-detection-runs/{run_id}", status_code=204)
+    def api_delete_anomaly_detection_run(run_id: int, db: Session = Depends(get_db)):
+        if not anomaly_detection_service.delete_run(db, run_id):
+            raise HTTPException(status_code=404, detail="Anomaly detection run not found.")
         return None
 
     @app.get("/api/optimization/studies", response_model=list[OptimizationStudyRead])
