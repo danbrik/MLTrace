@@ -1,6 +1,10 @@
 import csv
+from contextlib import nullcontext
 from pathlib import Path
+import sys
+from types import SimpleNamespace
 
+import numpy as np
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
@@ -9,6 +13,7 @@ from app import models
 from app.database import Base
 from app.schemas import TestingRunCreate
 from app.testing import engine as testing_engine
+from app.testing import service as testing_service
 from app.testing.service import enqueue_testing_run
 
 from tests.test_testing_service import seed_finished_mean_image_run
@@ -22,6 +27,73 @@ def _make_engine():
     )
     Base.metadata.create_all(bind=engine)
     return engine
+
+
+def test_gradient_model_moves_to_cuda_before_materializing_forward(tmp_path: Path, monkeypatch) -> None:
+    events = []
+
+    class FakeTensor:
+        def __init__(self):
+            self.device = None
+
+        def to(self, device):
+            self.device = device
+            events.append(("tensor.to", device))
+            return self
+
+    class FakeModel:
+        def __init__(self):
+            self.device = None
+
+        def to(self, device):
+            self.device = device
+            events.append(("model.to", device))
+            return self
+
+        def eval(self):
+            return self
+
+        def __call__(self, tensor):
+            events.append(("forward", self.device, tensor.device))
+            assert self.device == "cuda"
+            assert tensor.device == "cuda"
+
+        def load_state_dict(self, state):
+            events.append(("load_state_dict", state))
+
+    fake_torch = SimpleNamespace(
+        cuda=SimpleNamespace(is_available=lambda: True),
+        device=lambda value: value,
+        from_numpy=lambda _array: FakeTensor(),
+        load=lambda _path, map_location: {"weight": 1},
+        no_grad=nullcontext,
+    )
+    model = FakeModel()
+    monkeypatch.setitem(sys.modules, "torch", fake_torch)
+    monkeypatch.setattr(testing_service, "_build_model", lambda *_args, **_kwargs: (model, False))
+
+    artifact_path = tmp_path / "weights.pt"
+    artifact_path.touch()
+    evaluator = testing_service.ArtifactEvaluator.__new__(testing_service.ArtifactEvaluator)
+    evaluator.training_run = SimpleNamespace(artifact_kind="weights")
+    evaluator.configuration = SimpleNamespace(
+        builder_kind="sequential_autoencoder",
+        method_config={"input_channels": 1, "input_height": 6, "input_width": 8},
+    )
+    evaluator.artifact_path = artifact_path
+    evaluator.model = None
+    evaluator.fast_anogan_modules = None
+    evaluator.torch = None
+
+    evaluator._ensure_torch_model(np.zeros((6, 8), dtype=np.float32))
+
+    assert events[:3] == [
+        ("model.to", "cuda"),
+        ("tensor.to", "cuda"),
+        ("forward", "cuda", "cuda"),
+    ]
+    assert evaluator._batch_device() == "cuda"
+    assert events.count(("model.to", "cuda")) == 1
 
 
 def test_run_testing_batched_matches_expected_scores(tmp_path: Path, monkeypatch) -> None:

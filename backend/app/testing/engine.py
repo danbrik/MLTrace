@@ -152,6 +152,12 @@ def run_testing(run_id: int, abort_event: threading.Event | None = None) -> None
             pipeline = training_run.training_pipeline
             graph = PreprocessingGraph.model_validate(pipeline.preprocessing_pipeline.graph)
             evaluator = ArtifactEvaluator(training_run, run.inference_config)
+            logger.info(
+                "Testing run %s loaded pipeline and artifact (builder=%s, artifact=%s)",
+                run_id,
+                pipeline.method_configuration.builder_kind,
+                evaluator.artifact_path,
+            )
             # Unreadable/corrupt images skipped during this run ("skip + report").
             # Appended from prep worker threads (list.append is thread-safe).
             skipped_paths: list[str] = []
@@ -183,6 +189,7 @@ def run_testing(run_id: int, abort_event: threading.Event | None = None) -> None
                 )
                 run.expected_image_count = len(clips)
                 db.commit()
+                logger.info("STAE testing run %s starting preprocessing for %s clips", run_id, len(clips))
 
                 results_path = _testing_run_dir(run.id) / "reconstruction_errors.csv"
                 results_path.parent.mkdir(parents=True, exist_ok=True)
@@ -225,7 +232,12 @@ def run_testing(run_id: int, abort_event: threading.Event | None = None) -> None
                                 run.image_count = count
                                 db.commit()
                                 continue
+                            first_inference = evaluator.model is None
+                            if first_inference:
+                                logger.info("STAE testing run %s initializing model for first batch", run_id)
                             outputs = evaluator.reconstruct_clip_batch([item[1] for item in prepared])
+                            if first_inference:
+                                logger.info("STAE testing run %s completed first inference batch", run_id)
                             mappings = []
                             for (clip, input_tensor, future_tensor), output in zip(prepared, outputs):
                                 position = count
@@ -344,11 +356,18 @@ def run_testing(run_id: int, abort_event: threading.Event | None = None) -> None
                 logger.info("STAE testing run %s finished (%s clips)", run_id, count)
                 return
 
+            resolution_started = time.perf_counter()
             records = enumerate_training_dataset_image_records(training_dataset)
             if not records:
                 raise ValueError("Train/test dataset produced no images.")
             run.expected_image_count = len(records)
             db.commit()
+            logger.info(
+                "Testing run %s resolved %s images in %.3fs",
+                run_id,
+                len(records),
+                time.perf_counter() - resolution_started,
+            )
 
             def _prep(record):
                 try:
@@ -390,7 +409,12 @@ def run_testing(run_id: int, abort_event: threading.Event | None = None) -> None
                             run.image_count = count
                             db.commit()
                             continue
+                        first_inference = evaluator.model is None
+                        if first_inference:
+                            logger.info("Testing run %s initializing model for first batch", run_id)
                         scored = evaluator.score_batch([image for _, image in prepared], roi)
+                        if first_inference:
+                            logger.info("Testing run %s completed first inference batch", run_id)
                         mappings = []
                         for (record, _), (full_mse, roi_mse, width, height, tile_scores, score_metadata) in zip(
                             prepared, scored

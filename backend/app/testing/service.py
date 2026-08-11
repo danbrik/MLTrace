@@ -502,7 +502,8 @@ class ArtifactEvaluator:
     """Reusable scorer for one trained artifact.
 
     Mean-image artifacts are numpy arrays. Gradient artifacts are loaded once
-    into a CPU torch module and reused across all test images.
+    onto the scheduler-pinned CUDA device (or CPU) and reused across all test
+    images.
     """
 
     def __init__(self, training_run: models.TrainingRun, inference_config: dict | None = None) -> None:
@@ -528,6 +529,13 @@ class ArtifactEvaluator:
         training_run = getattr(self, "training_run", None)
         return self.configuration.builder_kind == "fast_anogan" or getattr(training_run, "artifact_kind", None) == "gan_bundle"
 
+    def _torch_device(self, torch):
+        cached = getattr(self, "_device", None)
+        if cached is None:
+            cached = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+            self._device = cached
+        return cached
+
     def _ensure_torch_model(self, image: np.ndarray) -> None:
         if self._is_fast_anogan():
             self._ensure_fast_anogan_model(image)
@@ -552,9 +560,11 @@ class ArtifactEvaluator:
                 f"but the trained method expects {expected[0]}x{expected[1]}x{expected[2]}."
             )
 
+        device = self._torch_device(torch)
         model, _ = _build_model(torch, self.configuration, deterministic_vae=True)
+        model.to(device)
         model.eval()
-        dummy = torch.from_numpy(input_chw[np.newaxis])
+        dummy = torch.from_numpy(input_chw[np.newaxis]).to(device)
         with torch.no_grad():
             model(dummy)
         state = torch.load(self.artifact_path, map_location="cpu")
@@ -582,10 +592,13 @@ class ArtifactEvaluator:
                 f"Preprocessing output is {actual[0]}x{actual[1]}x{actual[2]} (CxHxW), "
                 f"but the trained fastAnoGAN method expects {expected[0]}x{expected[1]}x{expected[2]}."
             )
+        device = self._torch_device(torch)
         generator, critic, encoder = build_fast_anogan_modules(torch, self.configuration.method_graph, self.configuration.method_config)
-        dummy = torch.from_numpy(input_chw[np.newaxis])
+        for module in (generator, critic, encoder):
+            module.to(device)
+        dummy = torch.from_numpy(input_chw[np.newaxis]).to(device)
         with torch.no_grad():
-            generator(torch.randn((1, int(self.configuration.method_config["latent_dim"]))))
+            generator(torch.randn((1, int(self.configuration.method_config["latent_dim"])), device=device))
             critic(dummy)
             encoder(dummy)
         bundle = torch.load(self.artifact_path, map_location="cpu")
@@ -708,9 +721,11 @@ class ArtifactEvaluator:
             raise ValueError(
                 f"Preprocessing clip output is {actual} (C,T,H,W), but the trained method expects {expected}."
             )
+        device = self._torch_device(torch)
         model, _ = _build_model(torch, self.configuration, deterministic_vae=True)
+        model.to(device)
         model.eval()
-        dummy = torch.from_numpy(clip[np.newaxis])
+        dummy = torch.from_numpy(clip[np.newaxis]).to(device)
         with torch.no_grad():
             model(dummy)
         state = torch.load(self.artifact_path, map_location="cpu")
@@ -746,21 +761,7 @@ class ArtifactEvaluator:
         return outputs
 
     def _batch_device(self):
-        cached = getattr(self, "_device", None)
-        if cached is not None:
-            return cached
-        device = "cpu"
-        try:
-            if self.torch.cuda.is_available():
-                device = "cuda"
-                self.model.to(device)
-                if self.fast_anogan_modules is not None:
-                    for module in self.fast_anogan_modules:
-                        module.to(device)
-        except Exception:  # noqa: BLE001 - GPU optional; CPU fallback is always valid
-            device = "cpu"
-        self._device = device
-        return device
+        return self._torch_device(self.torch)
 
     def score(
         self, image: np.ndarray, roi: models.RoiDefinition | None
