@@ -1,4 +1,5 @@
 from datetime import datetime
+import math
 from typing import ClassVar, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -1142,7 +1143,7 @@ class TestingRunResultsResponse(BaseModel):
 
 
 class AnomalyDetectionConfig(BaseModel):
-    algorithm: Literal["robust_zscore", "robust_cusum"] = "robust_cusum"
+    algorithm: Literal["robust_zscore", "robust_cusum", "event_threshold"] = "robust_cusum"
     smoothing_half_life_minutes: float = Field(default=5.0, gt=0.0, le=1440.0)
     baseline_window_minutes: float = Field(default=120.0, gt=0.0, le=43200.0)
     warmup_minutes: float = Field(default=30.0, ge=0.0, le=43200.0)
@@ -1157,13 +1158,33 @@ class AnomalyDetectionConfig(BaseModel):
     preroll_minutes: float = Field(default=120.0, ge=0.0, le=43200.0)
     gap_multiplier: float = Field(default=5.0, gt=1.0, le=1000.0)
     minimum_gap_minutes: float = Field(default=15.0, gt=0.0, le=43200.0)
+    event_smoothing_enabled: bool = True
+    event_smoothing_method: Literal["median", "moving_average"] = "median"
+    event_smoothing_window_seconds: float = Field(default=5.0, gt=0.0, le=86400.0)
+    threshold_mode: Literal["manual", "quantile"] = "quantile"
+    manual_threshold: float | None = Field(default=None, ge=0.0)
+    threshold_quantile: float = Field(default=0.9999, gt=0.0, lt=1.0)
+    persistence_k: int = Field(default=10, ge=1, le=100000)
+    persistence_n: int = Field(default=15, ge=1, le=100000)
+    threshold_off_factor: float = Field(default=0.8, gt=0.0, le=1.0)
+    normal_close_seconds: float = Field(default=30.0, ge=0.0, le=86400.0)
+    merge_gap_seconds: float = Field(default=60.0, ge=0.0, le=86400.0)
+    event_minimum_gap_seconds: float = Field(default=15.0, gt=0.0, le=86400.0)
 
     @model_validator(mode="after")
     def validate_threshold_order(self):
-        if self.high_z < self.warning_z:
-            raise ValueError("high_z must be greater than or equal to warning_z.")
-        if self.recovery_z >= self.warning_z:
-            raise ValueError("recovery_z must be lower than warning_z.")
+        if self.algorithm in {"robust_zscore", "robust_cusum"}:
+            if self.high_z < self.warning_z:
+                raise ValueError("high_z must be greater than or equal to warning_z.")
+            if self.recovery_z >= self.warning_z:
+                raise ValueError("recovery_z must be lower than warning_z.")
+        if self.algorithm == "event_threshold":
+            if self.persistence_k > self.persistence_n:
+                raise ValueError("persistence_k must be lower than or equal to persistence_n.")
+            if self.threshold_mode == "manual" and self.manual_threshold is None:
+                raise ValueError("manual_threshold is required for a manual event threshold.")
+            if self.manual_threshold is not None and not math.isfinite(self.manual_threshold):
+                raise ValueError("manual_threshold must be finite.")
         return self
 
 
@@ -1174,12 +1195,58 @@ class AnomalyDetectionRunCreate(BaseModel):
     start_timestamp: datetime
     end_timestamp: datetime
     config: AnomalyDetectionConfig = Field(default_factory=AnomalyDetectionConfig)
+    threshold_testing_run_id: int | None = None
+    threshold_start_timestamp: datetime | None = None
+    threshold_end_timestamp: datetime | None = None
+    progress_token: str | None = Field(default=None, min_length=1, max_length=128)
+
+    @model_validator(mode="after")
+    def validate_time_range(self):
+        if self.end_timestamp < self.start_timestamp:
+            raise ValueError("end_timestamp must be after start_timestamp.")
+        threshold_fields = (
+            self.threshold_testing_run_id,
+            self.threshold_start_timestamp,
+            self.threshold_end_timestamp,
+        )
+        if self.config.algorithm == "event_threshold" and self.config.threshold_mode == "quantile":
+            if any(value is None for value in threshold_fields):
+                raise ValueError("A validation inference and time range are required for a quantile threshold.")
+            if self.threshold_end_timestamp < self.threshold_start_timestamp:
+                raise ValueError("threshold_end_timestamp must be after threshold_start_timestamp.")
+            if self.threshold_testing_run_id == self.testing_run_id:
+                raise ValueError("The validation inference must differ from the analyzed inference.")
+        return self
+
+
+class AnomalyDetectionThresholdPreviewRequest(BaseModel):
+    testing_run_id: int
+    score_series: Literal["score", "full_mse", "roi_mse"] = "score"
+    start_timestamp: datetime
+    end_timestamp: datetime
+    smoothing_enabled: bool = True
+    smoothing_method: Literal["median", "moving_average"] = "median"
+    smoothing_window_seconds: float = Field(default=5.0, gt=0.0, le=86400.0)
+    gap_multiplier: float = Field(default=5.0, gt=1.0, le=1000.0)
+    minimum_gap_seconds: float = Field(default=15.0, gt=0.0, le=86400.0)
+    quantile: float = Field(default=0.9999, gt=0.0, lt=1.0)
 
     @model_validator(mode="after")
     def validate_time_range(self):
         if self.end_timestamp < self.start_timestamp:
             raise ValueError("end_timestamp must be after start_timestamp.")
         return self
+
+
+class AnomalyDetectionThresholdPreviewRead(BaseModel):
+    testing_run_id: int
+    testing_run_name: str
+    score_series: str
+    start_timestamp: datetime
+    end_timestamp: datetime
+    point_count: int
+    quantile: float
+    threshold: float
 
 
 class AnomalyDetectionEventRead(BaseModel):
@@ -1192,7 +1259,11 @@ class AnomalyDetectionEventRead(BaseModel):
     end_reason: str
     peak_timestamp: datetime
     max_score: float
-    max_robust_z: float
+    max_robust_z: float | None
+    duration_seconds: float | None
+    max_smoothed_score: float | None
+    mean_smoothed_score: float | None
+    threshold: float | None
 
 
 class AnomalyDetectionRunSummary(BaseModel):
@@ -1202,6 +1273,11 @@ class AnomalyDetectionRunSummary(BaseModel):
     name: str
     testing_run_id: int
     testing_run_name: str
+    threshold_testing_run_id: int | None
+    threshold_testing_run_name: str | None
+    threshold_start_timestamp: datetime | None
+    threshold_end_timestamp: datetime | None
+    resolved_threshold: float | None
     score_series: str
     start_timestamp: datetime
     end_timestamp: datetime
@@ -1223,6 +1299,10 @@ class AnomalyDetectionSeriesPoint(BaseModel):
     high_threshold: float | None
     robust_z: float | None
     cusum: float
+    threshold_on: float | None = None
+    threshold_off: float | None = None
+    candidate: bool = False
+    persistence_count: int = 0
     state: Literal["warmup", "normal", "warning", "confirmed"]
 
 
@@ -1231,6 +1311,18 @@ class AnomalyDetectionRunRead(AnomalyDetectionRunSummary):
     series: list[AnomalyDetectionSeriesPoint]
     total: int
     decimated: bool
+
+
+class AnomalyDetectionProgressRead(BaseModel):
+    progress_token: str
+    phase: Literal["loading", "smoothing", "detecting", "saving", "plotting", "complete"]
+    status: Literal["running", "complete", "error"]
+    completed: int
+    total: int
+    percent: float
+    message: str
+    error: str | None = None
+    updated_at: datetime
 
 
 class TestingRunResultImageResponse(BaseModel):

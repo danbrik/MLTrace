@@ -22,8 +22,11 @@ from app.projects import (
 )
 from app.schemas import (
     AnomalyDetectionRunCreate,
+    AnomalyDetectionProgressRead,
     AnomalyDetectionRunRead,
     AnomalyDetectionRunSummary,
+    AnomalyDetectionThresholdPreviewRead,
+    AnomalyDetectionThresholdPreviewRequest,
     DatasetConnectionTestRequest,
     DatasetConnectionTestResponse,
     DatasetCreate,
@@ -327,13 +330,39 @@ def create_app() -> FastAPI:
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
+    @app.post(
+        "/api/anomaly-detection-threshold-preview",
+        response_model=AnomalyDetectionThresholdPreviewRead,
+    )
+    def api_preview_anomaly_detection_threshold(
+        payload: AnomalyDetectionThresholdPreviewRequest,
+        db: Session = Depends(get_db),
+    ):
+        try:
+            return anomaly_detection_service.preview_threshold(db, payload)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.get("/api/anomaly-detection-progress/{progress_token}", response_model=AnomalyDetectionProgressRead)
+    def api_get_anomaly_detection_progress(progress_token: str, db: Session = Depends(get_db)):
+        progress = anomaly_detection_service.get_progress(db, progress_token)
+        if progress is None:
+            raise HTTPException(status_code=404, detail="Anomaly detection progress not found.")
+        return progress
+
     @app.get("/api/anomaly-detection-runs/{run_id}", response_model=AnomalyDetectionRunRead)
     def api_get_anomaly_detection_run(
         run_id: int,
         max_points: int = Query(default=8000, ge=2, le=50000),
+        progress_token: str | None = Query(default=None, min_length=1, max_length=128),
         db: Session = Depends(get_db),
     ):
-        run = anomaly_detection_service.get_run(db, run_id, max_points=max_points)
+        run = anomaly_detection_service.get_run(
+            db,
+            run_id,
+            max_points=max_points,
+            progress_token=progress_token,
+        )
         if run is None:
             raise HTTPException(status_code=404, detail="Anomaly detection run not found.")
         return run

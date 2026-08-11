@@ -672,7 +672,7 @@ export type TestingRunResults = {
 };
 
 export type AnomalyDetectionScoreSeries = 'score' | 'full_mse' | 'roi_mse';
-export type AnomalyDetectionAlgorithm = 'robust_zscore' | 'robust_cusum';
+export type AnomalyDetectionAlgorithm = 'robust_zscore' | 'robust_cusum' | 'event_threshold';
 
 export type AnomalyDetectionConfig = {
   algorithm: AnomalyDetectionAlgorithm;
@@ -690,6 +690,18 @@ export type AnomalyDetectionConfig = {
   preroll_minutes: number;
   gap_multiplier: number;
   minimum_gap_minutes: number;
+  event_smoothing_enabled: boolean;
+  event_smoothing_method: 'median' | 'moving_average';
+  event_smoothing_window_seconds: number;
+  threshold_mode: 'manual' | 'quantile';
+  manual_threshold: number | null;
+  threshold_quantile: number;
+  persistence_k: number;
+  persistence_n: number;
+  threshold_off_factor: number;
+  normal_close_seconds: number;
+  merge_gap_seconds: number;
+  event_minimum_gap_seconds: number;
 };
 
 export type AnomalyDetectionEvent = {
@@ -700,7 +712,11 @@ export type AnomalyDetectionEvent = {
   end_reason: string;
   peak_timestamp: string;
   max_score: number;
-  max_robust_z: number;
+  max_robust_z: number | null;
+  duration_seconds: number | null;
+  max_smoothed_score: number | null;
+  mean_smoothed_score: number | null;
+  threshold: number | null;
 };
 
 export type AnomalyDetectionSeriesPoint = {
@@ -712,6 +728,10 @@ export type AnomalyDetectionSeriesPoint = {
   high_threshold: number | null;
   robust_z: number | null;
   cusum: number;
+  threshold_on: number | null;
+  threshold_off: number | null;
+  candidate: boolean;
+  persistence_count: number;
   state: 'warmup' | 'normal' | 'warning' | 'confirmed';
 };
 
@@ -720,6 +740,11 @@ export type AnomalyDetectionRunSummary = {
   name: string;
   testing_run_id: number;
   testing_run_name: string;
+  threshold_testing_run_id: number | null;
+  threshold_testing_run_name: string | null;
+  threshold_start_timestamp: string | null;
+  threshold_end_timestamp: string | null;
+  resolved_threshold: number | null;
   score_series: AnomalyDetectionScoreSeries;
   start_timestamp: string;
   end_timestamp: string;
@@ -737,6 +762,29 @@ export type AnomalyDetectionRun = AnomalyDetectionRunSummary & {
   series: AnomalyDetectionSeriesPoint[];
   total: number;
   decimated: boolean;
+};
+
+export type AnomalyDetectionProgress = {
+  progress_token: string;
+  phase: 'loading' | 'smoothing' | 'detecting' | 'saving' | 'plotting' | 'complete';
+  status: 'running' | 'complete' | 'error';
+  completed: number;
+  total: number;
+  percent: number;
+  message: string;
+  error: string | null;
+  updated_at: string;
+};
+
+export type AnomalyDetectionThresholdPreview = {
+  testing_run_id: number;
+  testing_run_name: string;
+  score_series: AnomalyDetectionScoreSeries;
+  start_timestamp: string;
+  end_timestamp: string;
+  point_count: number;
+  quantile: number;
+  threshold: number;
 };
 
 export type TestingRunResultImage = {

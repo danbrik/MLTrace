@@ -1,8 +1,10 @@
 import type {
   AnomalyDetectionConfig,
+  AnomalyDetectionProgress,
   AnomalyDetectionRun,
   AnomalyDetectionRunSummary,
   AnomalyDetectionScoreSeries,
+  AnomalyDetectionThresholdPreview,
   CacheRevisions,
   Dataset,
   DatasetConnectionTest,
@@ -833,8 +835,14 @@ export function listAnomalyDetectionRuns(): Promise<AnomalyDetectionRunSummary[]
   return cachedList<AnomalyDetectionRunSummary[]>('anomalyDetectionRuns', '/api/anomaly-detection-runs', RUN_TTL_MS);
 }
 
-export function getAnomalyDetectionRun(runId: number, maxPoints = 8000): Promise<AnomalyDetectionRun> {
-  return request<AnomalyDetectionRun>(`/api/anomaly-detection-runs/${runId}?max_points=${maxPoints}`, undefined, 15 * 60_000);
+export function getAnomalyDetectionRun(runId: number, maxPoints = 8000, progressToken?: string): Promise<AnomalyDetectionRun> {
+  const query = new URLSearchParams({ max_points: String(maxPoints) });
+  if (progressToken) query.set('progress_token', progressToken);
+  return request<AnomalyDetectionRun>(`/api/anomaly-detection-runs/${runId}?${query}`, undefined, 15 * 60_000);
+}
+
+export function getAnomalyDetectionProgress(progressToken: string): Promise<AnomalyDetectionProgress> {
+  return request<AnomalyDetectionProgress>(`/api/anomaly-detection-progress/${encodeURIComponent(progressToken)}`);
 }
 
 export function createAnomalyDetectionRun(payload: {
@@ -844,6 +852,10 @@ export function createAnomalyDetectionRun(payload: {
   start_timestamp: string;
   end_timestamp: string;
   config: AnomalyDetectionConfig;
+  threshold_testing_run_id?: number;
+  threshold_start_timestamp?: string;
+  threshold_end_timestamp?: string;
+  progress_token?: string;
 }): Promise<AnomalyDetectionRun> {
   return request<AnomalyDetectionRun>('/api/anomaly-detection-runs', {
     method: 'POST',
@@ -852,6 +864,24 @@ export function createAnomalyDetectionRun(payload: {
     invalidate(['anomalyDetectionRuns']);
     return run;
   });
+}
+
+export function previewAnomalyDetectionThreshold(payload: {
+  testing_run_id: number;
+  score_series: AnomalyDetectionScoreSeries;
+  start_timestamp: string;
+  end_timestamp: string;
+  smoothing_enabled: boolean;
+  smoothing_method: 'median' | 'moving_average';
+  smoothing_window_seconds: number;
+  gap_multiplier: number;
+  minimum_gap_seconds: number;
+  quantile: number;
+}): Promise<AnomalyDetectionThresholdPreview> {
+  return request<AnomalyDetectionThresholdPreview>('/api/anomaly-detection-threshold-preview', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  }, 15 * 60_000);
 }
 
 export async function deleteAnomalyDetectionRun(runId: number): Promise<void> {

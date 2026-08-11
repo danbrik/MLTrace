@@ -478,6 +478,7 @@ class TestingRun(Base):
     anomaly_detection_runs: Mapped[list["AnomalyDetectionRun"]] = relationship(
         back_populates="testing_run",
         cascade="all, delete-orphan",
+        foreign_keys="AnomalyDetectionRun.testing_run_id",
     )
 
 
@@ -516,6 +517,7 @@ class AnomalyDetectionRun(Base):
     __table_args__ = (
         Index("ix_anomaly_detection_runs_created_at", "created_at"),
         Index("ix_anomaly_detection_runs_testing_run", "testing_run_id"),
+        Index("ix_anomaly_detection_runs_threshold_testing_run", "threshold_testing_run_id"),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
@@ -524,6 +526,13 @@ class AnomalyDetectionRun(Base):
         ForeignKey("testing_runs.id", ondelete="CASCADE"), nullable=False
     )
     testing_run_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    threshold_testing_run_id: Mapped[int | None] = mapped_column(
+        ForeignKey("testing_runs.id", ondelete="CASCADE")
+    )
+    threshold_testing_run_name: Mapped[str | None] = mapped_column(String(255))
+    threshold_start_timestamp: Mapped[datetime | None] = mapped_column(DateTime(timezone=False))
+    threshold_end_timestamp: Mapped[datetime | None] = mapped_column(DateTime(timezone=False))
+    resolved_threshold: Mapped[float | None] = mapped_column(Float)
     score_series: Mapped[str] = mapped_column(String(32), nullable=False, default="score")
     start_timestamp: Mapped[datetime] = mapped_column(DateTime(timezone=False), nullable=False)
     end_timestamp: Mapped[datetime] = mapped_column(DateTime(timezone=False), nullable=False)
@@ -537,7 +546,13 @@ class AnomalyDetectionRun(Base):
         DateTime(timezone=False), server_default=func.now(), onupdate=func.now()
     )
 
-    testing_run: Mapped[TestingRun] = relationship(back_populates="anomaly_detection_runs")
+    testing_run: Mapped[TestingRun] = relationship(
+        back_populates="anomaly_detection_runs",
+        foreign_keys=[testing_run_id],
+    )
+    threshold_testing_run: Mapped[TestingRun | None] = relationship(
+        foreign_keys=[threshold_testing_run_id]
+    )
     events: Mapped[list["AnomalyDetectionEvent"]] = relationship(
         back_populates="run",
         cascade="all, delete-orphan",
@@ -561,7 +576,11 @@ class AnomalyDetectionEvent(Base):
     end_reason: Mapped[str] = mapped_column(String(32), nullable=False)
     peak_timestamp: Mapped[datetime] = mapped_column(DateTime(timezone=False), nullable=False)
     max_score: Mapped[float] = mapped_column(Float, nullable=False)
-    max_robust_z: Mapped[float] = mapped_column(Float, nullable=False)
+    max_robust_z: Mapped[float | None] = mapped_column(Float)
+    duration_seconds: Mapped[float | None] = mapped_column(Float)
+    max_smoothed_score: Mapped[float | None] = mapped_column(Float)
+    mean_smoothed_score: Mapped[float | None] = mapped_column(Float)
+    threshold: Mapped[float | None] = mapped_column(Float)
 
     run: Mapped[AnomalyDetectionRun] = relationship(back_populates="events")
 

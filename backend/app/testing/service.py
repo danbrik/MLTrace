@@ -1449,6 +1449,9 @@ def delete_testing_run(db: Session, run_id: int) -> bool:
         return False
     if run.status == "running":
         raise ValueError("Abort the testing run before removing it.")
+    from app.anomaly_detection.service import delete_runs_for_testing_run
+
+    delete_runs_for_testing_run(db, run.id)
     shutil.rmtree(_testing_run_dir(run.id), ignore_errors=True)
     db.delete(run)
     db.commit()

@@ -1,5 +1,8 @@
 from datetime import datetime, timedelta
+import random
+import statistics
 
+import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
@@ -12,6 +15,7 @@ from app.database import Base, get_db
 from app.main import app
 from app.schemas import AnomalyDetectionConfig
 from app.schemas import AnomalyDetectionRunCreate
+from app.schemas import AnomalyDetectionThresholdPreviewRequest
 from app.testing import service as testing_service
 
 
@@ -37,6 +41,27 @@ def _fast_config(**overrides) -> AnomalyDetectionConfig:
         "recovery_minutes": 2,
         "preroll_minutes": 10,
         "minimum_gap_minutes": 15,
+    }
+    values.update(overrides)
+    return AnomalyDetectionConfig(**values)
+
+
+def _event_config(**overrides) -> AnomalyDetectionConfig:
+    values = {
+        "algorithm": "event_threshold",
+        "event_smoothing_enabled": False,
+        "event_smoothing_method": "median",
+        "event_smoothing_window_seconds": 5,
+        "threshold_mode": "manual",
+        "manual_threshold": 1.0,
+        "persistence_k": 2,
+        "persistence_n": 3,
+        "threshold_off_factor": 0.8,
+        "normal_close_seconds": 2,
+        "merge_gap_seconds": 0,
+        "event_minimum_gap_seconds": 10,
+        "gap_multiplier": 5,
+        "preroll_minutes": 0,
     }
     values.update(overrides)
     return AnomalyDetectionConfig(**values)
@@ -88,10 +113,171 @@ def test_large_gap_closes_active_event() -> None:
     assert output.events[0].end_reason == "data_gap"
 
 
-def _seed_testing_run(db: Session, count: int = 80) -> models.TestingRun:
+def test_event_threshold_median_smoothing_removes_single_peak() -> None:
+    output = detect(
+        _points([0.02, 0.02, 0.09, 0.02, 0.02], seconds=1),
+        _event_config(
+            event_smoothing_enabled=True,
+            event_smoothing_method="median",
+            persistence_k=1,
+            persistence_n=1,
+            manual_threshold=0.05,
+        ),
+    )
+    assert [point.score for point in output.series] == [0.02, 0.02, 0.09, 0.02, 0.02]
+    assert [point.smoothed for point in output.series] == [0.02] * 5
+    assert output.events == []
+
+
+def test_event_threshold_moving_average_uses_causal_time_window() -> None:
+    points = [
+        SignalPoint(BASE, 1.0),
+        SignalPoint(BASE + timedelta(seconds=2), 3.0),
+        SignalPoint(BASE + timedelta(seconds=5), 9.0),
+    ]
+    output = detect(
+        points,
+        _event_config(
+            event_smoothing_enabled=True,
+            event_smoothing_method="moving_average",
+            manual_threshold=100,
+        ),
+    )
+    assert [point.smoothed for point in output.series] == [1.0, 2.0, 6.0]
+
+
+def test_event_threshold_triggers_at_kth_candidate_and_recovers_with_hysteresis() -> None:
+    values = [0.2, 1.2, 0.9, 1.3, 0.9, 0.7, 0.75, 0.7]
+    output = detect(_points(values, seconds=1), _event_config())
+    assert len(output.events) == 1
+    event = output.events[0]
+    assert event.warning_start == BASE + timedelta(seconds=3)
+    assert event.confirmed_at == event.warning_start
+    assert event.end_timestamp == BASE + timedelta(seconds=7)
+    assert event.end_reason == "recovered"
+    assert event.duration_seconds == 4
+    assert event.max_score == 1.3
+    assert event.max_smoothed_score == 1.3
+    assert event.threshold == 1.0
+
+
+def test_event_threshold_merges_close_events_but_not_across_data_gap() -> None:
+    config = _event_config(
+        persistence_k=1,
+        persistence_n=1,
+        normal_close_seconds=1,
+        merge_gap_seconds=5,
+    )
+    merged = detect(_points([1.2, 0.2, 0.2, 1.5, 0.2, 0.2], seconds=1), config)
+    assert len(merged.events) == 1
+    assert merged.events[0].warning_start == BASE
+    assert merged.events[0].end_timestamp == BASE + timedelta(seconds=5)
+    assert merged.events[0].max_smoothed_score == 1.5
+    assert merged.events[0].mean_smoothed_score == statistics.fmean([1.2, 0.2, 0.2, 1.5, 0.2, 0.2])
+
+    points = _points([1.2, 0.2], seconds=1)
+    points.extend([
+        SignalPoint(BASE + timedelta(seconds=20), 1.5),
+        SignalPoint(BASE + timedelta(seconds=21), 0.2),
+    ])
+    separated = detect(points, _event_config(
+        persistence_k=1,
+        persistence_n=1,
+        normal_close_seconds=30,
+        merge_gap_seconds=60,
+        event_minimum_gap_seconds=5,
+    ))
+    assert len(separated.events) == 2
+    assert separated.events[0].end_reason == "data_gap"
+
+
+def test_incremental_order_statistics_match_exact_median_and_mad() -> None:
+    random.seed(11)
+    values = [round(random.uniform(-3, 5), 3) for _ in range(200)]
+    multiset = anomaly_service._FenwickMultiset(sorted(set(values)))
+    active: list[float] = []
+    for index, value in enumerate(values):
+        multiset.add(value, 1)
+        active.append(value)
+        if index >= 37:
+            expired = values[index - 37]
+            multiset.add(expired, -1)
+            active.remove(expired)
+        expected_median = statistics.median(active)
+        expected_mad = statistics.median(abs(item - expected_median) for item in active)
+        assert multiset.median() == expected_median
+        assert multiset.median_absolute_deviation(expected_median) == expected_mad
+
+
+def test_detector_reports_real_smoothing_and_detection_progress() -> None:
+    updates: list[tuple[str, int, int]] = []
+    points = _points([1.0] * 20 + [3.0] * 8 + [1.0] * 5)
+    detect(points, _fast_config(), lambda phase, completed, total, _message: updates.append((phase, completed, total)))
+    assert updates[0] == ("smoothing", 0, len(points))
+    assert ("smoothing", len(points), len(points)) in updates
+    assert ("detecting", 0, len(points)) in updates
+    assert updates[-1] == ("detecting", len(points), len(points))
+
+
+def test_optimized_detector_matches_naive_exact_reference(monkeypatch) -> None:
+    class NaiveExactMultiset:
+        def __init__(self, _coordinates) -> None:
+            self.values: list[float] = []
+
+        @property
+        def size(self) -> int:
+            return len(self.values)
+
+        def add(self, value: float, delta: int) -> None:
+            if delta > 0:
+                self.values.append(value)
+            else:
+                self.values.remove(value)
+
+        def median(self) -> float | None:
+            return statistics.median(self.values) if self.values else None
+
+        def median_absolute_deviation(self, median: float) -> float | None:
+            return statistics.median(abs(value - median) for value in self.values) if self.values else None
+
+    random.seed(23)
+    timestamps = [BASE]
+    for index in range(1, 180):
+        seconds = random.choice([0, 20, 60, 90])
+        if index == 115:
+            seconds = 3600
+        timestamps.append(timestamps[-1] + timedelta(seconds=seconds))
+    values = [1.0 + random.uniform(-0.08, 0.08) for _ in timestamps]
+    for index in range(55, 90):
+        values[index] += 1.5
+    points = [SignalPoint(timestamp, value) for timestamp, value in zip(timestamps, values)]
+
+    for algorithm in ("robust_zscore", "robust_cusum"):
+        config = _fast_config(algorithm=algorithm, minimum_gap_minutes=10)
+        optimized = detect(points, config)
+        with monkeypatch.context() as context:
+            context.setattr(anomaly_service, "_FenwickMultiset", NaiveExactMultiset)
+            reference = detect(points, config)
+        assert [point.model_dump() for point in optimized.series] == [
+            point.model_dump() for point in reference.series
+        ]
+        assert [event.__dict__ for event in optimized.events] == [
+            event.__dict__ for event in reference.events
+        ]
+
+
+def _seed_testing_run(
+    db: Session,
+    count: int = 80,
+    *,
+    name: str = "Crucible inference",
+    values: list[float] | None = None,
+    training_run_id: int = 1,
+    inference_config: dict | None = None,
+) -> models.TestingRun:
     run = models.TestingRun(
-        name="Crucible inference",
-        training_run_id=1,
+        name=name,
+        training_run_id=training_run_id,
         training_dataset_id=1,
         status="finished",
         training_run_name="model",
@@ -103,12 +289,13 @@ def _seed_testing_run(db: Session, count: int = 80) -> models.TestingRun:
         training_mode="gradient",
         artifact_kind="weights",
         artifact_path="/tmp/model.pt",
+        inference_config=inference_config,
     )
     db.add(run)
     db.flush()
     rows = []
     for index in range(count):
-        value = 3.0 if 35 <= index < 55 else 1.0
+        value = values[index] if values is not None else (3.0 if 35 <= index < 55 else 1.0)
         rows.append({
             "testing_run_id": run.id,
             "position": index,
@@ -123,6 +310,126 @@ def _seed_testing_run(db: Session, count: int = 80) -> models.TestingRun:
     db.bulk_insert_mappings(models.TestingRunResult, rows)
     db.commit()
     return run
+
+
+def test_quantile_preview_uses_only_selected_smoothed_validation_range() -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:", poolclass=StaticPool)
+    SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+    Base.metadata.create_all(engine)
+    with SessionLocal() as db:
+        reference = _seed_testing_run(
+            db,
+            count=5,
+            name="Normal validation",
+            values=[100.0, 1.0, 9.0, 1.0, 100.0],
+        )
+        preview = anomaly_service.preview_threshold(db, AnomalyDetectionThresholdPreviewRequest(
+            testing_run_id=reference.id,
+            score_series="score",
+            start_timestamp=BASE + timedelta(minutes=1),
+            end_timestamp=BASE + timedelta(minutes=3),
+            smoothing_enabled=True,
+            smoothing_method="median",
+            smoothing_window_seconds=300,
+            quantile=0.5,
+        ))
+        assert preview.point_count == 3
+        assert preview.threshold == 1.0
+
+
+def test_event_threshold_run_persists_reference_and_resolved_threshold() -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:", poolclass=StaticPool)
+    SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+    Base.metadata.create_all(engine)
+    with SessionLocal() as db:
+        reference = _seed_testing_run(
+            db,
+            count=20,
+            name="Normal validation",
+            values=[1.0] * 20,
+            inference_config={"error_metric": "mse"},
+        )
+        target = _seed_testing_run(
+            db,
+            count=20,
+            name="Target inference",
+            values=[1.0] * 10 + [3.0] * 10,
+            inference_config={"error_metric": "mse"},
+        )
+        detection = anomaly_service.create_run(db, AnomalyDetectionRunCreate(
+            name="Quantile event detector",
+            testing_run_id=target.id,
+            score_series="score",
+            start_timestamp=BASE,
+            end_timestamp=BASE + timedelta(minutes=19),
+            threshold_testing_run_id=reference.id,
+            threshold_start_timestamp=BASE,
+            threshold_end_timestamp=BASE + timedelta(minutes=19),
+            config=_event_config(
+                threshold_mode="quantile",
+                manual_threshold=None,
+                threshold_quantile=0.9999,
+                persistence_k=2,
+                persistence_n=3,
+            ),
+        ))
+        assert detection.algorithm_version == "event_threshold_v1"
+        assert detection.threshold_testing_run_id == reference.id
+        assert detection.threshold_testing_run_name == "Normal validation"
+        assert detection.resolved_threshold == 1.0
+        assert detection.anomaly_count == 1
+        assert detection.events[0].max_smoothed_score == 3.0
+        assert detection.events[0].threshold == 1.0
+        assert detection.series[-1].threshold_off == 0.8
+
+
+def test_quantile_reference_must_have_matching_model_and_scoring() -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:", poolclass=StaticPool)
+    SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+    Base.metadata.create_all(engine)
+    with SessionLocal() as db:
+        target = _seed_testing_run(db, count=5, inference_config={"error_metric": "mse"})
+        wrong_model = _seed_testing_run(
+            db,
+            count=5,
+            name="Wrong model",
+            training_run_id=2,
+            inference_config={"error_metric": "mse"},
+        )
+        wrong_scoring = _seed_testing_run(
+            db,
+            count=5,
+            name="Wrong scoring",
+            inference_config={"error_metric": "mae"},
+        )
+        wrong_roi = _seed_testing_run(
+            db,
+            count=5,
+            name="Wrong ROI",
+            inference_config={"error_metric": "mse"},
+        )
+        target.roi_geometry = {"x": 0, "y": 0, "width": 10, "height": 10}
+        wrong_roi.roi_geometry = {"x": 1, "y": 0, "width": 10, "height": 10}
+        db.commit()
+        payload = {
+            "name": "Invalid reference",
+            "testing_run_id": target.id,
+            "start_timestamp": BASE,
+            "end_timestamp": BASE + timedelta(minutes=4),
+            "threshold_start_timestamp": BASE,
+            "threshold_end_timestamp": BASE + timedelta(minutes=4),
+            "config": _event_config(threshold_mode="quantile", manual_threshold=None),
+        }
+        for reference, message in (
+            (wrong_model, "same trained model"),
+            (wrong_scoring, "same scoring configuration"),
+            (wrong_roi, "same ROI geometry"),
+        ):
+            with pytest.raises(ValueError, match=message):
+                anomaly_service.create_run(db, AnomalyDetectionRunCreate(
+                    **payload,
+                    threshold_testing_run_id=reference.id,
+                ))
 
 
 def test_anomaly_detection_api_crud_and_decimation() -> None:
@@ -144,6 +451,7 @@ def test_anomaly_detection_api_crud_and_decimation() -> None:
     app.dependency_overrides[get_db] = override_get_db
     try:
         with TestClient(app) as client:
+            progress_token = "test-create-progress"
             created = client.post("/api/anomaly-detection-runs", json={
                 "name": "Sensitive detector",
                 "testing_run_id": testing_run_id,
@@ -151,6 +459,7 @@ def test_anomaly_detection_api_crud_and_decimation() -> None:
                 "start_timestamp": BASE.isoformat(),
                 "end_timestamp": (BASE + timedelta(minutes=79)).isoformat(),
                 "config": _fast_config().model_dump(),
+                "progress_token": progress_token,
             })
             assert created.status_code == 200, created.text
             body = created.json()
@@ -159,16 +468,61 @@ def test_anomaly_detection_api_crud_and_decimation() -> None:
             assert body["algorithm_version"] == "robust_cusum_v1"
             assert body["config"]["algorithm"] == "robust_cusum"
             run_id = body["id"]
+            progress = client.get(f"/api/anomaly-detection-progress/{progress_token}")
+            assert progress.status_code == 200
+            assert progress.json()["status"] == "complete"
+            assert progress.json()["percent"] == 100
 
             listed = client.get("/api/anomaly-detection-runs")
             assert listed.status_code == 200
             assert [item["id"] for item in listed.json()] == [run_id]
 
-            detail = client.get(f"/api/anomaly-detection-runs/{run_id}?max_points=20")
+            detail_token = "test-detail-progress"
+            detail = client.get(
+                f"/api/anomaly-detection-runs/{run_id}?max_points=20&progress_token={detail_token}"
+            )
             assert detail.status_code == 200
             assert detail.json()["decimated"] is True
             assert len(detail.json()["series"]) <= 20
             assert detail.json()["events"][0]["confirmed_at"] is not None
+            detail_progress = client.get(f"/api/anomaly-detection-progress/{detail_token}")
+            assert detail_progress.status_code == 200
+            assert detail_progress.json()["status"] == "complete"
+
+            threshold_preview = client.post("/api/anomaly-detection-threshold-preview", json={
+                "testing_run_id": testing_run_id,
+                "score_series": "score",
+                "start_timestamp": BASE.isoformat(),
+                "end_timestamp": (BASE + timedelta(minutes=79)).isoformat(),
+                "smoothing_enabled": False,
+                "smoothing_method": "median",
+                "smoothing_window_seconds": 5,
+                "quantile": 0.5,
+            })
+            assert threshold_preview.status_code == 200, threshold_preview.text
+            assert threshold_preview.json()["point_count"] == 80
+            assert threshold_preview.json()["threshold"] == 1.0
+
+            event_run = client.post("/api/anomaly-detection-runs", json={
+                "name": "K-out-of-N detector",
+                "testing_run_id": testing_run_id,
+                "score_series": "score",
+                "start_timestamp": BASE.isoformat(),
+                "end_timestamp": (BASE + timedelta(minutes=79)).isoformat(),
+                "config": _event_config(
+                    persistence_k=2,
+                    persistence_n=3,
+                    manual_threshold=2.0,
+                ).model_dump(),
+            })
+            assert event_run.status_code == 200, event_run.text
+            event_body = event_run.json()
+            assert event_body["algorithm_version"] == "event_threshold_v1"
+            assert event_body["resolved_threshold"] == 2.0
+            assert event_body["anomaly_count"] == 1
+            assert event_body["series"][0]["threshold_on"] == 2.0
+            assert event_body["events"][0]["max_smoothed_score"] == 3.0
+            assert client.delete(f"/api/anomaly-detection-runs/{event_body['id']}").status_code == 204
 
             zscore = client.post("/api/anomaly-detection-runs", json={
                 "name": "Robust z-score detector",
@@ -202,8 +556,49 @@ def test_anomaly_detection_api_crud_and_decimation() -> None:
             deleted = client.delete(f"/api/anomaly-detection-runs/{run_id}")
             assert deleted.status_code == 204
             assert client.get(f"/api/anomaly-detection-runs/{run_id}").status_code == 404
+            assert client.get("/api/anomaly-detection-progress/unknown-token").status_code == 404
     finally:
         app.dependency_overrides.clear()
+
+
+def test_create_run_executes_detector_once(monkeypatch) -> None:
+    engine = create_engine(
+        "sqlite+pysqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+    Base.metadata.create_all(engine)
+    calls = 0
+    original_detect = anomaly_service.detect
+
+    def counted_detect(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return original_detect(*args, **kwargs)
+
+    monkeypatch.setattr(anomaly_service, "detect", counted_detect)
+    with SessionLocal() as db:
+        testing_run = _seed_testing_run(db)
+        anomaly_service.create_run(db, AnomalyDetectionRunCreate(
+            name="Single pass detector",
+            testing_run_id=testing_run.id,
+            start_timestamp=BASE,
+            end_timestamp=BASE + timedelta(minutes=79),
+            config=_fast_config(),
+        ))
+    assert calls == 1
+
+
+def test_progress_registry_is_project_isolated() -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:", poolclass=StaticPool)
+    SessionLocal = sessionmaker(bind=engine)
+    with SessionLocal() as first, SessionLocal() as second:
+        first.info["database_url"] = "sqlite:///project-one.db"
+        second.info["database_url"] = "sqlite:///project-two.db"
+        anomaly_service._set_progress(first, "same-token", "loading", 1, 2, "Project one")
+        assert anomaly_service.get_progress(first, "same-token") is not None
+        assert anomaly_service.get_progress(second, "same-token") is None
 
 
 def test_restarting_inference_invalidates_saved_detections(monkeypatch) -> None:
@@ -228,4 +623,32 @@ def test_restarting_inference_invalidates_saved_detections(monkeypatch) -> None:
         restarted = testing_service.restart_testing_run(db, testing_run.id)
         assert restarted is not None
         assert restarted.status == "queued"
+        assert db.get(models.AnomalyDetectionRun, detection.id) is None
+
+
+def test_restarting_threshold_reference_invalidates_saved_detection(monkeypatch) -> None:
+    engine = create_engine(
+        "sqlite+pysqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+    Base.metadata.create_all(engine)
+    with SessionLocal() as db:
+        reference = _seed_testing_run(db, count=10, name="Normal reference", values=[1.0] * 10)
+        target = _seed_testing_run(db, count=10, name="Target", values=[1.0] * 5 + [3.0] * 5)
+        detection = anomaly_service.create_run(db, AnomalyDetectionRunCreate(
+            name="Referenced detector",
+            testing_run_id=target.id,
+            start_timestamp=BASE,
+            end_timestamp=BASE + timedelta(minutes=9),
+            threshold_testing_run_id=reference.id,
+            threshold_start_timestamp=BASE,
+            threshold_end_timestamp=BASE + timedelta(minutes=9),
+            config=_event_config(threshold_mode="quantile", manual_threshold=None),
+        ))
+        assert db.get(models.AnomalyDetectionRun, detection.id) is not None
+        monkeypatch.setattr(testing_service.scheduler, "wake", lambda: None)
+        restarted = testing_service.restart_testing_run(db, reference.id)
+        assert restarted is not None
         assert db.get(models.AnomalyDetectionRun, detection.id) is None
