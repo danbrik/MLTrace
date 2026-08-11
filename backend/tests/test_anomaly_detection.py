@@ -67,6 +67,21 @@ def _event_config(**overrides) -> AnomalyDetectionConfig:
     return AnomalyDetectionConfig(**values)
 
 
+def _sigma_config(**overrides) -> AnomalyDetectionConfig:
+    values = {
+        "algorithm": "rolling_sigma",
+        "baseline_window_minutes": 10,
+        "warmup_minutes": 0,
+        "minimum_warmup_points": 3,
+        "sigma_threshold": 3,
+        "preroll_minutes": 10,
+        "gap_multiplier": 5,
+        "minimum_gap_minutes": 10,
+    }
+    values.update(overrides)
+    return AnomalyDetectionConfig(**values)
+
+
 def test_constant_signal_is_stable_when_mad_is_zero() -> None:
     output = detect(_points([1.0] * 40), _fast_config())
     assert output.events == []
@@ -189,6 +204,59 @@ def test_event_threshold_merges_close_events_but_not_across_data_gap() -> None:
     ))
     assert len(separated.events) == 2
     assert separated.events[0].end_reason == "data_gap"
+
+
+def test_rolling_sigma_uses_raw_score_and_triggers_immediately() -> None:
+    output = detect(_points([1.0, 2.0, 3.0, 10.0, 2.0], seconds=1), _sigma_config())
+
+    assert [point.smoothed for point in output.series] == [point.score for point in output.series]
+    anomaly_point = output.series[3]
+    assert anomaly_point.baseline == pytest.approx(2.0)
+    assert anomaly_point.baseline_std == pytest.approx(statistics.pstdev([1.0, 2.0, 3.0]))
+    assert anomaly_point.high_threshold == pytest.approx(
+        2.0 + 3 * statistics.pstdev([1.0, 2.0, 3.0])
+    )
+    assert anomaly_point.state == "confirmed"
+    assert len(output.events) == 1
+    assert output.events[0].warning_start == BASE + timedelta(seconds=3)
+    assert output.events[0].confirmed_at == output.events[0].warning_start
+    assert output.events[0].end_reason == "recovered"
+
+
+def test_rolling_sigma_freezes_baseline_during_anomaly() -> None:
+    output = detect(
+        _points([1.0, 1.1, 0.9, 4.0, 5.0, 6.0, 1.0], seconds=1),
+        _sigma_config(),
+    )
+
+    anomaly_points = output.series[3:6]
+    assert all(point.state == "confirmed" for point in anomaly_points)
+    assert {round(point.baseline or 0.0, 10) for point in anomaly_points} == {1.0}
+    assert len(output.events) == 1
+    assert output.events[0].max_score == 6.0
+    assert output.events[0].peak_timestamp == BASE + timedelta(seconds=5)
+
+
+def test_rolling_sigma_constant_baseline_is_numerically_stable() -> None:
+    output = detect(_points([1.0] * 20, seconds=1), _sigma_config())
+    assert output.events == []
+    ready = [point for point in output.series if point.state != "warmup"]
+    assert ready
+    assert all(point.robust_z == 0 for point in ready)
+    assert all(point.baseline_std == pytest.approx(1e-6) for point in ready)
+
+
+def test_rolling_sigma_data_gap_resets_baseline_and_warmup() -> None:
+    points = _points([1.0, 1.1, 0.9, 4.0], seconds=1)
+    points.extend([
+        SignalPoint(BASE + timedelta(hours=1), 1.0),
+        SignalPoint(BASE + timedelta(hours=1, seconds=1), 1.0),
+    ])
+    output = detect(points, _sigma_config(minimum_gap_minutes=1))
+
+    assert output.events[0].end_reason == "data_gap"
+    assert output.series[-2].state == "warmup"
+    assert output.series[-1].state == "warmup"
 
 
 def test_incremental_order_statistics_match_exact_median_and_mad() -> None:
@@ -523,6 +591,23 @@ def test_anomaly_detection_api_crud_and_decimation() -> None:
             assert event_body["series"][0]["threshold_on"] == 2.0
             assert event_body["events"][0]["max_smoothed_score"] == 3.0
             assert client.delete(f"/api/anomaly-detection-runs/{event_body['id']}").status_code == 204
+
+            sigma_run = client.post("/api/anomaly-detection-runs", json={
+                "name": "Rolling 3-sigma detector",
+                "testing_run_id": testing_run_id,
+                "score_series": "score",
+                "start_timestamp": BASE.isoformat(),
+                "end_timestamp": (BASE + timedelta(minutes=79)).isoformat(),
+                "config": _sigma_config().model_dump(),
+            })
+            assert sigma_run.status_code == 200, sigma_run.text
+            sigma_body = sigma_run.json()
+            assert sigma_body["algorithm_version"] == "rolling_sigma_v1"
+            assert sigma_body["anomaly_count"] == 1
+            assert sigma_body["series"][35]["smoothed"] == sigma_body["series"][35]["score"]
+            assert sigma_body["series"][35]["baseline"] == 1.0
+            assert sigma_body["series"][35]["baseline_std"] == pytest.approx(1e-6)
+            assert client.delete(f"/api/anomaly-detection-runs/{sigma_body['id']}").status_code == 204
 
             zscore = client.post("/api/anomaly-detection-runs", json={
                 "name": "Robust z-score detector",

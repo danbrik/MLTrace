@@ -672,7 +672,7 @@ export type TestingRunResults = {
 };
 
 export type AnomalyDetectionScoreSeries = 'score' | 'full_mse' | 'roi_mse';
-export type AnomalyDetectionAlgorithm = 'robust_zscore' | 'robust_cusum' | 'event_threshold';
+export type AnomalyDetectionAlgorithm = 'robust_zscore' | 'robust_cusum' | 'event_threshold' | 'rolling_sigma';
 
 export type AnomalyDetectionConfig = {
   algorithm: AnomalyDetectionAlgorithm;
@@ -702,6 +702,7 @@ export type AnomalyDetectionConfig = {
   normal_close_seconds: number;
   merge_gap_seconds: number;
   event_minimum_gap_seconds: number;
+  sigma_threshold: number;
 };
 
 export type AnomalyDetectionEvent = {
@@ -732,6 +733,7 @@ export type AnomalyDetectionSeriesPoint = {
   threshold_off: number | null;
   candidate: boolean;
   persistence_count: number;
+  baseline_std: number | null;
   state: 'warmup' | 'normal' | 'warning' | 'confirmed';
 };
 

@@ -1143,7 +1143,7 @@ class TestingRunResultsResponse(BaseModel):
 
 
 class AnomalyDetectionConfig(BaseModel):
-    algorithm: Literal["robust_zscore", "robust_cusum", "event_threshold"] = "robust_cusum"
+    algorithm: Literal["robust_zscore", "robust_cusum", "event_threshold", "rolling_sigma"] = "robust_cusum"
     smoothing_half_life_minutes: float = Field(default=5.0, gt=0.0, le=1440.0)
     baseline_window_minutes: float = Field(default=120.0, gt=0.0, le=43200.0)
     warmup_minutes: float = Field(default=30.0, ge=0.0, le=43200.0)
@@ -1170,6 +1170,7 @@ class AnomalyDetectionConfig(BaseModel):
     normal_close_seconds: float = Field(default=30.0, ge=0.0, le=86400.0)
     merge_gap_seconds: float = Field(default=60.0, ge=0.0, le=86400.0)
     event_minimum_gap_seconds: float = Field(default=15.0, gt=0.0, le=86400.0)
+    sigma_threshold: float = Field(default=3.0, gt=0.0, le=1000.0)
 
     @model_validator(mode="after")
     def validate_threshold_order(self):
@@ -1303,6 +1304,7 @@ class AnomalyDetectionSeriesPoint(BaseModel):
     threshold_off: float | None = None
     candidate: bool = False
     persistence_count: int = 0
+    baseline_std: float | None = None
     state: Literal["warmup", "normal", "warning", "confirmed"]
 
 

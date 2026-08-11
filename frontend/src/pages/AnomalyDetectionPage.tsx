@@ -80,11 +80,22 @@ const FAST_CONFIG: AnomalyDetectionConfig = {
   normal_close_seconds: 30,
   merge_gap_seconds: 60,
   event_minimum_gap_seconds: 15,
+  sigma_threshold: 3,
 };
 
 const EVENT_CONFIG: AnomalyDetectionConfig = {
   ...FAST_CONFIG,
   algorithm: 'event_threshold',
+};
+
+const SIGMA_CONFIG: AnomalyDetectionConfig = {
+  ...FAST_CONFIG,
+  algorithm: 'rolling_sigma',
+  baseline_window_minutes: 30,
+  warmup_minutes: 5,
+  minimum_warmup_points: 30,
+  sigma_threshold: 3,
+  preroll_minutes: 30,
 };
 
 const BALANCED_CONFIG: AnomalyDetectionConfig = {
@@ -141,6 +152,11 @@ const ALGORITHMS: Array<{
     label: 'Event Threshold (K-out-of-N)',
     description: 'Smooths the reconstruction error, applies a manual or validation quantile threshold, and confirms an event when K of the last N samples exceed it.',
   },
+  {
+    value: 'rolling_sigma',
+    label: 'Rolling baseline + 3σ',
+    description: 'Uses the unchanged raw reconstruction error. A point is anomalous immediately when it exceeds the mean of the preceding normal baseline by the configured number of standard deviations.',
+  },
 ];
 
 type NumericConfigKey = {
@@ -148,6 +164,7 @@ type NumericConfigKey = {
 }[keyof AnomalyDetectionConfig];
 
 const ROBUST_ALGORITHMS: AnomalyDetectionAlgorithm[] = ['robust_zscore', 'robust_cusum'];
+const BASELINE_ALGORITHMS: AnomalyDetectionAlgorithm[] = [...ROBUST_ALGORITHMS, 'rolling_sigma'];
 
 const PARAMETER_DEFINITIONS: Array<{
   key: NumericConfigKey;
@@ -158,9 +175,9 @@ const PARAMETER_DEFINITIONS: Array<{
   algorithms?: AnomalyDetectionAlgorithm[];
 }> = [
   { key: 'smoothing_half_life_minutes', label: 'EWMA half-life (min)', description: 'Controls time-weighted smoothing. A shorter half-life reacts faster but follows noise more closely.', min: 0.1, algorithms: ROBUST_ALGORITHMS },
-  { key: 'baseline_window_minutes', label: 'Baseline window (min)', description: 'Length of normal history used for the rolling median and median absolute deviation (MAD).', min: 1, algorithms: ROBUST_ALGORITHMS },
-  { key: 'warmup_minutes', label: 'Warm-up (min)', description: 'Minimum normal-history duration required before warnings can start.', min: 0, algorithms: ROBUST_ALGORITHMS },
-  { key: 'minimum_warmup_points', label: 'Minimum warm-up points', description: 'Minimum number of valid measurements required before the baseline is considered reliable.', min: 3, algorithms: ROBUST_ALGORITHMS },
+  { key: 'baseline_window_minutes', label: 'Baseline window (min)', description: 'Length of normal history used for the rolling baseline. Rolling Sigma uses its mean and standard deviation; robust methods use median and MAD.', min: 1, algorithms: BASELINE_ALGORITHMS },
+  { key: 'warmup_minutes', label: 'Warm-up (min)', description: 'Minimum normal-history duration required before anomalies can be detected.', min: 0, algorithms: BASELINE_ALGORITHMS },
+  { key: 'minimum_warmup_points', label: 'Minimum warm-up points', description: 'Minimum number of valid normal measurements required before the baseline is considered reliable.', min: 3, algorithms: BASELINE_ALGORITHMS },
   { key: 'warning_z', label: 'Warning Z-score', description: 'Starts a yellow early-warning interval when the robust Z-score reaches this value.', min: 0.1, decimalScale: 2, algorithms: ROBUST_ALGORITHMS },
   { key: 'high_z', label: 'Confirmation Z-score', description: 'Confirms a red anomaly when this robust Z-score persists for the confirmation time.', min: 0.1, decimalScale: 2, algorithms: ROBUST_ALGORITHMS },
   { key: 'cusum_drift', label: 'CUSUM drift', description: 'Evidence subtracted during every minute. Larger values make CUSUM less sensitive to small shifts.', min: 0, decimalScale: 2, algorithms: ['robust_cusum'] },
@@ -170,7 +187,8 @@ const PARAMETER_DEFINITIONS: Array<{
   { key: 'recovery_minutes', label: 'Recovery hold (min)', description: 'Continuous time below the recovery Z-score required to close an event.', min: 0, algorithms: ROBUST_ALGORITHMS },
   { key: 'preroll_minutes', label: 'Pre-roll (min)', description: 'Hidden history loaded before a selected range so its baseline is already initialized.', min: 0 },
   { key: 'gap_multiplier', label: 'Gap multiplier', description: 'A time gap larger than this multiple of the normal sample interval resets detector state.', min: 1.1, decimalScale: 1 },
-  { key: 'minimum_gap_minutes', label: 'Minimum gap (min)', description: 'Absolute minimum duration that is treated as a data gap.', min: 0.1, algorithms: ROBUST_ALGORITHMS },
+  { key: 'minimum_gap_minutes', label: 'Minimum gap (min)', description: 'Absolute minimum duration that is treated as a data gap and resets the baseline.', min: 0.1, algorithms: BASELINE_ALGORITHMS },
+  { key: 'sigma_threshold', label: 'Standard-deviation threshold (σ)', description: 'A raw score is marked anomalous when it is strictly greater than rolling mean plus this many standard deviations. The default is 3σ.', min: 0.1, decimalScale: 2, algorithms: ['rolling_sigma'] },
   { key: 'event_smoothing_window_seconds', label: 'Smoothing window (s)', description: 'Trailing causal time window (t − window, t] used by median or moving-average smoothing.', min: 0.1, algorithms: ['event_threshold'] },
   { key: 'persistence_k', label: 'Required candidates K', description: 'Number of above-threshold samples required within the last N samples.', min: 1, algorithms: ['event_threshold'] },
   { key: 'persistence_n', label: 'Persistence window N', description: 'Number of most recent samples considered by the K-out-of-N rule.', min: 1, algorithms: ['event_threshold'] },
@@ -547,10 +565,14 @@ export function AnomalyDetectionPage({ active }: { active: boolean }) {
   }, []);
 
   function applyPreset(value: string | null) {
-    const next = value ?? (config.algorithm === 'event_threshold' ? 'prototype' : 'fast');
+    const next = value ?? (config.algorithm === 'event_threshold' ? 'prototype' : config.algorithm === 'rolling_sigma' ? 'simple' : 'fast');
     setPreset(next);
     if (next === 'prototype') {
       setConfig({ ...EVENT_CONFIG });
+      return;
+    }
+    if (next === 'simple') {
+      setConfig({ ...SIGMA_CONFIG });
       return;
     }
     if (PRESETS[next]) {
@@ -568,6 +590,9 @@ export function AnomalyDetectionPage({ active }: { active: boolean }) {
     if (algorithm === 'event_threshold') {
       setConfig({ ...EVENT_CONFIG });
       setPreset('prototype');
+    } else if (algorithm === 'rolling_sigma') {
+      setConfig({ ...SIGMA_CONFIG });
+      setPreset('simple');
     } else {
       setConfig({ ...FAST_CONFIG, algorithm });
       setPreset('fast');
@@ -688,7 +713,7 @@ export function AnomalyDetectionPage({ active }: { active: boolean }) {
       shapes.push({ type: 'rect', xref: 'x', yref: 'paper', x0: warmup[0].timestamp, x1: warmup.at(-1)?.timestamp, y0: 0, y1: 1, fillcolor: 'rgba(134,142,150,0.14)', line: { width: 0 }, layer: 'below' });
     }
     activeRun.events.forEach((event) => {
-      if (activeRun.config.algorithm !== 'event_threshold') {
+      if (!['event_threshold', 'rolling_sigma'].includes(activeRun.config.algorithm)) {
         const yellowEnd = event.confirmed_at ?? event.end_timestamp;
         shapes.push({ type: 'rect', xref: 'x', yref: 'paper', x0: event.warning_start, x1: yellowEnd, y0: 0, y1: 1, fillcolor: 'rgba(250,176,5,0.20)', line: { width: 0 }, layer: 'below' });
       }
@@ -713,6 +738,13 @@ export function AnomalyDetectionPage({ active }: { active: boolean }) {
         { type: 'scatter', mode: 'lines', name: 'Threshold Off', x: timestamps, y: activeRun.series.map((point) => point.threshold_off), line: { color: '#f59f00', width: 1.5, dash: 'dot' } },
       ];
     }
+    if (activeRun.config.algorithm === 'rolling_sigma') {
+      return [
+        { type: 'scatter', mode: 'lines', name: 'Raw error', x: timestamps, y: activeRun.series.map((point) => point.score), line: { color: '#228be6', width: 1.5 } },
+        { type: 'scatter', mode: 'lines', name: 'Rolling mean', x: timestamps, y: activeRun.series.map((point) => point.baseline), line: { color: '#868e96', width: 1.5 } },
+        { type: 'scatter', mode: 'lines', name: `Mean + ${activeRun.config.sigma_threshold}σ`, x: timestamps, y: activeRun.series.map((point) => point.high_threshold), line: { color: '#fa5252', width: 1.5, dash: 'dash' } },
+      ];
+    }
     return [
       { type: 'scatter', mode: 'lines', name: 'Raw error', x: timestamps, y: activeRun.series.map((point) => point.score), line: { color: '#868e96', width: 1 } },
       { type: 'scatter', mode: 'lines', name: 'EWMA', x: timestamps, y: activeRun.series.map((point) => point.smoothed), line: { color: '#228be6', width: 2 } },
@@ -732,8 +764,11 @@ export function AnomalyDetectionPage({ active }: { active: boolean }) {
       ];
     }
     const data: Data[] = [
-      { type: 'scatter', mode: 'lines', name: 'Robust z-score', x: activeRun.series.map((point) => point.timestamp), y: activeRun.series.map((point) => point.robust_z), line: { color: '#7950f2', width: 1.5 } },
+      { type: 'scatter', mode: 'lines', name: activeRun.config.algorithm === 'rolling_sigma' ? 'Standard deviations above mean' : 'Robust z-score', x: activeRun.series.map((point) => point.timestamp), y: activeRun.series.map((point) => point.robust_z), line: { color: '#7950f2', width: 1.5 } },
     ];
+    if (activeRun.config.algorithm === 'rolling_sigma') {
+      data.push({ type: 'scatter', mode: 'lines', name: `Anomaly at ${activeRun.config.sigma_threshold}σ`, x: activeRun.series.map((point) => point.timestamp), y: activeRun.series.map(() => activeRun.config.sigma_threshold), line: { color: '#fa5252', width: 1.2, dash: 'dash' } });
+    }
     if (activeRun.config.algorithm === 'robust_cusum') {
       data.push({ type: 'scatter', mode: 'lines', name: 'CUSUM', x: activeRun.series.map((point) => point.timestamp), y: activeRun.series.map((point) => point.cusum), yaxis: 'y2', line: { color: '#0ca678', width: 1.5 } });
     }
@@ -818,6 +853,8 @@ export function AnomalyDetectionPage({ active }: { active: boolean }) {
                 value={preset}
                 data={config.algorithm === 'event_threshold'
                   ? [{ value: 'prototype', label: 'Prototype defaults (recommended)' }, { value: 'custom', label: 'Custom', disabled: preset !== 'custom' }]
+                  : config.algorithm === 'rolling_sigma'
+                    ? [{ value: 'simple', label: '30 min baseline · 3σ (recommended)' }, { value: 'custom', label: 'Custom', disabled: preset !== 'custom' }]
                   : [{ value: 'fast', label: 'Fast response (recommended)' }, { value: 'balanced', label: 'Balanced' }, { value: 'robust', label: 'Very robust' }, { value: 'custom', label: 'Custom', disabled: preset !== 'custom' }]}
                 disabled={running || thresholdCalculating}
                 onChange={applyPreset}
@@ -1054,7 +1091,7 @@ export function AnomalyDetectionPage({ active }: { active: boolean }) {
               <div><Title order={3}>{activeRun.name}</Title><Text size="sm" c="dimmed">{activeRun.testing_run_name} · {formatTimestamp(activeRun.start_timestamp)} – {formatTimestamp(activeRun.end_timestamp)}</Text></div>
               <Group gap="xs">
                 <Badge color="violet">{algorithmDefinition(activeRun.config.algorithm).label}</Badge>
-                {activeRun.config.algorithm === 'event_threshold'
+                {activeRun.config.algorithm === 'event_threshold' || activeRun.config.algorithm === 'rolling_sigma'
                   ? <Badge color="red">{activeRun.anomaly_count} events</Badge>
                   : <><Badge color="yellow">{activeRun.warning_count} warnings</Badge><Badge color="red">{activeRun.anomaly_count} confirmed</Badge></>}
                 <Badge color="gray">{activeRun.point_count} points</Badge>
@@ -1072,7 +1109,7 @@ export function AnomalyDetectionPage({ active }: { active: boolean }) {
             <PlotlyChart data={resultData} layout={{ hovermode: 'x unified', shapes: resultShapes, xaxis: { type: 'date', title: { text: 'Time' } }, yaxis: { title: { text: activeRun.score_series.replace('_', ' ').toUpperCase() } }, legend: { orientation: 'h' } }} height={480} />
             <Button variant="subtle" justify="space-between" rightSection={detailsOpen ? <ChevronDown size={16} /> : <ChevronRight size={16} />} onClick={() => setDetailsOpen((value) => !value)}>Diagnostics</Button>
             <Collapse in={detailsOpen}>
-              <PlotlyChart data={diagnosticData} layout={{ hovermode: 'x unified', xaxis: { type: 'date' }, yaxis: { title: { text: activeRun.config.algorithm === 'event_threshold' ? 'Candidate count' : 'Robust z-score' } }, ...(activeRun.config.algorithm === 'robust_cusum' ? { yaxis2: { title: { text: 'CUSUM' }, overlaying: 'y', side: 'right' } } : {}), legend: { orientation: 'h' } }} height={300} />
+              <PlotlyChart data={diagnosticData} layout={{ hovermode: 'x unified', xaxis: { type: 'date' }, yaxis: { title: { text: activeRun.config.algorithm === 'event_threshold' ? 'Candidate count' : activeRun.config.algorithm === 'rolling_sigma' ? 'Standard deviations' : 'Robust z-score' } }, ...(activeRun.config.algorithm === 'robust_cusum' ? { yaxis2: { title: { text: 'CUSUM' }, overlaying: 'y', side: 'right' } } : {}), legend: { orientation: 'h' } }} height={300} />
             </Collapse>
             <Text fw={700}>{activeRun.config.algorithm === 'event_threshold' ? 'Detected events' : 'Detected intervals'}</Text>
             {activeRun.events.length === 0 ? <Alert color="green">No warnings or confirmed anomalies detected.</Alert> : (

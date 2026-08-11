@@ -32,6 +32,7 @@ ALGORITHM_VERSIONS = {
     "robust_zscore": "robust_zscore_v1",
     "robust_cusum": "robust_cusum_v1",
     "event_threshold": "event_threshold_v1",
+    "rolling_sigma": "rolling_sigma_v1",
 }
 
 _PROGRESS_TTL_SECONDS = 10 * 60
@@ -458,7 +459,142 @@ def detect(
         if threshold is None or not math.isfinite(threshold):
             raise ValueError("A finite resolved threshold is required for event-threshold detection.")
         return _detect_event_threshold(points, config, float(threshold), progress_callback)
+    if config.algorithm == "rolling_sigma":
+        return _detect_rolling_sigma(points, config, progress_callback)
     return _detect_robust(points, config, progress_callback)
+
+
+def _detect_rolling_sigma(
+    points: list[SignalPoint],
+    config: AnomalyDetectionConfig,
+    progress_callback: ProgressCallback | None = None,
+) -> DetectionOutput:
+    """Compare each raw score with the preceding normal mean plus N standard deviations."""
+    if not points:
+        return DetectionOutput(series=[], events=[])
+
+    ordered = sorted(points, key=lambda item: item.timestamp)
+    cadence = _median_positive_delta_seconds(ordered)
+    gap_seconds = max(config.minimum_gap_minutes * 60.0, cadence * config.gap_multiplier)
+    window_seconds = config.baseline_window_minutes * 60.0
+    warmup_seconds = config.warmup_minutes * 60.0
+    baseline: deque[tuple[float, float]] = deque()
+    baseline_sum = 0.0
+    baseline_sum_squares = 0.0
+    normal_clock = 0.0
+    first_baseline_clock: float | None = None
+    previous_timestamp: datetime | None = None
+    active: DetectionEvent | None = None
+    active_scores: list[float] = []
+    events: list[DetectionEvent] = []
+    series: list[AnomalyDetectionSeriesPoint] = []
+    total = len(ordered)
+    stride = max(1, total // 100)
+
+    def close_active(at: datetime, reason: str) -> None:
+        nonlocal active, active_scores
+        if active is not None:
+            active.end_timestamp = at
+            active.end_reason = reason
+            active.duration_seconds = max(0.0, (at - active.warning_start).total_seconds())
+            active.max_smoothed_score = active.max_score
+            active.mean_smoothed_score = statistics.fmean(active_scores) if active_scores else active.max_score
+            events.append(active)
+        active = None
+        active_scores = []
+
+    if progress_callback is not None:
+        progress_callback("detecting", 0, total, "Comparing raw scores with the rolling baseline")
+
+    for index, point in enumerate(ordered):
+        dt = 0.0 if previous_timestamp is None else max(
+            0.0, (point.timestamp - previous_timestamp).total_seconds()
+        )
+        is_gap = previous_timestamp is not None and dt > gap_seconds
+        if is_gap:
+            close_active(ordered[index - 1].timestamp, "data_gap")
+            baseline.clear()
+            baseline_sum = 0.0
+            baseline_sum_squares = 0.0
+            normal_clock = 0.0
+            first_baseline_clock = None
+            dt = 0.0
+
+        if active is None:
+            normal_clock += dt
+            cutoff = normal_clock - window_seconds
+            while baseline and baseline[0][0] < cutoff:
+                _clock, expired = baseline.popleft()
+                baseline_sum -= expired
+                baseline_sum_squares -= expired * expired
+
+        count = len(baseline)
+        mean = baseline_sum / count if count else None
+        standard_deviation = None
+        threshold = None
+        if mean is not None:
+            variance = max(0.0, baseline_sum_squares / count - mean * mean)
+            standard_deviation = max(math.sqrt(variance), abs(mean) * 1e-6, 1e-12)
+            threshold = mean + config.sigma_threshold * standard_deviation
+        baseline_span = 0.0 if first_baseline_clock is None else normal_clock - first_baseline_clock
+        ready = count >= config.minimum_warmup_points and baseline_span >= warmup_seconds
+        sigma = (
+            (point.score - mean) / standard_deviation
+            if ready and mean is not None and standard_deviation is not None
+            else None
+        )
+        anomalous = ready and threshold is not None and point.score > threshold
+
+        if anomalous:
+            if active is None:
+                active = DetectionEvent(
+                    warning_start=point.timestamp,
+                    confirmed_at=point.timestamp,
+                    end_timestamp=point.timestamp,
+                    end_reason="range_end",
+                    peak_timestamp=point.timestamp,
+                    max_score=point.score,
+                    max_robust_z=sigma,
+                    threshold=threshold,
+                )
+            elif point.score > active.max_score:
+                active.max_score = point.score
+                active.peak_timestamp = point.timestamp
+            if sigma is not None:
+                active.max_robust_z = max(active.max_robust_z or sigma, sigma)
+            active_scores.append(point.score)
+        elif active is not None:
+            close_active(point.timestamp, "recovered")
+
+        display_state = "warmup" if not ready else "confirmed" if anomalous else "normal"
+        series.append(AnomalyDetectionSeriesPoint(
+            timestamp=point.timestamp,
+            score=point.score,
+            smoothed=point.score,
+            baseline=mean if ready else None,
+            warning_threshold=threshold if ready else None,
+            high_threshold=threshold if ready else None,
+            robust_z=sigma,
+            cusum=0.0,
+            state=display_state,
+            baseline_std=standard_deviation if ready else None,
+        ))
+
+        if active is None:
+            if first_baseline_clock is None:
+                first_baseline_clock = normal_clock
+            baseline.append((normal_clock, point.score))
+            baseline_sum += point.score
+            baseline_sum_squares += point.score * point.score
+        previous_timestamp = point.timestamp
+        if progress_callback is not None and ((index + 1) % stride == 0 or index + 1 == total):
+            progress_callback(
+                "detecting", index + 1, total, "Comparing raw scores with the rolling baseline"
+            )
+
+    if active is not None:
+        close_active(ordered[-1].timestamp, "range_end")
+    return DetectionOutput(series=series, events=events)
 
 
 def _detect_robust(
