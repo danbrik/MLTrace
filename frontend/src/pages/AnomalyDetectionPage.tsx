@@ -219,6 +219,7 @@ export function AnomalyDetectionPage({ active }: { active: boolean }) {
   const [runProgress, setRunProgress] = useState(0);
   const [runElapsedSeconds, setRunElapsedSeconds] = useState(0);
   const [activeRun, setActiveRun] = useState<AnomalyDetectionRun | null>(null);
+  const [loadingSavedRunId, setLoadingSavedRunId] = useState<number | null>(null);
   const [detailsOpen, setDetailsOpen] = useState(true);
 
   const refresh = useCallback(async () => {
@@ -366,14 +367,21 @@ export function AnomalyDetectionPage({ active }: { active: boolean }) {
   }
 
   async function openSaved(runId: number) {
+    if (loadingSavedRunId !== null) return;
+    setLoadingSavedRunId(runId);
     try {
-      setActiveRun(await getAnomalyDetectionRun(runId));
+      const loaded = await getAnomalyDetectionRun(runId, MAX_PREVIEW_POINTS);
+      setActiveRun(loaded);
+      setDetailsOpen(true);
     } catch (error) {
       notifications.show({ color: 'red', title: 'Could not open detection run', message: errorMessage(error) });
+    } finally {
+      setLoadingSavedRunId(null);
     }
   }
 
   async function removeSaved(run: AnomalyDetectionRunSummary) {
+    if (loadingSavedRunId !== null) return;
     if (!window.confirm(`Delete anomaly detection run “${run.name}”?`)) return;
     try {
       await deleteAnomalyDetectionRun(run.id);
@@ -538,6 +546,41 @@ export function AnomalyDetectionPage({ active }: { active: boolean }) {
         </Paper>
       )}
 
+      <Paper withBorder p="md">
+        <Stack gap="sm">
+          <Group justify="space-between"><Text fw={700}>Saved detection runs</Text><Badge variant="light">{savedRuns.length}</Badge></Group>
+          {savedRuns.length === 0 ? <Text size="sm" c="dimmed">No saved anomaly detection runs yet.</Text> : (
+            <ScrollArea.Autosize mah={360} type="auto">
+              <Table highlightOnHover>
+                <Table.Thead><Table.Tr><Table.Th>Name</Table.Th><Table.Th>Algorithm</Table.Th><Table.Th>Inference</Table.Th><Table.Th>Range</Table.Th><Table.Th>Warnings</Table.Th><Table.Th>Anomalies</Table.Th><Table.Th /></Table.Tr></Table.Thead>
+                <Table.Tbody>{savedRuns.map((run) => <Table.Tr key={run.id} bg={activeRun?.id === run.id ? 'var(--mantine-color-violet-light)' : undefined}>
+                  <Table.Td><Text fw={activeRun?.id === run.id ? 700 : 500}>{run.name}</Text></Table.Td>
+                  <Table.Td><Badge variant="light" color="violet">{algorithmDefinition(run.config.algorithm).label}</Badge></Table.Td>
+                  <Table.Td>{run.testing_run_name}</Table.Td><Table.Td>{formatDuration(run.start_timestamp, run.end_timestamp)}</Table.Td><Table.Td>{run.warning_count}</Table.Td><Table.Td><Badge color={run.anomaly_count ? 'red' : 'gray'}>{run.anomaly_count}</Badge></Table.Td>
+                  <Table.Td>
+                    <Group gap={4} wrap="nowrap">
+                      <Button
+                        size="compact-sm"
+                        variant={activeRun?.id === run.id ? 'light' : 'subtle'}
+                        color="violet"
+                        leftSection={loadingSavedRunId === run.id ? <Loader size="xs" /> : <Activity size={15} />}
+                        disabled={loadingSavedRunId !== null || activeRun?.id === run.id}
+                        onClick={() => openSaved(run.id)}
+                      >
+                        {activeRun?.id === run.id ? 'Opened' : 'Open'}
+                      </Button>
+                      <Tooltip label="Delete run">
+                        <ActionIcon color="red" variant="subtle" disabled={loadingSavedRunId !== null} onClick={() => removeSaved(run)}><Trash2 size={16} /></ActionIcon>
+                      </Tooltip>
+                    </Group>
+                  </Table.Td>
+                </Table.Tr>)}</Table.Tbody>
+              </Table>
+            </ScrollArea.Autosize>
+          )}
+        </Stack>
+      </Paper>
+
       {activeRun && (
         <Paper withBorder p="md">
           <Stack gap="md">
@@ -568,25 +611,6 @@ export function AnomalyDetectionPage({ active }: { active: boolean }) {
           </Stack>
         </Paper>
       )}
-
-      <Paper withBorder p="md">
-        <Stack gap="sm">
-          <Group justify="space-between"><Text fw={700}>Saved detection runs</Text><Badge variant="light">{savedRuns.length}</Badge></Group>
-          {savedRuns.length === 0 ? <Text size="sm" c="dimmed">No saved anomaly detection runs yet.</Text> : (
-            <ScrollArea>
-              <Table highlightOnHover>
-                <Table.Thead><Table.Tr><Table.Th>Name</Table.Th><Table.Th>Algorithm</Table.Th><Table.Th>Inference</Table.Th><Table.Th>Range</Table.Th><Table.Th>Warnings</Table.Th><Table.Th>Anomalies</Table.Th><Table.Th /></Table.Tr></Table.Thead>
-                <Table.Tbody>{savedRuns.map((run) => <Table.Tr key={run.id}>
-                  <Table.Td><Button variant="subtle" px={0} leftSection={<Activity size={15} />} onClick={() => openSaved(run.id)}>{run.name}</Button></Table.Td>
-                  <Table.Td><Badge variant="light" color="violet">{algorithmDefinition(run.config.algorithm).label}</Badge></Table.Td>
-                  <Table.Td>{run.testing_run_name}</Table.Td><Table.Td>{formatDuration(run.start_timestamp, run.end_timestamp)}</Table.Td><Table.Td>{run.warning_count}</Table.Td><Table.Td><Badge color={run.anomaly_count ? 'red' : 'gray'}>{run.anomaly_count}</Badge></Table.Td>
-                  <Table.Td><Tooltip label="Delete run"><ActionIcon color="red" variant="subtle" onClick={() => removeSaved(run)}><Trash2 size={16} /></ActionIcon></Tooltip></Table.Td>
-                </Table.Tr>)}</Table.Tbody>
-              </Table>
-            </ScrollArea>
-          )}
-        </Stack>
-      </Paper>
     </Stack>
   );
 }

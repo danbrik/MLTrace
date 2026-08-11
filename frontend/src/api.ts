@@ -834,7 +834,7 @@ export function listAnomalyDetectionRuns(): Promise<AnomalyDetectionRunSummary[]
 }
 
 export function getAnomalyDetectionRun(runId: number, maxPoints = 8000): Promise<AnomalyDetectionRun> {
-  return request<AnomalyDetectionRun>(`/api/anomaly-detection-runs/${runId}?max_points=${maxPoints}`);
+  return request<AnomalyDetectionRun>(`/api/anomaly-detection-runs/${runId}?max_points=${maxPoints}`, undefined, 15 * 60_000);
 }
 
 export function createAnomalyDetectionRun(payload: {
