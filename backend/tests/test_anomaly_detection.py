@@ -59,6 +59,14 @@ def test_brief_peak_remains_unconfirmed() -> None:
     assert output.events[0].end_reason == "recovered"
 
 
+def test_robust_zscore_does_not_accumulate_cusum() -> None:
+    values = [1.0] * 12 + [3.0] * 10 + [1.0] * 5
+    output = detect(_points(values), _fast_config(algorithm="robust_zscore"))
+    assert len(output.events) == 1
+    assert output.events[0].confirmed_at is not None
+    assert all(point.cusum == 0 for point in output.series)
+
+
 def test_sustained_shift_confirms_and_frozen_baseline_does_not_follow() -> None:
     values = [1.0] * 12 + [3.0] * 10 + [1.0] * 5
     output = detect(_points(values), _fast_config())
@@ -148,6 +156,8 @@ def test_anomaly_detection_api_crud_and_decimation() -> None:
             body = created.json()
             assert body["point_count"] == 80
             assert body["anomaly_count"] == 1
+            assert body["algorithm_version"] == "robust_cusum_v1"
+            assert body["config"]["algorithm"] == "robust_cusum"
             run_id = body["id"]
 
             listed = client.get("/api/anomaly-detection-runs")
@@ -159,6 +169,20 @@ def test_anomaly_detection_api_crud_and_decimation() -> None:
             assert detail.json()["decimated"] is True
             assert len(detail.json()["series"]) <= 20
             assert detail.json()["events"][0]["confirmed_at"] is not None
+
+            zscore = client.post("/api/anomaly-detection-runs", json={
+                "name": "Robust z-score detector",
+                "testing_run_id": testing_run_id,
+                "score_series": "score",
+                "start_timestamp": BASE.isoformat(),
+                "end_timestamp": (BASE + timedelta(minutes=79)).isoformat(),
+                "config": _fast_config(algorithm="robust_zscore").model_dump(),
+            })
+            assert zscore.status_code == 200, zscore.text
+            assert zscore.json()["algorithm_version"] == "robust_zscore_v1"
+            assert zscore.json()["config"]["algorithm"] == "robust_zscore"
+            assert all(point["cusum"] == 0 for point in zscore.json()["series"])
+            assert client.delete(f"/api/anomaly-detection-runs/{zscore.json()['id']}").status_code == 204
 
             with_preroll = client.post("/api/anomaly-detection-runs", json={
                 "name": "Selected range with pre-roll",

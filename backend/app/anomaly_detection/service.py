@@ -19,7 +19,10 @@ from app.schemas import (
 )
 
 
-ALGORITHM_VERSION = "robust_cusum_v1"
+ALGORITHM_VERSIONS = {
+    "robust_zscore": "robust_zscore_v1",
+    "robust_cusum": "robust_cusum_v1",
+}
 
 
 @dataclass(frozen=True)
@@ -133,7 +136,10 @@ def detect(points: list[SignalPoint], config: AnomalyDetectionConfig) -> Detecti
 
         if ready and robust_z is not None:
             evidence_minutes = max(0.0, dt) / 60.0
-            cusum = max(0.0, cusum + (robust_z - config.cusum_drift) * evidence_minutes)
+            if config.algorithm == "robust_cusum":
+                cusum = max(0.0, cusum + (robust_z - config.cusum_drift) * evidence_minutes)
+            else:
+                cusum = 0.0
             if state == "normal" and robust_z >= config.warning_z:
                 state = "warning"
                 active = DetectionEvent(
@@ -151,11 +157,14 @@ def detect(points: list[SignalPoint], config: AnomalyDetectionConfig) -> Detecti
                     active.peak_timestamp = point.timestamp
                 active.max_robust_z = max(active.max_robust_z, robust_z)
                 warning_age = (point.timestamp - active.warning_start).total_seconds()
+                high_evidence = robust_z >= config.high_z
+                if config.algorithm == "robust_cusum":
+                    high_evidence = high_evidence or cusum >= config.cusum_threshold
                 if (
                     state == "warning"
                     and warning_age >= confirmation_seconds
                     and robust_z >= config.warning_z
-                    and (robust_z >= config.high_z or cusum >= config.cusum_threshold)
+                    and high_evidence
                 ):
                     state = "confirmed"
                     active.confirmed_at = point.timestamp
@@ -320,7 +329,7 @@ def create_run(db: Session, payload: AnomalyDetectionRunCreate) -> AnomalyDetect
         score_series=payload.score_series,
         start_timestamp=payload.start_timestamp,
         end_timestamp=payload.end_timestamp,
-        algorithm_version=ALGORITHM_VERSION,
+        algorithm_version=ALGORITHM_VERSIONS[payload.config.algorithm],
         config=payload.config.model_dump(mode="json"),
     )
     db.add(run)

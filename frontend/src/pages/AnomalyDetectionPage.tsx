@@ -8,6 +8,7 @@ import {
   Loader,
   NumberInput,
   Paper,
+  Progress,
   ScrollArea,
   SegmentedControl,
   Select,
@@ -20,7 +21,7 @@ import {
   Tooltip,
 } from '@mantine/core';
 import { notifications } from '@mantine/notifications';
-import { Activity, ChevronDown, ChevronRight, Play, RefreshCw, Trash2 } from 'lucide-react';
+import { Activity, ChevronDown, ChevronRight, Info, Play, RefreshCw, Trash2 } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 
 import {
@@ -36,6 +37,7 @@ import { PlotlyChart, type PlotlyChartSelection } from '../components/PlotlyChar
 import type { Data, Layout } from '../lib/plotly';
 import type {
   AnomalyDetectionConfig,
+  AnomalyDetectionAlgorithm,
   AnomalyDetectionRun,
   AnomalyDetectionRunSummary,
   AnomalyDetectionScoreSeries,
@@ -46,6 +48,7 @@ import type {
 const MAX_PREVIEW_POINTS = 8000;
 
 const FAST_CONFIG: AnomalyDetectionConfig = {
+  algorithm: 'robust_cusum',
   smoothing_half_life_minutes: 5,
   baseline_window_minutes: 120,
   warmup_minutes: 30,
@@ -95,6 +98,66 @@ const PRESETS: Record<string, AnomalyDetectionConfig> = {
   balanced: BALANCED_CONFIG,
   robust: ROBUST_CONFIG,
 };
+
+const ALGORITHMS: Array<{
+  value: AnomalyDetectionAlgorithm;
+  label: string;
+  description: string;
+}> = [
+  {
+    value: 'robust_cusum',
+    label: 'Robust Z-score + CUSUM (recommended)',
+    description: 'Starts a warning from the robust Z-score and confirms sustained changes using either a high Z-score or accumulated CUSUM evidence.',
+  },
+  {
+    value: 'robust_zscore',
+    label: 'Robust Z-score',
+    description: 'Uses the rolling median and MAD only. It confirms an event when the high Z-score remains present for the confirmation time.',
+  },
+];
+
+type NumericConfigKey = Exclude<keyof AnomalyDetectionConfig, 'algorithm'>;
+
+const PARAMETER_DEFINITIONS: Array<{
+  key: NumericConfigKey;
+  label: string;
+  description: string;
+  min?: number;
+  decimalScale?: number;
+  algorithms?: AnomalyDetectionAlgorithm[];
+}> = [
+  { key: 'smoothing_half_life_minutes', label: 'EWMA half-life (min)', description: 'Controls time-weighted smoothing. A shorter half-life reacts faster but follows noise more closely.', min: 0.1 },
+  { key: 'baseline_window_minutes', label: 'Baseline window (min)', description: 'Length of normal history used for the rolling median and median absolute deviation (MAD).', min: 1 },
+  { key: 'warmup_minutes', label: 'Warm-up (min)', description: 'Minimum normal-history duration required before warnings can start.', min: 0 },
+  { key: 'minimum_warmup_points', label: 'Minimum warm-up points', description: 'Minimum number of valid measurements required before the baseline is considered reliable.', min: 3 },
+  { key: 'warning_z', label: 'Warning Z-score', description: 'Starts a yellow early-warning interval when the robust Z-score reaches this value.', min: 0.1, decimalScale: 2 },
+  { key: 'high_z', label: 'Confirmation Z-score', description: 'Confirms a red anomaly when this robust Z-score persists for the confirmation time.', min: 0.1, decimalScale: 2 },
+  { key: 'cusum_drift', label: 'CUSUM drift', description: 'Evidence subtracted during every minute. Larger values make CUSUM less sensitive to small shifts.', min: 0, decimalScale: 2, algorithms: ['robust_cusum'] },
+  { key: 'cusum_threshold', label: 'CUSUM threshold', description: 'Accumulated positive evidence required to confirm an anomaly when the high Z-score is not reached.', min: 0.1, decimalScale: 2, algorithms: ['robust_cusum'] },
+  { key: 'confirmation_minutes', label: 'Confirmation hold (min)', description: 'Minimum time between the start of a warning and confirmation of an anomaly.', min: 0 },
+  { key: 'recovery_z', label: 'Recovery Z-score', description: 'The signal must fall below this Z-score before recovery timing begins.', decimalScale: 2 },
+  { key: 'recovery_minutes', label: 'Recovery hold (min)', description: 'Continuous time below the recovery Z-score required to close an event.', min: 0 },
+  { key: 'preroll_minutes', label: 'Pre-roll (min)', description: 'Hidden history loaded before a selected range so its baseline is already initialized.', min: 0 },
+  { key: 'gap_multiplier', label: 'Gap multiplier', description: 'A time gap larger than this multiple of the normal sample interval resets detector state.', min: 1.1, decimalScale: 1 },
+  { key: 'minimum_gap_minutes', label: 'Minimum gap (min)', description: 'Absolute minimum duration that is treated as a data gap.', min: 0.1 },
+];
+
+function InfoLabel({ label, description }: { label: string; description: string }) {
+  return (
+    <Group gap={4} wrap="nowrap">
+      <Text span size="sm" fw={500}>{label}</Text>
+      <Tooltip label={description} multiline w={320} withArrow>
+        <ActionIcon component="span" size="xs" variant="subtle" color="gray" aria-label={`${label} information`}>
+          <Info size={13} />
+        </ActionIcon>
+      </Tooltip>
+    </Group>
+  );
+}
+
+function algorithmDefinition(value: AnomalyDetectionAlgorithm) {
+  return ALGORITHMS.find((algorithm) => algorithm.value === value) ?? ALGORITHMS[0];
+}
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : 'Unknown error';
@@ -153,6 +216,8 @@ export function AnomalyDetectionPage({ active }: { active: boolean }) {
   const [config, setConfig] = useState<AnomalyDetectionConfig>({ ...FAST_CONFIG });
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const [running, setRunning] = useState(false);
+  const [runProgress, setRunProgress] = useState(0);
+  const [runElapsedSeconds, setRunElapsedSeconds] = useState(0);
   const [activeRun, setActiveRun] = useState<AnomalyDetectionRun | null>(null);
   const [detailsOpen, setDetailsOpen] = useState(true);
 
@@ -166,6 +231,17 @@ export function AnomalyDetectionPage({ active }: { active: boolean }) {
     if (!active) return;
     refresh().catch((error) => notifications.show({ color: 'red', title: 'Could not load anomaly detection', message: errorMessage(error) }));
   }, [active, refresh]);
+
+  useEffect(() => {
+    if (!running) return;
+    const startedAt = Date.now();
+    const timer = window.setInterval(() => {
+      const elapsed = (Date.now() - startedAt) / 1000;
+      setRunElapsedSeconds(Math.floor(elapsed));
+      setRunProgress(Math.min(95, 5 + 90 * (1 - Math.exp(-elapsed / 45))));
+    }, 500);
+    return () => window.clearInterval(timer);
+  }, [running]);
 
   const modelRuns = useMemo(
     () => testingRuns.filter((run) => !modelFilter || run.training_run_id === Number(modelFilter)),
@@ -246,12 +322,19 @@ export function AnomalyDetectionPage({ active }: { active: boolean }) {
   function applyPreset(value: string | null) {
     const next = value ?? 'fast';
     setPreset(next);
-    if (PRESETS[next]) setConfig({ ...PRESETS[next] });
+    if (PRESETS[next]) {
+      setConfig((current) => ({ ...PRESETS[next], algorithm: current.algorithm }));
+    }
   }
 
-  function patchConfig(key: keyof AnomalyDetectionConfig, value: string | number) {
+  function patchConfig(key: NumericConfigKey, value: string | number) {
     setPreset('custom');
     setConfig((current) => ({ ...current, [key]: numberValue(value, current[key]) }));
+  }
+
+  function selectAlgorithm(value: string | null) {
+    const algorithm = (value ?? 'robust_cusum') as AnomalyDetectionAlgorithm;
+    setConfig((current) => ({ ...current, algorithm }));
   }
 
   async function executeDetection() {
@@ -259,6 +342,8 @@ export function AnomalyDetectionPage({ active }: { active: boolean }) {
       notifications.show({ color: 'yellow', title: 'Incomplete configuration', message: 'Select an inference, time range and run name.' });
       return;
     }
+    setRunProgress(3);
+    setRunElapsedSeconds(0);
     setRunning(true);
     try {
       const created = await createAnomalyDetectionRun({
@@ -269,6 +354,7 @@ export function AnomalyDetectionPage({ active }: { active: boolean }) {
         end_timestamp: rangeMode === 'full' ? fullEnd : end,
         config,
       });
+      setRunProgress(100);
       setActiveRun(created);
       await refresh();
       notifications.show({ color: 'green', title: 'Anomaly detection complete', message: `${created.anomaly_count} confirmed anomalies detected.` });
@@ -322,10 +408,16 @@ export function AnomalyDetectionPage({ active }: { active: boolean }) {
     { type: 'scatter', mode: 'lines', name: 'High threshold', x: activeRun.series.map((point) => point.timestamp), y: activeRun.series.map((point) => point.high_threshold), line: { color: '#fa5252', width: 1.5, dash: 'dot' } },
   ] : [], [activeRun]);
 
-  const diagnosticData = useMemo<Data[]>(() => activeRun ? [
-    { type: 'scatter', mode: 'lines', name: 'Robust z-score', x: activeRun.series.map((point) => point.timestamp), y: activeRun.series.map((point) => point.robust_z), line: { color: '#7950f2', width: 1.5 } },
-    { type: 'scatter', mode: 'lines', name: 'CUSUM', x: activeRun.series.map((point) => point.timestamp), y: activeRun.series.map((point) => point.cusum), yaxis: 'y2', line: { color: '#0ca678', width: 1.5 } },
-  ] : [], [activeRun]);
+  const diagnosticData = useMemo<Data[]>(() => {
+    if (!activeRun) return [];
+    const data: Data[] = [
+      { type: 'scatter', mode: 'lines', name: 'Robust z-score', x: activeRun.series.map((point) => point.timestamp), y: activeRun.series.map((point) => point.robust_z), line: { color: '#7950f2', width: 1.5 } },
+    ];
+    if (activeRun.config.algorithm === 'robust_cusum') {
+      data.push({ type: 'scatter', mode: 'lines', name: 'CUSUM', x: activeRun.series.map((point) => point.timestamp), y: activeRun.series.map((point) => point.cusum), yaxis: 'y2', line: { color: '#0ca678', width: 1.5 } });
+    }
+    return data;
+  }, [activeRun]);
 
   return (
     <Stack gap="lg">
@@ -390,29 +482,57 @@ export function AnomalyDetectionPage({ active }: { active: boolean }) {
         <Paper withBorder p="md">
           <Stack gap="md">
             <Text fw={700}>3. Configure and run detector</Text>
-            <SimpleGrid cols={{ base: 1, md: 2 }}>
-              <TextInput label="Run name" value={runName} onChange={(event) => setRunName(event.currentTarget.value)} />
-              <Select label="Sensitivity preset" value={preset} data={[{ value: 'fast', label: 'Fast response (recommended)' }, { value: 'balanced', label: 'Balanced' }, { value: 'robust', label: 'Very robust' }, { value: 'custom', label: 'Custom', disabled: preset !== 'custom' }]} onChange={applyPreset} />
+            <SimpleGrid cols={{ base: 1, md: 3 }}>
+              <TextInput label="Run name" value={runName} disabled={running} onChange={(event) => setRunName(event.currentTarget.value)} />
+              <Select
+                label={<InfoLabel label="Detection algorithm" description={`${algorithmDefinition(config.algorithm).description} Exactly one algorithm is executed per run.`} />}
+                value={config.algorithm}
+                data={ALGORITHMS.map((algorithm) => ({ value: algorithm.value, label: algorithm.label }))}
+                disabled={running}
+                onChange={selectAlgorithm}
+              />
+              <Select
+                label={<InfoLabel label="Sensitivity preset" description="Applies a complete parameter set to the selected algorithm. Editing an advanced value changes the preset to Custom." />}
+                value={preset}
+                data={[{ value: 'fast', label: 'Fast response (recommended)' }, { value: 'balanced', label: 'Balanced' }, { value: 'robust', label: 'Very robust' }, { value: 'custom', label: 'Custom', disabled: preset !== 'custom' }]}
+                disabled={running}
+                onChange={applyPreset}
+              />
             </SimpleGrid>
+            <Alert color="blue" variant="light">
+              <Text fw={600}>{algorithmDefinition(config.algorithm).label}</Text>
+              <Text size="sm">{algorithmDefinition(config.algorithm).description}</Text>
+            </Alert>
             <Button variant="subtle" justify="space-between" rightSection={advancedOpen ? <ChevronDown size={16} /> : <ChevronRight size={16} />} onClick={() => setAdvancedOpen((value) => !value)}>Advanced detector parameters</Button>
             <Collapse in={advancedOpen}>
               <SimpleGrid cols={{ base: 1, sm: 2, lg: 4 }}>
-                <NumberInput label="EWMA half-life (min)" min={0.1} value={config.smoothing_half_life_minutes} onChange={(value) => patchConfig('smoothing_half_life_minutes', value)} />
-                <NumberInput label="Baseline window (min)" min={1} value={config.baseline_window_minutes} onChange={(value) => patchConfig('baseline_window_minutes', value)} />
-                <NumberInput label="Warm-up (min)" min={0} value={config.warmup_minutes} onChange={(value) => patchConfig('warmup_minutes', value)} />
-                <NumberInput label="Minimum warm-up points" min={3} value={config.minimum_warmup_points} onChange={(value) => patchConfig('minimum_warmup_points', value)} />
-                <NumberInput label="Warning z" min={0.1} decimalScale={2} value={config.warning_z} onChange={(value) => patchConfig('warning_z', value)} />
-                <NumberInput label="High z" min={0.1} decimalScale={2} value={config.high_z} onChange={(value) => patchConfig('high_z', value)} />
-                <NumberInput label="CUSUM drift" min={0} decimalScale={2} value={config.cusum_drift} onChange={(value) => patchConfig('cusum_drift', value)} />
-                <NumberInput label="CUSUM threshold" min={0.1} decimalScale={2} value={config.cusum_threshold} onChange={(value) => patchConfig('cusum_threshold', value)} />
-                <NumberInput label="Confirmation (min)" min={0} value={config.confirmation_minutes} onChange={(value) => patchConfig('confirmation_minutes', value)} />
-                <NumberInput label="Recovery z" decimalScale={2} value={config.recovery_z} onChange={(value) => patchConfig('recovery_z', value)} />
-                <NumberInput label="Recovery hold (min)" min={0} value={config.recovery_minutes} onChange={(value) => patchConfig('recovery_minutes', value)} />
-                <NumberInput label="Pre-roll (min)" min={0} value={config.preroll_minutes} onChange={(value) => patchConfig('preroll_minutes', value)} />
-                <NumberInput label="Gap multiplier" min={1.1} decimalScale={1} value={config.gap_multiplier} onChange={(value) => patchConfig('gap_multiplier', value)} />
-                <NumberInput label="Minimum gap (min)" min={0.1} value={config.minimum_gap_minutes} onChange={(value) => patchConfig('minimum_gap_minutes', value)} />
+                {PARAMETER_DEFINITIONS
+                  .filter((parameter) => !parameter.algorithms || parameter.algorithms.includes(config.algorithm))
+                  .map((parameter) => (
+                    <NumberInput
+                      key={parameter.key}
+                      label={<InfoLabel label={parameter.label} description={parameter.description} />}
+                      min={parameter.min}
+                      decimalScale={parameter.decimalScale}
+                      value={config[parameter.key]}
+                      disabled={running}
+                      onChange={(value) => patchConfig(parameter.key, value)}
+                    />
+                  ))}
               </SimpleGrid>
             </Collapse>
+            {running && (
+              <Paper withBorder p="sm" radius="sm">
+                <Stack gap={6}>
+                  <Group justify="space-between">
+                    <Text size="sm" fw={600}>{runProgress < 25 ? 'Loading full-resolution score series…' : runProgress < 85 ? `Running ${algorithmDefinition(config.algorithm).label}…` : 'Finalizing events and plot series…'}</Text>
+                    <Text size="sm" c="dimmed">{Math.round(runProgress)}%</Text>
+                  </Group>
+                  <Progress value={runProgress} animated size="md" />
+                  <Text size="xs" c="dimmed">Estimated progress · elapsed {runElapsedSeconds}s · client timeout 15 minutes</Text>
+                </Stack>
+              </Paper>
+            )}
             <Button leftSection={running ? <Loader size="xs" color="white" /> : <Play size={16} />} onClick={executeDetection} disabled={running || !previewResults.length}>Run anomaly detection</Button>
           </Stack>
         </Paper>
@@ -423,13 +543,13 @@ export function AnomalyDetectionPage({ active }: { active: boolean }) {
           <Stack gap="md">
             <Group justify="space-between" align="flex-start">
               <div><Title order={3}>{activeRun.name}</Title><Text size="sm" c="dimmed">{activeRun.testing_run_name} · {formatTimestamp(activeRun.start_timestamp)} – {formatTimestamp(activeRun.end_timestamp)}</Text></div>
-              <Group gap="xs"><Badge color="yellow">{activeRun.warning_count} warnings</Badge><Badge color="red">{activeRun.anomaly_count} confirmed</Badge><Badge color="gray">{activeRun.point_count} points</Badge></Group>
+              <Group gap="xs"><Badge color="violet">{algorithmDefinition(activeRun.config.algorithm).label}</Badge><Badge color="yellow">{activeRun.warning_count} warnings</Badge><Badge color="red">{activeRun.anomaly_count} confirmed</Badge><Badge color="gray">{activeRun.point_count} points</Badge></Group>
             </Group>
             {activeRun.decimated && <Alert color="blue">Plot reduced from {activeRun.total.toLocaleString()} points; event detection used the full series.</Alert>}
             <PlotlyChart data={resultData} layout={{ hovermode: 'x unified', shapes: resultShapes, xaxis: { type: 'date', title: { text: 'Time' } }, yaxis: { title: { text: activeRun.score_series.replace('_', ' ').toUpperCase() } }, legend: { orientation: 'h' } }} height={480} />
             <Button variant="subtle" justify="space-between" rightSection={detailsOpen ? <ChevronDown size={16} /> : <ChevronRight size={16} />} onClick={() => setDetailsOpen((value) => !value)}>Diagnostics</Button>
             <Collapse in={detailsOpen}>
-              <PlotlyChart data={diagnosticData} layout={{ hovermode: 'x unified', xaxis: { type: 'date' }, yaxis: { title: { text: 'Robust z-score' } }, yaxis2: { title: { text: 'CUSUM' }, overlaying: 'y', side: 'right' }, legend: { orientation: 'h' } }} height={300} />
+              <PlotlyChart data={diagnosticData} layout={{ hovermode: 'x unified', xaxis: { type: 'date' }, yaxis: { title: { text: 'Robust z-score' } }, ...(activeRun.config.algorithm === 'robust_cusum' ? { yaxis2: { title: { text: 'CUSUM' }, overlaying: 'y', side: 'right' } } : {}), legend: { orientation: 'h' } }} height={300} />
             </Collapse>
             <Text fw={700}>Detected intervals</Text>
             {activeRun.events.length === 0 ? <Alert color="green">No warnings or confirmed anomalies detected.</Alert> : (
@@ -455,9 +575,10 @@ export function AnomalyDetectionPage({ active }: { active: boolean }) {
           {savedRuns.length === 0 ? <Text size="sm" c="dimmed">No saved anomaly detection runs yet.</Text> : (
             <ScrollArea>
               <Table highlightOnHover>
-                <Table.Thead><Table.Tr><Table.Th>Name</Table.Th><Table.Th>Inference</Table.Th><Table.Th>Range</Table.Th><Table.Th>Warnings</Table.Th><Table.Th>Anomalies</Table.Th><Table.Th /></Table.Tr></Table.Thead>
+                <Table.Thead><Table.Tr><Table.Th>Name</Table.Th><Table.Th>Algorithm</Table.Th><Table.Th>Inference</Table.Th><Table.Th>Range</Table.Th><Table.Th>Warnings</Table.Th><Table.Th>Anomalies</Table.Th><Table.Th /></Table.Tr></Table.Thead>
                 <Table.Tbody>{savedRuns.map((run) => <Table.Tr key={run.id}>
                   <Table.Td><Button variant="subtle" px={0} leftSection={<Activity size={15} />} onClick={() => openSaved(run.id)}>{run.name}</Button></Table.Td>
+                  <Table.Td><Badge variant="light" color="violet">{algorithmDefinition(run.config.algorithm).label}</Badge></Table.Td>
                   <Table.Td>{run.testing_run_name}</Table.Td><Table.Td>{formatDuration(run.start_timestamp, run.end_timestamp)}</Table.Td><Table.Td>{run.warning_count}</Table.Td><Table.Td><Badge color={run.anomaly_count ? 'red' : 'gray'}>{run.anomaly_count}</Badge></Table.Td>
                   <Table.Td><Tooltip label="Delete run"><ActionIcon color="red" variant="subtle" onClick={() => removeSaved(run)}><Trash2 size={16} /></ActionIcon></Tooltip></Table.Td>
                 </Table.Tr>)}</Table.Tbody>

@@ -672,8 +672,10 @@ export type TestingRunResults = {
 };
 
 export type AnomalyDetectionScoreSeries = 'score' | 'full_mse' | 'roi_mse';
+export type AnomalyDetectionAlgorithm = 'robust_zscore' | 'robust_cusum';
 
 export type AnomalyDetectionConfig = {
+  algorithm: AnomalyDetectionAlgorithm;
   smoothing_half_life_minutes: number;
   baseline_window_minutes: number;
   warmup_minutes: number;

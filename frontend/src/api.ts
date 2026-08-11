@@ -848,7 +848,7 @@ export function createAnomalyDetectionRun(payload: {
   return request<AnomalyDetectionRun>('/api/anomaly-detection-runs', {
     method: 'POST',
     body: JSON.stringify(payload),
-  }, 120_000).then((run) => {
+  }, 15 * 60_000).then((run) => {
     invalidate(['anomalyDetectionRuns']);
     return run;
   });

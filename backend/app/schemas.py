@@ -1142,6 +1142,7 @@ class TestingRunResultsResponse(BaseModel):
 
 
 class AnomalyDetectionConfig(BaseModel):
+    algorithm: Literal["robust_zscore", "robust_cusum"] = "robust_cusum"
     smoothing_half_life_minutes: float = Field(default=5.0, gt=0.0, le=1440.0)
     baseline_window_minutes: float = Field(default=120.0, gt=0.0, le=43200.0)
     warmup_minutes: float = Field(default=30.0, ge=0.0, le=43200.0)
