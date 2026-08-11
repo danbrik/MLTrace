@@ -1108,6 +1108,10 @@ class TestingRunRead(BaseModel):
     roi_mse_mean: float | None
     results_path: str | None
     results_size_bytes: int | None
+    checkpoint_at: datetime | None = None
+    checkpoint_input_count: int | None = None
+    checkpoint_result_count: int | None = None
+    restart_mode: Literal["checkpoint"] | None = None
     training_run_name: str
     training_pipeline_name: str
     training_dataset_name: str

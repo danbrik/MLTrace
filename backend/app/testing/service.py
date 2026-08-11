@@ -47,9 +47,14 @@ from app.schemas import (
     TestingRunResultRead,
     TestingRunResultsResponse,
 )
-from app.training.data import ResolvedDatasetImage, enumerate_training_dataset_image_records
+from app.training.data import (
+    ResolvedDatasetImage,
+    enumerate_training_dataset_clip_samples,
+    enumerate_training_dataset_image_records,
+)
 from app.training.engine import _build_model, _to_nchw
 from app.training.scheduler import next_queue_rank, scheduler
+from app.testing.checkpoint import MAX_SKIPPED_PATHS, source_signature, validated_checkpoint_state
 
 
 CURRENT_HEATMAP_RENDER_VERSION = 6
@@ -303,6 +308,130 @@ def _load_training_dataset(db: Session, training_dataset_id: int) -> models.Trai
             .selectinload(models.DatasetFolder.dataset)
         )
     )
+
+
+@dataclass(frozen=True)
+class TestingInputContext:
+    training_run: models.TrainingRun
+    training_dataset: models.TrainingDataset
+    roi: models.RoiDefinition | None
+    graph: PreprocessingGraph
+    kind: str
+    inputs: list
+    signature: str
+    clip_summary: object | None = None
+
+
+def resolve_testing_input_context(db: Session, run: models.TestingRun) -> TestingInputContext:
+    """Resolve the deterministic input sequence used by a testing run."""
+
+    training_run = _load_training_run(db, run.training_run_id)
+    if training_run is None:
+        raise ValueError("Training run no longer exists.")
+    training_dataset = _load_training_dataset(db, run.training_dataset_id)
+    if training_dataset is None:
+        raise ValueError("Train/test dataset no longer exists.")
+    roi = db.get(models.RoiDefinition, run.roi_id) if run.roi_id is not None else None
+    if run.roi_id is not None and roi is None:
+        raise ValueError("The inference ROI no longer exists.")
+
+    pipeline = training_run.training_pipeline
+    graph = PreprocessingGraph.model_validate(pipeline.preprocessing_pipeline.graph)
+    is_stae = pipeline.method_configuration.builder_kind == "spatiotemporal_autoencoder"
+    clip_summary = None
+    if is_stae:
+        method_config = pipeline.method_configuration.method_config or {}
+        future_length = (
+            int(method_config.get("future_length") or 0)
+            if method_config.get("prediction_branch")
+            else 0
+        )
+        clip_summary = enumerate_training_dataset_clip_samples(
+            training_dataset,
+            clip_length=int(method_config.get("clip_length") or 1),
+            future_length=future_length,
+            temporal_stride=int(method_config.get("temporal_stride") or 1),
+            future_stride=int(
+                method_config.get("future_stride")
+                or method_config.get("temporal_stride")
+                or 1
+            ),
+            missing_frame_policy=str(method_config.get("missing_frame_policy") or "skip"),
+            score_timestamp_mode=str(method_config.get("score_timestamp_mode") or "last_input"),
+            sequence_contiguity_mode=str(
+                method_config.get("sequence_contiguity_mode") or "ordered_index"
+            ),
+        )
+        inputs = list(clip_summary.clips)
+        kind = "clip"
+    else:
+        inputs = enumerate_training_dataset_image_records(training_dataset)
+        kind = "image"
+    if not inputs:
+        noun = "valid sequence clips" if is_stae else "images"
+        raise ValueError(f"Train/test dataset produced no {noun}.")
+
+    signature = source_signature(
+        kind=kind,
+        inputs=inputs,
+        training_run=training_run,
+        graph=graph,
+        roi_geometry=_roi_geometry(roi),
+        inference_config=run.inference_config,
+    )
+    return TestingInputContext(
+        training_run=training_run,
+        training_dataset=training_dataset,
+        roi=roi,
+        graph=graph,
+        kind=kind,
+        inputs=inputs,
+        signature=signature,
+        clip_summary=clip_summary,
+    )
+
+
+def validate_testing_checkpoint(
+    db: Session,
+    run: models.TestingRun,
+    context: TestingInputContext | None = None,
+) -> tuple[TestingInputContext, dict]:
+    if run.checkpoint_at is None:
+        raise ValueError("No inference checkpoint is available.")
+    context = context or resolve_testing_input_context(db, run)
+    state = validated_checkpoint_state(
+        run,
+        kind=context.kind,
+        signature=context.signature,
+        total_inputs=len(context.inputs),
+    )
+    result_count = int(state["result_count"])
+    prefix_count, distinct_positions = db.execute(
+        select(
+            func.count(),
+            func.count(func.distinct(models.TestingRunResult.position)),
+        )
+        .select_from(models.TestingRunResult)
+        .where(
+            models.TestingRunResult.testing_run_id == run.id,
+            models.TestingRunResult.position < result_count,
+        )
+    ).one()
+    if prefix_count != result_count or distinct_positions != result_count:
+        raise ValueError("The inference checkpoint result rows are incomplete. Restart the inference completely.")
+    if result_count:
+        min_position, max_position = db.execute(
+            select(
+                func.min(models.TestingRunResult.position),
+                func.max(models.TestingRunResult.position),
+            ).where(
+                models.TestingRunResult.testing_run_id == run.id,
+                models.TestingRunResult.position < result_count,
+            )
+        ).one()
+        if min_position != 0 or max_position != result_count - 1:
+            raise ValueError("The inference checkpoint result positions are inconsistent. Restart completely.")
+    return context, state
 
 
 def _first_test_record(db: Session, training_dataset_id: int) -> ResolvedDatasetImage:
@@ -828,6 +957,8 @@ def _serialize_testing_run(run: models.TestingRun) -> TestingRunRead:
         error_message=run.error_message,
         image_count=run.image_count,
         expected_image_count=run.expected_image_count,
+        skipped_image_count=run.skipped_image_count,
+        skipped_images=run.skipped_images,
         score_mean=run.score_mean,
         score_min=run.score_min,
         score_max=run.score_max,
@@ -835,6 +966,10 @@ def _serialize_testing_run(run: models.TestingRun) -> TestingRunRead:
         roi_mse_mean=run.roi_mse_mean,
         results_path=run.results_path,
         results_size_bytes=run.results_size_bytes,
+        checkpoint_at=run.checkpoint_at,
+        checkpoint_input_count=run.checkpoint_input_count,
+        checkpoint_result_count=run.checkpoint_result_count,
+        restart_mode=run.restart_mode,
         training_run_name=run.training_run_name,
         training_pipeline_name=run.training_pipeline_name,
         training_dataset_name=run.training_dataset_name,
@@ -1529,7 +1664,20 @@ def _estimated_training_dataset_count(training_dataset: models.TrainingDataset) 
     return sum(values)
 
 
-def _reset_testing_run_for_queue(db: Session, run: models.TestingRun) -> None:
+def _clear_testing_checkpoint(run: models.TestingRun) -> None:
+    run.checkpoint_at = None
+    run.checkpoint_input_count = None
+    run.checkpoint_result_count = None
+    run.checkpoint_state = None
+    run.restart_mode = None
+
+
+def _reset_testing_run_for_queue(
+    db: Session,
+    run: models.TestingRun,
+    *,
+    preserve_checkpoint: bool = False,
+) -> None:
     run.status = "queued"
     run.enqueued_at = _utcnow()
     run.queue_rank = next_queue_rank(db)
@@ -1541,7 +1689,9 @@ def _reset_testing_run_for_queue(db: Session, run: models.TestingRun) -> None:
     run.pid = None
     run.log_path = None
     run.error_message = None
-    run.image_count = None
+    run.image_count = run.checkpoint_result_count if preserve_checkpoint else None
+    run.skipped_image_count = None
+    run.skipped_images = None
     run.score_mean = None
     run.score_min = None
     run.score_max = None
@@ -1549,6 +1699,8 @@ def _reset_testing_run_for_queue(db: Session, run: models.TestingRun) -> None:
     run.roi_mse_mean = None
     run.results_path = None
     run.results_size_bytes = None
+    if not preserve_checkpoint:
+        _clear_testing_checkpoint(run)
 
 
 def enqueue_testing_run(db: Session, payload: TestingRunCreate, *, wake_scheduler: bool = True) -> TestingRunRead:
@@ -1869,6 +2021,28 @@ def restart_testing_run(db: Session, run_id: int) -> TestingRunRead | None:
     db.execute(delete(models.TestingRunResult).where(models.TestingRunResult.testing_run_id == run.id))
     shutil.rmtree(_testing_run_dir(run.id), ignore_errors=True)
     _reset_testing_run_for_queue(db, run)
+    db.commit()
+    db.refresh(run)
+    scheduler.wake()
+    return _serialize_testing_run(run)
+
+
+def restart_testing_run_from_checkpoint(db: Session, run_id: int) -> TestingRunRead | None:
+    run = db.get(models.TestingRun, run_id)
+    if run is None:
+        return None
+    if run.status not in {"failed", "aborted"}:
+        raise ValueError("Only failed or aborted inference runs can restart from a checkpoint.")
+
+    _, state = validate_testing_checkpoint(db, run)
+    from app.anomaly_detection.service import delete_runs_for_testing_run
+
+    delete_runs_for_testing_run(db, run.id)
+    _reset_testing_run_for_queue(db, run, preserve_checkpoint=True)
+    run.restart_mode = "checkpoint"
+    run.image_count = int(state["result_count"])
+    run.skipped_image_count = int(state.get("skipped_count") or 0)
+    run.skipped_images = list(state.get("skipped_paths") or [])[:MAX_SKIPPED_PATHS]
     db.commit()
     db.refresh(run)
     scheduler.wake()

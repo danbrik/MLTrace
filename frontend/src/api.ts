@@ -1171,6 +1171,13 @@ export function restartTestingRun(runId: number, projectId?: string): Promise<Te
   });
 }
 
+export function restartTestingRunFromCheckpoint(runId: number, projectId?: string): Promise<TestingRun> {
+  return request<TestingRun>(`/api/testing-runs/${runId}/restart-from-checkpoint`, { method: 'POST' }, undefined, projectId).then((run) => {
+    invalidate(['testingRuns']);
+    return run;
+  });
+}
+
 export async function deleteTestingRun(runId: number, projectId?: string): Promise<void> {
   await request<void>(`/api/testing-runs/${runId}`, { method: 'DELETE' }, undefined, projectId);
   invalidate(['testingRuns']);

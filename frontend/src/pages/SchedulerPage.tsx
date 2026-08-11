@@ -5,6 +5,7 @@ import {
   Badge,
   Button,
   Group,
+  Menu,
   Modal,
   NumberInput,
   Paper,
@@ -51,6 +52,7 @@ import {
   listSchedulerJobs,
   moveSchedulerJob,
   restartTestingRun,
+  restartTestingRunFromCheckpoint,
   restartTrainingRun,
   updateSchedulerSettings,
 } from '../api';
@@ -153,14 +155,20 @@ function ProgressCell({ job }: { job: SchedulerJob }) {
     return <Text size="xs" c="dimmed">{done > 0 ? `${done} frames` : '—'}</Text>;
   }
   if (job.kind === 'test') {
-    const processed = job.run.image_count ?? 0;
+    const resultCount = job.run.image_count ?? 0;
     const expected = job.run.expected_image_count ?? (job.run.status === 'finished' ? job.run.image_count : null);
+    const resumed = job.run.restart_mode === 'checkpoint' && (job.run.status === 'queued' || job.run.status === 'running');
+    const checkpointSkipOffset = resumed
+      ? Math.max(0, (job.run.checkpoint_input_count ?? 0) - (job.run.checkpoint_result_count ?? 0))
+      : 0;
+    const processed = resultCount + checkpointSkipOffset;
     if (expected && expected > 0) {
       return (
         <Stack gap={2}>
           <Text size="xs">
-            {processed}/{expected} images
+            {processed}/{expected} {resumed ? 'inputs' : 'images'}
           </Text>
+          {resumed && <Text size="xs" c="grape">Resumed from checkpoint</Text>}
           <Progress value={Math.min(100, (processed / expected) * 100)} size="sm" radius="sm" color={runStatusColor(job.run.status)} />
         </Stack>
       );
@@ -377,12 +385,18 @@ export function SchedulerPage({ active = true }: { active?: boolean }) {
     withRefresh(`abort:${jobKey(job)}`, action, 'Could not abort');
   }
 
-  function handleRestart(job: DisplayJob) {
+  function handleRestart(job: DisplayJob, mode: 'complete' | 'checkpoint' = 'complete') {
     if (job.kind === 'heatmap') return; // heatmap videos are not restartable; re-render from Analysis
+    if (mode === 'complete' && job.kind === 'test' && !window.confirm(
+      `Restart inference "${jobName(job)}" completely? Partial results and its checkpoint will be removed.`,
+    )) return;
     const action = job.kind === 'train'
       ? () => restartTrainingRun(job.run.id, job.project_id)
-      : () => restartTestingRun(job.run.id, job.project_id);
-    withRefresh(`restart:${jobKey(job)}`, action, 'Could not restart');
+      : mode === 'checkpoint'
+        ? () => restartTestingRunFromCheckpoint(job.run.id, job.project_id)
+        : () => restartTestingRun(job.run.id, job.project_id);
+    const actionKey = mode === 'checkpoint' ? 'restart-checkpoint' : 'restart';
+    withRefresh(`${actionKey}:${jobKey(job)}`, action, mode === 'checkpoint' ? 'Could not restart from backup' : 'Could not restart');
   }
 
   function handleDelete(job: DisplayJob) {
@@ -591,6 +605,7 @@ export function SchedulerPage({ active = true }: { active?: boolean }) {
               <Table.Tbody>
                 {filteredJobs.map((job) => {
                   const run = job.run;
+                  const testRun = job.kind === 'test' ? job.run : null;
                   const terminal = TERMINAL.has(run.status);
                   const abortable = run.status === 'queued' || run.status === 'running';
                   const key = jobKey(job);
@@ -599,6 +614,7 @@ export function SchedulerPage({ active = true }: { active?: boolean }) {
                   const rowBusy =
                     rowActions.isPending(`abort:${key}`) ||
                     rowActions.isPending(`restart:${key}`) ||
+                    rowActions.isPending(`restart-checkpoint:${key}`) ||
                     rowActions.isPending(`delete:${key}`) ||
                     rowActions.isPending(`move-up:${key}`) ||
                     rowActions.isPending(`move-down:${key}`);
@@ -618,7 +634,15 @@ export function SchedulerPage({ active = true }: { active?: boolean }) {
                         <Text size="sm">{jobMethodType(job)}</Text>
                       </Table.Td>
                       <Table.Td>
-                        <Badge color={runStatusColor(run.status)}>{run.status}</Badge>
+                        <Stack gap={3}>
+                          <Badge color={runStatusColor(run.status)}>{run.status}</Badge>
+                          {testRun?.checkpoint_at && testRun.checkpoint_input_count != null && (
+                            <Text size="xs" c="dimmed">
+                              Backup: {testRun.checkpoint_input_count.toLocaleString()} inputs · {(testRun.checkpoint_result_count ?? 0).toLocaleString()} results
+                              {' · '}{new Date(testRun.checkpoint_at).toLocaleString()}
+                            </Text>
+                          )}
+                        </Stack>
                       </Table.Td>
                       <Table.Td>
                         {run.device ? (
@@ -678,17 +702,54 @@ export function SchedulerPage({ active = true }: { active?: boolean }) {
                               </ActionIcon>
                             </Tooltip>
                           )}
-                          {terminal && job.kind !== 'heatmap' && (
+                          {terminal && job.kind === 'train' && (
                             <Tooltip label="Restart">
                               <ActionIcon
                                 variant="subtle"
                                 loading={rowActions.isPending(`restart:${key}`)}
                                 disabled={rowBusy && !rowActions.isPending(`restart:${key}`)}
-                                onClick={() => handleRestart(job)}
+                                onClick={() => handleRestart(job, 'complete')}
                               >
                                 <RotateCcw size={18} />
                               </ActionIcon>
                             </Tooltip>
+                          )}
+                          {terminal && job.kind === 'test' && (
+                            testRun?.checkpoint_at && testRun.checkpoint_input_count != null && ['failed', 'aborted'].includes(testRun.status) ? (
+                              <Menu position="bottom-end" withinPortal>
+                                <Menu.Target>
+                                  <Tooltip label="Restart options">
+                                    <ActionIcon
+                                      variant="subtle"
+                                      loading={rowActions.isPending(`restart:${key}`) || rowActions.isPending(`restart-checkpoint:${key}`)}
+                                      disabled={rowBusy && !rowActions.isPending(`restart:${key}`) && !rowActions.isPending(`restart-checkpoint:${key}`)}
+                                    >
+                                      <RotateCcw size={18} />
+                                    </ActionIcon>
+                                  </Tooltip>
+                                </Menu.Target>
+                                <Menu.Dropdown>
+                                  <Menu.Label>Inference restart</Menu.Label>
+                                  <Menu.Item onClick={() => handleRestart(job, 'checkpoint')}>
+                                    Restart from backup ({testRun.checkpoint_input_count.toLocaleString()} inputs)
+                                  </Menu.Item>
+                                  <Menu.Item color="orange" onClick={() => handleRestart(job, 'complete')}>
+                                    Restart completely
+                                  </Menu.Item>
+                                </Menu.Dropdown>
+                              </Menu>
+                            ) : (
+                              <Tooltip label="Restart completely">
+                                <ActionIcon
+                                  variant="subtle"
+                                  loading={rowActions.isPending(`restart:${key}`)}
+                                  disabled={rowBusy && !rowActions.isPending(`restart:${key}`)}
+                                  onClick={() => handleRestart(job, 'complete')}
+                                >
+                                  <RotateCcw size={18} />
+                                </ActionIcon>
+                              </Tooltip>
+                            )
                           )}
                           {run.status !== 'running' && (
                             <Tooltip label="Remove">

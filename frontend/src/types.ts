@@ -606,6 +606,8 @@ export type TestingRun = {
   error_message: string | null;
   image_count: number | null;
   expected_image_count: number | null;
+  skipped_image_count: number | null;
+  skipped_images: string[] | null;
   score_mean: number | null;
   score_min: number | null;
   score_max: number | null;
@@ -613,6 +615,10 @@ export type TestingRun = {
   roi_mse_mean: number | null;
   results_path: string | null;
   results_size_bytes: number | null;
+  checkpoint_at: string | null;
+  checkpoint_input_count: number | null;
+  checkpoint_result_count: number | null;
+  restart_mode: 'checkpoint' | null;
   training_run_name: string;
   training_pipeline_name: string;
   training_dataset_name: string;

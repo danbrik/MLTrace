@@ -18,6 +18,8 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 
+from sqlalchemy import delete, select
+
 from app import models
 from app.database import SessionLocal
 from app.logging_setup import log_device_diagnostics
@@ -25,13 +27,12 @@ from app.preprocessing.pipeline import ImageLoadError, run_pipeline_array
 from app.schemas import PreprocessingGraph
 from app.testing.service import (
     ArtifactEvaluator,
-    _load_training_dataset,
-    _load_training_run,
     _testing_run_dir,
     _utcnow,
+    resolve_testing_input_context,
+    validate_testing_checkpoint,
 )
-from app.training.data import enumerate_training_dataset_image_records
-from app.training.data import enumerate_training_dataset_clip_samples
+from app.testing.checkpoint import CHECKPOINT_INTERVAL, MAX_SKIPPED_PATHS, make_checkpoint_state
 from app.training.engine import _to_nchw
 from app.metrics.aggregation import normalize_aggregation
 from app.metrics.ssim import ssim_distance_map_np
@@ -42,9 +43,6 @@ logger = logging.getLogger("mltrace.testing")
 # are decoded/preprocessed and held at once.
 _INFER_BATCH = 16
 
-# Cap on skipped-image paths persisted on the run row; the count stays exact.
-_MAX_SKIPPED_PATHS = 200
-
 _CSV_HEADER = [
     "position", "timestamp", "image_path", "score", "full_mse",
     "roi_mse", "tile_scores_json", "width", "height", "result_metadata_json",
@@ -53,6 +51,98 @@ _CSV_HEADER = [
 
 class AbortedError(Exception):
     """Raised internally when an abort signal is observed mid-inference."""
+
+
+def _csv_row(values) -> list:
+    tile_scores = values["tile_scores"] if isinstance(values, dict) else values.tile_scores
+    metadata = values["result_metadata"] if isinstance(values, dict) else values.result_metadata
+    timestamp = values["timestamp"] if isinstance(values, dict) else values.timestamp
+    return [
+        values["position"] if isinstance(values, dict) else values.position,
+        timestamp.isoformat(),
+        values["image_path"] if isinstance(values, dict) else values.image_path,
+        values["score"] if isinstance(values, dict) else values.score,
+        values["full_mse"] if isinstance(values, dict) else values.full_mse,
+        "" if (values["roi_mse"] if isinstance(values, dict) else values.roi_mse) is None else (
+            values["roi_mse"] if isinstance(values, dict) else values.roi_mse
+        ),
+        "" if tile_scores is None else json.dumps(tile_scores, sort_keys=True),
+        values["width"] if isinstance(values, dict) else values.width,
+        values["height"] if isinstance(values, dict) else values.height,
+        "" if metadata is None else json.dumps(metadata, sort_keys=True),
+    ]
+
+
+def _write_checkpoint_prefix(db, writer, run_id: int, result_count: int) -> None:
+    if result_count <= 0:
+        return
+    rows = db.scalars(
+        select(models.TestingRunResult)
+        .where(
+            models.TestingRunResult.testing_run_id == run_id,
+            models.TestingRunResult.position < result_count,
+        )
+        .order_by(models.TestingRunResult.position)
+    )
+    for row in rows:
+        writer.writerow(_csv_row(row))
+
+
+def _restore_checkpoint(db, run: models.TestingRun, context) -> dict:
+    _, state = validate_testing_checkpoint(db, run, context)
+    result_count = int(state["result_count"])
+    db.execute(
+        delete(models.TestingRunResult).where(
+            models.TestingRunResult.testing_run_id == run.id,
+            models.TestingRunResult.position >= result_count,
+        )
+    )
+    run.image_count = result_count
+    db.commit()
+    return state
+
+
+def _checkpoint_due(processed_inputs: int, previous_checkpoint: int) -> bool:
+    if CHECKPOINT_INTERVAL <= 0:
+        return False
+    return processed_inputs >= ((previous_checkpoint // CHECKPOINT_INTERVAL) + 1) * CHECKPOINT_INTERVAL
+
+
+def _store_checkpoint(
+    run: models.TestingRun,
+    *,
+    kind: str,
+    signature: str,
+    input_count: int,
+    result_count: int,
+    total_inputs: int,
+    score_sum: float,
+    full_sum: float,
+    roi_sum: float,
+    roi_count: int,
+    score_min: float | None,
+    score_max: float | None,
+    skipped_count: int,
+    skipped_paths: list[str],
+) -> None:
+    run.checkpoint_at = _utcnow()
+    run.checkpoint_input_count = input_count
+    run.checkpoint_result_count = result_count
+    run.checkpoint_state = make_checkpoint_state(
+        kind=kind,
+        signature=signature,
+        input_count=input_count,
+        result_count=result_count,
+        total_inputs=total_inputs,
+        score_sum=score_sum,
+        full_sum=full_sum,
+        roi_sum=roi_sum,
+        roi_count=roi_count,
+        score_min=score_min,
+        score_max=score_max,
+        skipped_count=skipped_count,
+        skipped_paths=skipped_paths[:MAX_SKIPPED_PATHS],
+    )
 
 
 def _resolve_device(gpu_index: int | None) -> str:
@@ -141,16 +231,12 @@ def run_testing(run_id: int, abort_event: threading.Event | None = None) -> None
         logger.info("Testing run %s started on %s", run_id, run.device)
 
         try:
-            training_run = _load_training_run(db, run.training_run_id)
-            if training_run is None:
-                raise ValueError("Training run no longer exists.")
-            training_dataset = _load_training_dataset(db, run.training_dataset_id)
-            if training_dataset is None:
-                raise ValueError("Train/test dataset no longer exists.")
-            roi = db.get(models.RoiDefinition, run.roi_id) if run.roi_id is not None else None
-
+            resume_requested = run.restart_mode == "checkpoint"
+            context = resolve_testing_input_context(db, run)
+            training_run = context.training_run
+            roi = context.roi
             pipeline = training_run.training_pipeline
-            graph = PreprocessingGraph.model_validate(pipeline.preprocessing_pipeline.graph)
+            graph = context.graph
             evaluator = ArtifactEvaluator(training_run, run.inference_config)
             logger.info(
                 "Testing run %s loaded pipeline and artifact (builder=%s, artifact=%s)",
@@ -158,26 +244,55 @@ def run_testing(run_id: int, abort_event: threading.Event | None = None) -> None
                 pipeline.method_configuration.builder_kind,
                 evaluator.artifact_path,
             )
-            # Unreadable/corrupt images skipped during this run ("skip + report").
-            # Appended from prep worker threads (list.append is thread-safe).
-            skipped_paths: list[str] = []
-            is_stae = pipeline.method_configuration.builder_kind == "spatiotemporal_autoencoder"
+            total = len(context.inputs)
+            state = _restore_checkpoint(db, run, context) if resume_requested else None
+            if state is None:
+                input_start = count = 0
+                score_sum = full_sum = roi_sum = 0.0
+                roi_count = 0
+                score_min: float | None = None
+                score_max: float | None = None
+                skipped_count = 0
+                skipped_paths: list[str] = []
+            else:
+                try:
+                    input_start = int(state["input_count"])
+                    count = int(state["result_count"])
+                    score_sum = float(state["score_sum"])
+                    full_sum = float(state["full_sum"])
+                    roi_sum = float(state["roi_sum"])
+                    roi_count = int(state["roi_count"])
+                    score_min = None if state.get("score_min") is None else float(state["score_min"])
+                    score_max = None if state.get("score_max") is None else float(state["score_max"])
+                    skipped_count = int(state["skipped_count"])
+                    skipped_paths = list(state.get("skipped_paths") or [])[:MAX_SKIPPED_PATHS]
+                except (KeyError, TypeError, ValueError) as exc:
+                    raise ValueError("The inference checkpoint aggregate state is incomplete. Restart completely.") from exc
+                logger.info(
+                    "Testing run %s resuming from checkpoint at input %s with %s results",
+                    run_id,
+                    input_start,
+                    count,
+                )
+
+            skipped_lock = threading.Lock()
+
+            def _record_skip(path: str) -> None:
+                nonlocal skipped_count
+                with skipped_lock:
+                    skipped_count += 1
+                    if path not in skipped_paths and len(skipped_paths) < MAX_SKIPPED_PATHS:
+                        skipped_paths.append(path)
+
+            run.expected_image_count = total
+            run.image_count = count
+            db.commit()
+            last_checkpoint_input = input_start
+            is_stae = context.kind == "clip"
             if is_stae:
                 method_config = pipeline.method_configuration.method_config or {}
-                future_length = int(method_config.get("future_length") or 0) if method_config.get("prediction_branch") else 0
-                clip_summary = enumerate_training_dataset_clip_samples(
-                    training_dataset,
-                    clip_length=int(method_config.get("clip_length") or 1),
-                    future_length=future_length,
-                    temporal_stride=int(method_config.get("temporal_stride") or 1),
-                    future_stride=int(method_config.get("future_stride") or method_config.get("temporal_stride") or 1),
-                    missing_frame_policy=str(method_config.get("missing_frame_policy") or "skip"),
-                    score_timestamp_mode=str(method_config.get("score_timestamp_mode") or "last_input"),
-                    sequence_contiguity_mode=str(method_config.get("sequence_contiguity_mode") or "ordered_index"),
-                )
-                clips = list(clip_summary.clips)
-                if not clips:
-                    raise ValueError("Train/test dataset produced no valid sequence clips.")
+                clip_summary = context.clip_summary
+                clips = context.inputs
                 logger.info(
                     "STAE testing run %s resolved %s clips (%s skipped, %s selected frames, %s possible clips, mode=%s)",
                     run_id,
@@ -187,18 +302,11 @@ def run_testing(run_id: int, abort_event: threading.Event | None = None) -> None
                     clip_summary.possible_clip_count,
                     clip_summary.sequence_contiguity_mode,
                 )
-                run.expected_image_count = len(clips)
-                db.commit()
                 logger.info("STAE testing run %s starting preprocessing for %s clips", run_id, len(clips))
 
                 results_path = _testing_run_dir(run.id) / "reconstruction_errors.csv"
                 results_path.parent.mkdir(parents=True, exist_ok=True)
-                total = len(clips)
                 prep_workers = min(8, os.cpu_count() or 1)
-                count = 0
-                score_sum = full_sum = 0.0
-                score_min: float | None = None
-                score_max: float | None = None
                 inference_config = {**(pipeline.method_configuration.inference_config or {}), **(run.inference_config or {})}
                 error_metric = str(inference_config.get("error_metric") or ("mse" if str(inference_config.get("residual_mode", "absolute")) == "squared" else "mae"))
                 residual_mode = str(inference_config.get("residual_mode", "absolute"))
@@ -215,22 +323,52 @@ def run_testing(run_id: int, abort_event: threading.Event | None = None) -> None
                             "STAE testing run %s skipping clip with unreadable frame: %s (%s)",
                             run_id, exc.path, exc.original,
                         )
-                        skipped_paths.append(exc.path)
+                        _record_skip(exc.path)
                         return clip, None, None
                     return clip, input_tensor, future_tensor
+
+                def _commit_stae_progress(processed_inputs: int) -> None:
+                    nonlocal last_checkpoint_input
+                    run.image_count = count
+                    if _checkpoint_due(processed_inputs, last_checkpoint_input):
+                        _store_checkpoint(
+                            run,
+                            kind=context.kind,
+                            signature=context.signature,
+                            input_count=processed_inputs,
+                            result_count=count,
+                            total_inputs=total,
+                            score_sum=score_sum,
+                            full_sum=full_sum,
+                            roi_sum=0.0,
+                            roi_count=0,
+                            score_min=score_min,
+                            score_max=score_max,
+                            skipped_count=skipped_count,
+                            skipped_paths=skipped_paths,
+                        )
+                        last_checkpoint_input = processed_inputs
+                        logger.info(
+                            "STAE testing run %s saved checkpoint at %s inputs (%s results)",
+                            run_id,
+                            processed_inputs,
+                            count,
+                        )
+                    db.commit()
 
                 with open(results_path, "w", encoding="utf-8", newline="") as handle:
                     writer = csv.writer(handle)
                     writer.writerow(_CSV_HEADER)
+                    _write_checkpoint_prefix(db, writer, run.id, count)
                     with ThreadPoolExecutor(max_workers=prep_workers) as pool:
-                        for start in range(0, total, _INFER_BATCH):
+                        for start in range(input_start, total, _INFER_BATCH):
                             if abort_event.is_set():
                                 raise AbortedError()
-                            prepared = list(pool.map(_prep_clip, clips[start : start + _INFER_BATCH]))
+                            end = min(total, start + _INFER_BATCH)
+                            prepared = list(pool.map(_prep_clip, clips[start:end]))
                             prepared = [item for item in prepared if item[1] is not None]
                             if not prepared:
-                                run.image_count = count
-                                db.commit()
+                                _commit_stae_progress(end)
                                 continue
                             first_inference = evaluator.model is None
                             if first_inference:
@@ -311,26 +449,14 @@ def run_testing(run_id: int, abort_event: threading.Event | None = None) -> None
                                     "width": int(input_tensor.shape[3]),
                                     "height": int(input_tensor.shape[2]),
                                 })
-                                writer.writerow([
-                                    position,
-                                    clip.score_timestamp.isoformat(),
-                                    first.file_path,
-                                    combined,
-                                    reconstruction_score,
-                                    "" if prediction_score is None else prediction_score,
-                                    json.dumps(future_scores, sort_keys=True),
-                                    int(input_tensor.shape[3]),
-                                    int(input_tensor.shape[2]),
-                                    json.dumps(metadata, sort_keys=True),
-                                ])
+                                writer.writerow(_csv_row(mappings[-1]))
                                 count += 1
                                 score_sum += combined
                                 full_sum += reconstruction_score
                                 score_min = combined if score_min is None else min(score_min, combined)
                                 score_max = combined if score_max is None else max(score_max, combined)
                             db.bulk_insert_mappings(models.TestingRunResult, mappings)
-                            run.image_count = count
-                            db.commit()
+                            _commit_stae_progress(end)
                             if (start // _INFER_BATCH) % 20 == 0:
                                 rate = count / max(1e-6, time.perf_counter() - started)
                                 logger.info("STAE testing run %s: %s/%s (%.0f clips/s)", run_id, count, total, rate)
@@ -343,8 +469,8 @@ def run_testing(run_id: int, abort_event: threading.Event | None = None) -> None
                 run.ended_at = _utcnow()
                 run.duration_seconds = round(time.perf_counter() - started, 3)
                 run.image_count = count
-                run.skipped_image_count = len(skipped_paths)
-                run.skipped_images = sorted(set(skipped_paths))[:_MAX_SKIPPED_PATHS]
+                run.skipped_image_count = skipped_count
+                run.skipped_images = sorted(set(skipped_paths))[:MAX_SKIPPED_PATHS]
                 run.score_mean = score_sum / count if count else None
                 run.score_min = score_min
                 run.score_max = score_max
@@ -352,16 +478,17 @@ def run_testing(run_id: int, abort_event: threading.Event | None = None) -> None
                 run.roi_mse_mean = None
                 run.results_path = str(results_path)
                 run.results_size_bytes = results_path.stat().st_size
+                run.checkpoint_at = None
+                run.checkpoint_input_count = None
+                run.checkpoint_result_count = None
+                run.checkpoint_state = None
+                run.restart_mode = None
                 db.commit()
                 logger.info("STAE testing run %s finished (%s clips)", run_id, count)
                 return
 
             resolution_started = time.perf_counter()
-            records = enumerate_training_dataset_image_records(training_dataset)
-            if not records:
-                raise ValueError("Train/test dataset produced no images.")
-            run.expected_image_count = len(records)
-            db.commit()
+            records = context.inputs
             logger.info(
                 "Testing run %s resolved %s images in %.3fs",
                 run_id,
@@ -377,7 +504,7 @@ def run_testing(run_id: int, abort_event: threading.Event | None = None) -> None
                         "Testing run %s skipping unreadable image: %s (%s)",
                         run_id, record.file_path, exc.original,
                     )
-                    skipped_paths.append(record.file_path)
+                    _record_skip(record.file_path)
                     return record, None
 
             # Streaming, batched inference: preprocess a batch (parallel), score it
@@ -386,28 +513,51 @@ def run_testing(run_id: int, abort_event: threading.Event | None = None) -> None
             # in RAM, so this scales to hundreds of thousands of images.
             results_path = _testing_run_dir(run.id) / "reconstruction_errors.csv"
             results_path.parent.mkdir(parents=True, exist_ok=True)
-            total = len(records)
             prep_workers = min(8, os.cpu_count() or 1)
 
-            count = 0
-            score_sum = full_sum = roi_sum = 0.0
-            roi_count = 0
-            score_min: float | None = None
-            score_max: float | None = None
+            def _commit_image_progress(processed_inputs: int) -> None:
+                nonlocal last_checkpoint_input
+                run.image_count = count
+                if _checkpoint_due(processed_inputs, last_checkpoint_input):
+                    _store_checkpoint(
+                        run,
+                        kind=context.kind,
+                        signature=context.signature,
+                        input_count=processed_inputs,
+                        result_count=count,
+                        total_inputs=total,
+                        score_sum=score_sum,
+                        full_sum=full_sum,
+                        roi_sum=roi_sum,
+                        roi_count=roi_count,
+                        score_min=score_min,
+                        score_max=score_max,
+                        skipped_count=skipped_count,
+                        skipped_paths=skipped_paths,
+                    )
+                    last_checkpoint_input = processed_inputs
+                    logger.info(
+                        "Testing run %s saved checkpoint at %s inputs (%s results)",
+                        run_id,
+                        processed_inputs,
+                        count,
+                    )
+                db.commit()
 
             with open(results_path, "w", encoding="utf-8", newline="") as handle:
                 writer = csv.writer(handle)
                 writer.writerow(_CSV_HEADER)
+                _write_checkpoint_prefix(db, writer, run.id, count)
                 with ThreadPoolExecutor(max_workers=prep_workers) as pool:
-                    for start in range(0, total, _INFER_BATCH):
+                    for start in range(input_start, total, _INFER_BATCH):
                         if abort_event.is_set():
                             raise AbortedError()
-                        batch = records[start : start + _INFER_BATCH]
+                        end = min(total, start + _INFER_BATCH)
+                        batch = records[start:end]
                         prepared = list(pool.map(_prep, batch))
                         prepared = [(record, image) for record, image in prepared if image is not None]
                         if not prepared:
-                            run.image_count = count
-                            db.commit()
+                            _commit_image_progress(end)
                             continue
                         first_inference = evaluator.model is None
                         if first_inference:
@@ -439,18 +589,7 @@ def run_testing(run_id: int, abort_event: threading.Event | None = None) -> None
                                 "width": width,
                                 "height": height,
                             })
-                            writer.writerow([
-                                position,
-                                record.timestamp_parsed.isoformat(),
-                                record.file_path,
-                                score,
-                                full_mse,
-                                "" if roi_mse is None else roi_mse,
-                                "" if tile_scores is None else json.dumps(tile_scores, sort_keys=True),
-                                width,
-                                height,
-                                json.dumps({"sample_kind": "image", **score_metadata}, sort_keys=True),
-                            ])
+                            writer.writerow(_csv_row(mappings[-1]))
                             count += 1
                             score_sum += score
                             full_sum += full_mse
@@ -460,8 +599,7 @@ def run_testing(run_id: int, abort_event: threading.Event | None = None) -> None
                                 roi_sum += roi_mse
                                 roi_count += 1
                         db.bulk_insert_mappings(models.TestingRunResult, mappings)
-                        run.image_count = count
-                        db.commit()
+                        _commit_image_progress(end)
                         if (start // _INFER_BATCH) % 20 == 0:
                             rate = count / max(1e-6, time.perf_counter() - started)
                             logger.info("Testing run %s: %s/%s (%.0f img/s)", run_id, count, total, rate)
@@ -474,8 +612,8 @@ def run_testing(run_id: int, abort_event: threading.Event | None = None) -> None
             run.ended_at = _utcnow()
             run.duration_seconds = round(time.perf_counter() - started, 3)
             run.image_count = count
-            run.skipped_image_count = len(skipped_paths)
-            run.skipped_images = sorted(set(skipped_paths))[:_MAX_SKIPPED_PATHS]
+            run.skipped_image_count = skipped_count
+            run.skipped_images = sorted(set(skipped_paths))[:MAX_SKIPPED_PATHS]
             run.score_mean = score_sum / count if count else None
             run.score_min = score_min
             run.score_max = score_max
@@ -483,6 +621,11 @@ def run_testing(run_id: int, abort_event: threading.Event | None = None) -> None
             run.roi_mse_mean = roi_sum / roi_count if roi_count else None
             run.results_path = str(results_path)
             run.results_size_bytes = results_path.stat().st_size
+            run.checkpoint_at = None
+            run.checkpoint_input_count = None
+            run.checkpoint_result_count = None
+            run.checkpoint_state = None
+            run.restart_mode = None
             db.commit()
             logger.info("Testing run %s finished (%s images)", run_id, count)
         except AbortedError:
@@ -493,6 +636,7 @@ def run_testing(run_id: int, abort_event: threading.Event | None = None) -> None
                 run.ended_at = _utcnow()
                 run.duration_seconds = round(time.perf_counter() - started, 3)
                 run.error_message = "Testing aborted by user."
+                run.restart_mode = None
                 db.commit()
             logger.info("Testing run %s aborted", run_id)
         except Exception as exc:  # noqa: BLE001 - record any failure on the run row
@@ -503,6 +647,7 @@ def run_testing(run_id: int, abort_event: threading.Event | None = None) -> None
                 run.ended_at = _utcnow()
                 run.duration_seconds = round(time.perf_counter() - started, 3)
                 run.error_message = str(exc)
+                run.restart_mode = None
                 db.commit()
             logger.exception("Testing run %s failed", run_id)
     finally:

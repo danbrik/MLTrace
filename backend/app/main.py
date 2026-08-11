@@ -1349,6 +1349,16 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=404, detail="Testing run not found.")
         return run
 
+    @app.post("/api/testing-runs/{run_id}/restart-from-checkpoint", response_model=TestingRunRead)
+    def api_restart_testing_run_from_checkpoint(run_id: int, db: Session = Depends(get_db)):
+        try:
+            run = testing_service.restart_testing_run_from_checkpoint(db, run_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        if run is None:
+            raise HTTPException(status_code=404, detail="Testing run not found.")
+        return run
+
     @app.delete("/api/testing-runs/{run_id}", status_code=204)
     def api_delete_testing_run(run_id: int, db: Session = Depends(get_db)):
         try:

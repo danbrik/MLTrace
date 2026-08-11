@@ -1,10 +1,12 @@
 import csv
 from contextlib import nullcontext
+from datetime import datetime, timedelta
 from pathlib import Path
 import sys
 from types import SimpleNamespace
 
 import numpy as np
+import pytest
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
@@ -16,7 +18,7 @@ from app.testing import engine as testing_engine
 from app.testing import service as testing_service
 from app.testing.service import enqueue_testing_run
 
-from tests.test_testing_service import seed_finished_mean_image_run
+from tests.test_testing_service import seed_finished_mean_image_run, write_tiff
 
 
 def _make_engine():
@@ -27,6 +29,21 @@ def _make_engine():
     )
     Base.metadata.create_all(bind=engine)
     return engine
+
+
+def _append_test_frame(db, test_set_id: int, tmp_path: Path, *, second: int, value: int) -> None:
+    rule = db.scalar(
+        select(models.TrainingDatasetRule).where(
+            models.TrainingDatasetRule.training_dataset_id == test_set_id
+        )
+    )
+    folder = db.get(models.DatasetFolder, rule.folder_id)
+    timestamp = datetime(2026, 4, 1, 12, 0, 0) + timedelta(seconds=second)
+    write_tiff(tmp_path / "test_images" / f"frame_{timestamp:%Y%m%d_%H%M%S}.tiff", value)
+    rule.end_timestamp = timestamp
+    folder.last_timestamp = timestamp
+    folder.image_count += 1
+    db.commit()
 
 
 def test_gradient_model_moves_to_cuda_before_materializing_forward(tmp_path: Path, monkeypatch) -> None:
@@ -182,5 +199,237 @@ def test_run_testing_skips_corrupt_image(tmp_path: Path, monkeypatch) -> None:
         with open(run.results_path, encoding="utf-8") as handle:
             csv_rows = list(csv.reader(handle))
         assert len(csv_rows) == 1 + 2
+    finally:
+        db.close()
+
+
+def test_failed_testing_run_resumes_from_last_checkpoint(tmp_path: Path, monkeypatch) -> None:
+    engine = _make_engine()
+    Session = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+    db = Session()
+    try:
+        training_run_id, test_set_id = seed_finished_mean_image_run(db, tmp_path)
+        _append_test_frame(db, test_set_id, tmp_path, second=30, value=130)
+        queued = enqueue_testing_run(
+            db,
+            TestingRunCreate(training_run_id=training_run_id, training_dataset_id=test_set_id),
+            wake_scheduler=False,
+        )
+        monkeypatch.setattr(testing_engine, "SessionLocal", lambda: Session())
+        monkeypatch.setattr(testing_engine, "CHECKPOINT_INTERVAL", 2)
+        monkeypatch.setattr(testing_engine, "_INFER_BATCH", 1)
+        monkeypatch.setattr(testing_service.scheduler, "wake", lambda: None)
+
+        original_score_batch = testing_service.ArtifactEvaluator.score_batch
+        calls = {"count": 0, "fail": True}
+
+        def flaky_score_batch(self, images, roi):
+            calls["count"] += 1
+            if calls["fail"] and calls["count"] == 4:
+                raise RuntimeError("synthetic inference failure")
+            return original_score_batch(self, images, roi)
+
+        monkeypatch.setattr(testing_service.ArtifactEvaluator, "score_batch", flaky_score_batch)
+        testing_engine.run_testing(queued.id)
+
+        run = db.get(models.TestingRun, queued.id)
+        db.refresh(run)
+        assert run.status == "failed"
+        assert run.image_count == 3
+        assert run.checkpoint_input_count == 2
+        assert run.checkpoint_result_count == 2
+        assert run.checkpoint_at is not None
+        assert db.scalar(
+            select(models.TestingRunResult)
+            .where(models.TestingRunResult.testing_run_id == run.id)
+            .order_by(models.TestingRunResult.position.desc())
+        ).position == 2
+
+        restarted = testing_service.restart_testing_run_from_checkpoint(db, run.id)
+        assert restarted is not None
+        assert restarted.status == "queued"
+        assert restarted.restart_mode == "checkpoint"
+        assert restarted.image_count == 2
+
+        calls.update(count=0, fail=False)
+        testing_engine.run_testing(run.id)
+        db.refresh(run)
+        assert run.status == "finished"
+        assert calls["count"] == 2
+        assert run.image_count == 4
+        assert run.score_mean == pytest.approx((0.0 + 100.0 + 400.0 + 900.0) / 4)
+        assert run.checkpoint_at is None
+        assert run.checkpoint_state is None
+        assert run.restart_mode is None
+
+        rows = db.scalars(
+            select(models.TestingRunResult)
+            .where(models.TestingRunResult.testing_run_id == run.id)
+            .order_by(models.TestingRunResult.position)
+        ).all()
+        assert [row.position for row in rows] == [0, 1, 2, 3]
+        assert [row.score for row in rows] == [0.0, 100.0, 400.0, 900.0]
+        with open(run.results_path, encoding="utf-8") as handle:
+            assert len(list(csv.reader(handle))) == 5
+    finally:
+        db.close()
+
+
+def test_checkpoint_resume_rejects_changed_source_and_full_restart_clears_it(
+    tmp_path: Path, monkeypatch
+) -> None:
+    engine = _make_engine()
+    Session = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+    db = Session()
+    try:
+        training_run_id, test_set_id = seed_finished_mean_image_run(db, tmp_path)
+        queued = enqueue_testing_run(
+            db,
+            TestingRunCreate(training_run_id=training_run_id, training_dataset_id=test_set_id),
+            wake_scheduler=False,
+        )
+        monkeypatch.setattr(testing_engine, "SessionLocal", lambda: Session())
+        monkeypatch.setattr(testing_engine, "CHECKPOINT_INTERVAL", 2)
+        monkeypatch.setattr(testing_engine, "_INFER_BATCH", 1)
+        monkeypatch.setattr(testing_service.scheduler, "wake", lambda: None)
+
+        original_score_batch = testing_service.ArtifactEvaluator.score_batch
+        calls = {"count": 0}
+
+        def fail_after_checkpoint(self, images, roi):
+            calls["count"] += 1
+            if calls["count"] == 3:
+                raise RuntimeError("stop after checkpoint")
+            return original_score_batch(self, images, roi)
+
+        monkeypatch.setattr(testing_service.ArtifactEvaluator, "score_batch", fail_after_checkpoint)
+        testing_engine.run_testing(queued.id)
+        run = db.get(models.TestingRun, queued.id)
+        db.refresh(run)
+        assert run.status == "failed"
+        assert run.checkpoint_input_count == 2
+
+        _append_test_frame(db, test_set_id, tmp_path, second=30, value=130)
+        with pytest.raises(ValueError, match="changed since the checkpoint"):
+            testing_service.restart_testing_run_from_checkpoint(db, run.id)
+        db.refresh(run)
+        assert run.status == "failed"
+        assert run.checkpoint_input_count == 2
+
+        restarted = testing_service.restart_testing_run(db, run.id)
+        assert restarted is not None
+        assert restarted.status == "queued"
+        assert restarted.checkpoint_at is None
+        assert restarted.checkpoint_input_count is None
+        assert db.scalar(
+            select(models.TestingRunResult).where(models.TestingRunResult.testing_run_id == run.id)
+        ) is None
+    finally:
+        db.close()
+
+
+def test_stae_testing_run_resumes_by_clip_without_duplicate_results(tmp_path: Path, monkeypatch) -> None:
+    engine = _make_engine()
+    Session = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+    db = Session()
+    try:
+        training_run_id, test_set_id = seed_finished_mean_image_run(db, tmp_path)
+        _append_test_frame(db, test_set_id, tmp_path, second=30, value=130)
+        training_run = db.get(models.TrainingRun, training_run_id)
+        method = training_run.training_pipeline.method_configuration
+        method.builder_kind = "spatiotemporal_autoencoder"
+        method.method_type = "spatiotemporal_autoencoder"
+        method.method_config = {
+            "input_channels": 1,
+            "input_height": 6,
+            "input_width": 8,
+            "clip_length": 1,
+            "future_length": 0,
+            "prediction_branch": False,
+        }
+        db.commit()
+        queued = enqueue_testing_run(
+            db,
+            TestingRunCreate(training_run_id=training_run_id, training_dataset_id=test_set_id),
+            wake_scheduler=False,
+        )
+        monkeypatch.setattr(testing_engine, "SessionLocal", lambda: Session())
+        monkeypatch.setattr(testing_engine, "CHECKPOINT_INTERVAL", 2)
+        monkeypatch.setattr(testing_engine, "_INFER_BATCH", 1)
+        monkeypatch.setattr(testing_service.scheduler, "wake", lambda: None)
+
+        calls = {"count": 0, "fail": True}
+
+        class FakeStaeEvaluator:
+            def __init__(self, training_run, _config):
+                self.artifact_path = Path(training_run.artifact_path)
+                self.model = None
+
+            def reconstruct_clip_batch(self, clips):
+                calls["count"] += 1
+                if calls["fail"] and calls["count"] == 4:
+                    raise RuntimeError("synthetic STAE failure")
+                self.model = object()
+                return [{"reconstruction": clip.copy(), "prediction": None} for clip in clips]
+
+        monkeypatch.setattr(testing_engine, "ArtifactEvaluator", FakeStaeEvaluator)
+        testing_engine.run_testing(queued.id)
+        run = db.get(models.TestingRun, queued.id)
+        db.refresh(run)
+        assert run.status == "failed"
+        assert run.checkpoint_input_count == 2
+        assert run.checkpoint_result_count == 2
+
+        testing_service.restart_testing_run_from_checkpoint(db, run.id)
+        calls.update(count=0, fail=False)
+        testing_engine.run_testing(run.id)
+        db.refresh(run)
+        assert run.status == "finished"
+        assert calls["count"] == 2
+        rows = db.scalars(
+            select(models.TestingRunResult)
+            .where(models.TestingRunResult.testing_run_id == run.id)
+            .order_by(models.TestingRunResult.position)
+        ).all()
+        assert [row.position for row in rows] == [0, 1, 2, 3]
+        assert all(row.result_metadata["sample_kind"] == "clip" for row in rows)
+    finally:
+        db.close()
+
+
+def test_aborted_testing_run_keeps_checkpoint_for_resume(tmp_path: Path, monkeypatch) -> None:
+    engine = _make_engine()
+    Session = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+    db = Session()
+    try:
+        training_run_id, test_set_id = seed_finished_mean_image_run(db, tmp_path)
+        queued = enqueue_testing_run(
+            db,
+            TestingRunCreate(training_run_id=training_run_id, training_dataset_id=test_set_id),
+            wake_scheduler=False,
+        )
+        monkeypatch.setattr(testing_engine, "SessionLocal", lambda: Session())
+        monkeypatch.setattr(testing_engine, "CHECKPOINT_INTERVAL", 2)
+        monkeypatch.setattr(testing_engine, "_INFER_BATCH", 1)
+        monkeypatch.setattr(testing_service.scheduler, "wake", lambda: None)
+
+        class AbortAfterCheckpoint:
+            checks = 0
+
+            def is_set(self):
+                self.checks += 1
+                return self.checks >= 3
+
+        testing_engine.run_testing(queued.id, AbortAfterCheckpoint())
+        run = db.get(models.TestingRun, queued.id)
+        db.refresh(run)
+        assert run.status == "aborted"
+        assert run.checkpoint_input_count == 2
+        assert run.checkpoint_result_count == 2
+
+        restarted = testing_service.restart_testing_run_from_checkpoint(db, run.id)
+        assert restarted is not None
+        assert restarted.status == "queued"
+        assert restarted.restart_mode == "checkpoint"
     finally:
         db.close()

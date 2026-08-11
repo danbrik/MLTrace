@@ -446,6 +446,14 @@ class TestingRun(Base):
     roi_mse_mean: Mapped[float | None] = mapped_column(Float)
     results_path: Mapped[str | None] = mapped_column(Text)
     results_size_bytes: Mapped[int | None] = mapped_column(BigInteger)
+    # Durable resume marker for long scheduled inference runs. Result rows are
+    # already committed batch-by-batch; this state records the last consistent
+    # source cursor and running aggregates that may safely be resumed.
+    checkpoint_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=False))
+    checkpoint_input_count: Mapped[int | None] = mapped_column(Integer)
+    checkpoint_result_count: Mapped[int | None] = mapped_column(Integer)
+    checkpoint_state: Mapped[dict | None] = mapped_column(json_type())
+    restart_mode: Mapped[str | None] = mapped_column(String(32))
 
     # Denormalized snapshot for stable filtering/display even when source
     # objects are renamed later.
