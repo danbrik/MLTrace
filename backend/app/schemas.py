@@ -541,6 +541,8 @@ class BaselineNormalizationRequest(BaseModel):
         cleaned = sorted({float(value) for value in self.thresholds if math.isfinite(value) and value > 0})
         if not cleaned:
             raise ValueError("At least one positive finite threshold is required.")
+        if self.max_points < len(self.analysis_regions):
+            raise ValueError("max_points must allow at least one plot point per analysis region.")
         self.thresholds = cleaned
         return self
 
@@ -562,21 +564,6 @@ class BaselineThresholdStatisticsRead(BaseModel):
     longest_seconds: float
 
 
-class BaselineRegionStatisticsRead(BaseModel):
-    region_id: str
-    region_name: str
-    sample_count: int
-    raw_mean: float | None
-    raw_max: float | None
-    signal_mean: float | None
-    signal_max: float | None
-    signal_std: float | None
-    z_mean: float | None
-    z_median: float | None
-    z_max: float | None
-    thresholds: list[BaselineThresholdStatisticsRead]
-
-
 class BaselineSeriesPointRead(BaseModel):
     timestamp: datetime
     raw: float | None
@@ -591,6 +578,27 @@ class BaselineAnomalyEventRead(BaseModel):
     sample_count: int
 
 
+class BaselineRegionStatisticsRead(BaseModel):
+    region_id: str
+    region_name: str
+    start: datetime
+    end: datetime
+    sample_count: int
+    raw_mean: float | None
+    raw_max: float | None
+    signal_mean: float | None
+    signal_max: float | None
+    signal_std: float | None
+    z_mean: float | None
+    z_median: float | None
+    z_max: float | None
+    thresholds: list[BaselineThresholdStatisticsRead]
+    series: list[BaselineSeriesPointRead] = Field(default_factory=list)
+    events: list[BaselineAnomalyEventRead] = Field(default_factory=list)
+    total_points: int = 0
+    decimated: bool = False
+
+
 class BaselineTraceResultRead(BaseModel):
     testing_run_id: int
     label: str
@@ -598,10 +606,12 @@ class BaselineTraceResultRead(BaseModel):
     fingerprint: str
     baseline: BaselineStatisticsRead
     regions: list[BaselineRegionStatisticsRead]
-    series: list[BaselineSeriesPointRead]
-    events: list[BaselineAnomalyEventRead]
-    total_points: int
-    decimated: bool
+    # Legacy trace-wide plot fields. New responses keep plot data on each
+    # region so detection and presentation cannot escape its selected range.
+    series: list[BaselineSeriesPointRead] = Field(default_factory=list)
+    events: list[BaselineAnomalyEventRead] = Field(default_factory=list)
+    total_points: int = 0
+    decimated: bool = False
 
 
 class BaselineNormalizationResponse(BaseModel):
@@ -610,6 +620,41 @@ class BaselineNormalizationResponse(BaseModel):
     thresholds: list[float]
     persistence_samples: int
     traces: list[BaselineTraceResultRead]
+
+
+class AnalysisImageComparisonRequest(BaseModel):
+    testing_run_id: int = Field(gt=0)
+    reference_result_id: int = Field(gt=0)
+    comparison_result_ids: list[int] = Field(min_length=1, max_length=50)
+    image_source: Literal["input", "reconstruction"] = "input"
+
+    @model_validator(mode="after")
+    def validate_result_ids(self):
+        self.comparison_result_ids = list(dict.fromkeys(self.comparison_result_ids))
+        if self.reference_result_id in self.comparison_result_ids:
+            raise ValueError("The reference image cannot also be a comparison image.")
+        return self
+
+
+class AnalysisImageComparisonItemRead(BaseModel):
+    result_id: int
+    timestamp: datetime
+    image_data_url: str
+    heatmap_image_data_url: str
+    max_difference: float
+    mean_difference: float
+
+
+class AnalysisImageComparisonResponse(BaseModel):
+    testing_run_id: int
+    image_source: Literal["input", "reconstruction"]
+    reference_result_id: int
+    reference_timestamp: datetime
+    reference_image_data_url: str
+    width: int
+    height: int
+    shared_max_difference: float
+    comparisons: list[AnalysisImageComparisonItemRead]
 
 
 class OptimizationParameterSpec(BaseModel):

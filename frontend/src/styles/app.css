@@ -310,6 +310,11 @@ body {
   background: #ffffff;
 }
 
+.analysis-image-comparison-frame {
+  height: min(36vw, 420px);
+  min-height: 220px;
+}
+
 .analysis-heatmap-video-frame {
   width: min(100%, 1080px);
   height: min(68vh, 720px);

@@ -29,6 +29,9 @@ from app.preprocessing.pipeline import (
 )
 from app.scanner import filename_timestamp_template
 from app.schemas import (
+    AnalysisImageComparisonItemRead,
+    AnalysisImageComparisonRequest,
+    AnalysisImageComparisonResponse,
     HeatmapRunCreate,
     HeatmapRunRead,
     HeatmapRunSummary,
@@ -1092,6 +1095,113 @@ def get_testing_run_result_image(
         channels=channels,
         dtype=dtype,
         image_data_url=encode_absolute_image_data_url(image),
+    )
+
+
+def _comparison_images(
+    testing_run: models.TestingRun,
+    results: list[models.TestingRunResult],
+    image_source: str,
+) -> tuple[list[np.ndarray], list[datetime]]:
+    training_run = testing_run.training_run
+    if training_run is None:
+        raise ValueError("Training run no longer exists.")
+    preprocessing = training_run.training_pipeline.preprocessing_pipeline
+    graph = PreprocessingGraph.model_validate(preprocessing.graph)
+    is_stae = training_run.training_pipeline.method_configuration.builder_kind == "spatiotemporal_autoencoder"
+    if is_stae:
+        samples = [prepare_stae_heatmap_sample(graph, result) for result in results]
+        if image_source == "input":
+            pairs = [stae_heatmap_pair(
+                sample,
+                {"reconstruction": sample.clip},
+                fallback_timestamp=result.timestamp,
+            ) for sample, result in zip(samples, results, strict=True)]
+        else:
+            evaluator = ArtifactEvaluator(training_run, testing_run.inference_config)
+            outputs = evaluator.reconstruct_clip_batch([sample.clip for sample in samples])
+            pairs = [stae_heatmap_pair(
+                sample,
+                output,
+                fallback_timestamp=result.timestamp,
+            ) for sample, output, result in zip(samples, outputs, results, strict=True)]
+        images = [pair[0] if image_source == "input" else pair[1] for pair in pairs]
+        timestamps = [pair[3] for pair in pairs]
+        return images, timestamps
+
+    inputs = [run_pipeline_array(graph, result.image_path) for result in results]
+    sources = [_as_image(_to_nchw(image)) for image in inputs]
+    if image_source == "input":
+        return sources, [result.timestamp for result in results]
+    evaluator = ArtifactEvaluator(training_run, testing_run.inference_config)
+    return evaluator.reconstruct_batch(inputs), [result.timestamp for result in results]
+
+
+def _comparison_difference(reference: np.ndarray, comparison: np.ndarray) -> np.ndarray:
+    if reference.shape != comparison.shape:
+        raise ValueError(
+            f"Cannot compare images with different shapes: {reference.shape} vs {comparison.shape}."
+        )
+    difference = np.abs(reference.astype(np.float64) - comparison.astype(np.float64))
+    return np.mean(difference, axis=2) if difference.ndim == 3 else difference
+
+
+def _comparison_heatmap_data_url(difference: np.ndarray, shared_max: float) -> str:
+    normalized = np.clip(difference / shared_max, 0.0, 1.0) if shared_max > 0 else np.zeros_like(difference)
+    red = np.clip(1.5 - np.abs(4.0 * normalized - 3.0), 0.0, 1.0)
+    green = np.clip(1.5 - np.abs(4.0 * normalized - 2.0), 0.0, 1.0)
+    blue = np.clip(1.5 - np.abs(4.0 * normalized - 1.0), 0.0, 1.0)
+    rgb = np.stack([red, green, blue], axis=-1)
+    return encode_png_data_url(np.asarray(rgb * 255.0, dtype=np.uint8))
+
+
+def calculate_analysis_image_comparison(
+    db: Session, payload: AnalysisImageComparisonRequest
+) -> AnalysisImageComparisonResponse:
+    testing_run = _load_testing_run_for_heatmap(db, payload.testing_run_id)
+    if testing_run is None:
+        raise ValueError("Inference run not found.")
+    if testing_run.status != "finished":
+        raise ValueError("Images can only be compared for finished inference runs.")
+
+    requested_ids = [payload.reference_result_id, *payload.comparison_result_ids]
+    loaded = db.scalars(
+        select(models.TestingRunResult)
+        .where(
+            models.TestingRunResult.testing_run_id == payload.testing_run_id,
+            models.TestingRunResult.id.in_(requested_ids),
+        )
+    ).all()
+    by_id = {result.id: result for result in loaded}
+    missing = [result_id for result_id in requested_ids if result_id not in by_id]
+    if missing:
+        raise ValueError(f"Testing result #{missing[0]} was not found in the selected inference run.")
+    ordered_results = [by_id[result_id] for result_id in requested_ids]
+    images, timestamps = _comparison_images(testing_run, ordered_results, payload.image_source)
+    reference = images[0]
+    differences = [_comparison_difference(reference, image) for image in images[1:]]
+    shared_max = max((float(np.max(difference)) for difference in differences), default=0.0)
+    width, height, _, _, _, _ = image_metadata(reference)
+    comparisons = [AnalysisImageComparisonItemRead(
+        result_id=result.id,
+        timestamp=timestamp,
+        image_data_url=encode_absolute_image_data_url(image),
+        heatmap_image_data_url=_comparison_heatmap_data_url(difference, shared_max),
+        max_difference=float(np.max(difference)) if difference.size else 0.0,
+        mean_difference=float(np.mean(difference)) if difference.size else 0.0,
+    ) for result, timestamp, image, difference in zip(
+        ordered_results[1:], timestamps[1:], images[1:], differences, strict=True
+    )]
+    return AnalysisImageComparisonResponse(
+        testing_run_id=testing_run.id,
+        image_source=payload.image_source,
+        reference_result_id=ordered_results[0].id,
+        reference_timestamp=timestamps[0],
+        reference_image_data_url=encode_absolute_image_data_url(reference),
+        width=width,
+        height=height,
+        shared_max_difference=shared_max,
+        comparisons=comparisons,
     )
 
 

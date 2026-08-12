@@ -98,7 +98,8 @@ def test_sampling_precedes_statistics_and_plot_decimation_does_not_change_counts
         result = calculate(db, payload)
         assert result.traces[0].baseline.sample_count == 2
         assert result.traces[0].regions[0].sample_count == 3
-        assert result.traces[0].total_points == 5
+        assert result.traces[0].total_points == 3
+        assert result.traces[0].regions[0].total_points == 3
     finally:
         db.close()
 
@@ -110,16 +111,34 @@ def test_backend_ewma_matches_causal_frontend_semantics() -> None:
     assert output == pytest.approx([0.0, 5.0, 7.5])
 
 
+def test_region_signal_keeps_full_trace_history_for_causal_processing() -> None:
+    db, run_id, start = _seed([0, 0, 0, 8, 8, 0, 0, 0, 0, 0])
+    try:
+        payload = _payload(
+            run_id,
+            start,
+            moving_average=4,
+            baseline_regions=[{"id": "b1", "name": "Baseline", "start": start, "end": start + timedelta(seconds=2)}],
+            analysis_regions=[{"id": "r1", "name": "Region", "start": start + timedelta(seconds=3), "end": start + timedelta(seconds=4)}],
+        )
+        region = calculate(db, payload).traces[0].regions[0]
+        assert [point.signal for point in region.series] == pytest.approx([2.0, 4.0])
+    finally:
+        db.close()
+
+
 def test_anomaly_event_requires_configured_consecutive_samples() -> None:
     db, run_id, start = _seed([0, 1, 2, 3, 10, 10, 0, 10, 0, 0])
     try:
         result = calculate(db, _payload(run_id, start, thresholds=[3], persistence_samples=2))
         events = result.traces[0].events
-        assert len(events) == 1
-        assert events[0].threshold == 3
-        assert events[0].start == start + timedelta(seconds=4)
-        assert events[0].end == start + timedelta(seconds=5)
-        assert events[0].sample_count == 2
+        assert events == []
+        region = result.traces[0].regions[0]
+        assert len(region.events) == 1
+        assert region.events[0].threshold == 3
+        assert region.events[0].start == start + timedelta(seconds=4)
+        assert region.events[0].end == start + timedelta(seconds=5)
+        assert region.events[0].sample_count == 2
     finally:
         db.close()
 
@@ -136,6 +155,79 @@ def test_data_gap_resets_consecutive_sample_sequence() -> None:
         payload.traces[0].end = start + timedelta(seconds=70)
         payload.analysis_regions[0].end = start + timedelta(seconds=70)
         result = calculate(db, payload)
-        assert result.traces[0].events == []
+        assert result.traces[0].regions[0].events == []
+    finally:
+        db.close()
+
+
+def test_region_series_and_events_are_strictly_limited_to_each_analysis_region() -> None:
+    db, run_id, start = _seed([0, 1, 2, 3, 10, 10, 0, 10, 10, 0])
+    try:
+        payload = _payload(
+            run_id,
+            start,
+            thresholds=[3],
+            persistence_samples=2,
+            analysis_regions=[
+                {"id": "r1", "name": "First", "start": start + timedelta(seconds=4), "end": start + timedelta(seconds=5)},
+                {"id": "r2", "name": "Second", "start": start + timedelta(seconds=7), "end": start + timedelta(seconds=8)},
+            ],
+        )
+        result = calculate(db, payload)
+        trace = result.traces[0]
+        assert trace.series == []
+        assert trace.events == []
+        assert [[point.timestamp for point in region.series] for region in trace.regions] == [
+            [start + timedelta(seconds=4), start + timedelta(seconds=5)],
+            [start + timedelta(seconds=7), start + timedelta(seconds=8)],
+        ]
+        assert [[event.start for event in region.events] for region in trace.regions] == [
+            [start + timedelta(seconds=4)],
+            [start + timedelta(seconds=7)],
+        ]
+    finally:
+        db.close()
+
+
+def test_persistence_resets_at_region_boundaries_and_overlaps_are_independent() -> None:
+    db, run_id, start = _seed([0, 1, 2, 3, 10, 10, 10, 10, 0, 0])
+    try:
+        payload = _payload(
+            run_id,
+            start,
+            thresholds=[3],
+            persistence_samples=3,
+            analysis_regions=[
+                {"id": "short", "name": "Short", "start": start + timedelta(seconds=4), "end": start + timedelta(seconds=5)},
+                {"id": "overlap", "name": "Overlap", "start": start + timedelta(seconds=5), "end": start + timedelta(seconds=7)},
+            ],
+        )
+        regions = calculate(db, payload).traces[0].regions
+        assert regions[0].events == []
+        assert len(regions[1].events) == 1
+        assert regions[1].events[0].start == start + timedelta(seconds=5)
+        assert regions[1].events[0].sample_count == 3
+    finally:
+        db.close()
+
+
+def test_region_plot_budget_is_shared_without_changing_full_resolution_results() -> None:
+    db, run_id, start = _seed([float(index) for index in range(120)])
+    try:
+        payload = _payload(
+            run_id,
+            start,
+            max_points=100,
+            traces=[{"testing_run_id": run_id, "label": "model", "color": "#123456", "start": start, "end": start + timedelta(seconds=119)}],
+            analysis_regions=[
+                {"id": "r1", "name": "First", "start": start + timedelta(seconds=10), "end": start + timedelta(seconds=69)},
+                {"id": "r2", "name": "Second", "start": start + timedelta(seconds=60), "end": start + timedelta(seconds=119)},
+            ],
+        )
+        trace = calculate(db, payload).traces[0]
+        assert sum(len(region.series) for region in trace.regions) <= 100
+        assert [region.total_points for region in trace.regions] == [60, 60]
+        assert [region.sample_count for region in trace.regions] == [60, 60]
+        assert all(region.decimated for region in trace.regions)
     finally:
         db.close()

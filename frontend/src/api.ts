@@ -12,6 +12,7 @@ import type {
   BaselineAnalysisMethod,
   BaselineAnalysisRegion,
   BaselineNormalizationResult,
+  AnalysisImageComparisonResult,
   HeatmapRangeRun,
   HeatmapRun,
   HeatmapRunSummary,
@@ -813,6 +814,18 @@ export function calculateBaselineNormalization(payload: {
   max_points?: number;
 }): Promise<BaselineNormalizationResult> {
   return request<BaselineNormalizationResult>('/api/analysis/baseline-normalization', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  }, 15 * 60_000);
+}
+
+export function calculateAnalysisImageComparison(payload: {
+  testing_run_id: number;
+  reference_result_id: number;
+  comparison_result_ids: number[];
+  image_source: 'input' | 'reconstruction';
+}): Promise<AnalysisImageComparisonResult> {
+  return request<AnalysisImageComparisonResult>('/api/analysis/image-comparison', {
     method: 'POST',
     body: JSON.stringify(payload),
   }, 15 * 60_000);

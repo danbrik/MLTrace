@@ -21,6 +21,8 @@ from app.projects import (
     list_queue_entries,
 )
 from app.schemas import (
+    AnalysisImageComparisonRequest,
+    AnalysisImageComparisonResponse,
     AnomalyDetectionRunCreate,
     AnomalyDetectionProgressRead,
     AnomalyDetectionRunRead,
@@ -329,6 +331,16 @@ def create_app() -> FastAPI:
     ):
         try:
             return baseline_analysis_service.calculate(db, payload)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.post("/api/analysis/image-comparison", response_model=AnalysisImageComparisonResponse)
+    def api_calculate_analysis_image_comparison(
+        payload: AnalysisImageComparisonRequest,
+        db: Session = Depends(get_db),
+    ):
+        try:
+            return testing_service.calculate_analysis_image_comparison(db, payload)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 

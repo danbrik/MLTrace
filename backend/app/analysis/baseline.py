@@ -384,9 +384,48 @@ def _anomaly_events(
 def _decimate(points: list[BaselineSeriesPointRead], max_points: int) -> tuple[list[BaselineSeriesPointRead], bool]:
     if len(points) <= max_points:
         return points, False
+    if max_points <= 0:
+        return [], True
+    if max_points == 1:
+        return [points[0]], True
     step = (len(points) - 1) / (max_points - 1)
     indices = sorted({round(index * step) for index in range(max_points)} | {0, len(points) - 1})
     return [points[index] for index in indices], True
+
+
+def _region_point_budgets(point_counts: list[int], max_points: int) -> list[int]:
+    """Distribute one trace's plot budget proportionally across its regions."""
+    budgets = [0] * len(point_counts)
+    nonempty = [index for index, count in enumerate(point_counts) if count > 0]
+    if not nonempty:
+        return budgets
+    if max_points < len(nonempty):
+        for index in sorted(nonempty, key=lambda item: point_counts[item], reverse=True)[:max_points]:
+            budgets[index] = 1
+        return budgets
+    # A region needs both endpoints when possible. For exceptionally many
+    # regions, retaining one point per region is more useful than omitting a
+    # selected region from the response entirely.
+    minimum = 2 if max_points >= 2 * len(nonempty) else 1
+    for index in nonempty:
+        budgets[index] = min(minimum, point_counts[index])
+    remaining = max(0, max_points - sum(budgets))
+    unmet = [max(0, point_counts[index] - budgets[index]) for index in range(len(point_counts))]
+    total_unmet = sum(unmet)
+    if remaining == 0 or total_unmet == 0:
+        return budgets
+    shares = [remaining * count / total_unmet for count in unmet]
+    for index, share in enumerate(shares):
+        addition = min(unmet[index], math.floor(share))
+        budgets[index] += addition
+        remaining -= addition
+    for index in sorted(range(len(point_counts)), key=lambda item: shares[item] - math.floor(shares[item]), reverse=True):
+        if remaining <= 0:
+            break
+        if budgets[index] < point_counts[index]:
+            budgets[index] += 1
+            remaining -= 1
+    return budgets
 
 
 def calculate(db: Session, payload: BaselineNormalizationRequest) -> BaselineNormalizationResponse:
@@ -430,11 +469,18 @@ def calculate(db: Session, payload: BaselineNormalizationRequest) -> BaselineNor
         z: list[float | None] = [None if value is None or not math.isfinite(value) else (value - center) / scale for value in signal]
         baseline = BaselineStatisticsRead(sample_count=len(baseline_values), mean=mean, std=std, median=median, mad=mad, center=center, scale=scale)
 
-        region_results: list[BaselineRegionStatisticsRead] = []
+        region_payloads: list[dict[str, Any]] = []
         for region in payload.analysis_regions:
             region_start = _naive(region.start)
             region_end = _naive(region.end)
-            indices = [index for index, timestamp in enumerate(timestamps) if region_start <= timestamp <= region_end and signal[index] is not None and z[index] is not None]
+            region_indices = [index for index, timestamp in enumerate(timestamps) if region_start <= timestamp <= region_end]
+            indices = [
+                index for index in region_indices
+                if signal[index] is not None
+                and z[index] is not None
+                and math.isfinite(float(signal[index]))
+                and math.isfinite(float(z[index]))
+            ]
             raw_values = [raw[index] for index in indices if math.isfinite(raw[index])]
             signal_values = [float(signal[index]) for index in indices if signal[index] is not None and math.isfinite(float(signal[index]))]
             z_values = [float(z[index]) for index in indices if z[index] is not None and math.isfinite(float(z[index]))]
@@ -448,24 +494,49 @@ def calculate(db: Session, payload: BaselineNormalizationRequest) -> BaselineNor
                     sample_fraction=count / len(z_values) if z_values else 0.0,
                     longest_seconds=_longest_above(region_times, z_values, threshold),
                 ))
-            region_results.append(BaselineRegionStatisticsRead(
-                region_id=region.id,
-                region_name=region.name,
-                sample_count=len(signal_values),
-                raw_mean=_optional_stat(raw_values, _mean),
-                raw_max=_optional_stat(raw_values, max),
-                signal_mean=_optional_stat(signal_values, _mean),
-                signal_max=_optional_stat(signal_values, max),
-                signal_std=_optional_stat(signal_values, _std),
-                z_mean=_optional_stat(z_values, _mean),
-                z_median=_optional_stat(z_values, _median),
-                z_max=_optional_stat(z_values, max),
-                thresholds=threshold_results,
-            ))
+            region_points = [BaselineSeriesPointRead(
+                timestamp=timestamps[index],
+                raw=raw[index] if math.isfinite(raw[index]) else None,
+                signal=(float(signal[index]) if signal[index] is not None and math.isfinite(float(signal[index])) else None),
+                z=(float(z[index]) if z[index] is not None and math.isfinite(float(z[index])) else None),
+            ) for index in region_indices]
+            region_payloads.append({
+                "region_id": region.id,
+                "region_name": region.name,
+                "start": region_start,
+                "end": region_end,
+                "sample_count": len(signal_values),
+                "raw_mean": _optional_stat(raw_values, _mean),
+                "raw_max": _optional_stat(raw_values, max),
+                "signal_mean": _optional_stat(signal_values, _mean),
+                "signal_max": _optional_stat(signal_values, max),
+                "signal_std": _optional_stat(signal_values, _std),
+                "z_mean": _optional_stat(z_values, _mean),
+                "z_median": _optional_stat(z_values, _median),
+                "z_max": _optional_stat(z_values, max),
+                "thresholds": threshold_results,
+                "full_series": region_points,
+                "events": _anomaly_events(
+                    [point.timestamp for point in region_points],
+                    [point.z for point in region_points],
+                    payload.thresholds,
+                    payload.persistence_samples,
+                ),
+            })
 
-        points = [BaselineSeriesPointRead(timestamp=timestamp, raw=raw[index] if math.isfinite(raw[index]) else None, signal=signal[index], z=z[index]) for index, timestamp in enumerate(timestamps)]
-        visible, decimated = _decimate(points, payload.max_points)
-        events = _anomaly_events(timestamps, z, payload.thresholds, payload.persistence_samples)
+        budgets = _region_point_budgets(
+            [len(region["full_series"]) for region in region_payloads], payload.max_points
+        )
+        region_results: list[BaselineRegionStatisticsRead] = []
+        for region, budget in zip(region_payloads, budgets, strict=True):
+            full_series = region.pop("full_series")
+            visible, decimated = _decimate(full_series, budget) if full_series else ([], False)
+            region_results.append(BaselineRegionStatisticsRead(
+                **region,
+                series=visible,
+                total_points=len(full_series),
+                decimated=decimated,
+            ))
         fingerprint_payload = {
             "run": run.id,
             "updated": run.updated_at.isoformat() if run.updated_at else None,
@@ -483,10 +554,10 @@ def calculate(db: Session, payload: BaselineNormalizationRequest) -> BaselineNor
             fingerprint=fingerprint,
             baseline=baseline,
             regions=region_results,
-            series=visible,
-            events=events,
-            total_points=len(points),
-            decimated=decimated,
+            series=[],
+            events=[],
+            total_points=sum(region.total_points for region in region_results),
+            decimated=any(region.decimated for region in region_results),
         ))
     return BaselineNormalizationResponse(
         computed_at=datetime.now(UTC),

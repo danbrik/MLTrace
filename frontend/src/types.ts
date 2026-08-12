@@ -1129,6 +1129,8 @@ export type BaselineThresholdStatistics = {
 export type BaselineRegionStatistics = {
   region_id: string;
   region_name: string;
+  start?: string;
+  end?: string;
   sample_count: number;
   raw_mean: number | null;
   raw_max: number | null;
@@ -1139,6 +1141,10 @@ export type BaselineRegionStatistics = {
   z_median: number | null;
   z_max: number | null;
   thresholds: BaselineThresholdStatistics[];
+  series?: BaselineSeriesPoint[];
+  events?: BaselineAnomalyEvent[];
+  total_points?: number;
+  decimated?: boolean;
 };
 
 export type BaselineSeriesPoint = {
@@ -1162,7 +1168,7 @@ export type BaselineTraceResult = {
   fingerprint: string;
   baseline: BaselineStatistics;
   regions: BaselineRegionStatistics[];
-  series: BaselineSeriesPoint[];
+  series?: BaselineSeriesPoint[];
   events?: BaselineAnomalyEvent[];
   total_points: number;
   decimated: boolean;
@@ -1174,6 +1180,27 @@ export type BaselineNormalizationResult = {
   thresholds: number[];
   persistence_samples?: number;
   traces: BaselineTraceResult[];
+};
+
+export type AnalysisImageComparisonItem = {
+  result_id: number;
+  timestamp: string;
+  image_data_url: string;
+  heatmap_image_data_url: string;
+  max_difference: number;
+  mean_difference: number;
+};
+
+export type AnalysisImageComparisonResult = {
+  testing_run_id: number;
+  image_source: 'input' | 'reconstruction';
+  reference_result_id: number;
+  reference_timestamp: string;
+  reference_image_data_url: string;
+  width: number;
+  height: number;
+  shared_max_difference: number;
+  comparisons: AnalysisImageComparisonItem[];
 };
 
 export type OptimizationParameterSpec = {

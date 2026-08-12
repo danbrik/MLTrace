@@ -12,6 +12,7 @@ from sqlalchemy.pool import StaticPool
 from app import models
 from app.database import Base
 from app.schemas import (
+    AnalysisImageComparisonRequest,
     HeatmapRunCreate,
     HeatmapVisualizationConfig,
     RoiDefinitionCreate,
@@ -262,6 +263,122 @@ def seed_finished_mean_image_run(db, tmp_path: Path):
     db.add(run)
     db.commit()
     return run.id, test_set.id
+
+
+def test_analysis_image_comparison_supports_input_and_reconstruction_modes(tmp_path: Path) -> None:
+    db = make_db()
+    try:
+        training_run_id, test_set_id = seed_finished_mean_image_run(db, tmp_path)
+        testing_run = create_testing_run(
+            db,
+            TestingRunCreatePayload(training_run_id=training_run_id, training_dataset_id=test_set_id),
+        )
+        root = tmp_path / "test_images"
+        timestamps = [datetime(2026, 4, 1, 12, 0, index * 10) for index in range(3)]
+        rows = []
+        for index, timestamp in enumerate(timestamps):
+            row = models.TestingRunResult(
+                testing_run_id=testing_run.id,
+                position=index,
+                image_path=str(root / f"frame_{timestamp:%Y%m%d_%H%M%S}.tiff"),
+                timestamp=timestamp,
+                score=0.0,
+                full_mse=0.0,
+                width=8,
+                height=6,
+            )
+            db.add(row)
+            rows.append(row)
+        testing_run.status = "finished"
+        db.commit()
+
+        inputs = testing_service.calculate_analysis_image_comparison(
+            db,
+            AnalysisImageComparisonRequest(
+                testing_run_id=testing_run.id,
+                reference_result_id=rows[0].id,
+                comparison_result_ids=[rows[1].id, rows[2].id],
+                image_source="input",
+            ),
+        )
+        assert inputs.image_source == "input"
+        assert inputs.shared_max_difference == pytest.approx(20 / 255)
+        assert [item.mean_difference for item in inputs.comparisons] == pytest.approx([10 / 255, 20 / 255])
+        assert inputs.reference_image_data_url.startswith("data:image/png;base64,")
+        assert all(item.heatmap_image_data_url.startswith("data:image/png;base64,") for item in inputs.comparisons)
+
+        reconstructions = testing_service.calculate_analysis_image_comparison(
+            db,
+            AnalysisImageComparisonRequest(
+                testing_run_id=testing_run.id,
+                reference_result_id=rows[0].id,
+                comparison_result_ids=[rows[1].id],
+                image_source="reconstruction",
+            ),
+        )
+        assert reconstructions.shared_max_difference == 0
+        assert reconstructions.comparisons[0].mean_difference == 0
+    finally:
+        db.close()
+
+
+def test_analysis_image_comparison_rejects_results_from_another_run(tmp_path: Path) -> None:
+    db = make_db()
+    try:
+        training_run_id, test_set_id = seed_finished_mean_image_run(db, tmp_path)
+        first = create_testing_run(db, TestingRunCreatePayload(training_run_id=training_run_id, training_dataset_id=test_set_id))
+        second = models.TestingRun(
+            name="Other test",
+            training_run_id=training_run_id,
+            training_dataset_id=test_set_id,
+            status="finished",
+            training_run_name="Mean run",
+            training_pipeline_name="Mean pipeline",
+            training_dataset_name="Test Set",
+            preprocessing_pipeline_name="Load only",
+            method_type="mean_image",
+            method_family="statistical_baseline",
+            training_mode="fit",
+            artifact_kind="mean_image",
+            artifact_path=str(tmp_path / "mean.npy"),
+            inference_config={"variant": "other"},
+        )
+        db.add(second)
+        db.flush()
+        timestamp = datetime(2026, 4, 1, 12, 0, 0)
+        first_row = models.TestingRunResult(testing_run_id=first.id, position=0, image_path="/first.tiff", timestamp=timestamp, score=0, full_mse=0, width=8, height=6)
+        second_row = models.TestingRunResult(testing_run_id=second.id, position=0, image_path="/second.tiff", timestamp=timestamp, score=0, full_mse=0, width=8, height=6)
+        db.add_all([first_row, second_row])
+        first.status = "finished"
+        second.status = "finished"
+        db.commit()
+        with pytest.raises(ValueError, match="was not found"):
+            testing_service.calculate_analysis_image_comparison(
+                db,
+                AnalysisImageComparisonRequest(
+                    testing_run_id=first.id,
+                    reference_result_id=first_row.id,
+                    comparison_result_ids=[second_row.id],
+                ),
+            )
+    finally:
+        db.close()
+
+
+def test_analysis_image_comparison_request_validates_reference_and_comparisons() -> None:
+    with pytest.raises(ValueError, match="cannot also be"):
+        AnalysisImageComparisonRequest(
+            testing_run_id=1,
+            reference_result_id=2,
+            comparison_result_ids=[2],
+        )
+
+    payload = AnalysisImageComparisonRequest(
+        testing_run_id=1,
+        reference_result_id=2,
+        comparison_result_ids=[3, 3, 4],
+    )
+    assert payload.comparison_result_ids == [3, 4]
 
 
 def seed_finished_stae_heatmap_run(db, tmp_path: Path):

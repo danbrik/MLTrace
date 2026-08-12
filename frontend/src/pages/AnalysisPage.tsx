@@ -32,6 +32,7 @@ import type React from 'react';
 
 import {
   abortHeatmapRange,
+  calculateAnalysisImageComparison,
   calculateBaselineNormalization,
   createAnalysisLayout,
   createHeatmap,
@@ -61,8 +62,12 @@ import { formatValue } from '../methods/utils';
 import { datasetResolutions, formatResolution, orderedGraphNodes, stepDetail } from '../training/graph';
 import type {
   AnalysisLayout,
+  AnalysisImageComparisonResult,
+  BaselineAnomalyEvent,
   BaselineAnalysisRegion,
   BaselineNormalizationResult,
+  BaselineRegionStatistics,
+  BaselineSeriesPoint,
   HeatmapRangeRun,
   HeatmapRun,
   HeatmapRunSummary,
@@ -151,7 +156,22 @@ type AnalysisPlot = PlotDraft & {
   heatmapScaleMode?: 'per_frame' | 'shared';
   heatmapDisplaySize?: number;
   baselineAnalysis?: BaselineAnalysisConfig;
+  imageComparison?: AnalysisImageComparisonConfig;
   detailSubtitle?: string;
+};
+
+type ImageComparisonPoint = {
+  resultId: number;
+  timestamp: string;
+};
+
+type AnalysisImageComparisonConfig = {
+  testingRunId: string;
+  imageSource: 'input' | 'reconstruction';
+  reference?: ImageComparisonPoint;
+  comparisons: ImageComparisonPoint[];
+  result?: AnalysisImageComparisonResult;
+  stale?: boolean;
 };
 
 type BaselineAnalysisConfig = {
@@ -1547,23 +1567,6 @@ function TimeSeriesPlot({
       const panelCount = Math.max(1, displayPanels.length);
       const gap = 0.035;
       const panelHeight = (1 - gap * (panelCount - 1)) / panelCount;
-      const analysisPanelIndex = plot.showIntermediateAnalyticsPanels === false
-        ? 0
-        : Math.min(panelCount - 1, Math.max(0, (plot.baselineAnalysis?.stageIndex ?? -1) + 1));
-      const analysisYRef = analysisPanelIndex === 0 ? 'y' : `y${analysisPanelIndex + 1}`;
-      const resultLineShapes = (plot.baselineAnalysis?.result?.traces ?? []).flatMap((trace) => [
-        {
-          type: 'line', xref: 'x', yref: analysisYRef, x0: plot.start, x1: plot.end,
-          y0: trace.baseline.center, y1: trace.baseline.center,
-          line: { color: trace.color, width: 1.3, dash: 'dash' },
-        },
-        ...plot.baselineAnalysis!.result!.thresholds.map((threshold) => ({
-          type: 'line', xref: 'x', yref: analysisYRef, x0: plot.start, x1: plot.end,
-          y0: trace.baseline.center + threshold * trace.baseline.scale,
-          y1: trace.baseline.center + threshold * trace.baseline.scale,
-          line: { color: trace.color, width: 1, dash: 'dot' },
-        })),
-      ]);
       const nextLayout: Partial<Layout> & Record<string, unknown> = {
         uirevision: `${plot.id}:${selectionActive ? 'select' : 'navigate'}`,
         showlegend: traces.length > panelCount,
@@ -1589,7 +1592,14 @@ function TimeSeriesPlot({
             fillcolor: index % 2 === 0 ? 'rgba(245, 159, 0, 0.16)' : 'rgba(224, 49, 49, 0.13)',
             line: { color: index % 2 === 0 ? 'rgba(245, 159, 0, 0.6)' : 'rgba(224, 49, 49, 0.55)', width: 1 }, layer: 'below',
           })),
-          ...resultLineShapes,
+          ...(plot.imageComparison?.reference ? [{
+            type: 'line', xref: 'x', yref: 'paper', x0: plot.imageComparison.reference.timestamp, x1: plot.imageComparison.reference.timestamp, y0: 0, y1: 1,
+            line: { color: '#228be6', width: 2, dash: 'dash' },
+          }] : []),
+          ...(plot.imageComparison?.comparisons ?? []).map((point) => ({
+            type: 'line', xref: 'x', yref: 'paper', x0: point.timestamp, x1: point.timestamp, y0: 0, y1: 1,
+            line: { color: '#f08c00', width: 1.5, dash: 'dot' },
+          })),
         ] as NonNullable<Layout['shapes']>,
         annotations: [
           ...(plot.baselineAnalysis?.baselineRegions ?? []).map((region) => ({
@@ -1597,6 +1607,12 @@ function TimeSeriesPlot({
           })),
           ...(plot.baselineAnalysis?.analysisRegions ?? []).map((region, index) => ({
             x: region.start, y: 0.96, xref: 'x', yref: 'paper', text: region.name, showarrow: false, xanchor: 'left', yanchor: 'top', font: { size: 10, color: index % 2 === 0 ? '#f08c00' : '#e03131' },
+          })),
+          ...(plot.imageComparison?.reference ? [{
+            x: plot.imageComparison.reference.timestamp, y: 0.9, xref: 'x', yref: 'paper', text: 'Reference', showarrow: false, xanchor: 'left', yanchor: 'top', font: { size: 10, color: '#228be6' },
+          }] : []),
+          ...(plot.imageComparison?.comparisons ?? []).map((point, index) => ({
+            x: point.timestamp, y: 0.86, xref: 'x', yref: 'paper', text: `Comparison ${index + 1}`, showarrow: false, xanchor: 'left', yanchor: 'top', font: { size: 10, color: '#f08c00' },
           })),
         ] as NonNullable<Layout['annotations']>,
       };
@@ -2162,26 +2178,73 @@ function downloadBaselineCsv(plot: AnalysisPlot) {
   URL.revokeObjectURL(url);
 }
 
-function BaselineAnalysisResultPanel({ plot }: { plot: AnalysisPlot }) {
-  const analysis = plot.baselineAnalysis;
-  const [diagnosticsOpen, setDiagnosticsOpen] = useState(false);
+function legacyRegionSeries(
+  trace: BaselineNormalizationResult['traces'][number],
+  region: BaselineRegionStatistics,
+  definition: BaselineAnalysisRegion,
+): BaselineSeriesPoint[] {
+  if (region.series !== undefined) return region.series;
+  const start = new Date(definition.start).getTime();
+  const end = new Date(definition.end).getTime();
+  return (trace.series ?? []).filter((point) => {
+    const timestamp = new Date(point.timestamp).getTime();
+    return timestamp >= start && timestamp <= end;
+  });
+}
+
+function legacyRegionEvents(
+  trace: BaselineNormalizationResult['traces'][number],
+  region: BaselineRegionStatistics,
+  definition: BaselineAnalysisRegion,
+): BaselineAnomalyEvent[] {
+  if (region.events !== undefined) return region.events;
+  const start = new Date(definition.start).getTime();
+  const end = new Date(definition.end).getTime();
+  return (trace.events ?? []).flatMap((event) => {
+    const eventStart = new Date(event.start).getTime();
+    const eventEnd = new Date(event.end).getTime();
+    if (eventEnd < start || eventStart > end) return [];
+    return [{
+      ...event,
+      start: new Date(Math.max(start, eventStart)).toISOString(),
+      end: new Date(Math.min(end, eventEnd)).toISOString(),
+    }];
+  });
+}
+
+function BaselineRegionResultPlot({
+  plotId,
+  definition,
+  result,
+  colorByThreshold,
+}: {
+  plotId: string;
+  definition: BaselineAnalysisRegion;
+  result: BaselineNormalizationResult;
+  colorByThreshold: Map<number, string>;
+}) {
   const [visibleXRange, setVisibleXRange] = useState<TimeSeriesAxisRange | null>(null);
   const [manualYRange, setManualYRange] = useState<TimeSeriesAxisRange | null>(null);
   const lastAutomaticYRange = useRef<TimeSeriesAxisRange | null>(null);
-  if (!analysis?.result) return null;
-  const result = analysis.result;
-  const zData: Data[] = result.traces.map((trace) => {
+  const regionTraces = result.traces.flatMap((trace) => {
+    const region = trace.regions.find((item) => item.region_id === definition.id);
+    return region ? [{ trace, region }] : [];
+  });
+  const calculatedRegion = regionTraces[0]?.region;
+  const regionStart = calculatedRegion?.start ?? definition.start;
+  const regionEnd = calculatedRegion?.end ?? definition.end;
+  const displayedDefinition = { ...definition, start: regionStart, end: regionEnd };
+  const zData: Data[] = regionTraces.map(({ trace, region }) => {
+    const series = legacyRegionSeries(trace, region, displayedDefinition);
     const visibleSeries = insertVisibleTimeGaps(
-      trace.series.map((point) => point.timestamp),
-      trace.series.map((point) => point.z),
+      series.map((point) => point.timestamp),
+      series.map((point) => point.z),
     );
     return {
       type: 'scatter', mode: 'lines', name: trace.label, x: visibleSeries.x,
       y: visibleSeries.y, line: { color: trace.color, width: 1.6 }, connectgaps: false,
     } as unknown as Data;
   });
-  const thresholdColors = ['#fab005', '#fd7e14', '#e03131', '#9c36b5', '#5f3dc4', '#0c8599'];
-  const colorByThreshold = new Map(result.thresholds.map((threshold, index) => [threshold, thresholdColors[index % thresholdColors.length]]));
   const traceValues: TimeSeriesTraceValues[] = zData.map((trace) => {
     const value = trace as unknown as { x?: Array<string | number | Date | null>; y?: Array<number | null> };
     return { x: value.x ?? [], y: value.y ?? [], yaxis: 'y' };
@@ -2194,9 +2257,10 @@ function BaselineAnalysisResultPanel({ plot }: { plot: AnalysisPlot }) {
       type: 'line', xref: 'paper', yref: 'y', x0: 0, x1: 1, y0: threshold, y1: threshold,
       line: { color: colorByThreshold.get(threshold), dash: 'dot', width: 1 },
     })),
-    ...result.traces.flatMap((trace) => {
-      const typicalDelta = medianPositiveTimeDelta(trace.series.map((point) => point.timestamp)) ?? 1000;
-      return (trace.events ?? []).map((event) => ({
+    ...regionTraces.flatMap(({ trace, region }) => {
+      const series = legacyRegionSeries(trace, region, displayedDefinition);
+      const typicalDelta = medianPositiveTimeDelta(series.map((point) => point.timestamp)) ?? 1000;
+      return legacyRegionEvents(trace, region, displayedDefinition).map((event) => ({
         type: 'rect', xref: 'x', yref: 'paper',
         x0: new Date(new Date(event.start).getTime() - typicalDelta / 2).toISOString(),
         x1: new Date(new Date(event.end).getTime() + typicalDelta / 2).toISOString(),
@@ -2220,14 +2284,50 @@ function BaselineAnalysisResultPanel({ plot }: { plot: AnalysisPlot }) {
     setManualYRange(null);
     return true;
   };
+  const xRange = visibleXRange ?? [new Date(regionStart).getTime(), new Date(regionEnd).getTime()] as TimeSeriesAxisRange;
+  return (
+    <Paper withBorder p="sm" radius="sm">
+      <Stack gap="xs">
+        <div>
+          <Text fw={600}>{definition.name}</Text>
+          <Text size="xs" c="dimmed">{new Date(regionStart).toLocaleString()} – {new Date(regionEnd).toLocaleString()}</Text>
+        </div>
+        {regionTraces.every(({ trace, region }) => legacyRegionSeries(trace, region, displayedDefinition).length === 0) ? (
+          <Alert color="yellow">No valid samples exist inside this analysis region.</Alert>
+        ) : (
+          <PlotlyChart
+            data={zData}
+            layout={{
+              uirevision: `${plotId}:baseline-result:${definition.id}`, hovermode: 'x unified', shapes: shapes as NonNullable<Layout['shapes']>,
+              xaxis: { type: 'date', title: { text: 'Time' }, range: xRange.map((value) => new Date(value).toISOString()), autorange: false },
+              yaxis: { title: { text: 'Baseline z-score' }, zeroline: true, ...(effectiveYRange ? { range: effectiveYRange, autorange: false, uirevision: effectiveYRange.join(':') } : { autorange: true }) },
+              margin: { l: 65, r: 20, t: 12, b: 48 },
+              legend: { orientation: 'h' },
+            }}
+            onRelayout={handleResultRelayout}
+            onDoubleClick={handleResultDoubleClick}
+            height={300}
+          />
+        )}
+      </Stack>
+    </Paper>
+  );
+}
+
+function BaselineAnalysisResultPanel({ plot }: { plot: AnalysisPlot }) {
+  const analysis = plot.baselineAnalysis;
+  const [diagnosticsOpen, setDiagnosticsOpen] = useState(false);
+  if (!analysis?.result) return null;
+  const result = analysis.result;
+  const thresholdColors = ['#fab005', '#fd7e14', '#e03131', '#9c36b5', '#5f3dc4', '#0c8599'];
+  const colorByThreshold = new Map(result.thresholds.map((threshold, index) => [threshold, thresholdColors[index % thresholdColors.length]]));
+  const decimated = result.traces.some((trace) => trace.decimated || trace.regions.some((region) => region.decimated));
   return (
     <Stack gap="sm">
       {analysis.stale && <Alert color="yellow">The saved result is stale. Recalculate to apply the current plot, regions or parameters.</Alert>}
-      {result.traces.some((trace) => trace.decimated) && <Alert color="blue">The plots are reduced to at most 8,000 points per curve. All statistics use the full selected resolution.</Alert>}
+      {decimated && <Alert color="blue">The regional plots share a limit of 8,000 points per curve. All statistics and anomaly events use the full selected resolution.</Alert>}
       <Group justify="space-between">
-        <Button variant="subtle" size="compact-sm" rightSection={diagnosticsOpen ? <ChevronDown size={14} /> : <ChevronRight size={14} />} onClick={() => setDiagnosticsOpen((value) => !value)}>
-          Z-score and results
-        </Button>
+        <Button variant="subtle" size="compact-sm" rightSection={diagnosticsOpen ? <ChevronDown size={14} /> : <ChevronRight size={14} />} onClick={() => setDiagnosticsOpen((value) => !value)}>Z-score and results</Button>
         <Button variant="default" size="compact-sm" leftSection={<Download size={14} />} onClick={() => downloadBaselineCsv(plot)}>Export CSV</Button>
       </Group>
       <Collapse in={diagnosticsOpen}>
@@ -2236,18 +2336,9 @@ function BaselineAnalysisResultPanel({ plot }: { plot: AnalysisPlot }) {
             {result.thresholds.map((threshold) => <Badge key={threshold} variant="light" style={{ color: colorByThreshold.get(threshold), borderColor: colorByThreshold.get(threshold) }}>Anomaly &gt; {threshold}σ · {result.persistence_samples ?? analysis.persistenceSamples} consecutive</Badge>)}
             <Badge variant="light" color="cyan">Y: drag axis · double-click axis for auto</Badge>
           </Group>
-          <PlotlyChart
-            data={zData}
-            layout={{
-              uirevision: `${plot.id}:baseline-result`, hovermode: 'x unified', shapes: shapes as NonNullable<Layout['shapes']>,
-              xaxis: { type: 'date', title: { text: 'Time' }, ...(visibleXRange ? { range: visibleXRange.map((value) => new Date(value).toISOString()), autorange: false } : {}) },
-              yaxis: { title: { text: 'Baseline z-score' }, zeroline: true, ...(effectiveYRange ? { range: effectiveYRange, autorange: false, uirevision: effectiveYRange.join(':') } : { autorange: true }) },
-              margin: { l: 65, r: 20, t: 12, b: 48 },
-            }}
-            onRelayout={handleResultRelayout}
-            onDoubleClick={handleResultDoubleClick}
-            height={330}
-          />
+          {analysis.analysisRegions.map((definition) => (
+            <BaselineRegionResultPlot key={definition.id} plotId={plot.id} definition={definition} result={result} colorByThreshold={colorByThreshold} />
+          ))}
           <Text fw={600}>Baseline statistics</Text>
           <ScrollArea>
             <Table striped withTableBorder verticalSpacing="xs">
@@ -2264,6 +2355,49 @@ function BaselineAnalysisResultPanel({ plot }: { plot: AnalysisPlot }) {
           </ScrollArea>
         </Stack>
       </Collapse>
+    </Stack>
+  );
+}
+
+function ImageComparisonResultPanel({ comparison }: { comparison: AnalysisImageComparisonConfig }) {
+  if (!comparison.result) return null;
+  const result = comparison.result;
+  return (
+    <Stack gap="sm">
+      {comparison.stale && <Alert color="yellow">The saved image comparison is stale. Run the comparison again to apply the current selection.</Alert>}
+      <Group gap="xs">
+        <Badge variant="light" color="blue">{result.image_source === 'input' ? 'Input images' : 'Reconstructed images'}</Badge>
+        <Badge variant="light" color="grape">Shared difference max {formatMetric(result.shared_max_difference)}</Badge>
+      </Group>
+      {result.comparisons.map((item) => (
+        <Paper key={item.result_id} withBorder p="sm" radius="sm">
+          <SimpleGrid cols={{ base: 1, md: 3 }} spacing="sm">
+            <Stack gap={4} className="analysis-heatmap-panel">
+              <Text size="sm" fw={600}>Reference · {new Date(result.reference_timestamp).toLocaleString()}</Text>
+              <div className="analysis-heatmap-image-frame analysis-image-comparison-frame">
+                <img className="analysis-heatmap-image" src={result.reference_image_data_url} alt="Reference image" />
+              </div>
+            </Stack>
+            <Stack gap={4} className="analysis-heatmap-panel">
+              <Text size="sm" fw={600}>Comparison · {new Date(item.timestamp).toLocaleString()}</Text>
+              <div className="analysis-heatmap-image-frame analysis-image-comparison-frame">
+                <img className="analysis-heatmap-image" src={item.image_data_url} alt="Comparison image" />
+              </div>
+            </Stack>
+            <Stack gap={4} className="analysis-heatmap-panel">
+              <Text size="sm" fw={600}>Absolute difference heatmap</Text>
+              <div className="analysis-heatmap-image-frame analysis-image-comparison-frame">
+                <img className="analysis-heatmap-image" src={item.heatmap_image_data_url} alt="Difference heatmap" />
+              </div>
+              <div className="analysis-relative-colorbar" aria-label="Shared absolute difference color scale">
+                <Group justify="space-between" gap="xs"><Text size="xs" c="dimmed">0</Text><Text size="xs" c="dimmed">Shared scale</Text><Text size="xs" c="dimmed">{formatMetric(result.shared_max_difference)}</Text></Group>
+                <div className="analysis-relative-colorbar-gradient" />
+              </div>
+              <Text size="xs" c="dimmed">Mean {formatMetric(item.mean_difference)} · Max {formatMetric(item.max_difference)}</Text>
+            </Stack>
+          </SimpleGrid>
+        </Paper>
+      ))}
     </Stack>
   );
 }
@@ -2301,9 +2435,12 @@ const AnalysisPlotCard = memo(function AnalysisPlotCard({
 }) {
   const [heatmapSelectionActive, setHeatmapSelectionActive] = useState(false);
   const [baselineSelectionActive, setBaselineSelectionActive] = useState(false);
+  const [imageComparisonSelectionActive, setImageComparisonSelectionActive] = useState(false);
+  const [imageComparisonSelectionKind, setImageComparisonSelectionKind] = useState<'reference' | 'comparison'>('reference');
   const [baselineRegionKind, setBaselineRegionKind] = useState<'baseline' | 'analysis'>('baseline');
   const [detailsOpen, setDetailsOpen] = useState(false);
   const [calculatingBaseline, setCalculatingBaseline] = useState(false);
+  const [calculatingImageComparison, setCalculatingImageComparison] = useState(false);
   const baselineTraces = useMemo<PlotTraceConfig[]>(() => plot.traces?.length ? plot.traces : plot.sources.map((source, index) => ({
     ...source,
     metric: 'score',
@@ -2323,6 +2460,16 @@ const AnalysisPlotCard = memo(function AnalysisPlotCard({
     persistenceSamples: 1,
   }), [baselineTraces, plot.timeseriesAnalytics.length]);
   const baselineConfig = plot.baselineAnalysis ?? defaultBaselineConfig();
+  const comparisonSources = useMemo(() => [...new Map(plotSources(plot).map((source) => {
+    const run = results.find((result) => String(result.testingRunId) === source.testingRunId);
+    return [source.testingRunId, { value: source.testingRunId, label: run?.testingRunName ?? `Testing run #${source.testingRunId}` }] as const;
+  })).values()], [plot, results]);
+  const defaultComparisonConfig = useCallback((): AnalysisImageComparisonConfig => ({
+    testingRunId: comparisonSources[0]?.value ?? '',
+    imageSource: 'input',
+    comparisons: [],
+  }), [comparisonSources]);
+  const imageComparison = plot.imageComparison ?? defaultComparisonConfig();
   const baselineStageOptions = useMemo(() => {
     const raw = [{ value: '-1', label: plot.timeseriesAnalytics.length === 0 ? `Input / moving average (${plot.movingAverage})` : 'Raw input' }];
     const stages = plot.timeseriesAnalytics.map((method, index) => ({ value: String(index), label: `${index + 1}. ${analyticsDefinition(method.kind).label}` }));
@@ -2357,6 +2504,54 @@ const AnalysisPlotCard = memo(function AnalysisPlotCard({
       ? { baselineRegions: [...baselineConfig.baselineRegions, region] }
       : { analysisRegions: [...baselineConfig.analysisRegions, region] });
   }, [baselineConfig.analysisRegions, baselineConfig.baselineRegions, baselineRegionKind, patchBaseline]);
+
+  const selectImageComparisonPoint = useCallback((event: PlotlyChartClick) => {
+    const candidates = results.filter((result) => String(result.testingRunId) === imageComparison.testingRunId);
+    if (candidates.length === 0) return;
+    const selectedTime = new Date(event.timestamp).getTime();
+    const closest = candidates.reduce((best, result) =>
+      Math.abs(new Date(result.timestamp).getTime() - selectedTime) < Math.abs(new Date(best.timestamp).getTime() - selectedTime)
+        ? result
+        : best,
+    );
+    const point = { resultId: closest.id, timestamp: closest.timestamp };
+    if (imageComparisonSelectionKind === 'reference') {
+      const comparisons = imageComparison.comparisons.filter((item) => item.resultId !== point.resultId);
+      onPatch({ imageComparison: { ...imageComparison, reference: point, comparisons, result: imageComparison.result, stale: Boolean(imageComparison.result) } });
+      setImageComparisonSelectionKind('comparison');
+      return;
+    }
+    if (imageComparison.reference?.resultId === point.resultId) {
+      notifications.show({ color: 'yellow', title: 'Reference already selected', message: 'Choose another point as a comparison image.' });
+      return;
+    }
+    const comparisons = imageComparison.comparisons.some((item) => item.resultId === point.resultId)
+      ? imageComparison.comparisons.filter((item) => item.resultId !== point.resultId)
+      : [...imageComparison.comparisons, point].sort((left, right) => left.timestamp.localeCompare(right.timestamp));
+    onPatch({ imageComparison: { ...imageComparison, comparisons, result: imageComparison.result, stale: Boolean(imageComparison.result) } });
+  }, [imageComparison, imageComparisonSelectionKind, onPatch, results]);
+
+  const calculateImageComparison = useCallback(async () => {
+    if (!imageComparison.testingRunId || !imageComparison.reference || imageComparison.comparisons.length === 0) {
+      notifications.show({ color: 'yellow', title: 'Incomplete image comparison', message: 'Select one reference point and at least one comparison point.' });
+      return;
+    }
+    setCalculatingImageComparison(true);
+    try {
+      const result = await calculateAnalysisImageComparison({
+        testing_run_id: Number(imageComparison.testingRunId),
+        reference_result_id: imageComparison.reference.resultId,
+        comparison_result_ids: imageComparison.comparisons.map((item) => item.resultId),
+        image_source: imageComparison.imageSource,
+      });
+      onPatch({ imageComparison: { ...imageComparison, result, stale: false } });
+      notifications.show({ color: 'green', title: 'Image comparison complete', message: `${result.comparisons.length} comparison${result.comparisons.length === 1 ? '' : 's'} calculated.` });
+    } catch (error) {
+      notifyError('Could not calculate image comparison', error);
+    } finally {
+      setCalculatingImageComparison(false);
+    }
+  }, [imageComparison, onPatch]);
 
   const updateRegion = useCallback((kind: 'baseline' | 'analysis', id: string, patch: Partial<BaselineAnalysisRegion>) => {
     const key = kind === 'baseline' ? 'baselineRegions' : 'analysisRegions';
@@ -2461,7 +2656,7 @@ const AnalysisPlotCard = memo(function AnalysisPlotCard({
                   variant={heatmapSelectionActive ? 'filled' : 'subtle'}
                   color="orange"
                   aria-label={heatmapSelectionActive ? 'Cancel heatmap selection' : 'Create heatmap from plot selection'}
-                  onClick={() => { setHeatmapSelectionActive((current) => !current); setBaselineSelectionActive(false); }}
+                  onClick={() => { setHeatmapSelectionActive((current) => !current); setBaselineSelectionActive(false); setImageComparisonSelectionActive(false); }}
                 >
                   <Text span fz={17} lh={1}>🔥</Text>
                 </ActionIcon>
@@ -2469,8 +2664,15 @@ const AnalysisPlotCard = memo(function AnalysisPlotCard({
             )}
             {plot.plotType === 'timeseries' && (
               <Tooltip label={baselineSelectionActive ? 'Close baseline analysis selection' : 'Mark baseline and analysis regions'}>
-                <ActionIcon variant={baselineSelectionActive ? 'filled' : 'subtle'} color="violet" aria-label="Baseline-normalized region analysis" onClick={() => { setBaselineSelectionActive((current) => !current); setHeatmapSelectionActive(false); }}>
+                <ActionIcon variant={baselineSelectionActive ? 'filled' : 'subtle'} color="violet" aria-label="Baseline-normalized region analysis" onClick={() => { setBaselineSelectionActive((current) => !current); setHeatmapSelectionActive(false); setImageComparisonSelectionActive(false); }}>
                   <Activity size={17} />
+                </ActionIcon>
+              </Tooltip>
+            )}
+            {plot.plotType === 'timeseries' && (
+              <Tooltip label={imageComparisonSelectionActive ? 'Close image comparison selection' : 'Compare images at selected points'}>
+                <ActionIcon variant={imageComparisonSelectionActive ? 'filled' : 'subtle'} color="cyan" aria-label="Compare selected images" onClick={() => { setImageComparisonSelectionActive((current) => !current); setHeatmapSelectionActive(false); setBaselineSelectionActive(false); }}>
+                  <Image size={17} />
                 </ActionIcon>
               </Tooltip>
             )}
@@ -2547,12 +2749,56 @@ const AnalysisPlotCard = memo(function AnalysisPlotCard({
             </Stack>
           </Paper>
         )}
+        {imageComparisonSelectionActive && (
+          <Paper withBorder p="sm" radius="sm">
+            <Stack gap="sm">
+              <div>
+                <Text fw={600}>Reference image comparison</Text>
+                <Text size="xs" c="dimmed">Choose Reference, click one point, then switch to Comparison and click as many additional points as needed.</Text>
+              </div>
+              <SimpleGrid cols={{ base: 1, sm: 3 }}>
+                <Select
+                  label="Inference source"
+                  data={comparisonSources}
+                  value={imageComparison.testingRunId}
+                  allowDeselect={false}
+                  onChange={(value) => onPatch({ imageComparison: { testingRunId: value ?? '', imageSource: imageComparison.imageSource, comparisons: [], stale: Boolean(imageComparison.result), result: imageComparison.result } })}
+                />
+                <Select
+                  label="Images to compare"
+                  data={[{ value: 'input', label: 'Input images' }, { value: 'reconstruction', label: 'Reconstructed images' }]}
+                  value={imageComparison.imageSource}
+                  allowDeselect={false}
+                  onChange={(value) => onPatch({ imageComparison: { ...imageComparison, imageSource: value === 'reconstruction' ? 'reconstruction' : 'input', stale: Boolean(imageComparison.result) } })}
+                />
+                <Select
+                  label="Next click selects"
+                  data={[{ value: 'reference', label: 'Reference point' }, { value: 'comparison', label: 'Comparison point' }]}
+                  value={imageComparisonSelectionKind}
+                  allowDeselect={false}
+                  onChange={(value) => setImageComparisonSelectionKind(value === 'comparison' ? 'comparison' : 'reference')}
+                />
+              </SimpleGrid>
+              <Group gap="xs">
+                <Badge variant="light" color="blue">Reference: {imageComparison.reference ? new Date(imageComparison.reference.timestamp).toLocaleString() : 'not selected'}</Badge>
+                {imageComparison.comparisons.map((point) => (
+                  <Badge key={point.resultId} variant="light" color="orange" rightSection={<ActionIcon size="xs" variant="transparent" color="orange" onClick={() => onPatch({ imageComparison: { ...imageComparison, comparisons: imageComparison.comparisons.filter((item) => item.resultId !== point.resultId), stale: Boolean(imageComparison.result) } })}><Trash2 size={10} /></ActionIcon>}>
+                    {new Date(point.timestamp).toLocaleString()}
+                  </Badge>
+                ))}
+              </Group>
+              <Group justify="flex-end">
+                <Button loading={calculatingImageComparison} onClick={calculateImageComparison} leftSection={<Image size={16} />}>Calculate image comparison</Button>
+              </Group>
+            </Stack>
+          </Paper>
+        )}
         {plot.plotType === 'timeseries' ? (
           <TimeSeriesPlot
             plot={plot}
             results={results}
-            selectionActive={heatmapSelectionActive || baselineSelectionActive}
-            onPointClick={heatmapSelectionActive ? selectPoint : undefined}
+            selectionActive={heatmapSelectionActive || baselineSelectionActive || imageComparisonSelectionActive}
+            onPointClick={heatmapSelectionActive ? selectPoint : imageComparisonSelectionActive ? selectImageComparisonPoint : undefined}
             onRangeSelected={heatmapSelectionActive ? selectRange : baselineSelectionActive ? selectBaselineRange : undefined}
           />
         ) : plot.heatmapMode === 'range' ? (
@@ -2568,6 +2814,7 @@ const AnalysisPlotCard = memo(function AnalysisPlotCard({
           />
         )}
         {plot.plotType === 'timeseries' && <BaselineAnalysisResultPanel plot={plot} />}
+        {plot.plotType === 'timeseries' && plot.imageComparison && <ImageComparisonResultPanel comparison={plot.imageComparison} />}
       </Stack>
     </Paper>
   );
@@ -2968,6 +3215,28 @@ function restoreBaselineAnalysis(value: unknown): BaselineAnalysisConfig | undef
   };
 }
 
+function restoreImageComparisonPoint(value: unknown): ImageComparisonPoint | undefined {
+  if (!isRecord(value)) return undefined;
+  const resultId = valueAsNumber(value.resultId as string | number, 0);
+  const timestamp = String(value.timestamp ?? '');
+  return resultId > 0 && timestamp ? { resultId, timestamp } : undefined;
+}
+
+function restoreImageComparison(value: unknown): AnalysisImageComparisonConfig | undefined {
+  if (!isRecord(value)) return undefined;
+  const comparisons = Array.isArray(value.comparisons)
+    ? value.comparisons.map(restoreImageComparisonPoint).filter((item): item is ImageComparisonPoint => item !== undefined)
+    : [];
+  return {
+    testingRunId: String(value.testingRunId ?? ''),
+    imageSource: value.imageSource === 'reconstruction' ? 'reconstruction' : 'input',
+    reference: restoreImageComparisonPoint(value.reference),
+    comparisons,
+    result: isRecord(value.result) ? value.result as AnalysisImageComparisonResult : undefined,
+    stale: typeof value.stale === 'boolean' ? value.stale : false,
+  };
+}
+
 function restorePlots(value: unknown): AnalysisPlot[] {
   if (!Array.isArray(value)) return [];
   return value.filter(isRecord).map((plot) => {
@@ -2987,6 +3256,7 @@ function restorePlots(value: unknown): AnalysisPlot[] {
         ? DEFAULT_HEATMAP_DISPLAY_SIZE
         : valueAsNumber(plot.heatmapDisplaySize as string | number, DEFAULT_HEATMAP_DISPLAY_SIZE),
       baselineAnalysis: restoreBaselineAnalysis(plot.baselineAnalysis),
+      imageComparison: restoreImageComparison(plot.imageComparison),
     };
   });
 }
@@ -3973,6 +4243,7 @@ export function AnalysisPage({ active = true }: { active?: boolean }) {
         timestamp: draft.timestamp ?? traces[0]?.timestamp ?? start,
         scoreSeries: 'score',
         baselineAnalysis: editingPlot?.plot.baselineAnalysis,
+        imageComparison: editingPlot?.plot.imageComparison,
       }, testingRuns);
       setDraft((current) => ({
         ...current,
@@ -4042,6 +4313,9 @@ export function AnalysisPage({ active = true }: { active?: boolean }) {
       timestamp: plotPreview.plot.timestamp ?? availableResults[0]?.timestamp ?? plotPreview.traces[0]?.timestamp ?? null,
       baselineAnalysis: editingPlot?.plot.baselineAnalysis
         ? { ...editingPlot.plot.baselineAnalysis, stale: true }
+        : undefined,
+      imageComparison: editingPlot?.plot.imageComparison
+        ? { ...editingPlot.plot.imageComparison, stale: true }
         : undefined,
     }, testingRuns);
     setPlots((current) => {
