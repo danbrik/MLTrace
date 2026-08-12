@@ -107,6 +107,21 @@ def test_robust_zscore_does_not_accumulate_cusum() -> None:
     assert all(point.cusum == 0 for point in output.series)
 
 
+def test_robust_zscore_can_confirm_after_consecutive_samples() -> None:
+    values = [1.0] * 12 + [3.0] * 4 + [1.0] * 5
+    output = detect(
+        _points(values),
+        _fast_config(
+            algorithm="robust_zscore",
+            confirmation_mode="samples",
+            confirmation_samples=3,
+        ),
+    )
+
+    assert len(output.events) == 1
+    assert output.events[0].confirmed_at == output.events[0].warning_start + timedelta(minutes=2)
+
+
 def test_sustained_shift_confirms_and_frozen_baseline_does_not_follow() -> None:
     values = [1.0] * 12 + [3.0] * 10 + [1.0] * 5
     output = detect(_points(values), _fast_config())
@@ -221,6 +236,32 @@ def test_rolling_sigma_uses_raw_score_and_triggers_immediately() -> None:
     assert output.events[0].warning_start == BASE + timedelta(seconds=3)
     assert output.events[0].confirmed_at == output.events[0].warning_start
     assert output.events[0].end_reason == "recovered"
+
+
+def test_rolling_sigma_requires_consecutive_samples_before_confirmation() -> None:
+    output = detect(
+        _points([1.0, 2.0, 3.0, 10.0, 2.0, 10.0, 11.0, 12.0, 2.0], seconds=1),
+        _sigma_config(confirmation_mode="samples", confirmation_samples=3),
+    )
+
+    assert len(output.events) == 1
+    event = output.events[0]
+    assert event.warning_start == BASE + timedelta(seconds=5)
+    assert event.confirmed_at == BASE + timedelta(seconds=7)
+    assert output.series[3].state == "warning"
+    assert output.series[4].state == "normal"
+    assert [point.state for point in output.series[5:8]] == ["warning", "warning", "confirmed"]
+
+
+def test_rolling_sigma_requires_continuous_minutes_before_confirmation() -> None:
+    output = detect(
+        _points([1.0, 2.0, 3.0, 10.0, 11.0, 12.0, 2.0], seconds=30),
+        _sigma_config(confirmation_mode="minutes", confirmation_minutes=1),
+    )
+
+    assert len(output.events) == 1
+    assert output.events[0].warning_start == BASE + timedelta(seconds=90)
+    assert output.events[0].confirmed_at == BASE + timedelta(seconds=150)
 
 
 def test_rolling_sigma_freezes_baseline_during_anomaly() -> None:
@@ -533,7 +574,7 @@ def test_anomaly_detection_api_crud_and_decimation() -> None:
             body = created.json()
             assert body["point_count"] == 80
             assert body["anomaly_count"] == 1
-            assert body["algorithm_version"] == "robust_cusum_v1"
+            assert body["algorithm_version"] == "robust_cusum_v2"
             assert body["config"]["algorithm"] == "robust_cusum"
             run_id = body["id"]
             progress = client.get(f"/api/anomaly-detection-progress/{progress_token}")
@@ -602,7 +643,7 @@ def test_anomaly_detection_api_crud_and_decimation() -> None:
             })
             assert sigma_run.status_code == 200, sigma_run.text
             sigma_body = sigma_run.json()
-            assert sigma_body["algorithm_version"] == "rolling_sigma_v1"
+            assert sigma_body["algorithm_version"] == "rolling_sigma_v2"
             assert sigma_body["anomaly_count"] == 1
             assert sigma_body["series"][35]["smoothed"] == sigma_body["series"][35]["score"]
             assert sigma_body["series"][35]["baseline"] == 1.0
@@ -618,7 +659,7 @@ def test_anomaly_detection_api_crud_and_decimation() -> None:
                 "config": _fast_config(algorithm="robust_zscore").model_dump(),
             })
             assert zscore.status_code == 200, zscore.text
-            assert zscore.json()["algorithm_version"] == "robust_zscore_v1"
+            assert zscore.json()["algorithm_version"] == "robust_zscore_v2"
             assert zscore.json()["config"]["algorithm"] == "robust_zscore"
             assert all(point["cusum"] == 0 for point in zscore.json()["series"])
             assert client.delete(f"/api/anomaly-detection-runs/{zscore.json()['id']}").status_code == 204

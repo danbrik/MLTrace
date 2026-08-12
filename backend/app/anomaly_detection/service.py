@@ -29,10 +29,10 @@ from app.schemas import (
 
 
 ALGORITHM_VERSIONS = {
-    "robust_zscore": "robust_zscore_v1",
-    "robust_cusum": "robust_cusum_v1",
+    "robust_zscore": "robust_zscore_v2",
+    "robust_cusum": "robust_cusum_v2",
     "event_threshold": "event_threshold_v1",
-    "rolling_sigma": "rolling_sigma_v1",
+    "rolling_sigma": "rolling_sigma_v2",
 }
 
 _PROGRESS_TTL_SECONDS = 10 * 60
@@ -485,11 +485,27 @@ def _detect_rolling_sigma(
     first_baseline_clock: float | None = None
     previous_timestamp: datetime | None = None
     active: DetectionEvent | None = None
+    candidate_start: datetime | None = None
+    candidate_count = 0
+    candidate_peak_timestamp: datetime | None = None
+    candidate_max_score = -math.inf
+    candidate_max_sigma: float | None = None
+    candidate_scores: list[float] = []
     active_scores: list[float] = []
     events: list[DetectionEvent] = []
     series: list[AnomalyDetectionSeriesPoint] = []
     total = len(ordered)
     stride = max(1, total // 100)
+
+    def reset_candidate() -> None:
+        nonlocal candidate_start, candidate_count, candidate_peak_timestamp
+        nonlocal candidate_max_score, candidate_max_sigma, candidate_scores
+        candidate_start = None
+        candidate_count = 0
+        candidate_peak_timestamp = None
+        candidate_max_score = -math.inf
+        candidate_max_sigma = None
+        candidate_scores = []
 
     def close_active(at: datetime, reason: str) -> None:
         nonlocal active, active_scores
@@ -502,6 +518,7 @@ def _detect_rolling_sigma(
             events.append(active)
         active = None
         active_scores = []
+        reset_candidate()
 
     if progress_callback is not None:
         progress_callback("detecting", 0, total, "Comparing raw scores with the rolling baseline")
@@ -520,7 +537,7 @@ def _detect_rolling_sigma(
             first_baseline_clock = None
             dt = 0.0
 
-        if active is None:
+        if active is None and candidate_start is None:
             normal_clock += dt
             cutoff = normal_clock - window_seconds
             while baseline and baseline[0][0] < cutoff:
@@ -545,28 +562,56 @@ def _detect_rolling_sigma(
         )
         anomalous = ready and threshold is not None and point.score > threshold
 
-        if anomalous:
-            if active is None:
+        if anomalous and active is None:
+            if candidate_start is None:
+                candidate_start = point.timestamp
+                candidate_peak_timestamp = point.timestamp
+                candidate_max_score = point.score
+                candidate_max_sigma = sigma
+            candidate_count += 1
+            candidate_scores.append(point.score)
+            if point.score > candidate_max_score:
+                candidate_max_score = point.score
+                candidate_peak_timestamp = point.timestamp
+            if sigma is not None:
+                candidate_max_sigma = max(candidate_max_sigma or sigma, sigma)
+            persistence_met = (
+                candidate_count >= config.confirmation_samples
+                if config.confirmation_mode == "samples"
+                else (point.timestamp - candidate_start).total_seconds()
+                >= config.confirmation_minutes * 60.0
+            )
+            if persistence_met:
                 active = DetectionEvent(
-                    warning_start=point.timestamp,
+                    warning_start=candidate_start,
                     confirmed_at=point.timestamp,
                     end_timestamp=point.timestamp,
                     end_reason="range_end",
-                    peak_timestamp=point.timestamp,
-                    max_score=point.score,
-                    max_robust_z=sigma,
+                    peak_timestamp=candidate_peak_timestamp or point.timestamp,
+                    max_score=candidate_max_score,
+                    max_robust_z=candidate_max_sigma,
                     threshold=threshold,
                 )
-            elif point.score > active.max_score:
+                active_scores = list(candidate_scores)
+        elif anomalous and active is not None:
+            if point.score > active.max_score:
                 active.max_score = point.score
                 active.peak_timestamp = point.timestamp
             if sigma is not None:
                 active.max_robust_z = max(active.max_robust_z or sigma, sigma)
             active_scores.append(point.score)
-        elif active is not None:
-            close_active(point.timestamp, "recovered")
+        elif not anomalous:
+            if active is not None:
+                close_active(point.timestamp, "recovered")
+            else:
+                reset_candidate()
 
-        display_state = "warmup" if not ready else "confirmed" if anomalous else "normal"
+        display_state = (
+            "warmup" if not ready
+            else "confirmed" if active is not None
+            else "warning" if candidate_start is not None
+            else "normal"
+        )
         series.append(AnomalyDetectionSeriesPoint(
             timestamp=point.timestamp,
             score=point.score,
@@ -580,7 +625,7 @@ def _detect_rolling_sigma(
             baseline_std=standard_deviation if ready else None,
         ))
 
-        if active is None:
+        if active is None and candidate_start is None:
             if first_baseline_clock is None:
                 first_baseline_clock = normal_clock
             baseline.append((normal_clock, point.score))
@@ -658,11 +703,13 @@ def _detect_robust(
     cusum = 0.0
     active: DetectionEvent | None = None
     recovery_started: datetime | None = None
+    confirmation_started: datetime | None = None
+    confirmation_count = 0
     output_events: list[DetectionEvent] = []
     series: list[AnomalyDetectionSeriesPoint] = []
 
     def close_active(at: datetime, reason: str) -> None:
-        nonlocal active, state, cusum, recovery_started
+        nonlocal active, state, cusum, recovery_started, confirmation_started, confirmation_count
         if active is not None:
             active.end_timestamp = at
             active.end_reason = reason
@@ -671,6 +718,8 @@ def _detect_robust(
         state = "normal"
         cusum = 0.0
         recovery_started = None
+        confirmation_started = None
+        confirmation_count = 0
 
     if progress_callback is not None:
         progress_callback("detecting", 0, total_points, "Detecting warnings and anomalies")
@@ -722,15 +771,25 @@ def _detect_robust(
                     active.max_score = point.score
                     active.peak_timestamp = point.timestamp
                 active.max_robust_z = max(active.max_robust_z, robust_z)
-                warning_age = (point.timestamp - active.warning_start).total_seconds()
                 high_evidence = robust_z >= config.high_z
                 if config.algorithm == "robust_cusum":
                     high_evidence = high_evidence or cusum >= config.cusum_threshold
+                if robust_z >= config.warning_z and high_evidence:
+                    confirmation_started = confirmation_started or point.timestamp
+                    confirmation_count += 1
+                else:
+                    confirmation_started = None
+                    confirmation_count = 0
+                persistence_met = (
+                    confirmation_count >= config.confirmation_samples
+                    if config.confirmation_mode == "samples"
+                    else confirmation_started is not None
+                    and (point.timestamp - confirmation_started).total_seconds()
+                    >= confirmation_seconds
+                )
                 if (
                     state == "warning"
-                    and warning_age >= confirmation_seconds
-                    and robust_z >= config.warning_z
-                    and high_evidence
+                    and persistence_met
                 ):
                     state = "confirmed"
                     active.confirmed_at = point.timestamp

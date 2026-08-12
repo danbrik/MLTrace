@@ -62,7 +62,9 @@ const FAST_CONFIG: AnomalyDetectionConfig = {
   high_z: 5,
   cusum_drift: 1,
   cusum_threshold: 10,
+  confirmation_mode: 'minutes',
   confirmation_minutes: 5,
+  confirmation_samples: 1,
   recovery_z: 1,
   recovery_minutes: 15,
   preroll_minutes: 120,
@@ -96,6 +98,8 @@ const SIGMA_CONFIG: AnomalyDetectionConfig = {
   minimum_warmup_points: 30,
   sigma_threshold: 3,
   preroll_minutes: 30,
+  confirmation_mode: 'samples',
+  confirmation_samples: 1,
 };
 
 const BALANCED_CONFIG: AnomalyDetectionConfig = {
@@ -155,7 +159,7 @@ const ALGORITHMS: Array<{
   {
     value: 'rolling_sigma',
     label: 'Rolling baseline + 3σ',
-    description: 'Uses the unchanged raw reconstruction error. A point is anomalous immediately when it exceeds the mean of the preceding normal baseline by the configured number of standard deviations.',
+    description: 'Uses the unchanged raw reconstruction error and confirms an anomaly after the configured consecutive time or sample count above the rolling standard-deviation threshold.',
   },
 ];
 
@@ -182,7 +186,6 @@ const PARAMETER_DEFINITIONS: Array<{
   { key: 'high_z', label: 'Confirmation Z-score', description: 'Confirms a red anomaly when this robust Z-score persists for the confirmation time.', min: 0.1, decimalScale: 2, algorithms: ROBUST_ALGORITHMS },
   { key: 'cusum_drift', label: 'CUSUM drift', description: 'Evidence subtracted during every minute. Larger values make CUSUM less sensitive to small shifts.', min: 0, decimalScale: 2, algorithms: ['robust_cusum'] },
   { key: 'cusum_threshold', label: 'CUSUM threshold', description: 'Accumulated positive evidence required to confirm an anomaly when the high Z-score is not reached.', min: 0.1, decimalScale: 2, algorithms: ['robust_cusum'] },
-  { key: 'confirmation_minutes', label: 'Confirmation hold (min)', description: 'Minimum time between the start of a warning and confirmation of an anomaly.', min: 0, algorithms: ROBUST_ALGORITHMS },
   { key: 'recovery_z', label: 'Recovery Z-score', description: 'The signal must fall below this Z-score before recovery timing begins.', decimalScale: 2, algorithms: ROBUST_ALGORITHMS },
   { key: 'recovery_minutes', label: 'Recovery hold (min)', description: 'Continuous time below the recovery Z-score required to close an event.', min: 0, algorithms: ROBUST_ALGORITHMS },
   { key: 'preroll_minutes', label: 'Pre-roll (min)', description: 'Hidden history loaded before a selected range so its baseline is already initialized.', min: 0 },
@@ -713,7 +716,7 @@ export function AnomalyDetectionPage({ active }: { active: boolean }) {
       shapes.push({ type: 'rect', xref: 'x', yref: 'paper', x0: warmup[0].timestamp, x1: warmup.at(-1)?.timestamp, y0: 0, y1: 1, fillcolor: 'rgba(134,142,150,0.14)', line: { width: 0 }, layer: 'below' });
     }
     activeRun.events.forEach((event) => {
-      if (!['event_threshold', 'rolling_sigma'].includes(activeRun.config.algorithm)) {
+      if (activeRun.config.algorithm !== 'event_threshold') {
         const yellowEnd = event.confirmed_at ?? event.end_timestamp;
         shapes.push({ type: 'rect', xref: 'x', yref: 'paper', x0: event.warning_start, x1: yellowEnd, y0: 0, y1: 1, fillcolor: 'rgba(250,176,5,0.20)', line: { width: 0 }, layer: 'below' });
       }
@@ -1010,6 +1013,41 @@ export function AnomalyDetectionPage({ active }: { active: boolean }) {
                         setConfig((current) => ({ ...current, event_smoothing_method: (value ?? 'median') as 'median' | 'moving_average' }));
                       }}
                     />
+                  </SimpleGrid>
+                )}
+                {BASELINE_ALGORITHMS.includes(config.algorithm) && (
+                  <SimpleGrid cols={{ base: 1, sm: 2 }}>
+                    <Select
+                      label={<InfoLabel label="Confirmation duration type" description="Choose whether the score must remain above the confirmation threshold for a continuous number of elapsed minutes or consecutive samples. The counter resets as soon as the score falls below the threshold." />}
+                      value={config.confirmation_mode}
+                      data={[
+                        { value: 'minutes', label: 'Minutes' },
+                        { value: 'samples', label: 'Samples' },
+                      ]}
+                      disabled={running || thresholdCalculating}
+                      onChange={(value) => {
+                        setPreset('custom');
+                        setConfig((current) => ({ ...current, confirmation_mode: (value ?? 'minutes') as 'minutes' | 'samples' }));
+                      }}
+                    />
+                    {config.confirmation_mode === 'minutes' ? (
+                      <NumberInput
+                        label={<InfoLabel label="Required time above threshold (min)" description="Continuous elapsed time that the signal must meet the algorithm's confirmation condition before the interval is marked as an anomaly. Any drop below it resets the timer." />}
+                        min={0}
+                        decimalScale={2}
+                        value={config.confirmation_minutes}
+                        disabled={running || thresholdCalculating}
+                        onChange={(value) => patchConfig('confirmation_minutes', value)}
+                      />
+                    ) : (
+                      <NumberInput
+                        label={<InfoLabel label="Required consecutive samples" description="Number of consecutive samples that must meet the algorithm's confirmation condition before the interval is marked as an anomaly. The default is 1 sample." />}
+                        min={1}
+                        value={config.confirmation_samples}
+                        disabled={running || thresholdCalculating}
+                        onChange={(value) => patchConfig('confirmation_samples', value)}
+                      />
+                    )}
                   </SimpleGrid>
                 )}
                 <SimpleGrid cols={{ base: 1, sm: 2, lg: 4 }}>

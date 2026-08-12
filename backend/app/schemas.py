@@ -1286,7 +1286,9 @@ class AnomalyDetectionConfig(BaseModel):
     high_z: float = Field(default=5.0, gt=0.0, le=1000.0)
     cusum_drift: float = Field(default=1.0, ge=0.0, le=1000.0)
     cusum_threshold: float = Field(default=10.0, gt=0.0, le=1000000.0)
+    confirmation_mode: Literal["minutes", "samples"] = "minutes"
     confirmation_minutes: float = Field(default=5.0, ge=0.0, le=43200.0)
+    confirmation_samples: int = Field(default=1, ge=1, le=100000)
     recovery_z: float = Field(default=1.0, ge=-1000.0, le=1000.0)
     recovery_minutes: float = Field(default=15.0, ge=0.0, le=43200.0)
     preroll_minutes: float = Field(default=120.0, ge=0.0, le=43200.0)
@@ -1308,6 +1310,11 @@ class AnomalyDetectionConfig(BaseModel):
 
     @model_validator(mode="after")
     def validate_threshold_order(self):
+        # Rolling Sigma historically confirmed the first above-threshold
+        # sample immediately. Preserve that behavior for old stored configs
+        # and API payloads that predate the explicit persistence selector.
+        if self.algorithm == "rolling_sigma" and "confirmation_mode" not in self.model_fields_set:
+            self.confirmation_mode = "samples"
         if self.algorithm in {"robust_zscore", "robust_cusum"}:
             if self.high_z < self.warning_z:
                 raise ValueError("high_z must be greater than or equal to warning_z.")

@@ -690,7 +690,9 @@ export type AnomalyDetectionConfig = {
   high_z: number;
   cusum_drift: number;
   cusum_threshold: number;
+  confirmation_mode: 'minutes' | 'samples';
   confirmation_minutes: number;
+  confirmation_samples: number;
   recovery_z: number;
   recovery_minutes: number;
   preroll_minutes: number;
