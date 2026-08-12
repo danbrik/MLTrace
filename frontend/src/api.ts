@@ -809,6 +809,7 @@ export function calculateBaselineNormalization(payload: {
   analysis_regions: BaselineAnalysisRegion[];
   normalization: 'classic' | 'robust';
   thresholds: number[];
+  persistence_samples: number;
   max_points?: number;
 }): Promise<BaselineNormalizationResult> {
   return request<BaselineNormalizationResult>('/api/analysis/baseline-normalization', {

@@ -531,6 +531,7 @@ class BaselineNormalizationRequest(BaseModel):
     analysis_regions: list[BaselineAnalysisRegion] = Field(min_length=1, max_length=256)
     normalization: Literal["classic", "robust"] = "classic"
     thresholds: list[float] = Field(default_factory=lambda: [3.0, 5.0], min_length=1, max_length=32)
+    persistence_samples: int = Field(default=1, ge=1, le=100_000)
     max_points: int = Field(default=8000, ge=100, le=50_000)
 
     @model_validator(mode="after")
@@ -583,6 +584,13 @@ class BaselineSeriesPointRead(BaseModel):
     z: float | None
 
 
+class BaselineAnomalyEventRead(BaseModel):
+    threshold: float
+    start: datetime
+    end: datetime
+    sample_count: int
+
+
 class BaselineTraceResultRead(BaseModel):
     testing_run_id: int
     label: str
@@ -591,6 +599,7 @@ class BaselineTraceResultRead(BaseModel):
     baseline: BaselineStatisticsRead
     regions: list[BaselineRegionStatisticsRead]
     series: list[BaselineSeriesPointRead]
+    events: list[BaselineAnomalyEventRead]
     total_points: int
     decimated: bool
 
@@ -599,6 +608,7 @@ class BaselineNormalizationResponse(BaseModel):
     computed_at: datetime
     normalization: Literal["classic", "robust"]
     thresholds: list[float]
+    persistence_samples: int
     traces: list[BaselineTraceResultRead]
 
 

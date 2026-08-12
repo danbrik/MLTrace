@@ -1,6 +1,6 @@
 import { useEffect, useRef } from 'react';
 import { useMantineColorScheme } from '@mantine/core';
-import Plotly, { type Data, type Layout, type Config, type PlotlyHTMLElement, type PlotMouseEvent, type PlotSelectionEvent } from '../lib/plotly';
+import Plotly, { type Data, type Layout, type Config, type PlotlyHTMLElement, type PlotMouseEvent, type PlotSelectionEvent, type PlotRelayoutEvent } from '../lib/plotly';
 
 export type PlotlyChartClick = {
   timestamp: string;
@@ -13,6 +13,13 @@ export type PlotlyChartSelection = {
   end: string;
 };
 
+export type PlotlyChartDoubleClick = {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+};
+
 type PlotlyChartProps = {
   data: Data[];
   layout?: Partial<Layout>;
@@ -22,6 +29,9 @@ type PlotlyChartProps = {
   className?: string;
   onClick?: (event: PlotlyChartClick) => void;
   onSelected?: (event: PlotlyChartSelection) => void;
+  onRelayout?: (event: PlotRelayoutEvent) => void;
+  /** Return true to consume the double-click before Plotly applies its global reset. */
+  onDoubleClick?: (event: PlotlyChartDoubleClick) => boolean;
 };
 
 const BASE_CONFIG: Partial<Config> = {
@@ -36,7 +46,7 @@ const BASE_CONFIG: Partial<Config> = {
  * Duenner Wrapper um Plotly.react: responsiv via ResizeObserver, raeumt beim
  * Unmount mit Plotly.purge auf. Kein react-plotly.js (React-19-Kompatibilitaet).
  */
-export function PlotlyChart({ data, layout, config, height = 400, className, onClick, onSelected }: PlotlyChartProps) {
+export function PlotlyChart({ data, layout, config, height = 400, className, onClick, onSelected, onRelayout, onDoubleClick }: PlotlyChartProps) {
   const ref = useRef<HTMLDivElement | null>(null);
   const { colorScheme } = useMantineColorScheme();
   const dark = colorScheme === 'dark';
@@ -67,6 +77,7 @@ export function PlotlyChart({ data, layout, config, height = 400, className, onC
 
     plot.removeAllListeners('plotly_click');
     plot.removeAllListeners('plotly_selected');
+    plot.removeAllListeners('plotly_relayout');
     if (onClick) {
       plot.on('plotly_click', (event: PlotMouseEvent) => {
         const point = event.points[0];
@@ -81,12 +92,33 @@ export function PlotlyChart({ data, layout, config, height = 400, className, onC
         onSelected({ start: String(xRange[0]), end: String(xRange[1]) });
       });
     }
+    if (onRelayout) {
+      plot.on('plotly_relayout', onRelayout);
+    }
+
+    const handleDoubleClick = (event: MouseEvent) => {
+      if (!onDoubleClick) return;
+      const bounds = plot.getBoundingClientRect();
+      const handled = onDoubleClick({
+        x: event.clientX - bounds.left,
+        y: event.clientY - bounds.top,
+        width: bounds.width,
+        height: bounds.height,
+      });
+      if (handled) {
+        event.preventDefault();
+        event.stopImmediatePropagation();
+      }
+    };
+    plot.addEventListener('dblclick', handleDoubleClick, true);
 
     return () => {
       plot.removeAllListeners('plotly_click');
       plot.removeAllListeners('plotly_selected');
+      plot.removeAllListeners('plotly_relayout');
+      plot.removeEventListener('dblclick', handleDoubleClick, true);
     };
-  }, [onClick, onSelected]);
+  }, [onClick, onDoubleClick, onRelayout, onSelected]);
 
   useEffect(() => {
     const el = ref.current;

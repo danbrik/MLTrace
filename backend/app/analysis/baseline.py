@@ -13,6 +13,7 @@ from sqlalchemy.orm import Session
 
 from app import models
 from app.schemas import (
+    BaselineAnomalyEventRead,
     BaselineNormalizationRequest,
     BaselineNormalizationResponse,
     BaselineRegionStatisticsRead,
@@ -336,6 +337,50 @@ def _longest_above(timestamps: list[datetime], z_values: list[float], threshold:
     return longest
 
 
+def _anomaly_events(
+    timestamps: list[datetime],
+    z_values: list[float | None],
+    thresholds: list[float],
+    persistence_samples: int,
+) -> list[BaselineAnomalyEventRead]:
+    positive_deltas = sorted(
+        (timestamps[index] - timestamps[index - 1]).total_seconds()
+        for index in range(1, len(timestamps))
+        if timestamps[index] > timestamps[index - 1]
+    )
+    typical = statistics.median(positive_deltas) if positive_deltas else 0.0
+    gap_limit = max(15.0, 5.0 * typical)
+    events: list[BaselineAnomalyEventRead] = []
+    for threshold in thresholds:
+        sequence_start: int | None = None
+        for index in range(len(timestamps) + 1):
+            value = z_values[index] if index < len(z_values) else None
+            gap = (
+                index > 0
+                and index < len(timestamps)
+                and (timestamps[index] - timestamps[index - 1]).total_seconds() > gap_limit
+            )
+            above = value is not None and math.isfinite(value) and value > threshold and not gap
+            if above and sequence_start is None:
+                sequence_start = index
+            if above:
+                continue
+            if sequence_start is not None:
+                sequence_end = index - 1
+                count = sequence_end - sequence_start + 1
+                if count >= persistence_samples:
+                    events.append(BaselineAnomalyEventRead(
+                        threshold=threshold,
+                        start=timestamps[sequence_start],
+                        end=timestamps[sequence_end],
+                        sample_count=count,
+                    ))
+                sequence_start = None
+            if gap and value is not None and math.isfinite(value) and value > threshold:
+                sequence_start = index
+    return events
+
+
 def _decimate(points: list[BaselineSeriesPointRead], max_points: int) -> tuple[list[BaselineSeriesPointRead], bool]:
     if len(points) <= max_points:
         return points, False
@@ -420,6 +465,7 @@ def calculate(db: Session, payload: BaselineNormalizationRequest) -> BaselineNor
 
         points = [BaselineSeriesPointRead(timestamp=timestamp, raw=raw[index] if math.isfinite(raw[index]) else None, signal=signal[index], z=z[index]) for index, timestamp in enumerate(timestamps)]
         visible, decimated = _decimate(points, payload.max_points)
+        events = _anomaly_events(timestamps, z, payload.thresholds, payload.persistence_samples)
         fingerprint_payload = {
             "run": run.id,
             "updated": run.updated_at.isoformat() if run.updated_at else None,
@@ -438,6 +484,7 @@ def calculate(db: Session, payload: BaselineNormalizationRequest) -> BaselineNor
             baseline=baseline,
             regions=region_results,
             series=visible,
+            events=events,
             total_points=len(points),
             decimated=decimated,
         ))
@@ -445,5 +492,6 @@ def calculate(db: Session, payload: BaselineNormalizationRequest) -> BaselineNor
         computed_at=datetime.now(UTC),
         normalization=payload.normalization,
         thresholds=payload.thresholds,
+        persistence_samples=payload.persistence_samples,
         traces=trace_results,
     )

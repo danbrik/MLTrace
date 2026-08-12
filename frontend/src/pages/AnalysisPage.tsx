@@ -54,9 +54,9 @@ import {
   updateAnalysisLayout,
 } from '../api';
 import { DateTime24Input } from '../components/DateTime24Input';
-import { PlotlyChart, type PlotlyChartClick, type PlotlyChartSelection } from '../components/PlotlyChart';
+import { PlotlyChart, type PlotlyChartClick, type PlotlyChartDoubleClick, type PlotlyChartSelection } from '../components/PlotlyChart';
 import { StepCard } from '../components/StepCard';
-import type { Data, Layout } from '../lib/plotly';
+import type { Data, Layout, PlotRelayoutEvent } from '../lib/plotly';
 import { formatValue } from '../methods/utils';
 import { datasetResolutions, formatResolution, orderedGraphNodes, stepDetail } from '../training/graph';
 import type {
@@ -161,6 +161,7 @@ type BaselineAnalysisConfig = {
   stageIndex: number;
   normalization: 'classic' | 'robust';
   thresholds: number[];
+  persistenceSamples: number;
   result?: BaselineNormalizationResult;
   stale?: boolean;
 };
@@ -1033,6 +1034,102 @@ function finiteOrNull(value: number): number | null {
   return Number.isFinite(value) ? value : null;
 }
 
+type TimeSeriesAxisRange = [number, number];
+type TimeSeriesTraceValues = { x: Array<string | number | Date | null>; y: Array<number | null>; yaxis: string };
+
+function medianPositiveTimeDelta(timestamps: string[]): number | null {
+  const ordered = timestamps
+    .map((timestamp, index) => ({ timestamp, index, time: new Date(timestamp).getTime() }))
+    .filter((item) => Number.isFinite(item.time))
+    .sort((left, right) => left.time - right.time || left.index - right.index);
+  const deltas: number[] = [];
+  for (let index = 1; index < ordered.length; index += 1) {
+    const delta = ordered[index].time - ordered[index - 1].time;
+    if (delta > 0) deltas.push(delta);
+  }
+  if (deltas.length === 0) return null;
+  deltas.sort((left, right) => left - right);
+  const middle = Math.floor(deltas.length / 2);
+  return deltas.length % 2 === 0 ? (deltas[middle - 1] + deltas[middle]) / 2 : deltas[middle];
+}
+
+function insertVisibleTimeGaps(timestamps: string[], values: Array<number | null>): { x: Array<string | null>; y: Array<number | null> } {
+  const typicalDelta = medianPositiveTimeDelta(timestamps);
+  if (typicalDelta === null || timestamps.length < 2) return { x: timestamps, y: values };
+  const gapThreshold = Math.max(15_000, typicalDelta * 5);
+  const x: Array<string | null> = [];
+  const y: Array<number | null> = [];
+  for (let index = 0; index < timestamps.length; index += 1) {
+    if (index > 0) {
+      const previous = new Date(timestamps[index - 1]).getTime();
+      const current = new Date(timestamps[index]).getTime();
+      if (Number.isFinite(previous) && Number.isFinite(current) && current - previous > gapThreshold) {
+        x.push(new Date(previous + Math.min(gapThreshold, (current - previous) / 2)).toISOString());
+        y.push(null);
+      }
+    }
+    x.push(timestamps[index]);
+    y.push(values[index] ?? null);
+  }
+  return { x, y };
+}
+
+function paddedAxisRange(minimum: number, maximum: number): TimeSeriesAxisRange {
+  if (minimum === maximum) {
+    const padding = Math.max(Math.abs(minimum) * 0.05, 1e-9);
+    return [minimum - padding, maximum + padding];
+  }
+  const padding = (maximum - minimum) * 0.05;
+  return [minimum - padding, maximum + padding];
+}
+
+function visibleAxisRanges(
+  traces: TimeSeriesTraceValues[],
+  xRange: [number, number] | null,
+): Record<string, TimeSeriesAxisRange> {
+  const valuesByAxis = new Map<string, number[]>();
+  for (const trace of traces) {
+    trace.y.forEach((value, index) => {
+      if (value === null || !Number.isFinite(value)) return;
+      const timestamp = new Date(trace.x[index] ?? '').getTime();
+      if (!Number.isFinite(timestamp)) return;
+      if (xRange && (timestamp < xRange[0] || timestamp > xRange[1])) return;
+      const values = valuesByAxis.get(trace.yaxis) ?? [];
+      values.push(value);
+      valuesByAxis.set(trace.yaxis, values);
+    });
+  }
+  return Object.fromEntries([...valuesByAxis].flatMap(([axis, values]) => {
+    if (values.length === 0) return [];
+    let minimum = values[0];
+    let maximum = values[0];
+    for (const value of values.slice(1)) {
+      minimum = Math.min(minimum, value);
+      maximum = Math.max(maximum, value);
+    }
+    return [[axis, paddedAxisRange(minimum, maximum)]];
+  }));
+}
+
+function relayoutRange(event: PlotRelayoutEvent, axis: 'xaxis' | string): TimeSeriesAxisRange | null | undefined {
+  const values = event as Record<string, unknown>;
+  const direct = values[`${axis}.range`];
+  if (Array.isArray(direct) && direct.length >= 2) {
+    const start = axis === 'xaxis' ? new Date(String(direct[0])).getTime() : Number(direct[0]);
+    const end = axis === 'xaxis' ? new Date(String(direct[1])).getTime() : Number(direct[1]);
+    return Number.isFinite(start) && Number.isFinite(end) ? [Math.min(start, end), Math.max(start, end)] : undefined;
+  }
+  const rawStart = values[`${axis}.range[0]`];
+  const rawEnd = values[`${axis}.range[1]`];
+  if (rawStart !== undefined && rawEnd !== undefined) {
+    const start = axis === 'xaxis' ? new Date(String(rawStart)).getTime() : Number(rawStart);
+    const end = axis === 'xaxis' ? new Date(String(rawEnd)).getTime() : Number(rawEnd);
+    return Number.isFinite(start) && Number.isFinite(end) ? [Math.min(start, end), Math.max(start, end)] : undefined;
+  }
+  if (values[`${axis}.autorange`] === true) return null;
+  return undefined;
+}
+
 function ewma(values: number[], alpha: number): number[] {
   if (values.length === 0) return [];
   const boundedAlpha = Math.min(1, Math.max(0, alpha));
@@ -1307,6 +1404,9 @@ function TimeSeriesPlot({
   onRangeSelected?: (event: PlotlyChartSelection) => void;
 }) {
   const analyticsConfigs = plot.timeseriesAnalytics ?? [];
+  const [visibleXRange, setVisibleXRange] = useState<TimeSeriesAxisRange | null>(null);
+  const [manualYRanges, setManualYRanges] = useState<Record<string, TimeSeriesAxisRange>>({});
+  const lastAutomaticYRanges = useRef<Record<string, TimeSeriesAxisRange>>({});
   const displayPanels = useMemo(() => {
     if (analyticsConfigs.length === 0) return [defaultAnalyticsConfig('raw')];
     if (plot.showIntermediateAnalyticsPanels === false) return [analyticsConfigs[analyticsConfigs.length - 1]];
@@ -1340,8 +1440,12 @@ function TimeSeriesPlot({
     }
     const nextTraces: Data[] = [];
     [...groups.values()].filter((group) => group.results.length > 0).forEach((group, groupIndex) => {
-      const x = group.results.map((result) => result.timestamp);
-      const rawValues = group.results.map((result) => scoreValue(result, plot.scoreSeries));
+      const orderedResults = group.results
+        .map((result, index) => ({ result, index }))
+        .sort((left, right) => new Date(left.result.timestamp).getTime() - new Date(right.result.timestamp).getTime() || left.index - right.index)
+        .map((item) => item.result);
+      const x = orderedResults.map((result) => result.timestamp);
+      const rawValues = orderedResults.map((result) => scoreValue(result, plot.scoreSeries));
       const stageOutputs = new Map<AnalyticsKind | 'input', Array<number | null>>();
       stageOutputs.set('input', analyticsConfigs.length === 0 ? movingAverage(rawValues, plot.movingAverage).map(finiteOrNull) : rawValues.map(finiteOrNull));
       let currentValues = rawValues;
@@ -1352,15 +1456,17 @@ function TimeSeriesPlot({
       });
       displayPanels.forEach((panel, panelIndex) => {
         const y = panel.kind === 'raw' ? stageOutputs.get('input') ?? [] : stageOutputs.get(panel.kind) ?? [];
+        const visibleSeries = insertVisibleTimeGaps(x, y);
         nextTraces.push({
           type: 'scatter',
           mode: selectionActive ? 'lines+markers' : 'lines',
           name: panelIndex === 0 ? group.name : `${group.name} · ${analyticsDefinition(panel.kind).label}`,
-          x,
-          y,
+          x: visibleSeries.x,
+          y: visibleSeries.y,
           xaxis: 'x',
           yaxis: panelIndex === 0 ? 'y' : `y${panelIndex + 1}`,
           line: { color: group.color || TRACE_COLORS[groupIndex % TRACE_COLORS.length], width: panel.kind === 'state_machine' ? 2.2 : 1.7, shape: panel.kind === 'state_machine' ? 'hv' : 'linear' },
+          connectgaps: false,
           ...(selectionActive ? { marker: { size: 8, color: group.color || TRACE_COLORS[groupIndex % TRACE_COLORS.length] } } : {}),
           showlegend: panelIndex === 0,
           hovertemplate: `%{x|%Y-%m-%d %H:%M:%S}<br>${analyticsDefinition(panel.kind).label} %{y:.5g}<extra>${group.name}</extra>`,
@@ -1369,6 +1475,72 @@ function TimeSeriesPlot({
     });
     return nextTraces;
   }, [analyticsConfigs, displayPanels, plot.movingAverage, plot.scoreSeries, plot.traces, results, selectionActive]);
+
+  const traceValues = useMemo<TimeSeriesTraceValues[]>(() => traces.map((trace) => {
+    const value = trace as unknown as { x?: Array<string | number | Date | null>; y?: Array<number | null>; yaxis?: string };
+    return { x: value.x ?? [], y: value.y ?? [], yaxis: value.yaxis ?? 'y' };
+  }), [traces]);
+  const automaticYRanges = useMemo(() => visibleAxisRanges(traceValues, visibleXRange), [traceValues, visibleXRange]);
+  const effectiveAutomaticYRanges = useMemo(() => {
+    lastAutomaticYRanges.current = { ...lastAutomaticYRanges.current, ...automaticYRanges };
+    return lastAutomaticYRanges.current;
+  }, [automaticYRanges]);
+
+  const handleRelayout = useCallback((event: PlotRelayoutEvent) => {
+    const nextXRange = relayoutRange(event, 'xaxis');
+    if (nextXRange !== undefined) setVisibleXRange(nextXRange);
+
+    // A box zoom can report X and Y ranges together. In that case X defines the
+    // visible window and Y must remain automatic. Only a pure Y-axis gesture
+    // switches a panel into manual mode.
+    if (nextXRange !== undefined) return;
+
+    const values = event as Record<string, unknown>;
+    const axisKeys = new Set<string>();
+    Object.keys(values).forEach((key) => {
+      const match = key.match(/^(yaxis\d*)\.(?:range(?:\[[01]\])?|autorange)$/);
+      if (match) axisKeys.add(match[1]);
+    });
+    if (axisKeys.size === 0) return;
+    setManualYRanges((current) => {
+      const next = { ...current };
+      let changed = false;
+      axisKeys.forEach((layoutAxis) => {
+        const range = relayoutRange(event, layoutAxis);
+        const traceAxis = layoutAxis === 'yaxis' ? 'y' : layoutAxis.replace('axis', '');
+        if (range && Number.isFinite(range[0]) && Number.isFinite(range[1])) {
+          next[traceAxis] = range;
+          changed = true;
+        }
+      });
+      return changed ? next : current;
+    });
+  }, []);
+
+  const handleDoubleClick = useCallback((event: PlotlyChartDoubleClick): boolean => {
+    const leftMargin = 72;
+    const topMargin = 12;
+    const bottomMargin = 58;
+    if (event.x > leftMargin || event.y < topMargin || event.y > event.height - bottomMargin) return false;
+    const paperY = (event.height - bottomMargin - event.y) / Math.max(1, event.height - topMargin - bottomMargin);
+    const panelCount = Math.max(1, displayPanels.length);
+    const gap = 0.035;
+    const panelHeight = (1 - gap * (panelCount - 1)) / panelCount;
+    const panelIndex = displayPanels.findIndex((_, index) => {
+      const top = 1 - index * (panelHeight + gap);
+      const bottom = top - panelHeight;
+      return paperY >= bottom && paperY <= top;
+    });
+    if (panelIndex < 0) return false;
+    const traceAxis = panelIndex === 0 ? 'y' : `y${panelIndex + 1}`;
+    setManualYRanges((current) => {
+      if (!current[traceAxis]) return current;
+      const next = { ...current };
+      delete next[traceAxis];
+      return next;
+    });
+    return true;
+  }, [displayPanels]);
 
   const layout = useMemo<Partial<Layout>>(
     () => {
@@ -1393,7 +1565,7 @@ function TimeSeriesPlot({
         })),
       ]);
       const nextLayout: Partial<Layout> & Record<string, unknown> = {
-        uirevision: plot.id,
+        uirevision: `${plot.id}:${selectionActive ? 'select' : 'navigate'}`,
         showlegend: traces.length > panelCount,
         legend: { orientation: 'h', y: -0.18, x: 0 },
         hovermode: 'x unified',
@@ -1431,17 +1603,25 @@ function TimeSeriesPlot({
       displayPanels.forEach((panel, index) => {
         const top = 1 - index * (panelHeight + gap);
         const bottom = top - panelHeight;
+        const traceAxis = index === 0 ? 'y' : `y${index + 1}`;
+        const range = manualYRanges[traceAxis] ?? effectiveAutomaticYRanges[traceAxis];
         nextLayout[index === 0 ? 'yaxis' : `yaxis${index + 1}`] = {
           title: { text: analyticsDefinition(panel.kind).label, font: { size: 11 } },
           domain: [Math.max(0, bottom), Math.min(1, top)],
           showgrid: true,
           gridcolor: 'rgba(128,128,128,0.15)',
           zeroline: panel.kind !== 'raw' && panel.kind !== 'ewma',
+          fixedrange: false,
+          uirevision: `${plot.id}:${traceAxis}:${range?.join(':') ?? 'empty'}`,
+          ...(range ? { range, autorange: false } : { autorange: true }),
         };
       });
+      if (visibleXRange) {
+        nextLayout.xaxis = { ...nextLayout.xaxis as object, range: visibleXRange.map((value) => new Date(value).toISOString()), autorange: false };
+      }
       return nextLayout as Partial<Layout>;
     },
-    [displayPanels, plot.baselineAnalysis, selectionActive, traces.length],
+    [displayPanels, effectiveAutomaticYRanges, manualYRanges, plot.baselineAnalysis, selectionActive, traces.length, visibleXRange],
   );
 
   if (results.length === 0) {
@@ -1455,10 +1635,13 @@ function TimeSeriesPlot({
         layout={layout}
         onClick={selectionActive ? onPointClick : undefined}
         onSelected={selectionActive ? onRangeSelected : undefined}
+        onRelayout={handleRelayout}
+        onDoubleClick={handleDoubleClick}
         height={analyticsConfigs.length > 0 ? Math.max(520, displayPanels.length * (plot.panelHeightPx || 260)) : (plot.panelHeightPx || 420)}
       />
       <Group gap="xs">
         <Badge variant="light">{results.length} points</Badge>
+        <Badge variant="light" color="cyan">Y: drag axis · double-click axis for auto</Badge>
         {plot.movingAverage > 1 && <Badge variant="light" color="blue">moving avg {plot.movingAverage}</Badge>}
         {plot.sampling > 1 && <Badge variant="light" color="gray">sample every {plot.sampling}</Badge>}
         {plot.traces?.length ? <Badge variant="light" color="teal">{plot.traces.length} traces</Badge> : null}
@@ -1982,16 +2165,61 @@ function downloadBaselineCsv(plot: AnalysisPlot) {
 function BaselineAnalysisResultPanel({ plot }: { plot: AnalysisPlot }) {
   const analysis = plot.baselineAnalysis;
   const [diagnosticsOpen, setDiagnosticsOpen] = useState(false);
+  const [visibleXRange, setVisibleXRange] = useState<TimeSeriesAxisRange | null>(null);
+  const [manualYRange, setManualYRange] = useState<TimeSeriesAxisRange | null>(null);
+  const lastAutomaticYRange = useRef<TimeSeriesAxisRange | null>(null);
   if (!analysis?.result) return null;
   const result = analysis.result;
-  const zData: Data[] = result.traces.map((trace) => ({
-    type: 'scatter', mode: 'lines', name: trace.label, x: trace.series.map((point) => point.timestamp),
-    y: trace.series.map((point) => point.z), line: { color: trace.color, width: 1.6 },
-  } as unknown as Data));
-  const shapes = result.thresholds.map((threshold) => ({
-    type: 'line', xref: 'paper', yref: 'y', x0: 0, x1: 1, y0: threshold, y1: threshold,
-    line: { color: '#e03131', dash: 'dot', width: 1 },
-  }));
+  const zData: Data[] = result.traces.map((trace) => {
+    const visibleSeries = insertVisibleTimeGaps(
+      trace.series.map((point) => point.timestamp),
+      trace.series.map((point) => point.z),
+    );
+    return {
+      type: 'scatter', mode: 'lines', name: trace.label, x: visibleSeries.x,
+      y: visibleSeries.y, line: { color: trace.color, width: 1.6 }, connectgaps: false,
+    } as unknown as Data;
+  });
+  const thresholdColors = ['#fab005', '#fd7e14', '#e03131', '#9c36b5', '#5f3dc4', '#0c8599'];
+  const colorByThreshold = new Map(result.thresholds.map((threshold, index) => [threshold, thresholdColors[index % thresholdColors.length]]));
+  const traceValues: TimeSeriesTraceValues[] = zData.map((trace) => {
+    const value = trace as unknown as { x?: Array<string | number | Date | null>; y?: Array<number | null> };
+    return { x: value.x ?? [], y: value.y ?? [], yaxis: 'y' };
+  });
+  const nextAutomaticYRange = visibleAxisRanges(traceValues, visibleXRange).y;
+  if (nextAutomaticYRange) lastAutomaticYRange.current = nextAutomaticYRange;
+  const effectiveYRange = manualYRange ?? lastAutomaticYRange.current;
+  const shapes = [
+    ...result.thresholds.map((threshold) => ({
+      type: 'line', xref: 'paper', yref: 'y', x0: 0, x1: 1, y0: threshold, y1: threshold,
+      line: { color: colorByThreshold.get(threshold), dash: 'dot', width: 1 },
+    })),
+    ...result.traces.flatMap((trace) => {
+      const typicalDelta = medianPositiveTimeDelta(trace.series.map((point) => point.timestamp)) ?? 1000;
+      return (trace.events ?? []).map((event) => ({
+        type: 'rect', xref: 'x', yref: 'paper',
+        x0: new Date(new Date(event.start).getTime() - typicalDelta / 2).toISOString(),
+        x1: new Date(new Date(event.end).getTime() + typicalDelta / 2).toISOString(),
+        y0: 0, y1: 1,
+        fillcolor: colorByThreshold.get(event.threshold), opacity: 0.18,
+        line: { color: colorByThreshold.get(event.threshold), width: 1 }, layer: 'below',
+      }));
+    }),
+  ];
+  const handleResultRelayout = (event: PlotRelayoutEvent) => {
+    const xRange = relayoutRange(event, 'xaxis');
+    if (xRange !== undefined) {
+      setVisibleXRange(xRange);
+      return;
+    }
+    const yRange = relayoutRange(event, 'yaxis');
+    if (yRange) setManualYRange(yRange);
+  };
+  const handleResultDoubleClick = (event: PlotlyChartDoubleClick) => {
+    if (event.x > 65 || event.y < 12 || event.y > event.height - 48) return false;
+    setManualYRange(null);
+    return true;
+  };
   return (
     <Stack gap="sm">
       {analysis.stale && <Alert color="yellow">The saved result is stale. Recalculate to apply the current plot, regions or parameters.</Alert>}
@@ -2004,7 +2232,22 @@ function BaselineAnalysisResultPanel({ plot }: { plot: AnalysisPlot }) {
       </Group>
       <Collapse in={diagnosticsOpen}>
         <Stack gap="md">
-          <PlotlyChart data={zData} layout={{ hovermode: 'x unified', shapes: shapes as NonNullable<Layout['shapes']>, xaxis: { type: 'date', title: { text: 'Time' } }, yaxis: { title: { text: 'Baseline z-score' }, zeroline: true }, margin: { l: 65, r: 20, t: 12, b: 48 } }} height={330} />
+          <Group gap="xs">
+            {result.thresholds.map((threshold) => <Badge key={threshold} variant="light" style={{ color: colorByThreshold.get(threshold), borderColor: colorByThreshold.get(threshold) }}>Anomaly &gt; {threshold}σ · {result.persistence_samples ?? analysis.persistenceSamples} consecutive</Badge>)}
+            <Badge variant="light" color="cyan">Y: drag axis · double-click axis for auto</Badge>
+          </Group>
+          <PlotlyChart
+            data={zData}
+            layout={{
+              uirevision: `${plot.id}:baseline-result`, hovermode: 'x unified', shapes: shapes as NonNullable<Layout['shapes']>,
+              xaxis: { type: 'date', title: { text: 'Time' }, ...(visibleXRange ? { range: visibleXRange.map((value) => new Date(value).toISOString()), autorange: false } : {}) },
+              yaxis: { title: { text: 'Baseline z-score' }, zeroline: true, ...(effectiveYRange ? { range: effectiveYRange, autorange: false, uirevision: effectiveYRange.join(':') } : { autorange: true }) },
+              margin: { l: 65, r: 20, t: 12, b: 48 },
+            }}
+            onRelayout={handleResultRelayout}
+            onDoubleClick={handleResultDoubleClick}
+            height={330}
+          />
           <Text fw={600}>Baseline statistics</Text>
           <ScrollArea>
             <Table striped withTableBorder verticalSpacing="xs">
@@ -2077,6 +2320,7 @@ const AnalysisPlotCard = memo(function AnalysisPlotCard({
     stageIndex: plot.timeseriesAnalytics.length - 1,
     normalization: 'classic',
     thresholds: [3, 5],
+    persistenceSamples: 1,
   }), [baselineTraces, plot.timeseriesAnalytics.length]);
   const baselineConfig = plot.baselineAnalysis ?? defaultBaselineConfig();
   const baselineStageOptions = useMemo(() => {
@@ -2143,6 +2387,7 @@ const AnalysisPlotCard = memo(function AnalysisPlotCard({
         analysis_regions: baselineConfig.analysisRegions,
         normalization: baselineConfig.normalization,
         thresholds: baselineConfig.thresholds,
+        persistence_samples: baselineConfig.persistenceSamples,
         max_points: ANALYSIS_MAX_POINTS,
       });
       onPatch({ baselineAnalysis: { ...baselineConfig, result, stale: false } });
@@ -2277,7 +2522,7 @@ const AnalysisPlotCard = memo(function AnalysisPlotCard({
               )}
               <Text size="xs" fw={600}>Curves</Text>
               <Group gap="md">{baselineTraces.map((trace) => <Checkbox key={trace.testingRunId} label={trace.legendLabel} checked={baselineConfig.selectedRunIds.includes(trace.testingRunId)} onChange={(event) => patchBaseline({ selectedRunIds: event.currentTarget.checked ? [...baselineConfig.selectedRunIds, trace.testingRunId] : baselineConfig.selectedRunIds.filter((id) => id !== trace.testingRunId) })} />)}</Group>
-              <SimpleGrid cols={{ base: 1, sm: 3 }}>
+              <SimpleGrid cols={{ base: 1, sm: 4 }}>
                 <Select label="Signal stage" value={String(baselineConfig.stageIndex)} data={baselineStageOptions} onChange={(value) => patchBaseline({ stageIndex: Number(value ?? -1) })} />
                 <Select label="Normalization" value={baselineConfig.normalization} data={[{ value: 'classic', label: 'Classic (mean / std)' }, { value: 'robust', label: 'Robust (median / MAD)' }]} onChange={(value) => patchBaseline({ normalization: value === 'robust' ? 'robust' : 'classic' })} />
                 <TagsInput
@@ -2289,6 +2534,13 @@ const AnalysisPlotCard = memo(function AnalysisPlotCard({
                     if (values.length) patchBaseline({ thresholds: values });
                   }}
                   splitChars={[',', ' ']}
+                />
+                <NumberInput
+                  label={<InfoLabel label="Consecutive samples" info="Minimum number of directly consecutive samples strictly above a Z threshold before that interval is marked as an anomaly. Data gaps reset the sequence." />}
+                  min={1}
+                  step={1}
+                  value={baselineConfig.persistenceSamples}
+                  onChange={(value) => patchBaseline({ persistenceSamples: Math.max(1, Math.floor(valueAsNumber(value, 1))) })}
                 />
               </SimpleGrid>
               <Group justify="flex-end"><Button loading={calculatingBaseline} onClick={calculateBaseline} leftSection={<Activity size={16} />}>Calculate baseline analysis</Button></Group>
@@ -2589,6 +2841,30 @@ function defaultDraft(): PlotDraft {
   };
 }
 
+function plotDraftFrom(plot: PlotDraft): PlotDraft {
+  return {
+    plotType: plot.plotType,
+    testingRunId: plot.testingRunId,
+    title: plot.title,
+    subtitle: plot.subtitle,
+    scoreSeries: plot.scoreSeries,
+    start: plot.start,
+    end: plot.end,
+    sampling: plot.sampling,
+    movingAverage: plot.movingAverage,
+    timeseriesAnalytics: plot.timeseriesAnalytics.map((method) => ({ ...method, params: { ...method.params } })),
+    analyticsDisplayMode: plot.analyticsDisplayMode,
+    showIntermediateAnalyticsPanels: plot.showIntermediateAnalyticsPanels,
+    panelHeightPx: plot.panelHeightPx,
+    heatmapMode: plot.heatmapMode,
+    timestamp: plot.timestamp,
+    includeReference: plot.includeReference,
+    staeHeatmapView: plot.staeHeatmapView,
+    predictionHorizon: plot.predictionHorizon,
+    heatmapConfig: { ...plot.heatmapConfig },
+  };
+}
+
 type AnalysisBoardLayout = {
   version: 1 | 2 | 3;
   draft: PlotDraft;
@@ -2627,7 +2903,7 @@ function restoreAnalytics(value: unknown): AnalyticsMethodConfig[] {
 function restoreDraft(value: unknown): PlotDraft {
   if (!isRecord(value)) return defaultDraft();
   const restoredAnalytics = restoreAnalytics(value.timeseriesAnalyticsPipeline ?? value.timeseriesAnalytics);
-  return {
+  return plotDraftFrom({
     ...defaultDraft(),
     ...(value as Partial<PlotDraft>),
     timeseriesAnalytics: restoredAnalytics,
@@ -2638,7 +2914,7 @@ function restoreDraft(value: unknown): PlotDraft {
       ...defaultHeatmapConfig(),
       ...(isRecord(value.heatmapConfig) ? value.heatmapConfig : {}),
     },
-  };
+  });
 }
 
 function restoreSources(value: unknown): PlotSourceConfig[] {
@@ -2686,6 +2962,7 @@ function restoreBaselineAnalysis(value: unknown): BaselineAnalysisConfig | undef
     stageIndex: valueAsNumber(value.stageIndex as string | number, -1),
     normalization: value.normalization === 'robust' ? 'robust' : 'classic',
     thresholds: Array.isArray(value.thresholds) ? value.thresholds.map(Number).filter((item) => Number.isFinite(item) && item > 0) : [3, 5],
+    persistenceSamples: Math.max(1, Math.floor(valueAsNumber(value.persistenceSamples as string | number, 1))),
     result: isRecord(value.result) ? value.result as BaselineNormalizationResult : undefined,
     stale: typeof value.stale === 'boolean' ? value.stale : false,
   };
@@ -3695,6 +3972,7 @@ export function AnalysisPage({ active = true }: { active?: boolean }) {
         sampling,
         timestamp: draft.timestamp ?? traces[0]?.timestamp ?? start,
         scoreSeries: 'score',
+        baselineAnalysis: editingPlot?.plot.baselineAnalysis,
       }, testingRuns);
       setDraft((current) => ({
         ...current,
@@ -3764,7 +4042,7 @@ export function AnalysisPage({ active = true }: { active?: boolean }) {
       timestamp: plotPreview.plot.timestamp ?? availableResults[0]?.timestamp ?? plotPreview.traces[0]?.timestamp ?? null,
       baselineAnalysis: editingPlot?.plot.baselineAnalysis
         ? { ...editingPlot.plot.baselineAnalysis, stale: true }
-        : plotPreview.plot.baselineAnalysis,
+        : undefined,
     }, testingRuns);
     setPlots((current) => {
       if (!editingPlot) return [...current, nextPlot];
@@ -3773,6 +4051,7 @@ export function AnalysisPage({ active = true }: { active?: boolean }) {
       return next;
     });
     setEditingPlot(null);
+    setDraft(plotDraftFrom(nextPlot));
     clearPreview();
   }
 
@@ -3805,7 +4084,7 @@ export function AnalysisPage({ active = true }: { active?: boolean }) {
     const firstRun = testingRuns.find((run) => run.id === Number(traces[0]?.testingRunId));
     setEditingPlot({ plot: canonicalPlot, index });
     setPlots((current) => current.filter((item) => item.id !== plot.id));
-    setDraft({ ...canonicalPlot, traces: undefined } as PlotDraft);
+    setDraft(plotDraftFrom(canonicalPlot));
     setSelectedSources(traces.map(traceToSource));
     setSelectedModelIds([...new Set(traces.map((trace) => testingRuns.find((run) => run.id === Number(trace.testingRunId))?.training_run_id).filter((id): id is number => typeof id === 'number').map(String))]);
     setSelectedInferenceDatasetId(firstRun ? String(firstRun.training_dataset_id) : null);

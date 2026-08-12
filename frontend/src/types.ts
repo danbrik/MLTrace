@@ -1146,6 +1146,13 @@ export type BaselineSeriesPoint = {
   z: number | null;
 };
 
+export type BaselineAnomalyEvent = {
+  threshold: number;
+  start: string;
+  end: string;
+  sample_count: number;
+};
+
 export type BaselineTraceResult = {
   testing_run_id: number;
   label: string;
@@ -1154,6 +1161,7 @@ export type BaselineTraceResult = {
   baseline: BaselineStatistics;
   regions: BaselineRegionStatistics[];
   series: BaselineSeriesPoint[];
+  events?: BaselineAnomalyEvent[];
   total_points: number;
   decimated: boolean;
 };
@@ -1162,6 +1170,7 @@ export type BaselineNormalizationResult = {
   computed_at: string;
   normalization: 'classic' | 'robust';
   thresholds: number[];
+  persistence_samples?: number;
   traces: BaselineTraceResult[];
 };
 

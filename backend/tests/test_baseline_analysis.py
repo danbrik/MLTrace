@@ -108,3 +108,34 @@ def test_backend_ewma_matches_causal_frontend_semantics() -> None:
     values = [0.0, 10.0, 10.0]
     output = compute_analytics("ewma", {"alpha": 0.5}, values, [start + timedelta(seconds=index) for index in range(3)])
     assert output == pytest.approx([0.0, 5.0, 7.5])
+
+
+def test_anomaly_event_requires_configured_consecutive_samples() -> None:
+    db, run_id, start = _seed([0, 1, 2, 3, 10, 10, 0, 10, 0, 0])
+    try:
+        result = calculate(db, _payload(run_id, start, thresholds=[3], persistence_samples=2))
+        events = result.traces[0].events
+        assert len(events) == 1
+        assert events[0].threshold == 3
+        assert events[0].start == start + timedelta(seconds=4)
+        assert events[0].end == start + timedelta(seconds=5)
+        assert events[0].sample_count == 2
+    finally:
+        db.close()
+
+
+def test_data_gap_resets_consecutive_sample_sequence() -> None:
+    db, run_id, start = _seed([0, 1, 2, 3, 10, 10, 10, 10, 0, 0])
+    try:
+        row = db.query(models.TestingRunResult).filter_by(testing_run_id=run_id, position=6).one()
+        row.timestamp = start + timedelta(seconds=60)
+        following = db.query(models.TestingRunResult).filter_by(testing_run_id=run_id, position=7).one()
+        following.timestamp = start + timedelta(seconds=61)
+        db.commit()
+        payload = _payload(run_id, start, thresholds=[3], persistence_samples=3)
+        payload.traces[0].end = start + timedelta(seconds=70)
+        payload.analysis_regions[0].end = start + timedelta(seconds=70)
+        result = calculate(db, payload)
+        assert result.traces[0].events == []
+    finally:
+        db.close()
