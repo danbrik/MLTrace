@@ -9,6 +9,9 @@ import type {
   Dataset,
   DatasetConnectionTest,
   AnalysisLayout,
+  BaselineAnalysisMethod,
+  BaselineAnalysisRegion,
+  BaselineNormalizationResult,
   HeatmapRangeRun,
   HeatmapRun,
   HeatmapRunSummary,
@@ -793,6 +796,25 @@ export function listAnalysisLayouts(): Promise<AnalysisLayout[]> {
 
 export function getAnalysisLayout(layoutId: number): Promise<AnalysisLayout> {
   return request<AnalysisLayout>(`/api/analysis/layouts/${layoutId}`);
+}
+
+export function calculateBaselineNormalization(payload: {
+  traces: Array<{ testing_run_id: number; label: string; color: string; start: string; end: string }>;
+  score_series: string;
+  moving_average: number;
+  analytics_pipeline: BaselineAnalysisMethod[];
+  stage_index: number;
+  sampling: number;
+  baseline_regions: BaselineAnalysisRegion[];
+  analysis_regions: BaselineAnalysisRegion[];
+  normalization: 'classic' | 'robust';
+  thresholds: number[];
+  max_points?: number;
+}): Promise<BaselineNormalizationResult> {
+  return request<BaselineNormalizationResult>('/api/analysis/baseline-normalization', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  }, 15 * 60_000);
 }
 
 export function createAnalysisLayout(payload: {

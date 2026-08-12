@@ -3,6 +3,7 @@ import {
   Alert,
   Badge,
   Button,
+  Checkbox,
   Collapse,
   ColorInput,
   Group,
@@ -18,18 +19,20 @@ import {
   Stack,
   Switch,
   Table,
+  TagsInput,
   Text,
   TextInput,
   Title,
   Tooltip,
 } from '@mantine/core';
 import { notifications } from '@mantine/notifications';
-import { ArrowDown, ArrowUp, Check, ChevronDown, ChevronRight, Film, Flame, Image, Info, Pause, Pencil, Play, Plus, RefreshCw, RotateCcw, Save, Search, SlidersHorizontal, Trash2, Upload } from 'lucide-react';
+import { Activity, ArrowDown, ArrowUp, Check, ChevronDown, ChevronRight, Download, Film, Flame, Image, Info, Pause, Pencil, Play, Plus, RefreshCw, RotateCcw, Save, Search, SlidersHorizontal, Trash2, Upload } from 'lucide-react';
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type React from 'react';
 
 import {
   abortHeatmapRange,
+  calculateBaselineNormalization,
   createAnalysisLayout,
   createHeatmap,
   createHeatmapRange,
@@ -58,6 +61,8 @@ import { formatValue } from '../methods/utils';
 import { datasetResolutions, formatResolution, orderedGraphNodes, stepDetail } from '../training/graph';
 import type {
   AnalysisLayout,
+  BaselineAnalysisRegion,
+  BaselineNormalizationResult,
   HeatmapRangeRun,
   HeatmapRun,
   HeatmapRunSummary,
@@ -145,6 +150,19 @@ type AnalysisPlot = PlotDraft & {
   heatmapFps?: number;
   heatmapScaleMode?: 'per_frame' | 'shared';
   heatmapDisplaySize?: number;
+  baselineAnalysis?: BaselineAnalysisConfig;
+  detailSubtitle?: string;
+};
+
+type BaselineAnalysisConfig = {
+  baselineRegions: BaselineAnalysisRegion[];
+  analysisRegions: BaselineAnalysisRegion[];
+  selectedRunIds: string[];
+  stageIndex: number;
+  normalization: 'classic' | 'robust';
+  thresholds: number[];
+  result?: BaselineNormalizationResult;
+  stale?: boolean;
 };
 
 type TimeSeriesHeatmapDraft = {
@@ -205,6 +223,7 @@ type PlotPreview = {
 
 type AutomaticPlotMetadata = {
   title: string;
+  summaryLine: string;
   detailLines: string[];
 };
 
@@ -969,12 +988,30 @@ function automaticPlotMetadata(plot: AnalysisPlot, testingRuns: TestingRun[]): A
     }
   }
 
-  return { title: `${modelPart} · ${datasetPart} · ${roiPart}`, detailLines };
+  const summaryLine = plot.plotType === 'timeseries'
+    ? `${scoreSeriesLabel(plot.scoreSeries)} · ${artifactTimestamp(plot.start)} – ${artifactTimestamp(plot.end)}`
+    : plot.heatmapMode === 'single'
+      ? `Single heatmap · ${artifactTimestamp(plot.timestamp ?? plot.start)}`
+      : `Heatmap video · ${artifactTimestamp(plot.start)} – ${artifactTimestamp(plot.end)}`;
+  return { title: `${modelPart} · ${datasetPart} · ${roiPart}`, summaryLine, detailLines };
 }
 
 function withAutomaticPlotMetadata(plot: AnalysisPlot, testingRuns: TestingRun[]): AnalysisPlot {
   const metadata = automaticPlotMetadata(plot, testingRuns);
-  return { ...plot, title: metadata.title, subtitle: metadata.detailLines.join('\n') };
+  return { ...plot, title: metadata.title, subtitle: metadata.summaryLine, detailSubtitle: metadata.detailLines.join('\n') };
+}
+
+function withBaselineFreshness(plot: AnalysisPlot, testingRuns: TestingRun[]): AnalysisPlot {
+  const analysis = plot.baselineAnalysis;
+  if (!analysis?.result) return plot;
+  const computedAt = new Date(analysis.result.computed_at).getTime();
+  const stale = analysis.stale || analysis.result.traces.some((trace) => {
+    const run = testingRuns.find((item) => item.id === trace.testing_run_id);
+    if (!run || run.status !== 'finished') return true;
+    const updatedAt = new Date(run.updated_at).getTime();
+    return Number.isFinite(updatedAt) && Number.isFinite(computedAt) && updatedAt > computedAt;
+  });
+  return stale === analysis.stale ? plot : { ...plot, baselineAnalysis: { ...analysis, stale } };
 }
 
 function numberParam(config: AnalyticsMethodConfig, key: string, fallback: number): number {
@@ -1338,6 +1375,23 @@ function TimeSeriesPlot({
       const panelCount = Math.max(1, displayPanels.length);
       const gap = 0.035;
       const panelHeight = (1 - gap * (panelCount - 1)) / panelCount;
+      const analysisPanelIndex = plot.showIntermediateAnalyticsPanels === false
+        ? 0
+        : Math.min(panelCount - 1, Math.max(0, (plot.baselineAnalysis?.stageIndex ?? -1) + 1));
+      const analysisYRef = analysisPanelIndex === 0 ? 'y' : `y${analysisPanelIndex + 1}`;
+      const resultLineShapes = (plot.baselineAnalysis?.result?.traces ?? []).flatMap((trace) => [
+        {
+          type: 'line', xref: 'x', yref: analysisYRef, x0: plot.start, x1: plot.end,
+          y0: trace.baseline.center, y1: trace.baseline.center,
+          line: { color: trace.color, width: 1.3, dash: 'dash' },
+        },
+        ...plot.baselineAnalysis!.result!.thresholds.map((threshold) => ({
+          type: 'line', xref: 'x', yref: analysisYRef, x0: plot.start, x1: plot.end,
+          y0: trace.baseline.center + threshold * trace.baseline.scale,
+          y1: trace.baseline.center + threshold * trace.baseline.scale,
+          line: { color: trace.color, width: 1, dash: 'dot' },
+        })),
+      ]);
       const nextLayout: Partial<Layout> & Record<string, unknown> = {
         uirevision: plot.id,
         showlegend: traces.length > panelCount,
@@ -1353,6 +1407,26 @@ function TimeSeriesPlot({
           gridcolor: 'rgba(128,128,128,0.15)',
         },
         margin: { l: 72, r: 24, t: 12, b: 58 },
+        shapes: [
+          ...(plot.baselineAnalysis?.baselineRegions ?? []).map((region) => ({
+            type: 'rect', xref: 'x', yref: 'paper', x0: region.start, x1: region.end, y0: 0, y1: 1,
+            fillcolor: 'rgba(34, 139, 230, 0.16)', line: { color: 'rgba(34, 139, 230, 0.55)', width: 1 }, layer: 'below',
+          })),
+          ...(plot.baselineAnalysis?.analysisRegions ?? []).map((region, index) => ({
+            type: 'rect', xref: 'x', yref: 'paper', x0: region.start, x1: region.end, y0: 0, y1: 1,
+            fillcolor: index % 2 === 0 ? 'rgba(245, 159, 0, 0.16)' : 'rgba(224, 49, 49, 0.13)',
+            line: { color: index % 2 === 0 ? 'rgba(245, 159, 0, 0.6)' : 'rgba(224, 49, 49, 0.55)', width: 1 }, layer: 'below',
+          })),
+          ...resultLineShapes,
+        ] as NonNullable<Layout['shapes']>,
+        annotations: [
+          ...(plot.baselineAnalysis?.baselineRegions ?? []).map((region) => ({
+            x: region.start, y: 1, xref: 'x', yref: 'paper', text: region.name, showarrow: false, xanchor: 'left', yanchor: 'bottom', font: { size: 10, color: '#228be6' },
+          })),
+          ...(plot.baselineAnalysis?.analysisRegions ?? []).map((region, index) => ({
+            x: region.start, y: 0.96, xref: 'x', yref: 'paper', text: region.name, showarrow: false, xanchor: 'left', yanchor: 'top', font: { size: 10, color: index % 2 === 0 ? '#f08c00' : '#e03131' },
+          })),
+        ] as NonNullable<Layout['annotations']>,
       };
       displayPanels.forEach((panel, index) => {
         const top = 1 - index * (panelHeight + gap);
@@ -1367,7 +1441,7 @@ function TimeSeriesPlot({
       });
       return nextLayout as Partial<Layout>;
     },
-    [displayPanels, selectionActive, traces.length],
+    [displayPanels, plot.baselineAnalysis, selectionActive, traces.length],
   );
 
   if (results.length === 0) {
@@ -1872,6 +1946,85 @@ function HeatmapVideo({ plot, results }: { plot: AnalysisPlot; results: Combined
   );
 }
 
+function downloadBaselineCsv(plot: AnalysisPlot) {
+  const analysis = plot.baselineAnalysis;
+  if (!analysis?.result) return;
+  const thresholds = analysis.result.thresholds;
+  const header = [
+    'trace', 'testing_run_id', 'region', 'region_start', 'region_end', 'samples',
+    'raw_mean', 'raw_max', 'signal_mean', 'signal_max', 'signal_std', 'z_mean', 'z_median', 'z_max',
+    'baseline_samples', 'baseline_mean', 'baseline_std', 'baseline_median', 'baseline_mad', 'baseline_center', 'baseline_scale',
+    ...thresholds.flatMap((threshold) => [`above_${threshold}_count`, `above_${threshold}_fraction`, `above_${threshold}_longest_seconds`]),
+  ];
+  const quote = (value: unknown) => `"${String(value ?? '').replaceAll('"', '""')}"`;
+  const rows = analysis.result.traces.flatMap((trace) => trace.regions.map((region) => {
+    const definition = analysis.analysisRegions.find((item) => item.id === region.region_id);
+    const byThreshold = new Map(region.thresholds.map((item) => [item.threshold, item]));
+    return [
+      trace.label, trace.testing_run_id, region.region_name, definition?.start ?? '', definition?.end ?? '', region.sample_count,
+      region.raw_mean, region.raw_max, region.signal_mean, region.signal_max, region.signal_std, region.z_mean, region.z_median, region.z_max,
+      trace.baseline.sample_count, trace.baseline.mean, trace.baseline.std, trace.baseline.median, trace.baseline.mad, trace.baseline.center, trace.baseline.scale,
+      ...thresholds.flatMap((threshold) => {
+        const value = byThreshold.get(threshold);
+        return [value?.sample_count ?? 0, value?.sample_fraction ?? 0, value?.longest_seconds ?? 0];
+      }),
+    ].map(quote).join(',');
+  }));
+  const blob = new Blob([[header.map(quote).join(','), ...rows].join('\n')], { type: 'text/csv;charset=utf-8' });
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement('a');
+  anchor.href = url;
+  anchor.download = `baseline-analysis-${plot.id}.csv`;
+  anchor.click();
+  URL.revokeObjectURL(url);
+}
+
+function BaselineAnalysisResultPanel({ plot }: { plot: AnalysisPlot }) {
+  const analysis = plot.baselineAnalysis;
+  const [diagnosticsOpen, setDiagnosticsOpen] = useState(false);
+  if (!analysis?.result) return null;
+  const result = analysis.result;
+  const zData: Data[] = result.traces.map((trace) => ({
+    type: 'scatter', mode: 'lines', name: trace.label, x: trace.series.map((point) => point.timestamp),
+    y: trace.series.map((point) => point.z), line: { color: trace.color, width: 1.6 },
+  } as unknown as Data));
+  const shapes = result.thresholds.map((threshold) => ({
+    type: 'line', xref: 'paper', yref: 'y', x0: 0, x1: 1, y0: threshold, y1: threshold,
+    line: { color: '#e03131', dash: 'dot', width: 1 },
+  }));
+  return (
+    <Stack gap="sm">
+      {analysis.stale && <Alert color="yellow">The saved result is stale. Recalculate to apply the current plot, regions or parameters.</Alert>}
+      {result.traces.some((trace) => trace.decimated) && <Alert color="blue">The plots are reduced to at most 8,000 points per curve. All statistics use the full selected resolution.</Alert>}
+      <Group justify="space-between">
+        <Button variant="subtle" size="compact-sm" rightSection={diagnosticsOpen ? <ChevronDown size={14} /> : <ChevronRight size={14} />} onClick={() => setDiagnosticsOpen((value) => !value)}>
+          Z-score and results
+        </Button>
+        <Button variant="default" size="compact-sm" leftSection={<Download size={14} />} onClick={() => downloadBaselineCsv(plot)}>Export CSV</Button>
+      </Group>
+      <Collapse in={diagnosticsOpen}>
+        <Stack gap="md">
+          <PlotlyChart data={zData} layout={{ hovermode: 'x unified', shapes: shapes as NonNullable<Layout['shapes']>, xaxis: { type: 'date', title: { text: 'Time' } }, yaxis: { title: { text: 'Baseline z-score' }, zeroline: true }, margin: { l: 65, r: 20, t: 12, b: 48 } }} height={330} />
+          <Text fw={600}>Baseline statistics</Text>
+          <ScrollArea>
+            <Table striped withTableBorder verticalSpacing="xs">
+              <Table.Thead><Table.Tr><Table.Th>Curve</Table.Th><Table.Th>Samples</Table.Th><Table.Th>Mean</Table.Th><Table.Th>Std</Table.Th><Table.Th>Median</Table.Th><Table.Th>MAD</Table.Th><Table.Th>Center</Table.Th><Table.Th>Scale</Table.Th></Table.Tr></Table.Thead>
+              <Table.Tbody>{result.traces.map((trace) => <Table.Tr key={trace.testing_run_id}><Table.Td>{trace.label}</Table.Td><Table.Td>{trace.baseline.sample_count}</Table.Td><Table.Td>{formatMetric(trace.baseline.mean)}</Table.Td><Table.Td>{formatMetric(trace.baseline.std)}</Table.Td><Table.Td>{formatMetric(trace.baseline.median)}</Table.Td><Table.Td>{formatMetric(trace.baseline.mad)}</Table.Td><Table.Td>{formatMetric(trace.baseline.center)}</Table.Td><Table.Td>{formatMetric(trace.baseline.scale)}</Table.Td></Table.Tr>)}</Table.Tbody>
+            </Table>
+          </ScrollArea>
+          <Text fw={600}>Analysis regions</Text>
+          <ScrollArea>
+            <Table striped withTableBorder verticalSpacing="xs">
+              <Table.Thead><Table.Tr><Table.Th>Curve</Table.Th><Table.Th>Region</Table.Th><Table.Th>N</Table.Th><Table.Th>Raw mean / max</Table.Th><Table.Th>Signal mean / max / std</Table.Th><Table.Th>Z mean / median / max</Table.Th>{result.thresholds.map((threshold) => <Table.Th key={threshold}>&gt; {threshold}σ</Table.Th>)}</Table.Tr></Table.Thead>
+              <Table.Tbody>{result.traces.flatMap((trace) => trace.regions.map((region) => <Table.Tr key={`${trace.testing_run_id}:${region.region_id}`}><Table.Td>{trace.label}</Table.Td><Table.Td>{region.region_name}</Table.Td><Table.Td>{region.sample_count}</Table.Td><Table.Td>{formatMetric(region.raw_mean)} / {formatMetric(region.raw_max)}</Table.Td><Table.Td>{formatMetric(region.signal_mean)} / {formatMetric(region.signal_max)} / {formatMetric(region.signal_std)}</Table.Td><Table.Td>{formatMetric(region.z_mean)} / {formatMetric(region.z_median)} / {formatMetric(region.z_max)}</Table.Td>{region.thresholds.map((threshold) => <Table.Td key={threshold.threshold}>{threshold.sample_count} ({(threshold.sample_fraction * 100).toFixed(1)}%) · {threshold.longest_seconds.toFixed(1)}s</Table.Td>)}</Table.Tr>))}</Table.Tbody>
+            </Table>
+          </ScrollArea>
+        </Stack>
+      </Collapse>
+    </Stack>
+  );
+}
+
 const AnalysisPlotCard = memo(function AnalysisPlotCard({
   plot,
   results,
@@ -1904,6 +2057,37 @@ const AnalysisPlotCard = memo(function AnalysisPlotCard({
   onHeatmapSelection: (mode: HeatmapMode, start: string, end: string) => void;
 }) {
   const [heatmapSelectionActive, setHeatmapSelectionActive] = useState(false);
+  const [baselineSelectionActive, setBaselineSelectionActive] = useState(false);
+  const [baselineRegionKind, setBaselineRegionKind] = useState<'baseline' | 'analysis'>('baseline');
+  const [detailsOpen, setDetailsOpen] = useState(false);
+  const [calculatingBaseline, setCalculatingBaseline] = useState(false);
+  const baselineTraces = useMemo<PlotTraceConfig[]>(() => plot.traces?.length ? plot.traces : plot.sources.map((source, index) => ({
+    ...source,
+    metric: 'score',
+    aggregation: 'mean',
+    modelLabel: `Testing run #${source.testingRunId}`,
+    legendLabel: `Testing run #${source.testingRunId}`,
+    color: TRACE_COLORS[index % TRACE_COLORS.length],
+  })), [plot.sources, plot.traces]);
+
+  const defaultBaselineConfig = useCallback((): BaselineAnalysisConfig => ({
+    baselineRegions: [],
+    analysisRegions: [],
+    selectedRunIds: baselineTraces.map((trace) => trace.testingRunId),
+    stageIndex: plot.timeseriesAnalytics.length - 1,
+    normalization: 'classic',
+    thresholds: [3, 5],
+  }), [baselineTraces, plot.timeseriesAnalytics.length]);
+  const baselineConfig = plot.baselineAnalysis ?? defaultBaselineConfig();
+  const baselineStageOptions = useMemo(() => {
+    const raw = [{ value: '-1', label: plot.timeseriesAnalytics.length === 0 ? `Input / moving average (${plot.movingAverage})` : 'Raw input' }];
+    const stages = plot.timeseriesAnalytics.map((method, index) => ({ value: String(index), label: `${index + 1}. ${analyticsDefinition(method.kind).label}` }));
+    return plot.showIntermediateAnalyticsPanels === false && stages.length > 0 ? [...raw, stages[stages.length - 1]] : [...raw, ...stages];
+  }, [plot.movingAverage, plot.showIntermediateAnalyticsPanels, plot.timeseriesAnalytics]);
+
+  const patchBaseline = useCallback((patch: Partial<BaselineAnalysisConfig>) => {
+    onPatch({ baselineAnalysis: { ...baselineConfig, ...patch, stale: baselineConfig.result ? true : baselineConfig.stale } });
+  }, [baselineConfig, onPatch]);
 
   const selectPoint = useCallback((event: PlotlyChartClick) => {
     onHeatmapSelection('single', event.timestamp, event.timestamp);
@@ -1914,6 +2098,61 @@ const AnalysisPlotCard = memo(function AnalysisPlotCard({
     onHeatmapSelection('range', event.start, event.end);
     setHeatmapSelectionActive(false);
   }, [onHeatmapSelection]);
+
+  const selectBaselineRange = useCallback((event: PlotlyChartSelection) => {
+    const startMs = new Date(event.start).getTime();
+    const endMs = new Date(event.end).getTime();
+    if (!Number.isFinite(startMs) || !Number.isFinite(endMs)) return;
+    const region: BaselineAnalysisRegion = {
+      id: crypto.randomUUID(),
+      name: baselineRegionKind === 'baseline' ? `Baseline ${baselineConfig.baselineRegions.length + 1}` : `Region ${baselineConfig.analysisRegions.length + 1}`,
+      start: startMs <= endMs ? event.start : event.end,
+      end: startMs <= endMs ? event.end : event.start,
+    };
+    patchBaseline(baselineRegionKind === 'baseline'
+      ? { baselineRegions: [...baselineConfig.baselineRegions, region] }
+      : { analysisRegions: [...baselineConfig.analysisRegions, region] });
+  }, [baselineConfig.analysisRegions, baselineConfig.baselineRegions, baselineRegionKind, patchBaseline]);
+
+  const updateRegion = useCallback((kind: 'baseline' | 'analysis', id: string, patch: Partial<BaselineAnalysisRegion>) => {
+    const key = kind === 'baseline' ? 'baselineRegions' : 'analysisRegions';
+    patchBaseline({ [key]: baselineConfig[key].map((region) => region.id === id ? { ...region, ...patch } : region) });
+  }, [baselineConfig, patchBaseline]);
+
+  const removeRegion = useCallback((kind: 'baseline' | 'analysis', id: string) => {
+    const key = kind === 'baseline' ? 'baselineRegions' : 'analysisRegions';
+    patchBaseline({ [key]: baselineConfig[key].filter((region) => region.id !== id) });
+  }, [baselineConfig, patchBaseline]);
+
+  const calculateBaseline = useCallback(async () => {
+    const traces = baselineTraces.filter((trace) => baselineConfig.selectedRunIds.includes(trace.testingRunId));
+    if (traces.length === 0 || baselineConfig.baselineRegions.length === 0 || baselineConfig.analysisRegions.length === 0) {
+      notifications.show({ color: 'yellow', title: 'Incomplete baseline analysis', message: 'Select at least one curve, one baseline and one analysis region.' });
+      return;
+    }
+    setCalculatingBaseline(true);
+    try {
+      const result = await calculateBaselineNormalization({
+        traces: traces.map((trace) => ({ testing_run_id: Number(trace.testingRunId), label: trace.legendLabel, color: trace.color, start: trace.start, end: trace.end })),
+        score_series: plot.scoreSeries,
+        moving_average: plot.movingAverage,
+        analytics_pipeline: plot.timeseriesAnalytics,
+        stage_index: baselineConfig.stageIndex,
+        sampling: plot.sampling,
+        baseline_regions: baselineConfig.baselineRegions,
+        analysis_regions: baselineConfig.analysisRegions,
+        normalization: baselineConfig.normalization,
+        thresholds: baselineConfig.thresholds,
+        max_points: ANALYSIS_MAX_POINTS,
+      });
+      onPatch({ baselineAnalysis: { ...baselineConfig, result, stale: false } });
+      notifications.show({ color: 'green', title: 'Baseline analysis complete', message: `${result.traces.length} curve${result.traces.length === 1 ? '' : 's'} calculated on full resolution.` });
+    } catch (error) {
+      notifyError('Could not calculate baseline analysis', error);
+    } finally {
+      setCalculatingBaseline(false);
+    }
+  }, [baselineConfig, baselineTraces, onPatch, plot.movingAverage, plot.sampling, plot.scoreSeries, plot.timeseriesAnalytics]);
 
   return (
     <Paper withBorder p="md" radius="sm">
@@ -1926,18 +2165,16 @@ const AnalysisPlotCard = memo(function AnalysisPlotCard({
                 {plot.plotType === 'heatmap' ? 'Heatmap' : 'Time series'}
               </Badge>
             </Group>
-            {plot.subtitle && (
-              <Stack gap={1} mt={3}>
-                {plot.subtitle.split('\n').filter(Boolean).map((line, index) => (
-                  <Text key={`${index}:${line}`} size="sm" c="dimmed" style={{ overflowWrap: 'anywhere' }}>
-                    {line}
-                  </Text>
-                ))}
-              </Stack>
-            )}
+            {plot.subtitle && <Text size="sm" c="dimmed" mt={3} style={{ overflowWrap: 'anywhere' }}>{plot.subtitle}</Text>}
             <Text size="sm" c="dimmed">
               {results.length} result rows · {plotSources(plot).length} source{plotSources(plot).length === 1 ? '' : 's'}
             </Text>
+            {plot.detailSubtitle && (
+              <>
+                <Button variant="subtle" size="compact-xs" px={0} mt={2} rightSection={detailsOpen ? <ChevronDown size={13} /> : <ChevronRight size={13} />} onClick={() => setDetailsOpen((value) => !value)}>Show details</Button>
+                <Collapse in={detailsOpen}><Stack gap={1} mt={2}>{plot.detailSubtitle.split('\n').filter(Boolean).map((line, index) => <Text key={`${index}:${line}`} size="xs" c="dimmed" style={{ overflowWrap: 'anywhere' }}>{line}</Text>)}</Stack></Collapse>
+              </>
+            )}
           </div>
           <Group gap={4}>
             {plot.plotType === 'timeseries' && (
@@ -1979,9 +2216,16 @@ const AnalysisPlotCard = memo(function AnalysisPlotCard({
                   variant={heatmapSelectionActive ? 'filled' : 'subtle'}
                   color="orange"
                   aria-label={heatmapSelectionActive ? 'Cancel heatmap selection' : 'Create heatmap from plot selection'}
-                  onClick={() => setHeatmapSelectionActive((current) => !current)}
+                  onClick={() => { setHeatmapSelectionActive((current) => !current); setBaselineSelectionActive(false); }}
                 >
                   <Text span fz={17} lh={1}>🔥</Text>
+                </ActionIcon>
+              </Tooltip>
+            )}
+            {plot.plotType === 'timeseries' && (
+              <Tooltip label={baselineSelectionActive ? 'Close baseline analysis selection' : 'Mark baseline and analysis regions'}>
+                <ActionIcon variant={baselineSelectionActive ? 'filled' : 'subtle'} color="violet" aria-label="Baseline-normalized region analysis" onClick={() => { setBaselineSelectionActive((current) => !current); setHeatmapSelectionActive(false); }}>
+                  <Activity size={17} />
                 </ActionIcon>
               </Tooltip>
             )}
@@ -2012,13 +2256,52 @@ const AnalysisPlotCard = memo(function AnalysisPlotCard({
             Zoom or pan to the desired section first. Then click a data point for a single heatmap, or drag horizontally to create a heatmap video. Click 🔥 again to cancel.
           </Alert>
         )}
+        {baselineSelectionActive && (
+          <Paper withBorder p="sm" radius="sm">
+            <Stack gap="sm">
+              <Group justify="space-between" wrap="wrap">
+                <div><Text fw={600}>Baseline-normalized region analysis</Text><Text size="xs" c="dimmed">Choose a region type, then drag horizontally in the plot. Markings appear immediately.</Text></div>
+                <Select size="xs" w={170} value={baselineRegionKind} data={[{ value: 'baseline', label: 'Add baseline' }, { value: 'analysis', label: 'Add analysis region' }]} onChange={(value) => setBaselineRegionKind(value === 'analysis' ? 'analysis' : 'baseline')} />
+              </Group>
+              {(baselineConfig.baselineRegions.length > 0 || baselineConfig.analysisRegions.length > 0) && (
+                <Stack gap="xs">
+                  {([['baseline', baselineConfig.baselineRegions], ['analysis', baselineConfig.analysisRegions]] as const).flatMap(([kind, regions]) => regions.map((region) => (
+                    <SimpleGrid key={region.id} cols={{ base: 1, md: 4 }} spacing="xs">
+                      <TextInput size="xs" label={kind === 'baseline' ? 'Baseline name' : 'Region name'} value={region.name} onChange={(event) => updateRegion(kind, region.id, { name: event.currentTarget.value })} />
+                      <DateTime24Input label="Start" value={toDateTimeLocal(region.start)} onChange={(value) => updateRegion(kind, region.id, { start: value })} />
+                      <DateTime24Input label="End" value={toDateTimeLocal(region.end)} onChange={(value) => updateRegion(kind, region.id, { end: value })} />
+                      <Group align="flex-end"><ActionIcon color="red" variant="subtle" aria-label={`Remove ${region.name}`} onClick={() => removeRegion(kind, region.id)}><Trash2 size={16} /></ActionIcon></Group>
+                    </SimpleGrid>
+                  )))}
+                </Stack>
+              )}
+              <Text size="xs" fw={600}>Curves</Text>
+              <Group gap="md">{baselineTraces.map((trace) => <Checkbox key={trace.testingRunId} label={trace.legendLabel} checked={baselineConfig.selectedRunIds.includes(trace.testingRunId)} onChange={(event) => patchBaseline({ selectedRunIds: event.currentTarget.checked ? [...baselineConfig.selectedRunIds, trace.testingRunId] : baselineConfig.selectedRunIds.filter((id) => id !== trace.testingRunId) })} />)}</Group>
+              <SimpleGrid cols={{ base: 1, sm: 3 }}>
+                <Select label="Signal stage" value={String(baselineConfig.stageIndex)} data={baselineStageOptions} onChange={(value) => patchBaseline({ stageIndex: Number(value ?? -1) })} />
+                <Select label="Normalization" value={baselineConfig.normalization} data={[{ value: 'classic', label: 'Classic (mean / std)' }, { value: 'robust', label: 'Robust (median / MAD)' }]} onChange={(value) => patchBaseline({ normalization: value === 'robust' ? 'robust' : 'classic' })} />
+                <TagsInput
+                  label="Z thresholds"
+                  description="Enter a positive value and press Enter"
+                  value={baselineConfig.thresholds.map(String)}
+                  onChange={(items) => {
+                    const values = [...new Set(items.map(Number).filter((value) => Number.isFinite(value) && value > 0))].sort((left, right) => left - right);
+                    if (values.length) patchBaseline({ thresholds: values });
+                  }}
+                  splitChars={[',', ' ']}
+                />
+              </SimpleGrid>
+              <Group justify="flex-end"><Button loading={calculatingBaseline} onClick={calculateBaseline} leftSection={<Activity size={16} />}>Calculate baseline analysis</Button></Group>
+            </Stack>
+          </Paper>
+        )}
         {plot.plotType === 'timeseries' ? (
           <TimeSeriesPlot
             plot={plot}
             results={results}
-            selectionActive={heatmapSelectionActive}
-            onPointClick={selectPoint}
-            onRangeSelected={selectRange}
+            selectionActive={heatmapSelectionActive || baselineSelectionActive}
+            onPointClick={heatmapSelectionActive ? selectPoint : undefined}
+            onRangeSelected={heatmapSelectionActive ? selectRange : baselineSelectionActive ? selectBaselineRange : undefined}
           />
         ) : plot.heatmapMode === 'range' ? (
           <HeatmapVideo plot={plot} results={results} />
@@ -2032,6 +2315,7 @@ const AnalysisPlotCard = memo(function AnalysisPlotCard({
             ensureHeatmap={ensureHeatmap}
           />
         )}
+        {plot.plotType === 'timeseries' && <BaselineAnalysisResultPanel plot={plot} />}
       </Stack>
     </Paper>
   );
@@ -2306,7 +2590,7 @@ function defaultDraft(): PlotDraft {
 }
 
 type AnalysisBoardLayout = {
-  version: 1 | 2;
+  version: 1 | 2 | 3;
   draft: PlotDraft;
   plots: AnalysisPlot[];
   selectedPipelineId: string | null;
@@ -2383,6 +2667,30 @@ function restoreTraces(value: unknown): PlotTraceConfig[] {
   }).filter((trace) => trace.testingRunId);
 }
 
+function restoreBaselineRegions(value: unknown): BaselineAnalysisRegion[] {
+  if (!Array.isArray(value)) return [];
+  return value.filter(isRecord).map((region) => ({
+    id: String(region.id ?? crypto.randomUUID()),
+    name: String(region.name ?? 'Region'),
+    start: String(region.start ?? ''),
+    end: String(region.end ?? ''),
+  })).filter((region) => region.start && region.end);
+}
+
+function restoreBaselineAnalysis(value: unknown): BaselineAnalysisConfig | undefined {
+  if (!isRecord(value)) return undefined;
+  return {
+    baselineRegions: restoreBaselineRegions(value.baselineRegions),
+    analysisRegions: restoreBaselineRegions(value.analysisRegions),
+    selectedRunIds: Array.isArray(value.selectedRunIds) ? value.selectedRunIds.map(String) : [],
+    stageIndex: valueAsNumber(value.stageIndex as string | number, -1),
+    normalization: value.normalization === 'robust' ? 'robust' : 'classic',
+    thresholds: Array.isArray(value.thresholds) ? value.thresholds.map(Number).filter((item) => Number.isFinite(item) && item > 0) : [3, 5],
+    result: isRecord(value.result) ? value.result as BaselineNormalizationResult : undefined,
+    stale: typeof value.stale === 'boolean' ? value.stale : false,
+  };
+}
+
 function restorePlots(value: unknown): AnalysisPlot[] {
   if (!Array.isArray(value)) return [];
   return value.filter(isRecord).map((plot) => {
@@ -2401,6 +2709,7 @@ function restorePlots(value: unknown): AnalysisPlot[] {
       heatmapDisplaySize: plot.heatmapDisplaySize === null || plot.heatmapDisplaySize === undefined
         ? DEFAULT_HEATMAP_DISPLAY_SIZE
         : valueAsNumber(plot.heatmapDisplaySize as string | number, DEFAULT_HEATMAP_DISPLAY_SIZE),
+      baselineAnalysis: restoreBaselineAnalysis(plot.baselineAnalysis),
     };
   });
 }
@@ -2770,7 +3079,7 @@ export function AnalysisPage({ active = true }: { active?: boolean }) {
 
   function buildBoardLayout(): AnalysisBoardLayout {
     return {
-      version: 2,
+      version: 3,
       draft,
       plots: plots.map((plot) => withAutomaticPlotMetadata(plot, testingRuns)),
       selectedPipelineId,
@@ -3453,6 +3762,9 @@ export function AnalysisPage({ active = true }: { active?: boolean }) {
       ...plotPreview.plot,
       id: editingPlot?.plot.id ?? crypto.randomUUID(),
       timestamp: plotPreview.plot.timestamp ?? availableResults[0]?.timestamp ?? plotPreview.traces[0]?.timestamp ?? null,
+      baselineAnalysis: editingPlot?.plot.baselineAnalysis
+        ? { ...editingPlot.plot.baselineAnalysis, stale: true }
+        : plotPreview.plot.baselineAnalysis,
     }, testingRuns);
     setPlots((current) => {
       if (!editingPlot) return [...current, nextPlot];
@@ -4487,13 +4799,13 @@ export function AnalysisPage({ active = true }: { active?: boolean }) {
                               {plotPreviewStale && <Badge color="yellow" variant="light">Preview stale</Badge>}
                             </Group>
                             <Text size="sm" fw={600} style={{ overflowWrap: 'anywhere' }}>{plotPreview.title}</Text>
-                            <Stack gap={1} mt={2}>
-                              {plotPreview.subtitle.split('\n').filter(Boolean).map((line, index) => (
-                                <Text key={`${index}:${line}`} size="xs" c="dimmed" style={{ overflowWrap: 'anywhere' }}>
-                                  {line}
-                                </Text>
-                              ))}
-                            </Stack>
+                            <Text size="xs" c="dimmed" mt={2} style={{ overflowWrap: 'anywhere' }}>{plotPreview.subtitle}</Text>
+                            {plotPreview.plot.detailSubtitle && (
+                              <details style={{ marginTop: 4 }}>
+                                <summary style={{ cursor: 'pointer', fontSize: 12 }}>Show details</summary>
+                                <Stack gap={1} mt={2}>{plotPreview.plot.detailSubtitle.split('\n').filter(Boolean).map((line, index) => <Text key={`${index}:${line}`} size="xs" c="dimmed" style={{ overflowWrap: 'anywhere' }}>{line}</Text>)}</Stack>
+                              </details>
+                            )}
                           </div>
                           {plotPreviewStale && (
                             <Alert color="yellow">
@@ -4584,7 +4896,7 @@ export function AnalysisPage({ active = true }: { active?: boolean }) {
         <Stack gap="md">
           {plots.map((plot) => {
             const plotData = plotResultsById.get(plot.id) ?? { hasAllData: false, results: [] };
-            const displayPlot = withAutomaticPlotMetadata(plot, testingRuns);
+            const displayPlot = withBaselineFreshness(withAutomaticPlotMetadata(plot, testingRuns), testingRuns);
             return plotData.hasAllData ? (
               <AnalysisPlotCard
                 key={plot.id}

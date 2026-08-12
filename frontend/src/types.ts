@@ -1095,6 +1095,76 @@ export type AnalysisLayout = {
   updated_at: string;
 };
 
+export type BaselineAnalysisRegion = {
+  id: string;
+  name: string;
+  start: string;
+  end: string;
+};
+
+export type BaselineAnalysisMethod = {
+  kind: string;
+  params: Record<string, number | string | boolean>;
+};
+
+export type BaselineStatistics = {
+  sample_count: number;
+  mean: number;
+  std: number;
+  median: number;
+  mad: number;
+  center: number;
+  scale: number;
+};
+
+export type BaselineThresholdStatistics = {
+  threshold: number;
+  sample_count: number;
+  sample_fraction: number;
+  longest_seconds: number;
+};
+
+export type BaselineRegionStatistics = {
+  region_id: string;
+  region_name: string;
+  sample_count: number;
+  raw_mean: number | null;
+  raw_max: number | null;
+  signal_mean: number | null;
+  signal_max: number | null;
+  signal_std: number | null;
+  z_mean: number | null;
+  z_median: number | null;
+  z_max: number | null;
+  thresholds: BaselineThresholdStatistics[];
+};
+
+export type BaselineSeriesPoint = {
+  timestamp: string;
+  raw: number | null;
+  signal: number | null;
+  z: number | null;
+};
+
+export type BaselineTraceResult = {
+  testing_run_id: number;
+  label: string;
+  color: string;
+  fingerprint: string;
+  baseline: BaselineStatistics;
+  regions: BaselineRegionStatistics[];
+  series: BaselineSeriesPoint[];
+  total_points: number;
+  decimated: boolean;
+};
+
+export type BaselineNormalizationResult = {
+  computed_at: string;
+  normalization: 'classic' | 'robust';
+  thresholds: number[];
+  traces: BaselineTraceResult[];
+};
+
 export type OptimizationParameterSpec = {
   path: string;
   kind: 'int' | 'float' | 'categorical';

@@ -482,6 +482,126 @@ class AnalysisLayoutRead(BaseModel):
     updated_at: datetime
 
 
+class BaselineAnalysisRegion(BaseModel):
+    id: str = Field(min_length=1, max_length=128)
+    name: str = Field(min_length=1, max_length=255)
+    start: datetime
+    end: datetime
+
+    @model_validator(mode="after")
+    def validate_range(self):
+        if self.end < self.start:
+            self.start, self.end = self.end, self.start
+        return self
+
+
+class BaselineAnalysisMethod(BaseModel):
+    kind: Literal[
+        "raw", "ewma", "derivative", "smoothed_derivative", "second_derivative", "rolling_slope",
+        "rolling_median", "rolling_mad", "robust_z", "positive_exceedance", "rolling_area",
+        "rolling_mean", "rolling_max", "drawdown", "positive_slope_count", "positive_slope_fraction",
+        "rising_streak", "cusum", "page_hinkley", "evidence_score", "slope_height_ratio", "energy_ratio",
+        "snr_db", "snr_ratio", "rolling_std", "rolling_cv", "time_since_onset", "state_machine",
+    ]
+    params: dict[str, float | int | str | bool] = Field(default_factory=dict)
+
+
+class BaselineAnalysisTraceRequest(BaseModel):
+    testing_run_id: int = Field(gt=0)
+    label: str = Field(min_length=1, max_length=512)
+    color: str = Field(default="#1c7ed6", max_length=32)
+    start: datetime
+    end: datetime
+
+    @model_validator(mode="after")
+    def validate_range(self):
+        if self.end < self.start:
+            self.start, self.end = self.end, self.start
+        return self
+
+
+class BaselineNormalizationRequest(BaseModel):
+    traces: list[BaselineAnalysisTraceRequest] = Field(min_length=1, max_length=32)
+    score_series: str = Field(default="score", min_length=1, max_length=64)
+    moving_average: int = Field(default=1, ge=1, le=1_000_000)
+    analytics_pipeline: list[BaselineAnalysisMethod] = Field(default_factory=list, max_length=64)
+    stage_index: int = Field(default=-1, ge=-1)
+    sampling: int = Field(default=1, ge=1, le=1_000_000)
+    baseline_regions: list[BaselineAnalysisRegion] = Field(min_length=1, max_length=256)
+    analysis_regions: list[BaselineAnalysisRegion] = Field(min_length=1, max_length=256)
+    normalization: Literal["classic", "robust"] = "classic"
+    thresholds: list[float] = Field(default_factory=lambda: [3.0, 5.0], min_length=1, max_length=32)
+    max_points: int = Field(default=8000, ge=100, le=50_000)
+
+    @model_validator(mode="after")
+    def validate_configuration(self):
+        if self.stage_index >= len(self.analytics_pipeline):
+            raise ValueError("Selected analytics stage does not exist in the supplied pipeline.")
+        cleaned = sorted({float(value) for value in self.thresholds if math.isfinite(value) and value > 0})
+        if not cleaned:
+            raise ValueError("At least one positive finite threshold is required.")
+        self.thresholds = cleaned
+        return self
+
+
+class BaselineStatisticsRead(BaseModel):
+    sample_count: int
+    mean: float
+    std: float
+    median: float
+    mad: float
+    center: float
+    scale: float
+
+
+class BaselineThresholdStatisticsRead(BaseModel):
+    threshold: float
+    sample_count: int
+    sample_fraction: float
+    longest_seconds: float
+
+
+class BaselineRegionStatisticsRead(BaseModel):
+    region_id: str
+    region_name: str
+    sample_count: int
+    raw_mean: float | None
+    raw_max: float | None
+    signal_mean: float | None
+    signal_max: float | None
+    signal_std: float | None
+    z_mean: float | None
+    z_median: float | None
+    z_max: float | None
+    thresholds: list[BaselineThresholdStatisticsRead]
+
+
+class BaselineSeriesPointRead(BaseModel):
+    timestamp: datetime
+    raw: float | None
+    signal: float | None
+    z: float | None
+
+
+class BaselineTraceResultRead(BaseModel):
+    testing_run_id: int
+    label: str
+    color: str
+    fingerprint: str
+    baseline: BaselineStatisticsRead
+    regions: list[BaselineRegionStatisticsRead]
+    series: list[BaselineSeriesPointRead]
+    total_points: int
+    decimated: bool
+
+
+class BaselineNormalizationResponse(BaseModel):
+    computed_at: datetime
+    normalization: Literal["classic", "robust"]
+    thresholds: list[float]
+    traces: list[BaselineTraceResultRead]
+
+
 class OptimizationParameterSpec(BaseModel):
     path: str = Field(min_length=1)
     kind: Literal["int", "float", "categorical"]

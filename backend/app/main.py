@@ -34,6 +34,8 @@ from app.schemas import (
     CacheRevisionsRead,
     AnalysisLayoutCreate,
     AnalysisLayoutRead,
+    BaselineNormalizationRequest,
+    BaselineNormalizationResponse,
     HeatmapRangeRunCreate,
     HeatmapRangeRunRead,
     HeatmapRunCreate,
@@ -105,6 +107,7 @@ from app.schemas import (
 )
 from app.anomaly_detection import service as anomaly_detection_service
 from app.analysis import service as analysis_service
+from app.analysis import baseline as baseline_analysis_service
 from app.heatmap import service as heatmap_service
 from app.registry import service as registry_service
 from app.inspect import service as inspect_service
@@ -318,6 +321,16 @@ def create_app() -> FastAPI:
         if not analysis_service.delete_analysis_layout(db, layout_id):
             raise HTTPException(status_code=404, detail="Analysis layout not found.")
         return None
+
+    @app.post("/api/analysis/baseline-normalization", response_model=BaselineNormalizationResponse)
+    def api_calculate_baseline_normalization(
+        payload: BaselineNormalizationRequest,
+        db: Session = Depends(get_db),
+    ):
+        try:
+            return baseline_analysis_service.calculate(db, payload)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     @app.get("/api/anomaly-detection-runs", response_model=list[AnomalyDetectionRunSummary])
     def api_list_anomaly_detection_runs(db: Session = Depends(get_db)):
