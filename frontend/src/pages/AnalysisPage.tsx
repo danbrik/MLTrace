@@ -1131,6 +1131,46 @@ function visibleAxisRanges(
   }));
 }
 
+function rangesEqual(left: TimeSeriesAxisRange | undefined, right: TimeSeriesAxisRange): boolean {
+  return left !== undefined && left[0] === right[0] && left[1] === right[1];
+}
+
+function useVisibleAutomaticYRanges(traces: TimeSeriesTraceValues[]) {
+  const tracesRef = useRef(traces);
+  const visibleXRangeRef = useRef<TimeSeriesAxisRange | null>(null);
+  const animationFrameRef = useRef<number | null>(null);
+  const [automaticYRanges, setAutomaticYRanges] = useState<Record<string, TimeSeriesAxisRange>>(
+    () => visibleAxisRanges(traces, null),
+  );
+  tracesRef.current = traces;
+
+  const scheduleAutomaticYRanges = useCallback((xRange: TimeSeriesAxisRange | null) => {
+    // Store this synchronously so a burst of wheel/pan events always uses the
+    // newest viewport when the single queued frame is processed.
+    visibleXRangeRef.current = xRange;
+    if (animationFrameRef.current !== null) return;
+    animationFrameRef.current = window.requestAnimationFrame(() => {
+      animationFrameRef.current = null;
+      const nextRanges = visibleAxisRanges(tracesRef.current, visibleXRangeRef.current);
+      if (Object.keys(nextRanges).length === 0) return;
+      setAutomaticYRanges((current) => {
+        const changed = Object.entries(nextRanges).some(([axis, range]) => !rangesEqual(current[axis], range));
+        return changed ? { ...current, ...nextRanges } : current;
+      });
+    });
+  }, []);
+
+  useEffect(() => {
+    scheduleAutomaticYRanges(visibleXRangeRef.current);
+  }, [scheduleAutomaticYRanges, traces]);
+
+  useEffect(() => () => {
+    if (animationFrameRef.current !== null) window.cancelAnimationFrame(animationFrameRef.current);
+  }, []);
+
+  return { automaticYRanges, scheduleAutomaticYRanges };
+}
+
 function relayoutRange(event: PlotRelayoutEvent, axis: 'xaxis' | string): TimeSeriesAxisRange | null | undefined {
   const values = event as Record<string, unknown>;
   const direct = values[`${axis}.range`];
@@ -1424,9 +1464,7 @@ function TimeSeriesPlot({
   onRangeSelected?: (event: PlotlyChartSelection) => void;
 }) {
   const analyticsConfigs = plot.timeseriesAnalytics ?? [];
-  const [visibleXRange, setVisibleXRange] = useState<TimeSeriesAxisRange | null>(null);
   const [manualYRanges, setManualYRanges] = useState<Record<string, TimeSeriesAxisRange>>({});
-  const lastAutomaticYRanges = useRef<Record<string, TimeSeriesAxisRange>>({});
   const displayPanels = useMemo(() => {
     if (analyticsConfigs.length === 0) return [defaultAnalyticsConfig('raw')];
     if (plot.showIntermediateAnalyticsPanels === false) return [analyticsConfigs[analyticsConfigs.length - 1]];
@@ -1500,15 +1538,11 @@ function TimeSeriesPlot({
     const value = trace as unknown as { x?: Array<string | number | Date | null>; y?: Array<number | null>; yaxis?: string };
     return { x: value.x ?? [], y: value.y ?? [], yaxis: value.yaxis ?? 'y' };
   }), [traces]);
-  const automaticYRanges = useMemo(() => visibleAxisRanges(traceValues, visibleXRange), [traceValues, visibleXRange]);
-  const effectiveAutomaticYRanges = useMemo(() => {
-    lastAutomaticYRanges.current = { ...lastAutomaticYRanges.current, ...automaticYRanges };
-    return lastAutomaticYRanges.current;
-  }, [automaticYRanges]);
+  const { automaticYRanges, scheduleAutomaticYRanges } = useVisibleAutomaticYRanges(traceValues);
 
   const handleRelayout = useCallback((event: PlotRelayoutEvent) => {
     const nextXRange = relayoutRange(event, 'xaxis');
-    if (nextXRange !== undefined) setVisibleXRange(nextXRange);
+    if (nextXRange !== undefined) scheduleAutomaticYRanges(nextXRange);
 
     // A box zoom can report X and Y ranges together. In that case X defines the
     // visible window and Y must remain automatic. Only a pure Y-axis gesture
@@ -1535,7 +1569,7 @@ function TimeSeriesPlot({
       });
       return changed ? next : current;
     });
-  }, []);
+  }, [scheduleAutomaticYRanges]);
 
   const handleDoubleClick = useCallback((event: PlotlyChartDoubleClick): boolean => {
     const leftMargin = 72;
@@ -1568,7 +1602,7 @@ function TimeSeriesPlot({
       const gap = 0.035;
       const panelHeight = (1 - gap * (panelCount - 1)) / panelCount;
       const nextLayout: Partial<Layout> & Record<string, unknown> = {
-        uirevision: `${plot.id}:${selectionActive ? 'select' : 'navigate'}`,
+        uirevision: plot.id,
         showlegend: traces.length > panelCount,
         legend: { orientation: 'h', y: -0.18, x: 0 },
         hovermode: 'x unified',
@@ -1577,6 +1611,7 @@ function TimeSeriesPlot({
         xaxis: {
           title: { text: 'Time', font: { size: 12 } },
           type: 'date',
+          uirevision: `${plot.id}:x`,
           rangeslider: panelCount === 1 ? { thickness: 0.08 } : undefined,
           showgrid: true,
           gridcolor: 'rgba(128,128,128,0.15)',
@@ -1620,7 +1655,7 @@ function TimeSeriesPlot({
         const top = 1 - index * (panelHeight + gap);
         const bottom = top - panelHeight;
         const traceAxis = index === 0 ? 'y' : `y${index + 1}`;
-        const range = manualYRanges[traceAxis] ?? effectiveAutomaticYRanges[traceAxis];
+        const range = manualYRanges[traceAxis] ?? automaticYRanges[traceAxis];
         nextLayout[index === 0 ? 'yaxis' : `yaxis${index + 1}`] = {
           title: { text: analyticsDefinition(panel.kind).label, font: { size: 11 } },
           domain: [Math.max(0, bottom), Math.min(1, top)],
@@ -1632,12 +1667,9 @@ function TimeSeriesPlot({
           ...(range ? { range, autorange: false } : { autorange: true }),
         };
       });
-      if (visibleXRange) {
-        nextLayout.xaxis = { ...nextLayout.xaxis as object, range: visibleXRange.map((value) => new Date(value).toISOString()), autorange: false };
-      }
       return nextLayout as Partial<Layout>;
     },
-    [displayPanels, effectiveAutomaticYRanges, manualYRanges, plot.baselineAnalysis, selectionActive, traces.length, visibleXRange],
+    [automaticYRanges, displayPanels, manualYRanges, plot.baselineAnalysis, plot.id, plot.imageComparison, selectionActive, traces.length],
   );
 
   if (results.length === 0) {
@@ -2223,9 +2255,7 @@ function BaselineRegionResultPlot({
   result: BaselineNormalizationResult;
   colorByThreshold: Map<number, string>;
 }) {
-  const [visibleXRange, setVisibleXRange] = useState<TimeSeriesAxisRange | null>(null);
   const [manualYRange, setManualYRange] = useState<TimeSeriesAxisRange | null>(null);
-  const lastAutomaticYRange = useRef<TimeSeriesAxisRange | null>(null);
   const regionTraces = result.traces.flatMap((trace) => {
     const region = trace.regions.find((item) => item.region_id === definition.id);
     return region ? [{ trace, region }] : [];
@@ -2249,9 +2279,8 @@ function BaselineRegionResultPlot({
     const value = trace as unknown as { x?: Array<string | number | Date | null>; y?: Array<number | null> };
     return { x: value.x ?? [], y: value.y ?? [], yaxis: 'y' };
   });
-  const nextAutomaticYRange = visibleAxisRanges(traceValues, visibleXRange).y;
-  if (nextAutomaticYRange) lastAutomaticYRange.current = nextAutomaticYRange;
-  const effectiveYRange = manualYRange ?? lastAutomaticYRange.current;
+  const { automaticYRanges, scheduleAutomaticYRanges } = useVisibleAutomaticYRanges(traceValues);
+  const effectiveYRange = manualYRange ?? automaticYRanges.y;
   const shapes = [
     ...result.thresholds.map((threshold) => ({
       type: 'line', xref: 'paper', yref: 'y', x0: 0, x1: 1, y0: threshold, y1: threshold,
@@ -2270,21 +2299,20 @@ function BaselineRegionResultPlot({
       }));
     }),
   ];
-  const handleResultRelayout = (event: PlotRelayoutEvent) => {
+  const handleResultRelayout = useCallback((event: PlotRelayoutEvent) => {
     const xRange = relayoutRange(event, 'xaxis');
     if (xRange !== undefined) {
-      setVisibleXRange(xRange);
+      scheduleAutomaticYRanges(xRange);
       return;
     }
     const yRange = relayoutRange(event, 'yaxis');
     if (yRange) setManualYRange(yRange);
-  };
+  }, [scheduleAutomaticYRanges]);
   const handleResultDoubleClick = (event: PlotlyChartDoubleClick) => {
     if (event.x > 65 || event.y < 12 || event.y > event.height - 48) return false;
     setManualYRange(null);
     return true;
   };
-  const xRange = visibleXRange ?? [new Date(regionStart).getTime(), new Date(regionEnd).getTime()] as TimeSeriesAxisRange;
   return (
     <Paper withBorder p="sm" radius="sm">
       <Stack gap="xs">
@@ -2299,7 +2327,13 @@ function BaselineRegionResultPlot({
             data={zData}
             layout={{
               uirevision: `${plotId}:baseline-result:${definition.id}`, hovermode: 'x unified', shapes: shapes as NonNullable<Layout['shapes']>,
-              xaxis: { type: 'date', title: { text: 'Time' }, range: xRange.map((value) => new Date(value).toISOString()), autorange: false },
+              xaxis: {
+                type: 'date',
+                title: { text: 'Time' },
+                range: [regionStart, regionEnd],
+                autorange: false,
+                uirevision: `${plotId}:baseline-result:${definition.id}:x`,
+              },
               yaxis: { title: { text: 'Baseline z-score' }, zeroline: true, ...(effectiveYRange ? { range: effectiveYRange, autorange: false, uirevision: effectiveYRange.join(':') } : { autorange: true }) },
               margin: { l: 65, r: 20, t: 12, b: 48 },
               legend: { orientation: 'h' },
