@@ -1,10 +1,11 @@
 from logging.config import fileConfig
 
 from alembic import context
-from sqlalchemy import engine_from_config, pool
+from sqlalchemy import create_engine, pool
+from sqlalchemy.engine import make_url
 
 from app.config import get_settings
-from app.database import Base
+from app.database import Base, configure_sqlite_engine, engine_options
 from app import models  # noqa: F401
 
 config = context.config
@@ -32,9 +33,10 @@ def run_migrations_offline() -> None:
 
 
 def run_migrations_online() -> None:
-    configuration = config.get_section(config.config_ini_section, {})
-    configuration["sqlalchemy.url"] = database_url()
-    connectable = engine_from_config(configuration, prefix="sqlalchemy.", poolclass=pool.NullPool)
+    url = database_url()
+    connectable = create_engine(url, poolclass=pool.NullPool, **engine_options(url))
+    if make_url(url).drivername.startswith("sqlite"):
+        configure_sqlite_engine(connectable)
 
     with connectable.connect() as connection:
         context.configure(connection=connection, target_metadata=target_metadata)

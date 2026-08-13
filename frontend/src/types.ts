@@ -485,7 +485,7 @@ export type TrainingPipelineDryRun = {
   note: string | null;
 };
 
-export type TrainingRunStatus = 'queued' | 'running' | 'finished' | 'failed' | 'aborted';
+export type TrainingRunStatus = 'queued' | 'running' | 'retry_wait' | 'finished' | 'failed' | 'aborted';
 
 export type TrainingRunMetric = {
   epoch: number;
@@ -513,6 +513,18 @@ export type TrainingRun = {
   artifact_kind: string | null;
   artifact_path: string | null;
   artifact_size_bytes: number | null;
+  checkpoint_at: string | null;
+  checkpoint_epoch: number | null;
+  checkpoint_phase: string | null;
+  checkpoint_iteration: number | null;
+  checkpoint_path: string | null;
+  checkpoint_size_bytes: number | null;
+  checkpoint_signature: string | null;
+  checkpoint_warning: string | null;
+  restart_mode: 'checkpoint' | null;
+  resume_count: number;
+  auto_retry_count: number;
+  next_retry_at: string | null;
   error_message: string | null;
   training_pipeline_name: string;
   method_type: string;

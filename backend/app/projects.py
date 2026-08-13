@@ -14,7 +14,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sessionmaker
 
 from app.config import get_settings
-from app.database import project_context
+from app.database import SQLITE_BUSY_TIMEOUT_MS, configure_sqlite_engine, project_context
 
 
 class CatalogBase(DeclarativeBase):
@@ -55,7 +55,12 @@ def _root_dir() -> Path:
 
 ROOT_DIR = _root_dir()
 CATALOG_PATH = ROOT_DIR / "catalog.db"
-_catalog_engine = create_engine(f"sqlite:///{CATALOG_PATH}", connect_args={"check_same_thread": False})
+_catalog_engine = create_engine(
+    f"sqlite:///{CATALOG_PATH}",
+    connect_args={"check_same_thread": False, "timeout": SQLITE_BUSY_TIMEOUT_MS / 1000},
+    pool_pre_ping=True,
+)
+configure_sqlite_engine(_catalog_engine)
 CatalogSession = sessionmaker(autocommit=False, autoflush=False, bind=_catalog_engine)
 _migration_lock = threading.Lock()
 

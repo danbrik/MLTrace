@@ -897,6 +897,18 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=404, detail="Training run not found.")
         return run
 
+    @app.post("/api/training-runs/{run_id}/restart-from-checkpoint", response_model=TrainingRunRead)
+    def api_restart_training_run_from_checkpoint(run_id: int, db: Session = Depends(get_db)):
+        try:
+            run = training_service.restart_training_run_from_checkpoint(db, run_id)
+        except RunConflict as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        if run is None:
+            raise HTTPException(status_code=404, detail="Training run not found.")
+        return run
+
     @app.delete("/api/training-runs/{run_id}", status_code=204)
     def api_delete_training_run(run_id: int, db: Session = Depends(get_db)):
         try:

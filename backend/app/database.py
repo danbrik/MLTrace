@@ -2,9 +2,13 @@ from collections.abc import Generator, Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
 from pathlib import Path
+import sqlite3
+import time
+from typing import Callable, TypeVar
 
 from sqlalchemy import create_engine, event
 from sqlalchemy.engine import make_url
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 
 from app.config import get_settings
@@ -15,6 +19,8 @@ class Base(DeclarativeBase):
 
 
 settings = get_settings()
+SQLITE_BUSY_TIMEOUT_MS = 60_000
+_T = TypeVar("_T")
 
 
 def _url_data_dir(database_url: str) -> Path:
@@ -37,21 +43,73 @@ def engine_options(database_url: str) -> dict:
         if url.database and url.database != ":memory:":
             database_path = Path(url.database).expanduser()
             database_path.parent.mkdir(parents=True, exist_ok=True)
-        options["connect_args"] = {"check_same_thread": False}
+        options["connect_args"] = {"check_same_thread": False, "timeout": SQLITE_BUSY_TIMEOUT_MS / 1000}
     return options
+
+
+def configure_sqlite_engine(project_engine) -> None:
+    """Apply the same concurrency-safe SQLite settings to every database."""
+    @event.listens_for(project_engine, "connect")
+    def _set_sqlite_pragmas(dbapi_connection, _connection_record):  # noqa: ANN001
+        cursor = dbapi_connection.cursor()
+        # The timeout must be active before WAL is inspected or changed: the
+        # journal-mode statement itself can otherwise fail behind another writer.
+        cursor.execute(f"PRAGMA busy_timeout={SQLITE_BUSY_TIMEOUT_MS};")
+        cursor.execute("PRAGMA foreign_keys=ON;")
+        cursor.execute("PRAGMA synchronous=NORMAL;")
+        current_mode = cursor.execute("PRAGMA journal_mode;").fetchone()
+        if current_mode and str(current_mode[0]).lower() not in {"wal", "memory"}:
+            cursor.execute("PRAGMA journal_mode=WAL;")
+        cursor.close()
 
 
 def create_project_engine(database_url: str):
     project_engine = create_engine(database_url, **engine_options(database_url))
     if make_url(database_url).drivername.startswith("sqlite"):
-        @event.listens_for(project_engine, "connect")
-        def _set_sqlite_pragmas(dbapi_connection, _connection_record):  # noqa: ANN001
-            cursor = dbapi_connection.cursor()
-            cursor.execute("PRAGMA foreign_keys=ON;")
-            cursor.execute("PRAGMA journal_mode=WAL;")
-            cursor.execute("PRAGMA busy_timeout=5000;")
-            cursor.close()
+        configure_sqlite_engine(project_engine)
     return project_engine
+
+
+def is_sqlite_lock_error(exc: BaseException) -> bool:
+    """Return true only for SQLite BUSY/LOCKED failures."""
+    candidate: BaseException | None = exc
+    while candidate is not None:
+        code = getattr(candidate, "sqlite_errorcode", None)
+        if isinstance(candidate, sqlite3.Error) and code in {5, 6, 261, 262, 517, 773}:
+            return True
+        message = str(candidate).lower()
+        if isinstance(candidate, sqlite3.Error) and (
+            "database is locked" in message or "database table is locked" in message
+        ):
+            return True
+        candidate = getattr(candidate, "orig", None) or getattr(candidate, "__cause__", None)
+    return False
+
+
+def retry_session_operation(
+    operation: Callable[[Session], _T],
+    *,
+    attempts: int = 3,
+    delay_seconds: float = 1.0,
+) -> _T:
+    """Run an idempotent write using a fresh Session after every lock failure."""
+    last_error: OperationalError | None = None
+    for attempt in range(attempts):
+        db = SessionLocal()
+        try:
+            result = operation(db)
+            db.commit()
+            return result
+        except OperationalError as exc:
+            db.rollback()
+            if not is_sqlite_lock_error(exc) or attempt + 1 >= attempts:
+                raise
+            last_error = exc
+        finally:
+            db.close()
+        time.sleep(delay_seconds * (attempt + 1))
+    assert last_error is not None
+    raise last_error
 
 
 engine = create_project_engine(settings.database_url)

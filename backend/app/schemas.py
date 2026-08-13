@@ -1101,6 +1101,18 @@ class TrainingRunRead(BaseModel):
     artifact_kind: str | None
     artifact_path: str | None
     artifact_size_bytes: int | None
+    checkpoint_at: datetime | None = None
+    checkpoint_epoch: int | None = None
+    checkpoint_phase: str | None = None
+    checkpoint_iteration: int | None = None
+    checkpoint_path: str | None = None
+    checkpoint_size_bytes: int | None = None
+    checkpoint_signature: str | None = None
+    checkpoint_warning: str | None = None
+    restart_mode: Literal["checkpoint"] | None = None
+    resume_count: int = 0
+    auto_retry_count: int = 0
+    next_retry_at: datetime | None = None
     error_message: str | None
     # Denormalized pipeline snapshot (for display + filtering).
     training_pipeline_name: str

@@ -15,22 +15,36 @@ from __future__ import annotations
 
 import logging
 import math
+import json
+import os
 import threading
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import NamedTuple
 
 import numpy as np
 
 from app import models
-from app.database import SessionLocal, data_dir
+from app.database import SessionLocal, data_dir, is_sqlite_lock_error, retry_session_operation
 from app.logging_setup import log_device_diagnostics
 from app.metrics.ssim import ssim_loss_torch
 from app.modeling.fast_anogan import build_fast_anogan_modules, fast_anogan_forward
 from app.modeling.forward import build_sequential_modules, build_spatiotemporal_modules
 from app.preprocessing.pipeline import CompiledPreprocessingPipeline, ImageLoadError, compile_pipeline
 from app.schemas import PreprocessingGraph
+from app.training.checkpoints import (
+    FAST_ANOGAN_CHECKPOINT_INTERVAL,
+    atomic_torch_save,
+    capture_rng_state,
+    load_checkpoint,
+    persist_training_progress,
+    restore_rng_state,
+    remove_checkpoint,
+    save_training_checkpoint,
+    source_signature,
+    trim_metrics_after_checkpoint,
+)
 
 logger = logging.getLogger("mltrace.training")
 
@@ -41,6 +55,8 @@ CPU_GRADIENT_MAX_PIXELS = 512 * 512
 
 # Cap on skipped-image paths persisted on the run row; the count stays exact.
 _MAX_SKIPPED_PATHS = 200
+_LOCK_RETRY_DELAY_MINUTES = 5
+_MAX_AUTOMATIC_LOCK_RETRIES = 3
 
 
 class _SkippedSample(NamedTuple):
@@ -461,6 +477,7 @@ def train_gradient(
     """
     import torch
     from torch.utils.data import DataLoader, Subset
+    metadata_db = None if db.info.get("database_url") else db
 
     if not image_paths:
         raise ValueError("Training set produced no images to train on.")
@@ -501,7 +518,7 @@ def train_gradient(
     run.device = f"GPU:{run.gpu_index}" if device.type == "cuda" and run.gpu_index is not None else "CPU"
     run.epochs_total = epochs
     run.image_count = sample_count
-    db.commit()
+    _commit_noncritical(db, run.id, "setup")
     log_device_diagnostics(logger, run.gpu_index)
     _guard_large_cpu_gradient_training(configuration, sample_count=sample_count, device_type=device.type)
 
@@ -584,6 +601,37 @@ def train_gradient(
     scaler = torch.amp.GradScaler("cuda", enabled=use_amp)
     best_stop_metric: float | None = None
     epochs_without_improvement = 0
+    best_val_loss = run.best_val_loss
+    skipped_paths: set[str] = set(skipped_paths)
+    signature = source_signature(configuration, graph, training_parameters, image_paths, {"shuffle": run.shuffle})
+    start_epoch = 1
+    accumulated_elapsed = 0.0
+    if run.restart_mode == "checkpoint" and run.checkpoint_path:
+        checkpoint = load_checkpoint(torch, run.checkpoint_path, signature)
+        model.load_state_dict(checkpoint["model_state_dict"])
+        optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+        scaler.load_state_dict(checkpoint["scaler_state_dict"])
+        best_stop_metric = checkpoint.get("best_stop_metric")
+        epochs_without_improvement = int(checkpoint.get("epochs_without_improvement", 0))
+        best_val_loss = checkpoint.get("best_val_loss")
+        skipped_paths.update(checkpoint.get("skipped_paths", []))
+        completed_epoch = int(checkpoint["epoch"])
+        accumulated_elapsed = float(checkpoint.get("elapsed_seconds", 0.0))
+        start_epoch = completed_epoch + 1
+        if early_stopping_enabled and epochs_without_improvement >= early_stopping_patience:
+            start_epoch = epochs + 1
+        trim_metrics_after_checkpoint(run.id, completed_epoch, db=metadata_db)
+        persist_training_progress(
+            run.id,
+            epoch=completed_epoch,
+            train_loss=checkpoint.get("train_loss"),
+            val_loss=checkpoint.get("val_loss"),
+            best_val_loss=best_val_loss,
+            db=metadata_db,
+        )
+        restore_rng_state(torch, checkpoint.get("rng_state"))
+        logger.info("Training run %s resumed from epoch %s", run.id, completed_epoch)
+    training_started = time.perf_counter()
 
     def compute_loss(xb):
         recon, extra = model(xb)
@@ -594,7 +642,7 @@ def train_gradient(
             loss = loss + kl_weight * kl
         return loss
 
-    for epoch in range(1, epochs + 1):
+    for epoch in range(start_epoch, epochs + 1):
         if abort_event.is_set():
             raise AbortedError()
 
@@ -696,21 +744,6 @@ def train_gradient(
                     val_batches += 1
                 val_loss = val_total / max(1, val_batches)
 
-        db.add(
-            models.TrainingRunMetric(
-                training_run_id=run.id, epoch=epoch, train_loss=train_loss, val_loss=val_loss
-            )
-        )
-        run.epochs_completed = epoch
-        run.train_loss = train_loss
-        run.val_loss = val_loss
-        if val_loss is not None and (run.best_val_loss is None or val_loss < run.best_val_loss):
-            run.best_val_loss = val_loss
-        db.commit()
-        logger.info(
-            "epoch %s/%s train_loss=%.5f val_loss=%s",
-            epoch, epochs, train_loss, f"{val_loss:.5f}" if val_loss is not None else "n/a",
-        )
         if early_stopping_enabled:
             stop_metric = val_loss if val_loss is not None else train_loss
             if best_stop_metric is None or stop_metric < best_stop_metric:
@@ -725,6 +758,45 @@ def train_gradient(
                     stop_metric,
                     best_stop_metric,
                 )
+        if val_loss is not None and (best_val_loss is None or val_loss < best_val_loss):
+            best_val_loss = val_loss
+        save_training_checkpoint(
+            torch,
+            run.id,
+            artifact_path.parent,
+            signature,
+            {
+                "kind": "gradient",
+                "epoch": epoch,
+                "model_state_dict": model.state_dict(),
+                "optimizer_state_dict": optimizer.state_dict(),
+                "scaler_state_dict": scaler.state_dict(),
+                "best_stop_metric": best_stop_metric,
+                "epochs_without_improvement": epochs_without_improvement,
+                "best_val_loss": best_val_loss,
+                "train_loss": train_loss,
+                "val_loss": val_loss,
+                "elapsed_seconds": accumulated_elapsed + time.perf_counter() - training_started,
+                "skipped_paths": sorted(skipped_paths)[:_MAX_SKIPPED_PATHS],
+                "rng_state": capture_rng_state(torch),
+            },
+            epoch=epoch,
+            phase="epoch",
+            metadata_db=metadata_db,
+        )
+        persist_training_progress(
+            run.id,
+            epoch=epoch,
+            train_loss=train_loss,
+            val_loss=val_loss,
+            best_val_loss=best_val_loss,
+            db=metadata_db,
+        )
+        logger.info(
+            "epoch %s/%s train_loss=%.5f val_loss=%s",
+            epoch, epochs, train_loss, f"{val_loss:.5f}" if val_loss is not None else "n/a",
+        )
+        if early_stopping_enabled:
             if epochs_without_improvement >= early_stopping_patience:
                 logger.info(
                     "early stopping triggered at epoch %s/%s using %s loss",
@@ -734,10 +806,10 @@ def train_gradient(
                 )
                 break
 
-    torch.save(model.state_dict(), artifact_path)
+    atomic_torch_save(torch, model.state_dict(), artifact_path)
     run.skipped_image_count = len(skipped_paths)
     run.skipped_images = sorted(skipped_paths)[:_MAX_SKIPPED_PATHS]
-    db.commit()
+    _commit_noncritical(db, run.id, "skipped-image summary")
     return sample_count
 
 
@@ -754,6 +826,7 @@ def train_spatiotemporal_gradient(
     """Train a 3D spatio-temporal autoencoder on lazy clip samples."""
     import torch
     from torch.utils.data import DataLoader, Subset
+    metadata_db = None if db.info.get("database_url") else db
 
     sample_count = len(clips)
     if not sample_count:
@@ -783,7 +856,7 @@ def train_spatiotemporal_gradient(
     run.device = f"GPU:{run.gpu_index}" if device.type == "cuda" and run.gpu_index is not None else "CPU"
     run.epochs_total = epochs
     run.image_count = sample_count
-    db.commit()
+    _commit_noncritical(db, run.id, "setup")
     log_device_diagnostics(logger, run.gpu_index)
 
     compiled_probe = compile_pipeline(graph)
@@ -828,6 +901,37 @@ def train_spatiotemporal_gradient(
     scaler = torch.amp.GradScaler("cuda", enabled=use_amp)
     best_stop_metric: float | None = None
     epochs_without_improvement = 0
+    best_val_loss = run.best_val_loss
+    clip_sources = [frame.file_path for clip in clips for frame in (*clip.input_frames, *clip.future_frames)]
+    signature = source_signature(configuration, graph, training_parameters, clip_sources, {"shuffle": run.shuffle})
+    start_epoch = 1
+    accumulated_elapsed = 0.0
+    if run.restart_mode == "checkpoint" and run.checkpoint_path:
+        checkpoint = load_checkpoint(torch, run.checkpoint_path, signature)
+        model.load_state_dict(checkpoint["model_state_dict"])
+        optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+        scaler.load_state_dict(checkpoint["scaler_state_dict"])
+        best_stop_metric = checkpoint.get("best_stop_metric")
+        epochs_without_improvement = int(checkpoint.get("epochs_without_improvement", 0))
+        best_val_loss = checkpoint.get("best_val_loss")
+        skipped_paths.update(checkpoint.get("skipped_paths", []))
+        completed_epoch = int(checkpoint["epoch"])
+        accumulated_elapsed = float(checkpoint.get("elapsed_seconds", 0.0))
+        start_epoch = completed_epoch + 1
+        if early_stopping_enabled and epochs_without_improvement >= early_stopping_patience:
+            start_epoch = epochs + 1
+        trim_metrics_after_checkpoint(run.id, completed_epoch, db=metadata_db)
+        persist_training_progress(
+            run.id,
+            epoch=completed_epoch,
+            train_loss=checkpoint.get("train_loss"),
+            val_loss=checkpoint.get("val_loss"),
+            best_val_loss=best_val_loss,
+            db=metadata_db,
+        )
+        restore_rng_state(torch, checkpoint.get("rng_state"))
+        logger.info("STAE training run %s resumed from epoch %s", run.id, completed_epoch)
+    training_started = time.perf_counter()
 
     def compute_loss(xb, y_future, epoch: int):
         reconstruction, extra = model(xb)
@@ -845,7 +949,7 @@ def train_spatiotemporal_gradient(
             loss = loss + _prediction_weight_for_epoch(training_parameters, epoch, epochs) * pred_loss
         return loss, rec_loss, pred_loss
 
-    for epoch in range(1, epochs + 1):
+    for epoch in range(start_epoch, epochs + 1):
         if abort_event.is_set():
             raise AbortedError()
         model.train()
@@ -889,14 +993,6 @@ def train_spatiotemporal_gradient(
                     val_batches += 1
                 val_loss = val_total / max(1, val_batches)
 
-        db.add(models.TrainingRunMetric(training_run_id=run.id, epoch=epoch, train_loss=train_loss, val_loss=val_loss))
-        run.epochs_completed = epoch
-        run.train_loss = train_loss
-        run.val_loss = val_loss
-        if val_loss is not None and (run.best_val_loss is None or val_loss < run.best_val_loss):
-            run.best_val_loss = val_loss
-        db.commit()
-        logger.info("STAE epoch %s/%s train_loss=%.5f val_loss=%s", epoch, epochs, train_loss, f"{val_loss:.5f}" if val_loss else "n/a")
         if early_stopping_enabled:
             stop_metric = val_loss if val_loss is not None else train_loss
             if best_stop_metric is None or stop_metric < best_stop_metric:
@@ -904,14 +1000,50 @@ def train_spatiotemporal_gradient(
                 epochs_without_improvement = 0
             else:
                 epochs_without_improvement += 1
+        if val_loss is not None and (best_val_loss is None or val_loss < best_val_loss):
+            best_val_loss = val_loss
+        save_training_checkpoint(
+            torch,
+            run.id,
+            artifact_path.parent,
+            signature,
+            {
+                "kind": "stae",
+                "epoch": epoch,
+                "model_state_dict": model.state_dict(),
+                "optimizer_state_dict": optimizer.state_dict(),
+                "scaler_state_dict": scaler.state_dict(),
+                "best_stop_metric": best_stop_metric,
+                "epochs_without_improvement": epochs_without_improvement,
+                "best_val_loss": best_val_loss,
+                "train_loss": train_loss,
+                "val_loss": val_loss,
+                "elapsed_seconds": accumulated_elapsed + time.perf_counter() - training_started,
+                "skipped_paths": sorted(skipped_paths)[:_MAX_SKIPPED_PATHS],
+                "rng_state": capture_rng_state(torch),
+            },
+            epoch=epoch,
+            phase="epoch",
+            metadata_db=metadata_db,
+        )
+        persist_training_progress(
+            run.id,
+            epoch=epoch,
+            train_loss=train_loss,
+            val_loss=val_loss,
+            best_val_loss=best_val_loss,
+            db=metadata_db,
+        )
+        logger.info("STAE epoch %s/%s train_loss=%.5f val_loss=%s", epoch, epochs, train_loss, f"{val_loss:.5f}" if val_loss else "n/a")
+        if early_stopping_enabled:
             if epochs_without_improvement >= early_stopping_patience:
                 logger.info("STAE early stopping triggered at epoch %s/%s", epoch, epochs)
                 break
 
-    torch.save(model.state_dict(), artifact_path)
+    atomic_torch_save(torch, model.state_dict(), artifact_path)
     run.skipped_image_count = len(skipped_paths)
     run.skipped_images = sorted(skipped_paths)[:_MAX_SKIPPED_PATHS]
-    db.commit()
+    _commit_noncritical(db, run.id, "skipped-image summary")
     return sample_count
 
 
@@ -928,6 +1060,7 @@ def train_fast_anogan(
     """Train paper-near fastAnoGAN: WGAN-GP first, then fixed-G/D encoder training."""
     import torch
     from torch.utils.data import DataLoader
+    metadata_db = None if db.info.get("database_url") else db
 
     if not image_paths:
         raise ValueError("Training set produced no images to train fastAnoGAN on.")
@@ -951,7 +1084,7 @@ def train_fast_anogan(
     run.device = f"GPU:{run.gpu_index}" if device.type == "cuda" and run.gpu_index is not None else "CPU"
     run.epochs_total = wgan_iterations + encoder_iterations
     run.image_count = sample_count
-    db.commit()
+    _commit_noncritical(db, run.id, "setup")
     log_device_diagnostics(logger, run.gpu_index)
     _guard_large_cpu_gradient_training(configuration, sample_count=sample_count, device_type=device.type)
 
@@ -994,6 +1127,45 @@ def train_fast_anogan(
     critic_optimizer = torch.optim.Adam(critic.parameters(), lr=wgan_lr, betas=(0.0, 0.9))
     encoder_optimizer = torch.optim.RMSprop(encoder.parameters(), lr=encoder_lr)
     scaler = torch.amp.GradScaler("cuda", enabled=use_amp)
+    signature = source_signature(configuration, graph, training_parameters, image_paths, {"shuffle": run.shuffle})
+    resume_phase = "wgan"
+    wgan_start = 1
+    encoder_start_iteration = 1
+    accumulated_elapsed = 0.0
+    resumed_train_loss: float | None = None
+    resumed_val_loss: float | None = None
+    if run.restart_mode == "checkpoint" and run.checkpoint_path:
+        checkpoint = load_checkpoint(torch, run.checkpoint_path, signature)
+        generator.load_state_dict(checkpoint["generator_state_dict"])
+        critic.load_state_dict(checkpoint["critic_state_dict"])
+        encoder.load_state_dict(checkpoint["encoder_state_dict"])
+        gen_optimizer.load_state_dict(checkpoint["gen_optimizer_state_dict"])
+        critic_optimizer.load_state_dict(checkpoint["critic_optimizer_state_dict"])
+        encoder_optimizer.load_state_dict(checkpoint["encoder_optimizer_state_dict"])
+        scaler.load_state_dict(checkpoint["scaler_state_dict"])
+        skipped_paths.update(checkpoint.get("skipped_paths", []))
+        resume_phase = str(checkpoint.get("phase", "wgan"))
+        completed_iteration = int(checkpoint.get("iteration", 0))
+        accumulated_elapsed = float(checkpoint.get("elapsed_seconds", 0.0))
+        resumed_train_loss = checkpoint.get("train_loss")
+        resumed_val_loss = checkpoint.get("val_loss")
+        if resume_phase == "wgan":
+            wgan_start = completed_iteration + 1
+        else:
+            wgan_start = wgan_iterations + 1
+            encoder_start_iteration = completed_iteration + 1
+        completed_global = completed_iteration if resume_phase == "wgan" else wgan_iterations + completed_iteration
+        trim_metrics_after_checkpoint(run.id, completed_global, db=metadata_db)
+        persist_training_progress(
+            run.id,
+            epoch=completed_global,
+            train_loss=checkpoint.get("train_loss"),
+            val_loss=checkpoint.get("val_loss"),
+            best_val_loss=None,
+            db=metadata_db,
+        )
+        restore_rng_state(torch, checkpoint.get("rng_state"))
+        logger.info("fastAnoGAN run %s resumed from %s iteration %s", run.id, resume_phase, completed_iteration)
 
     def batches():
         while True:
@@ -1004,6 +1176,44 @@ def train_fast_anogan(
                 yield batch
 
     batch_iter = batches()
+
+    def save_fast_checkpoint(phase: str, iteration: int, train_loss: float | None, val_loss: float | None) -> None:
+        global_iteration = iteration if phase == "wgan" else wgan_iterations + iteration
+        save_training_checkpoint(
+            torch,
+            run.id,
+            artifact_path.parent,
+            signature,
+            {
+                "kind": "fast_anogan",
+                "phase": phase,
+                "iteration": iteration,
+                "generator_state_dict": generator.state_dict(),
+                "critic_state_dict": critic.state_dict(),
+                "encoder_state_dict": encoder.state_dict(),
+                "gen_optimizer_state_dict": gen_optimizer.state_dict(),
+                "critic_optimizer_state_dict": critic_optimizer.state_dict(),
+                "encoder_optimizer_state_dict": encoder_optimizer.state_dict(),
+                "scaler_state_dict": scaler.state_dict(),
+                "train_loss": train_loss,
+                "val_loss": val_loss,
+                "elapsed_seconds": accumulated_elapsed + time.perf_counter() - start,
+                "skipped_paths": sorted(skipped_paths)[:_MAX_SKIPPED_PATHS],
+                "rng_state": capture_rng_state(torch),
+            },
+            epoch=global_iteration,
+            phase=phase,
+            iteration=iteration,
+            metadata_db=metadata_db,
+        )
+        persist_training_progress(
+            run.id,
+            epoch=global_iteration,
+            train_loss=train_loss,
+            val_loss=val_loss,
+            best_val_loss=None,
+            db=metadata_db,
+        )
 
     def gradient_penalty(real, fake):
         alpha = torch.rand((real.shape[0], 1, 1, 1), device=device)
@@ -1019,7 +1229,7 @@ def train_fast_anogan(
         return ((gradients.flatten(1).norm(2, dim=1) - 1.0) ** 2).mean()
 
     start = time.perf_counter()
-    for iteration in range(1, wgan_iterations + 1):
+    for iteration in range(wgan_start, wgan_iterations + 1):
         if abort_event.is_set():
             raise AbortedError()
         critic_loss_value = 0.0
@@ -1059,18 +1269,16 @@ def train_fast_anogan(
                 gp_value,
                 iteration * batch_size / elapsed,
             )
-            db.add(
-                models.TrainingRunMetric(
-                    training_run_id=run.id,
-                    epoch=iteration,
-                    train_loss=generator_loss_value,
-                    val_loss=critic_loss_value,
-                )
+            persist_training_progress(
+                run.id,
+                epoch=iteration,
+                train_loss=generator_loss_value,
+                val_loss=critic_loss_value,
+                best_val_loss=None,
+                db=metadata_db,
             )
-            run.epochs_completed = iteration
-            run.train_loss = generator_loss_value
-            run.val_loss = critic_loss_value
-            db.commit()
+        if iteration % FAST_ANOGAN_CHECKPOINT_INTERVAL == 0 or iteration == wgan_iterations:
+            save_fast_checkpoint("wgan", iteration, generator_loss_value, critic_loss_value)
 
     generator.eval()
     critic.eval()
@@ -1079,10 +1287,20 @@ def train_fast_anogan(
     for param in critic.parameters():
         param.requires_grad_(False)
 
+    # Saving once at the phase boundary means a crash during encoder training
+    # never requires repeating the WGAN phase.
+    if resume_phase == "wgan":
+        save_fast_checkpoint(
+            "encoder",
+            0,
+            generator_loss_value if wgan_start <= wgan_iterations else resumed_train_loss,
+            critic_loss_value if wgan_start <= wgan_iterations else resumed_val_loss,
+        )
+
     encoder_start = time.perf_counter()
     image_residual_value = 0.0
     feature_residual_value = 0.0
-    for iteration in range(1, encoder_iterations + 1):
+    for iteration in range(encoder_start_iteration, encoder_iterations + 1):
         if abort_event.is_set():
             raise AbortedError()
         real = next(batch_iter).to(device, non_blocking=pin)
@@ -1119,20 +1337,19 @@ def train_fast_anogan(
                 feature_residual_value,
                 iteration * batch_size / elapsed,
             )
-            db.add(
-                models.TrainingRunMetric(
-                    training_run_id=run.id,
-                    epoch=global_iteration,
-                    train_loss=encoder_loss_value,
-                    val_loss=feature_residual_value,
-                )
+            persist_training_progress(
+                run.id,
+                epoch=global_iteration,
+                train_loss=encoder_loss_value,
+                val_loss=feature_residual_value,
+                best_val_loss=None,
+                db=metadata_db,
             )
-            run.epochs_completed = global_iteration
-            run.train_loss = encoder_loss_value
-            run.val_loss = feature_residual_value
-            db.commit()
+        if iteration % FAST_ANOGAN_CHECKPOINT_INTERVAL == 0 or iteration == encoder_iterations:
+            save_fast_checkpoint("encoder", iteration, encoder_loss_value, feature_residual_value)
 
-    torch.save(
+    atomic_torch_save(
+        torch,
         {
             "generator_state_dict": generator.state_dict(),
             "critic_state_dict": critic.state_dict(),
@@ -1151,16 +1368,146 @@ def train_fast_anogan(
     )
     run.skipped_image_count = len(skipped_paths)
     run.skipped_images = sorted(skipped_paths)[:_MAX_SKIPPED_PATHS]
-    db.commit()
+    _commit_noncritical(db, run.id, "skipped-image summary")
     return sample_count
 
 
-def _finalize(db, run: models.TrainingRun, status: str, started: float, error: str | None = None) -> None:
+def _worker_result_path(run_id: int) -> Path:
+    return _run_artifact_dir(run_id) / "worker-result.json"
+
+
+def _write_worker_result(run: models.TrainingRun, status: str, started: float, error: str | None) -> None:
+    """Durable hand-off if the worker cannot write its terminal DB state."""
+    target = _worker_result_path(run.id)
+    temporary = target.with_name(f".{target.name}.{os.getpid()}.tmp")
+    payload = {
+        "status": status,
+        "ended_at": datetime.utcnow().isoformat(),
+        "duration_seconds": round(time.perf_counter() - started, 3),
+        "error_message": error,
+        "image_count": run.image_count,
+        "artifact_kind": run.artifact_kind,
+        "artifact_path": run.artifact_path,
+        "artifact_size_bytes": run.artifact_size_bytes,
+        "skipped_image_count": run.skipped_image_count,
+        "skipped_images": run.skipped_images,
+    }
+    target.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        temporary.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
+        os.replace(temporary, target)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def _finalize(db, run: models.TrainingRun, status: str, started: float, error: str | None = None) -> bool:
+    _write_worker_result(run, status, started, error)
     run.status = status
     run.ended_at = datetime.utcnow()
     run.duration_seconds = round(time.perf_counter() - started, 3)
     run.error_message = error
-    db.commit()
+    try:
+        db.commit()
+        return True
+    except Exception as exc:
+        db.rollback()
+        if not is_sqlite_lock_error(exc):
+            raise
+        logger.warning(
+            "Training run %s terminal status is deferred to the scheduler after a database lock.",
+            run.id,
+        )
+        return False
+
+
+def _clear_successful_checkpoint(run_id: int, path: str | None) -> None:
+    def operation(session):
+        persisted = session.get(models.TrainingRun, run_id)
+        if persisted is None or persisted.status != "finished":
+            return
+        persisted.checkpoint_at = None
+        persisted.checkpoint_epoch = None
+        persisted.checkpoint_phase = None
+        persisted.checkpoint_iteration = None
+        persisted.checkpoint_path = None
+        persisted.checkpoint_size_bytes = None
+        persisted.checkpoint_signature = None
+        persisted.checkpoint_warning = None
+        persisted.restart_mode = None
+        persisted.next_retry_at = None
+
+    retry_session_operation(operation, attempts=1)
+    remove_checkpoint(path)
+
+
+def _commit_noncritical(db, run_id: int, label: str) -> bool:
+    try:
+        db.commit()
+        return True
+    except Exception as exc:
+        db.rollback()
+        if not is_sqlite_lock_error(exc):
+            raise
+        logger.warning(
+            "Training run %s continues after its non-critical %s write timed out on a database lock.",
+            run_id,
+            label,
+        )
+        return False
+
+
+def _schedule_lock_retry(run_id: int, started: float, error: BaseException) -> bool:
+    checkpoint = _run_artifact_dir(run_id) / "checkpoint.pt"
+    if not checkpoint.is_file():
+        return False
+
+    try:
+        _write_retry_request(run_id, started, error)
+    except OSError:
+        logger.warning("Could not persist the automatic retry request for run %s", run_id, exc_info=True)
+
+    scheduled = False
+
+    def operation(session):
+        nonlocal scheduled
+        persisted = session.get(models.TrainingRun, run_id)
+        if persisted is None or int(persisted.auto_retry_count or 0) >= _MAX_AUTOMATIC_LOCK_RETRIES:
+            return
+        persisted.status = "retry_wait"
+        persisted.ended_at = datetime.utcnow()
+        persisted.duration_seconds = round(time.perf_counter() - started, 3)
+        persisted.error_message = f"SQLite remained locked; automatic resume scheduled: {error}"
+        persisted.auto_retry_count = int(persisted.auto_retry_count or 0) + 1
+        persisted.next_retry_at = datetime.utcnow() + timedelta(minutes=_LOCK_RETRY_DELAY_MINUTES)
+        persisted.restart_mode = "checkpoint"
+        scheduled = True
+
+    try:
+        retry_session_operation(operation, attempts=1)
+    except Exception as persist_error:
+        if not is_sqlite_lock_error(persist_error):
+            raise
+        # The scheduler cannot infer retry counters safely without the row, so
+        # retain a durable request for the scheduler to apply once the lock is
+        # gone. The retry counter is still incremented transactionally there.
+        return False
+    (_run_artifact_dir(run_id) / "retry-request.json").unlink(missing_ok=True)
+    return scheduled
+
+
+def _write_retry_request(run_id: int, started: float, error: BaseException) -> None:
+    target = _run_artifact_dir(run_id) / "retry-request.json"
+    temporary = target.with_name(f".{target.name}.{os.getpid()}.tmp")
+    payload = {
+        "created_at": datetime.utcnow().isoformat(),
+        "duration_seconds": round(time.perf_counter() - started, 3),
+        "error_message": f"SQLite remained locked; automatic resume scheduled: {error}",
+    }
+    try:
+        temporary.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
+        os.replace(temporary, target)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 def run_training(run_id: int, abort_event: threading.Event | None = None) -> None:
@@ -1194,7 +1541,7 @@ def run_training(run_id: int, abort_event: threading.Event | None = None) -> Non
                 logger.info("Training run %s resolved %s training image paths", run_id, len(image_paths))
                 # Fit-style methods (mean image) are pure numpy → always CPU.
                 run.device = "CPU"
-                db.commit()
+                _commit_noncritical(db, run.id, "device status")
                 artifact_path = artifact_dir / "artifact.npy"
                 skipped_paths: list[str] = []
                 count = fit_mean_image(
@@ -1253,7 +1600,15 @@ def run_training(run_id: int, abort_event: threading.Event | None = None) -> Non
             run.image_count = count
             run.artifact_path = str(artifact_path)
             run.artifact_size_bytes = artifact_path.stat().st_size if artifact_path.exists() else None
-            _finalize(db, run, "finished", started)
+            # Metadata is written through short independent sessions, so the
+            # long-lived worker object may not see the latest path.
+            checkpoint_to_remove = str(artifact_dir / "checkpoint.pt")
+            finalized = _finalize(db, run, "finished", started)
+            if finalized:
+                try:
+                    _clear_successful_checkpoint(run_id, checkpoint_to_remove)
+                except Exception:
+                    logger.warning("Could not clean the completed checkpoint for run %s", run_id, exc_info=True)
             logger.info("Training run %s finished (%s images)", run_id, count)
         except AbortedError:
             db.rollback()
@@ -1263,6 +1618,9 @@ def run_training(run_id: int, abort_event: threading.Event | None = None) -> Non
             logger.info("Training run %s aborted", run_id)
         except Exception as exc:  # noqa: BLE001 - record any failure on the run row
             db.rollback()
+            if is_sqlite_lock_error(exc) and _schedule_lock_retry(run_id, started, exc):
+                logger.warning("Training run %s will resume automatically after a SQLite lock", run_id)
+                return
             run = db.get(models.TrainingRun, run_id)
             if run is not None:
                 _finalize(db, run, "failed", started, error=str(exc))

@@ -8,7 +8,9 @@ a single indexed table. Process control is delegated to the scheduler.
 from __future__ import annotations
 
 import shutil
+import uuid
 from datetime import datetime
+from pathlib import Path
 
 from sqlalchemy import delete, select
 from sqlalchemy.orm import Session, selectinload
@@ -60,7 +62,24 @@ def _snapshot(db: Session, pipeline: models.TrainingPipeline) -> dict:
     }
 
 
-def _reset_run_for_queue(db: Session, run: models.TrainingRun, snapshot: dict) -> None:
+def _clear_checkpoint_fields(run: models.TrainingRun) -> None:
+    run.checkpoint_at = None
+    run.checkpoint_epoch = None
+    run.checkpoint_phase = None
+    run.checkpoint_iteration = None
+    run.checkpoint_path = None
+    run.checkpoint_size_bytes = None
+    run.checkpoint_signature = None
+    run.checkpoint_warning = None
+
+
+def _reset_run_for_queue(
+    db: Session,
+    run: models.TrainingRun,
+    snapshot: dict,
+    *,
+    preserve_checkpoint: bool = False,
+) -> None:
     run.status = "queued"
     run.enqueued_at = datetime.utcnow()
     run.queue_rank = next_queue_rank(db)
@@ -72,15 +91,22 @@ def _reset_run_for_queue(db: Session, run: models.TrainingRun, snapshot: dict) -
     run.pid = None
     run.log_path = None
     run.error_message = None
-    run.epochs_total = None
-    run.epochs_completed = 0
-    run.train_loss = None
-    run.val_loss = None
-    run.best_val_loss = None
-    run.image_count = None
+    if not preserve_checkpoint:
+        run.epochs_total = None
+        run.epochs_completed = 0
+        run.train_loss = None
+        run.val_loss = None
+        run.best_val_loss = None
+        run.image_count = None
     run.artifact_kind = None
     run.artifact_path = None
     run.artifact_size_bytes = None
+    run.next_retry_at = None
+    run.restart_mode = "checkpoint" if preserve_checkpoint else None
+    if not preserve_checkpoint:
+        _clear_checkpoint_fields(run)
+        run.resume_count = 0
+        run.auto_retry_count = 0
     for key, value in snapshot.items():
         setattr(run, key, value)
 
@@ -97,6 +123,7 @@ def enqueue_training_run(db: Session, pipeline_id: int) -> TrainingRunRead:
     if run is not None and run.status in ACTIVE_STATUSES:
         raise RunConflict("This training pipeline already has a queued or running run.")
 
+    staged_run_dir: tuple[Path, Path] | None = None
     if run is None:
         run = models.TrainingRun(training_pipeline_id=pipeline_id, **snapshot)
         _reset_run_for_queue(db, run, snapshot)
@@ -105,9 +132,23 @@ def enqueue_training_run(db: Session, pipeline_id: int) -> TrainingRunRead:
         # Restart: reset the same row (one history per pipeline) and clear old state.
         db.execute(delete(models.TrainingRunMetric).where(models.TrainingRunMetric.training_run_id == run.id))
         _reset_run_for_queue(db, run, snapshot)
-        shutil.rmtree(_run_dir(run.id), ignore_errors=True)
+        run_dir = _run_dir(run.id)
+        if run_dir.exists():
+            staged = run_dir.with_name(f".{run_dir.name}.restart-{uuid.uuid4().hex}")
+            run_dir.replace(staged)
+            staged_run_dir = (run_dir, staged)
 
-    db.commit()
+    try:
+        db.commit()
+    except Exception:
+        db.rollback()
+        if staged_run_dir is not None:
+            original, staged = staged_run_dir
+            if staged.exists() and not original.exists():
+                staged.replace(original)
+        raise
+    if staged_run_dir is not None:
+        shutil.rmtree(staged_run_dir[1], ignore_errors=True)
     db.refresh(run)
     scheduler.wake()
     return serialize_training_run(db, run)
@@ -122,21 +163,96 @@ def restart_training_run(db: Session, run_id: int) -> TrainingRunRead | None:
     return enqueue_training_run(db, run.training_pipeline_id)
 
 
+def restart_training_run_from_checkpoint(db: Session, run_id: int) -> TrainingRunRead | None:
+    run = db.get(models.TrainingRun, run_id)
+    if run is None:
+        return None
+    if run.status not in {"failed", "aborted", "retry_wait"}:
+        raise RunConflict("Only failed, aborted, or waiting training runs can resume from a backup.")
+    if run.builder_kind == "form":
+        raise RunConflict("This short fit method does not create training backups.")
+    if not run.checkpoint_at or not run.checkpoint_path or not run.checkpoint_signature:
+        raise RunConflict("No training backup is available.")
+    checkpoint = Path(run.checkpoint_path)
+    if not checkpoint.is_file():
+        raise RunConflict("The training backup file is missing. Restart completely.")
+
+    pipeline = db.get(models.TrainingPipeline, run.training_pipeline_id)
+    if pipeline is None:
+        raise ValueError("The training pipeline no longer exists.")
+    snapshot = _snapshot(db, pipeline)
+    _validate_training_checkpoint(db, run, pipeline, snapshot["training_parameters"], snapshot["shuffle"])
+    _reset_run_for_queue(db, run, snapshot, preserve_checkpoint=True)
+    run.resume_count = int(run.resume_count or 0) + 1
+    db.commit()
+    db.refresh(run)
+    scheduler.wake()
+    return serialize_training_run(db, run)
+
+
+def _validate_training_checkpoint(
+    db: Session,
+    run: models.TrainingRun,
+    pipeline: models.TrainingPipeline,
+    training_parameters: dict,
+    shuffle: bool,
+) -> None:
+    """Recompute the same signature now; the worker validates it again."""
+    from app.schemas import PreprocessingGraph
+    from app.training.checkpoints import load_checkpoint, source_signature
+    from app.training.data import enumerate_training_pipeline_clip_samples, enumerate_training_pipeline_images
+
+    configuration = pipeline.method_configuration
+    graph = PreprocessingGraph.model_validate(pipeline.preprocessing_pipeline.graph)
+    if configuration.builder_kind == "spatiotemporal_autoencoder":
+        summary = enumerate_training_pipeline_clip_samples(pipeline, configuration.method_config)
+        if not summary.clips:
+            raise RunConflict("The training sources no longer produce compatible clips. Restart completely.")
+        sources = [
+            frame.file_path
+            for clip in summary.clips
+            for frame in (*clip.input_frames, *clip.future_frames)
+        ]
+    else:
+        sources = enumerate_training_pipeline_images(db, pipeline)
+        if not sources:
+            raise RunConflict("The training sources are no longer available. Restart completely.")
+    current_signature = source_signature(
+        configuration,
+        graph,
+        training_parameters,
+        sources,
+        {"shuffle": shuffle},
+    )
+    if current_signature != run.checkpoint_signature:
+        raise RunConflict(
+            "Training sources, model, preprocessing, split, or parameters changed since the backup. Restart completely."
+        )
+    try:
+        import torch
+
+        load_checkpoint(torch, run.checkpoint_path, current_signature)
+    except (OSError, RuntimeError, ValueError, KeyError) as exc:
+        raise RunConflict(f"The training backup is invalid: {exc} Restart completely.") from exc
+
+
 def abort_training_run(db: Session, run_id: int) -> TrainingRunRead | None:
     run = db.get(models.TrainingRun, run_id)
     if run is None:
         return None
-    if run.status == "queued":
+    if run.status in {"queued", "retry_wait"}:
+        was_retry_wait = run.status == "retry_wait"
         run.status = "aborted"
         run.ended_at = datetime.utcnow()
-        run.error_message = "Aborted before it started."
+        run.next_retry_at = None
+        run.error_message = "Automatic retry cancelled by user." if was_retry_wait else "Aborted before it started."
         db.commit()
         db.refresh(run)
     elif run.status == "running":
         scheduler.request_abort("train", run.id, run.pid)
         # The worker turns SIGTERM into the terminal 'aborted' status.
     else:
-        raise RunConflict("Only queued or running runs can be aborted.")
+        raise RunConflict("Only queued, running, or retry-wait runs can be aborted.")
     return serialize_training_run(db, run)
 
 
@@ -249,6 +365,18 @@ def serialize_training_run(db: Session, run: models.TrainingRun) -> TrainingRunR
         artifact_kind=run.artifact_kind,
         artifact_path=run.artifact_path,
         artifact_size_bytes=run.artifact_size_bytes,
+        checkpoint_at=run.checkpoint_at,
+        checkpoint_epoch=run.checkpoint_epoch,
+        checkpoint_phase=run.checkpoint_phase,
+        checkpoint_iteration=run.checkpoint_iteration,
+        checkpoint_path=run.checkpoint_path,
+        checkpoint_size_bytes=run.checkpoint_size_bytes,
+        checkpoint_signature=run.checkpoint_signature,
+        checkpoint_warning=run.checkpoint_warning,
+        restart_mode=run.restart_mode,
+        resume_count=run.resume_count or 0,
+        auto_retry_count=run.auto_retry_count or 0,
+        next_retry_at=run.next_retry_at,
         error_message=run.error_message,
         training_pipeline_name=run.training_pipeline_name,
         method_type=run.method_type,

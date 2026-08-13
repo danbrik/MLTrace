@@ -23,7 +23,7 @@ import signal
 import subprocess
 import sys
 import threading
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from sqlalchemy import func, select
@@ -263,6 +263,7 @@ class JobScheduler:
             with project_context(project.database_url, project.artifact_dir):
                 db = SessionLocal()
                 try:
+                    self._apply_worker_results(db, project.artifact_dir)
                     for spec in _KINDS.values():
                         model = spec["model"]
                         for run in db.scalars(select(model).where(model.status == "running")):
@@ -312,6 +313,9 @@ class JobScheduler:
             self._wake.clear()
 
     def _tick(self) -> None:
+        self._apply_checkpoint_metadata_requests()
+        self._apply_retry_requests()
+        self._activate_due_training_retries()
         self._sync_global_queue()
         scheduler_settings = get_scheduler_settings()
         detected_gpus = int(scheduler_settings["detected_gpu_count"])
@@ -329,11 +333,15 @@ class JobScheduler:
                 db = SessionLocal()
                 try:
                     run = db.get(_KINDS[kind]["model"], run_id)
+                    self._apply_worker_results(db, project.artifact_dir, run_id=run_id if kind == "train" else None)
+                    run = db.get(_KINDS[kind]["model"], run_id)
                     if run is not None and run.status == "running":
-                        run.status = "failed"
-                        run.ended_at = datetime.utcnow()
-                        run.error_message = run.error_message or "Worker exited without reporting a result."
-                        db.commit()
+                        retry_request = Path(project.artifact_dir) / "runs" / str(run_id) / "retry-request.json"
+                        if kind != "train" or not retry_request.is_file():
+                            run.status = "failed"
+                            run.ended_at = datetime.utcnow()
+                            run.error_message = run.error_message or "Worker exited without reporting a result."
+                            db.commit()
                 finally:
                     db.close()
 
@@ -393,11 +401,160 @@ class JobScheduler:
         for enqueued_at, project_id, kind, run_id in sorted(candidates):
             ensure_queue_entry(project_id, kind, run_id, enqueued_at)
 
+    def _activate_due_training_retries(self) -> None:
+        now = datetime.utcnow()
+        for project in list_projects():
+            with project_context(project.database_url, project.artifact_dir):
+                db = SessionLocal()
+                try:
+                    runs = db.scalars(select(models.TrainingRun).where(
+                        models.TrainingRun.status == "retry_wait",
+                        models.TrainingRun.next_retry_at.is_not(None),
+                        models.TrainingRun.next_retry_at <= now,
+                    )).all()
+                    for run in runs:
+                        if not run.checkpoint_path or not Path(run.checkpoint_path).is_file():
+                            run.status = "failed"
+                            run.next_retry_at = None
+                            run.error_message = "Automatic resume failed because the checkpoint file is missing."
+                            continue
+                        run.status = "queued"
+                        run.enqueued_at = now
+                        run.queue_rank = next_queue_rank(db)
+                        run.started_at = None
+                        run.ended_at = None
+                        run.duration_seconds = None
+                        run.gpu_index = None
+                        run.device = None
+                        run.pid = None
+                        run.error_message = None
+                        run.restart_mode = "checkpoint"
+                        run.next_retry_at = None
+                    if runs:
+                        db.commit()
+                finally:
+                    db.close()
+
+    def _apply_checkpoint_metadata_requests(self) -> None:
+        for project in list_projects():
+            root = Path(project.artifact_dir) / "runs"
+            with project_context(project.database_url, project.artifact_dir):
+                db = SessionLocal()
+                try:
+                    for request_path in root.glob("*/checkpoint-metadata.json"):
+                        try:
+                            run = db.get(models.TrainingRun, int(request_path.parent.name))
+                            payload = json.loads(request_path.read_text(encoding="utf-8"))
+                            checkpoint_path = Path(str(payload["checkpoint_path"]))
+                            if run is None or not checkpoint_path.is_file():
+                                request_path.unlink(missing_ok=True)
+                                continue
+                            incoming_epoch = int(payload.get("checkpoint_epoch") or 0)
+                            if incoming_epoch >= int(run.checkpoint_epoch or 0):
+                                run.checkpoint_at = datetime.fromisoformat(payload["checkpoint_at"])
+                                run.checkpoint_epoch = payload.get("checkpoint_epoch")
+                                run.checkpoint_phase = payload.get("checkpoint_phase")
+                                run.checkpoint_iteration = payload.get("checkpoint_iteration")
+                                run.checkpoint_path = str(checkpoint_path)
+                                run.checkpoint_size_bytes = payload.get("checkpoint_size_bytes")
+                                run.checkpoint_signature = payload.get("checkpoint_signature")
+                                run.checkpoint_warning = None
+                            db.commit()
+                            request_path.unlink(missing_ok=True)
+                        except Exception:
+                            db.rollback()
+                            logger.warning("Could not apply checkpoint metadata %s yet", request_path, exc_info=True)
+                finally:
+                    db.close()
+
+    def _apply_retry_requests(self) -> None:
+        for project in list_projects():
+            root = Path(project.artifact_dir) / "runs"
+            with project_context(project.database_url, project.artifact_dir):
+                db = SessionLocal()
+                try:
+                    for request_path in root.glob("*/retry-request.json"):
+                        try:
+                            run = db.get(models.TrainingRun, int(request_path.parent.name))
+                            if run is None or run.status not in {"running", "failed"}:
+                                request_path.unlink(missing_ok=True)
+                                continue
+                            if int(run.auto_retry_count or 0) >= 3:
+                                run.status = "failed"
+                                run.next_retry_at = None
+                                run.error_message = "SQLite remained locked after three automatic resumes."
+                            elif not run.checkpoint_path or not Path(run.checkpoint_path).is_file():
+                                run.status = "failed"
+                                run.error_message = "SQLite remained locked and no training checkpoint is available."
+                            else:
+                                payload = json.loads(request_path.read_text(encoding="utf-8"))
+                                run.status = "retry_wait"
+                                run.ended_at = datetime.utcnow()
+                                run.duration_seconds = payload.get("duration_seconds")
+                                run.error_message = payload.get("error_message")
+                                run.auto_retry_count = int(run.auto_retry_count or 0) + 1
+                                run.next_retry_at = datetime.utcnow() + timedelta(minutes=5)
+                                run.restart_mode = "checkpoint"
+                            db.commit()
+                            request_path.unlink(missing_ok=True)
+                        except Exception:
+                            db.rollback()
+                            logger.warning("Could not apply training retry request %s yet", request_path, exc_info=True)
+                finally:
+                    db.close()
+
+    def _apply_worker_results(self, db, artifact_dir: str, run_id: int | None = None) -> None:
+        root = Path(artifact_dir) / "runs"
+        candidates = [root / str(run_id) / "worker-result.json"] if run_id is not None else root.glob("*/worker-result.json")
+        for result_path in candidates:
+            if not result_path.is_file():
+                continue
+            try:
+                payload = json.loads(result_path.read_text(encoding="utf-8"))
+                persisted_run_id = int(result_path.parent.name)
+                run = db.get(models.TrainingRun, persisted_run_id)
+                if run is None or run.status != "running":
+                    result_path.unlink(missing_ok=True)
+                    continue
+                run.status = str(payload["status"])
+                run.ended_at = datetime.fromisoformat(payload["ended_at"])
+                run.duration_seconds = payload.get("duration_seconds")
+                run.error_message = payload.get("error_message")
+                for field in (
+                    "image_count", "artifact_kind", "artifact_path", "artifact_size_bytes",
+                    "skipped_image_count", "skipped_images",
+                ):
+                    if field in payload:
+                        setattr(run, field, payload[field])
+                if run.status == "finished":
+                    checkpoint_path = run.checkpoint_path
+                    run.checkpoint_at = None
+                    run.checkpoint_epoch = None
+                    run.checkpoint_phase = None
+                    run.checkpoint_iteration = None
+                    run.checkpoint_path = None
+                    run.checkpoint_size_bytes = None
+                    run.checkpoint_signature = None
+                    run.checkpoint_warning = None
+                    run.restart_mode = None
+                    run.next_retry_at = None
+                    db.commit()
+                    if checkpoint_path:
+                        Path(checkpoint_path).unlink(missing_ok=True)
+                else:
+                    db.commit()
+                result_path.unlink(missing_ok=True)
+            except Exception:
+                db.rollback()
+                logger.warning("Could not apply worker result %s yet", result_path, exc_info=True)
+
     def _launch(self, db, project, kind: str, run, gpu_index: int | None) -> None:
         spec = _KINDS[kind]
         artifact_dir = Path(project.artifact_dir) / spec["subdir"] / str(run.id)
         artifact_dir.mkdir(parents=True, exist_ok=True)
         log_path = artifact_dir / "worker.log"
+        if kind == "train":
+            (artifact_dir / "worker-result.json").unlink(missing_ok=True)
         device_label = f"GPU:{gpu_index}" if gpu_index is not None else "CPU"
 
         env = os.environ.copy()
@@ -433,7 +590,19 @@ class JobScheduler:
         run.pid = proc.pid
         run.log_path = str(log_path)
         run.error_message = None
-        db.commit()
+        try:
+            db.commit()
+        except Exception:
+            db.rollback()
+            # Never leave an untracked worker behind: otherwise the still-
+            # queued DB row could launch a duplicate after the lock clears.
+            if proc.poll() is None:
+                proc.terminate()
+                try:
+                    proc.wait(timeout=10)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+            raise
         remove_queue_entry(project.id, kind, run.id)
         from app.gpu_monitor import invalidate_gpu_snapshot
         invalidate_gpu_snapshot()

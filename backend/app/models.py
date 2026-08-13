@@ -326,6 +326,20 @@ class TrainingRun(Base):
     artifact_path: Mapped[str | None] = mapped_column(Text)
     artifact_size_bytes: Mapped[int | None] = mapped_column(BigInteger)
 
+    # Single durable resume checkpoint for long gradient trainings.
+    checkpoint_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=False))
+    checkpoint_epoch: Mapped[int | None] = mapped_column(Integer)
+    checkpoint_phase: Mapped[str | None] = mapped_column(String(32))
+    checkpoint_iteration: Mapped[int | None] = mapped_column(Integer)
+    checkpoint_path: Mapped[str | None] = mapped_column(Text)
+    checkpoint_size_bytes: Mapped[int | None] = mapped_column(BigInteger)
+    checkpoint_signature: Mapped[str | None] = mapped_column(String(64))
+    checkpoint_warning: Mapped[str | None] = mapped_column(Text)
+    restart_mode: Mapped[str | None] = mapped_column(String(32))
+    resume_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    auto_retry_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    next_retry_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=False))
+
     # Denormalized pipeline snapshot for single-table filtering / sorting.
     training_pipeline_name: Mapped[str] = mapped_column(String(255), nullable=False)
     method_type: Mapped[str] = mapped_column(String(128), nullable=False)

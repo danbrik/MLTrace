@@ -54,6 +54,7 @@ import {
   restartTestingRun,
   restartTestingRunFromCheckpoint,
   restartTrainingRun,
+  restartTrainingRunFromCheckpoint,
   updateSchedulerSettings,
 } from '../api';
 import { SchedulerDetailsModal } from '../training/SchedulerDetailsModal';
@@ -73,7 +74,7 @@ import type {
   SchedulerJobWithProject,
 } from '../types';
 
-const TERMINAL = new Set(['finished', 'failed', 'aborted']);
+const TERMINAL = new Set(['finished', 'failed', 'aborted', 'retry_wait']);
 
 type HeatmapGroup = {
   key: string;
@@ -181,9 +182,11 @@ function ProgressCell({ job }: { job: SchedulerJob }) {
   }
   const total = run.epochs_total ?? run.epochs ?? 0;
   const value = total > 0 ? (run.epochs_completed / total) * 100 : 0;
+  const resumed = run.restart_mode === 'checkpoint' && ['queued', 'running', 'retry_wait'].includes(run.status);
   return (
     <Stack gap={2}>
       <Text size="xs">{run.epochs_completed}/{total || '?'} epochs</Text>
+      {resumed && <Text size="xs" c="grape">Resumed from checkpoint</Text>}
       {total > 0 && <Progress value={value} size="sm" radius="sm" color={runStatusColor(run.status)} />}
     </Stack>
   );
@@ -387,11 +390,13 @@ export function SchedulerPage({ active = true }: { active?: boolean }) {
 
   function handleRestart(job: DisplayJob, mode: 'complete' | 'checkpoint' = 'complete') {
     if (job.kind === 'heatmap') return; // heatmap videos are not restartable; re-render from Analysis
-    if (mode === 'complete' && job.kind === 'test' && !window.confirm(
-      `Restart inference "${jobName(job)}" completely? Partial results and its checkpoint will be removed.`,
+    if (mode === 'complete' && (job.kind === 'test' || job.kind === 'train') && !window.confirm(
+      `Restart ${job.kind === 'train' ? 'training' : 'inference'} "${jobName(job)}" completely? Existing progress and its checkpoint will be removed.`,
     )) return;
     const action = job.kind === 'train'
-      ? () => restartTrainingRun(job.run.id, job.project_id)
+      ? mode === 'checkpoint'
+        ? () => restartTrainingRunFromCheckpoint(job.run.id, job.project_id)
+        : () => restartTrainingRun(job.run.id, job.project_id)
       : mode === 'checkpoint'
         ? () => restartTestingRunFromCheckpoint(job.run.id, job.project_id)
         : () => restartTestingRun(job.run.id, job.project_id);
@@ -576,7 +581,7 @@ export function SchedulerPage({ active = true }: { active?: boolean }) {
             />
             <Select
               placeholder="Status"
-              data={['queued', 'running', 'finished', 'failed', 'aborted']}
+              data={['queued', 'running', 'retry_wait', 'finished', 'failed', 'aborted']}
               value={statusFilter}
               onChange={setStatusFilter}
               clearable
@@ -607,7 +612,8 @@ export function SchedulerPage({ active = true }: { active?: boolean }) {
                   const run = job.run;
                   const testRun = job.kind === 'test' ? job.run : null;
                   const terminal = TERMINAL.has(run.status);
-                  const abortable = run.status === 'queued' || run.status === 'running';
+                  const abortable = run.status === 'queued' || run.status === 'running' || run.status === 'retry_wait';
+                  const trainingRun = job.kind === 'train' ? job.run : null;
                   const key = jobKey(job);
                   const queueIndex = queueIndexByKey.get(key);
                   const movable = run.status === 'queued' && queueIndex !== undefined;
@@ -642,6 +648,23 @@ export function SchedulerPage({ active = true }: { active?: boolean }) {
                               {' · '}{new Date(testRun.checkpoint_at).toLocaleString()}
                             </Text>
                           )}
+                          {trainingRun?.checkpoint_at && (
+                            <Text size="xs" c="dimmed">
+                              Backup: {trainingRun.checkpoint_phase === 'epoch'
+                                ? `epoch ${trainingRun.checkpoint_epoch ?? trainingRun.epochs_completed}`
+                                : `${trainingRun.checkpoint_phase ?? 'iteration'} ${trainingRun.checkpoint_iteration ?? trainingRun.checkpoint_epoch ?? 0}`}
+                              {' · '}{new Date(trainingRun.checkpoint_at).toLocaleString()}
+                              {trainingRun.checkpoint_size_bytes != null
+                                ? ` · ${(trainingRun.checkpoint_size_bytes / 1024 / 1024).toFixed(1)} MB`
+                                : ''}
+                            </Text>
+                          )}
+                          {trainingRun?.status === 'retry_wait' && trainingRun.next_retry_at && (
+                            <Text size="xs" c="yellow">
+                              Automatic retry {trainingRun.auto_retry_count}/3 at {new Date(trainingRun.next_retry_at).toLocaleString()}
+                            </Text>
+                          )}
+                          {trainingRun?.checkpoint_warning && <Text size="xs" c="orange">{trainingRun.checkpoint_warning}</Text>}
                         </Stack>
                       </Table.Td>
                       <Table.Td>
@@ -703,16 +726,32 @@ export function SchedulerPage({ active = true }: { active?: boolean }) {
                             </Tooltip>
                           )}
                           {terminal && job.kind === 'train' && (
-                            <Tooltip label="Restart">
-                              <ActionIcon
-                                variant="subtle"
-                                loading={rowActions.isPending(`restart:${key}`)}
-                                disabled={rowBusy && !rowActions.isPending(`restart:${key}`)}
-                                onClick={() => handleRestart(job, 'complete')}
-                              >
-                                <RotateCcw size={18} />
-                              </ActionIcon>
-                            </Tooltip>
+                            trainingRun?.checkpoint_at && ['failed', 'aborted', 'retry_wait'].includes(trainingRun.status) ? (
+                              <Menu position="bottom-end" withinPortal>
+                                <Menu.Target>
+                                  <Tooltip label="Restart options">
+                                    <ActionIcon
+                                      variant="subtle"
+                                      loading={rowActions.isPending(`restart:${key}`) || rowActions.isPending(`restart-checkpoint:${key}`)}
+                                      disabled={rowBusy && !rowActions.isPending(`restart:${key}`) && !rowActions.isPending(`restart-checkpoint:${key}`)}
+                                    >
+                                      <RotateCcw size={18} />
+                                    </ActionIcon>
+                                  </Tooltip>
+                                </Menu.Target>
+                                <Menu.Dropdown>
+                                  <Menu.Label>Training restart</Menu.Label>
+                                  <Menu.Item onClick={() => handleRestart(job, 'checkpoint')}>Restart from backup</Menu.Item>
+                                  <Menu.Item color="orange" onClick={() => handleRestart(job, 'complete')}>Restart completely</Menu.Item>
+                                </Menu.Dropdown>
+                              </Menu>
+                            ) : (
+                              <Tooltip label="Restart completely">
+                                <ActionIcon variant="subtle" onClick={() => handleRestart(job, 'complete')}>
+                                  <RotateCcw size={18} />
+                                </ActionIcon>
+                              </Tooltip>
+                            )
                           )}
                           {terminal && job.kind === 'test' && (
                             testRun?.checkpoint_at && testRun.checkpoint_input_count != null && ['failed', 'aborted'].includes(testRun.status) ? (

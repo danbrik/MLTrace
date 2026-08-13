@@ -3,10 +3,12 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
+import pytest
 
 from app import models
 from app.schemas import PreprocessingGraph
 from app.training.engine import (
+    AbortedError,
     _PreprocessedClipDataset,
     _SkippedSample,
     _collate_clips_skip_bad,
@@ -16,6 +18,7 @@ from app.training.engine import (
     fit_mean_image,
     train_gradient,
 )
+from app.training import engine as training_engine
 
 from tests.test_modeling import autoencoder_payload
 from tests.test_testing_service import make_db, write_tiff
@@ -128,6 +131,45 @@ def test_train_gradient_streams_and_persists(tmp_path: Path) -> None:
             )
         ).all()
         assert len(metrics) == 2
+    finally:
+        db.close()
+
+
+def test_train_gradient_resumes_at_epoch_after_atomic_checkpoint(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    db = make_db()
+    try:
+        run, method, paths = _seed_ae(db, tmp_path, image_count=6)
+        graph = PreprocessingGraph.model_validate(LOAD_ONLY_GRAPH)
+        artifact_path = tmp_path / "artifact.pt"
+        parameters = {"epochs": 2, "batch_size": 2, "learning_rate": 0.001, "loss": "mse", "num_workers": 0}
+        abort = threading.Event()
+        real_save = training_engine.save_training_checkpoint
+
+        def save_then_abort(*args, **kwargs):
+            result = real_save(*args, **kwargs)
+            abort.set()
+            return result
+
+        monkeypatch.setattr(training_engine, "save_training_checkpoint", save_then_abort)
+        with pytest.raises(AbortedError):
+            train_gradient(db, run, method, paths, graph, parameters, artifact_path, abort)
+
+        db.refresh(run)
+        assert run.checkpoint_epoch == 1
+        assert Path(run.checkpoint_path).is_file()
+        run.restart_mode = "checkpoint"
+        db.commit()
+
+        monkeypatch.setattr(training_engine, "save_training_checkpoint", real_save)
+        train_gradient(db, run, method, paths, graph, parameters, artifact_path, threading.Event())
+
+        db.refresh(run)
+        assert run.epochs_completed == 2
+        assert [metric.epoch for metric in run.metrics] == [1, 2]
+        assert artifact_path.is_file()
     finally:
         db.close()
 

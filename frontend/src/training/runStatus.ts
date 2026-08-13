@@ -3,6 +3,7 @@ import type { TrainingRunStatus } from '../types';
 export function runStatusColor(status: TrainingRunStatus | string): string {
   if (status === 'finished') return 'green';
   if (status === 'running') return 'blue';
+  if (status === 'retry_wait') return 'yellow';
   if (status === 'aborted') return 'orange';
   if (status === 'failed') return 'red';
   return 'gray'; // queued
