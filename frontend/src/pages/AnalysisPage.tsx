@@ -61,6 +61,25 @@ import { DEFAULT_TABLE_PAGE_SIZE, TablePagination } from '../components/TablePag
 import type { Data, Layout, PlotRelayoutEvent } from '../lib/plotly';
 import { formatValue } from '../methods/utils';
 import { datasetResolutions, formatResolution, orderedGraphNodes, stepDetail } from '../training/graph';
+import {
+  countFacetValues,
+  facetOption,
+  matchingFacetGroupIds,
+  type FacetFilterState,
+  type FacetRecord,
+} from '../testing/facetFilters';
+import {
+  aggregationKeyForRun,
+  aggregationLabel,
+  aggregationOrder,
+  metricKeyForRun,
+  metricLabel,
+  metricOrder,
+  normalizeAggregationKey,
+  normalizeMetricKey,
+  roiKeyForRun,
+  roiLabelForRun,
+} from '../testing/inferenceRunMetadata';
 import type {
   AnalysisLayout,
   AnalysisImageComparisonResult,
@@ -461,61 +480,6 @@ function sourceBounds(dataset: TrainingDataset | null | undefined): { start: str
     start: toDateTimeLocal(starts[0]),
     end: toDateTimeLocal(ends.at(-1)),
   };
-}
-
-function metricKeyForRun(run: TestingRun): string {
-  const configMetric = run.inference_config?.error_metric ?? run.inference_config?.residual_metric;
-  if (typeof configMetric === 'string' && configMetric.trim()) return normalizeMetricKey(configMetric);
-  return 'mse';
-}
-
-function normalizeMetricKey(metric: string): string {
-  const normalized = metric.trim().toLowerCase();
-  if (normalized === 'ssim' || normalized === 'ssim_distance') return 'ssim_distance';
-  if (normalized === 'l1' || normalized === 'mae') return 'mae';
-  if (normalized === 'l2' || normalized === 'mse') return 'mse';
-  return normalized || 'mse';
-}
-
-function metricLabel(metric: string): string {
-  const normalized = normalizeMetricKey(metric);
-  if (normalized === 'mse') return 'MSE';
-  if (normalized === 'mae') return 'MAE';
-  if (normalized === 'ssim_distance') return 'SSIM';
-  return normalized.replaceAll('_', ' ').toUpperCase();
-}
-
-function metricOrder(metric: string): number {
-  const normalized = normalizeMetricKey(metric);
-  if (normalized === 'mse') return 0;
-  if (normalized === 'mae') return 1;
-  if (normalized === 'ssim_distance') return 2;
-  return 10;
-}
-
-function normalizeAggregationKey(aggregation: string): string {
-  return aggregation.trim().toLowerCase() || 'mean';
-}
-
-function aggregationKeyForRun(run: TestingRun): string {
-  const configured = run.inference_config?.frame_score_aggregation;
-  return typeof configured === 'string' && configured.trim() ? normalizeAggregationKey(configured) : 'mean';
-}
-
-function aggregationLabel(aggregation: string): string {
-  const normalized = normalizeAggregationKey(aggregation);
-  if (normalized === 'mean') return 'Mean';
-  if (normalized === 'max') return 'Max';
-  return normalized.toUpperCase();
-}
-
-// Sortiert mean vor allen Perzentilen und max ans Ende.
-function aggregationOrder(aggregation: string): number {
-  const normalized = normalizeAggregationKey(aggregation);
-  if (normalized === 'mean') return -1;
-  if (normalized === 'max') return 1000;
-  const percentile = Number(normalized.replace(/^p/, ''));
-  return Number.isFinite(percentile) ? percentile : 500;
 }
 
 function traceToSource(trace: PlotTraceConfig): PlotSourceConfig {
@@ -3351,6 +3315,17 @@ export function AnalysisPage({ active = true }: { active?: boolean }) {
   const [addPlotOpen, setAddPlotOpen] = useState(true);
   const [selectedPipelineId, setSelectedPipelineId] = useState<string | null>(null);
   const [pipelineSearch, setPipelineSearch] = useState('');
+  const [analysisFiltersOpen, setAnalysisFiltersOpen] = useState(true);
+  const [modelTrainingDatasetFilters, setModelTrainingDatasetFilters] = useState<string[]>([]);
+  const [modelPreprocessingFilters, setModelPreprocessingFilters] = useState<string[]>([]);
+  const [modelMethodFilters, setModelMethodFilters] = useState<string[]>([]);
+  const [modelInferenceDatasetFilters, setModelInferenceDatasetFilters] = useState<string[]>([]);
+  const [modelRoiFilters, setModelRoiFilters] = useState<string[]>([]);
+  const [modelMetricFilters, setModelMetricFilters] = useState<string[]>([]);
+  const [modelAggregationFilters, setModelAggregationFilters] = useState<string[]>([]);
+  const [analysisModelPage, setAnalysisModelPage] = useState(1);
+  const [commonDatasetSearch, setCommonDatasetSearch] = useState('');
+  const [commonDatasetPage, setCommonDatasetPage] = useState(1);
   const [selectedModelIds, setSelectedModelIds] = useState<string[]>([]);
   const [selectedInferenceDatasetId, setSelectedInferenceDatasetId] = useState<string | null>(null);
   const [selectedMetricKeys, setSelectedMetricKeys] = useState<string[]>([]);
@@ -3450,7 +3425,7 @@ export function AnalysisPage({ active = true }: { active?: boolean }) {
     (layout) => layout.id !== Number(selectedLayoutId) && layout.name.toLowerCase() === layoutNameTrimmed.toLowerCase(),
   );
 
-  const analysableModelRows = useMemo(() => {
+  const allAnalysableModelRows = useMemo(() => {
     const byTrainingRun = new Map<number, { id: number; label: string; run: TrainingRun | null; testingRuns: TestingRun[] }>();
     for (const run of finishedRuns) {
       const trainingRun = trainingRunById.get(run.training_run_id) ?? null;
@@ -3466,14 +3441,125 @@ export function AnalysisPage({ active = true }: { active?: boolean }) {
         });
       }
     }
-    const query = pipelineSearch.trim().toLowerCase();
     return [...byTrainingRun.values()]
-      .filter((row) => {
-        if (!query) return true;
-        return row.label.toLowerCase().includes(query) || row.testingRuns.some((run) => run.training_dataset_name.toLowerCase().includes(query));
-      })
       .sort((left, right) => left.label.localeCompare(right.label));
-  }, [finishedRuns, pipelineSearch, trainingRunById]);
+  }, [finishedRuns, trainingRunById]);
+
+  const analysisFacetRecords = useMemo<FacetRecord[]>(() => finishedRuns.map((run) => {
+    const trainingRun = trainingRunById.get(run.training_run_id) ?? null;
+    const pipeline = trainingRun ? trainingPipelineById.get(trainingRun.training_pipeline_id) ?? null : null;
+    const method = pipeline ? methodById.get(pipeline.method_configuration_id) ?? null : null;
+    const trainingDatasetIds = pipeline?.training_datasets.map((entry) => String(entry.training_dataset_id)) ?? [];
+    const trainingDatasetNames = pipeline?.training_datasets.map((entry) => entry.name) ?? trainingRun?.dataset_names ?? [];
+    return {
+      id: String(run.id),
+      groupId: String(run.training_run_id),
+      facets: {
+        trainingDataset: trainingDatasetIds,
+        preprocessing: pipeline ? [String(pipeline.preprocessing_pipeline_id)] : [],
+        method: pipeline ? [String(pipeline.method_configuration_id)] : [],
+        inferenceDataset: [String(run.training_dataset_id)],
+        roi: [roiKeyForRun(run)],
+        metric: [metricKeyForRun(run)],
+        aggregation: [aggregationKeyForRun(run)],
+      },
+      searchableValues: [
+        run.name,
+        run.training_run_name,
+        run.training_pipeline_name,
+        run.training_dataset_name,
+        roiLabelForRun(run),
+        run.preprocessing_pipeline_name,
+        run.method_type,
+        method?.name,
+        metricLabel(metricKeyForRun(run)),
+        aggregationLabel(aggregationKeyForRun(run)),
+        ...trainingDatasetNames,
+      ].filter((value): value is string => Boolean(value)),
+    };
+  }), [finishedRuns, methodById, trainingPipelineById, trainingRunById]);
+
+  const analysisFacetState = useMemo<FacetFilterState>(() => ({
+    query: pipelineSearch,
+    selections: {
+      trainingDataset: modelTrainingDatasetFilters,
+      preprocessing: modelPreprocessingFilters,
+      method: modelMethodFilters,
+      inferenceDataset: modelInferenceDatasetFilters,
+      roi: modelRoiFilters,
+      metric: modelMetricFilters,
+      aggregation: modelAggregationFilters,
+    },
+  }), [
+    modelAggregationFilters,
+    modelInferenceDatasetFilters,
+    modelMethodFilters,
+    modelMetricFilters,
+    modelPreprocessingFilters,
+    modelRoiFilters,
+    modelTrainingDatasetFilters,
+    pipelineSearch,
+  ]);
+  const matchingAnalysisModelIds = useMemo(
+    () => matchingFacetGroupIds(analysisFacetRecords, analysisFacetState),
+    [analysisFacetRecords, analysisFacetState],
+  );
+  const analysableModelRows = useMemo(
+    () => allAnalysableModelRows.filter((row) => matchingAnalysisModelIds.has(String(row.id))),
+    [allAnalysableModelRows, matchingAnalysisModelIds],
+  );
+  const analysisFacetCounts = useMemo(() => ({
+    trainingDataset: countFacetValues(analysisFacetRecords, analysisFacetState, 'trainingDataset'),
+    preprocessing: countFacetValues(analysisFacetRecords, analysisFacetState, 'preprocessing'),
+    method: countFacetValues(analysisFacetRecords, analysisFacetState, 'method'),
+    inferenceDataset: countFacetValues(analysisFacetRecords, analysisFacetState, 'inferenceDataset'),
+    roi: countFacetValues(analysisFacetRecords, analysisFacetState, 'roi'),
+    metric: countFacetValues(analysisFacetRecords, analysisFacetState, 'metric'),
+    aggregation: countFacetValues(analysisFacetRecords, analysisFacetState, 'aggregation'),
+  }), [analysisFacetRecords, analysisFacetState]);
+
+  const trainingDatasetFacetOptions = useMemo(() => {
+    const labels = new Map<string, string>();
+    trainingPipelines.forEach((pipeline) => pipeline.training_datasets.forEach((entry) => {
+      labels.set(String(entry.training_dataset_id), trainingDatasetById.get(entry.training_dataset_id)?.name ?? entry.name);
+    }));
+    return [...labels].map(([value, label]) => facetOption(value, label, analysisFacetCounts.trainingDataset, modelTrainingDatasetFilters)).sort((a, b) => a.label.localeCompare(b.label));
+  }, [analysisFacetCounts.trainingDataset, modelTrainingDatasetFilters, trainingDatasetById, trainingPipelines]);
+  const preprocessingFacetOptions = useMemo(() => trainingPipelines
+    .map((pipeline) => [String(pipeline.preprocessing_pipeline_id), pipeline.preprocessing_pipeline_name] as const)
+    .filter(([value], index, values) => values.findIndex(([candidate]) => candidate === value) === index)
+    .map(([value, label]) => facetOption(value, label, analysisFacetCounts.preprocessing, modelPreprocessingFilters))
+    .sort((a, b) => a.label.localeCompare(b.label)), [analysisFacetCounts.preprocessing, modelPreprocessingFilters, trainingPipelines]);
+  const methodFacetOptions = useMemo(() => trainingPipelines
+    .map((pipeline) => [String(pipeline.method_configuration_id), methodById.get(pipeline.method_configuration_id)?.name ?? pipeline.method_configuration_name] as const)
+    .filter(([value], index, values) => values.findIndex(([candidate]) => candidate === value) === index)
+    .map(([value, label]) => facetOption(value, label, analysisFacetCounts.method, modelMethodFilters))
+    .sort((a, b) => a.label.localeCompare(b.label)), [analysisFacetCounts.method, methodById, modelMethodFilters, trainingPipelines]);
+  const inferenceDatasetFacetOptions = useMemo(() => {
+    const labels = new Map(finishedRuns.map((run) => [String(run.training_dataset_id), trainingDatasetById.get(run.training_dataset_id)?.name ?? run.training_dataset_name]));
+    return [...labels].map(([value, label]) => facetOption(value, label, analysisFacetCounts.inferenceDataset, modelInferenceDatasetFilters)).sort((a, b) => a.label.localeCompare(b.label));
+  }, [analysisFacetCounts.inferenceDataset, finishedRuns, modelInferenceDatasetFilters, trainingDatasetById]);
+  const roiFacetOptions = useMemo(() => {
+    const labels = new Map(finishedRuns.map((run) => [roiKeyForRun(run), roiLabelForRun(run)]));
+    return [...labels].map(([value, label]) => facetOption(value, label, analysisFacetCounts.roi, modelRoiFilters)).sort((a, b) => a.label.localeCompare(b.label));
+  }, [analysisFacetCounts.roi, finishedRuns, modelRoiFilters]);
+  const metricFacetOptions = useMemo(() => [...new Set(finishedRuns.map(metricKeyForRun))]
+    .sort((a, b) => metricOrder(a) - metricOrder(b) || a.localeCompare(b))
+    .map((value) => facetOption(value, metricLabel(value), analysisFacetCounts.metric, modelMetricFilters)), [analysisFacetCounts.metric, finishedRuns, modelMetricFilters]);
+  const aggregationFacetOptions = useMemo(() => [...new Set(finishedRuns.map(aggregationKeyForRun))]
+    .sort((a, b) => aggregationOrder(a) - aggregationOrder(b) || a.localeCompare(b))
+    .map((value) => facetOption(value, aggregationLabel(value), analysisFacetCounts.aggregation, modelAggregationFilters)), [analysisFacetCounts.aggregation, finishedRuns, modelAggregationFilters]);
+  const selectedOrFilteredModelRows = useMemo(() => {
+    const included = new Set(analysableModelRows.map((row) => row.id));
+    return [
+      ...allAnalysableModelRows.filter((row) => selectedModelIds.includes(String(row.id)) && !included.has(row.id)),
+      ...analysableModelRows,
+    ];
+  }, [allAnalysableModelRows, analysableModelRows, selectedModelIds]);
+  const pagedAnalysableModelRows = useMemo(
+    () => analysableModelRows.slice((analysisModelPage - 1) * DEFAULT_TABLE_PAGE_SIZE, analysisModelPage * DEFAULT_TABLE_PAGE_SIZE),
+    [analysableModelRows, analysisModelPage],
+  );
 
   const selectedModelIdSet = useMemo(() => new Set(selectedModelIds.map(Number)), [selectedModelIds]);
   const runsForSelectedModels = useMemo(
@@ -3499,12 +3585,24 @@ export function AnalysisPage({ active = true }: { active?: boolean }) {
       })
       .sort((left, right) => left.label.localeCompare(right.label));
   }, [finishedRuns, runsForSelectedModels, selectedModelIds, trainingDatasetById]);
+  const filteredCommonDatasetOptions = useMemo(() => {
+    const query = commonDatasetSearch.trim().toLowerCase();
+    if (!query) return commonDatasetOptions;
+    return commonDatasetOptions.filter((option) => {
+      const searchable = [option.label, option.dataset?.usage_label, ...(option.dataset?.dataset_names ?? [])];
+      return searchable.some((value) => value?.toLowerCase().includes(query));
+    });
+  }, [commonDatasetOptions, commonDatasetSearch]);
+  const pagedCommonDatasetOptions = useMemo(
+    () => filteredCommonDatasetOptions.slice((commonDatasetPage - 1) * DEFAULT_TABLE_PAGE_SIZE, commonDatasetPage * DEFAULT_TABLE_PAGE_SIZE),
+    [commonDatasetPage, filteredCommonDatasetOptions],
+  );
 
   const selectedInferenceDataset = selectedInferenceDatasetId ? trainingDatasetById.get(Number(selectedInferenceDatasetId)) ?? null : null;
   const selectedInferenceBounds = sourceBounds(selectedInferenceDataset);
 
   const roiOptionsForSelection = useMemo(() => {
-    if (!selectedInferenceDatasetId || selectedModelIds.length === 0) return [{ value: 'none', label: 'No ROI' }];
+    if (!selectedInferenceDatasetId || selectedModelIds.length === 0) return [];
     const modelIds = selectedModelIds.map(Number);
     const sets = modelIds.map((modelId) => {
       const options = new Map<string, string>();
@@ -3516,11 +3614,17 @@ export function AnalysisPage({ active = true }: { active?: boolean }) {
       return options;
     });
     const commonKeys = [...(sets[0]?.keys() ?? [])].filter((key) => sets.every((set) => set.has(key)));
-    const sorted = commonKeys
-      .map((key) => ({ value: key, label: sets[0].get(key) ?? (key === 'none' ? 'No ROI' : `ROI #${key}`) }))
+    return commonKeys
+      .map((key) => {
+        const runCount = finishedRuns.filter((run) => (
+          modelIds.includes(run.training_run_id)
+          && run.training_dataset_id === Number(selectedInferenceDatasetId)
+          && roiKeyForRun(run) === key
+        )).length;
+        const label = sets[0].get(key) ?? (key === 'none' ? 'No ROI' : `ROI #${key}`);
+        return { value: key, label: `${label} (${runCount} runs)` };
+      })
       .sort((left, right) => (left.value === 'none' ? -1 : right.value === 'none' ? 1 : left.label.localeCompare(right.label)));
-    if (!sorted.some((option) => option.value === 'none')) sorted.unshift({ value: 'none', label: 'No ROI' });
-    return sorted.length > 0 ? sorted : [{ value: 'none', label: 'No ROI' }];
   }, [finishedRuns, selectedInferenceDatasetId, selectedModelIds]);
 
   const metricOptionsForSelection = useMemo(() => {
@@ -3538,7 +3642,15 @@ export function AnalysisPage({ active = true }: { active?: boolean }) {
     return [...(sets[0] ?? new Set<string>())]
       .filter((metric) => sets.every((set) => set.has(metric)))
       .sort((left, right) => metricOrder(left) - metricOrder(right) || left.localeCompare(right))
-      .map((metric) => ({ value: metric, label: metricLabel(metric) }));
+      .map((metric) => {
+        const runCount = finishedRuns.filter((run) => (
+          modelIds.includes(run.training_run_id)
+          && run.training_dataset_id === Number(selectedInferenceDatasetId)
+          && roiKeyForRun(run) === selectedRoiKey
+          && metricKeyForRun(run) === metric
+        )).length;
+        return { value: metric, label: `${metricLabel(metric)} (${runCount} runs)` };
+      });
   }, [finishedRuns, selectedInferenceDatasetId, selectedModelIds, selectedRoiKey]);
 
   const aggregationOptionsForSelection = useMemo(() => {
@@ -3562,7 +3674,16 @@ export function AnalysisPage({ active = true }: { active?: boolean }) {
     return [...(sets[0] ?? new Set<string>())]
       .filter((aggregation) => sets.every((set) => set.has(aggregation)))
       .sort((left, right) => aggregationOrder(left) - aggregationOrder(right) || left.localeCompare(right))
-      .map((aggregation) => ({ value: aggregation, label: aggregationLabel(aggregation) }));
+      .map((aggregation) => {
+        const runCount = finishedRuns.filter((run) => (
+          modelIds.includes(run.training_run_id)
+          && run.training_dataset_id === Number(selectedInferenceDatasetId)
+          && roiKeyForRun(run) === selectedRoiKey
+          && metrics.has(metricKeyForRun(run))
+          && aggregationKeyForRun(run) === aggregation
+        )).length;
+        return { value: aggregation, label: `${aggregationLabel(aggregation)} (${runCount} runs)` };
+      });
   }, [finishedRuns, selectedInferenceDatasetId, selectedMetricKeys, selectedModelIds, selectedRoiKey]);
 
   const heatmapArtifactTestingRunIds = useMemo(() => {
@@ -3628,7 +3749,7 @@ export function AnalysisPage({ active = true }: { active?: boolean }) {
 
   useEffect(() => {
     if (!roiOptionsForSelection.some((option) => option.value === selectedRoiKey)) {
-      setSelectedRoiKey('none');
+      setSelectedRoiKey(null);
       setSelectedMetricKeys([]);
       setSelectedAggregationKeys([]);
       resetSelectionPreview();
@@ -3654,6 +3775,24 @@ export function AnalysisPage({ active = true }: { active?: boolean }) {
       return aggregationOptionsForSelection[0]?.value ? [aggregationOptionsForSelection[0].value] : [];
     });
   }, [aggregationOptionsForSelection]);
+
+  useEffect(() => setAnalysisModelPage(1), [
+    pipelineSearch,
+    modelTrainingDatasetFilters,
+    modelPreprocessingFilters,
+    modelMethodFilters,
+    modelInferenceDatasetFilters,
+    modelRoiFilters,
+    modelMetricFilters,
+    modelAggregationFilters,
+  ]);
+  useEffect(() => {
+    setAnalysisModelPage((page) => Math.min(page, Math.max(1, Math.ceil(analysableModelRows.length / DEFAULT_TABLE_PAGE_SIZE))));
+  }, [analysableModelRows.length]);
+  useEffect(() => setCommonDatasetPage(1), [commonDatasetSearch, selectedModelIds]);
+  useEffect(() => {
+    setCommonDatasetPage((page) => Math.min(page, Math.max(1, Math.ceil(filteredCommonDatasetOptions.length / DEFAULT_TABLE_PAGE_SIZE))));
+  }, [filteredCommonDatasetOptions.length]);
 
   const fetchResults = useCallback(
     async (runId: number) => {
@@ -4188,7 +4327,7 @@ export function AnalysisPage({ active = true }: { active?: boolean }) {
   }
 
   function selectedModelLabel(modelId: string): string {
-    return analysableModelRows.find((row) => row.id === Number(modelId))?.label ?? `Training run #${modelId}`;
+    return allAnalysableModelRows.find((row) => row.id === Number(modelId))?.label ?? `Training run #${modelId}`;
   }
 
   function markPreviewStale() {
@@ -4678,25 +4817,61 @@ export function AnalysisPage({ active = true }: { active?: boolean }) {
             <Stack gap="md">
               <StepCard index={1} title="Trained models" color="blue">
                 <Stack gap="sm">
-                  <TextInput
-                    placeholder="Search by model, pipeline or inference dataset"
-                    leftSection={<Search size={16} />}
-                    value={pipelineSearch}
-                    onChange={(event) => setPipelineSearch(event.currentTarget.value)}
-                  />
+                  <Group justify="space-between" wrap="wrap">
+                    <Group gap="xs">
+                      <Button
+                        variant="subtle"
+                        size="compact-sm"
+                        leftSection={<SlidersHorizontal size={16} />}
+                        rightSection={analysisFiltersOpen ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+                        onClick={() => setAnalysisFiltersOpen((open) => !open)}
+                      >
+                        Filters
+                      </Button>
+                      <Badge variant="light">{analysableModelRows.length} matching model{analysableModelRows.length === 1 ? '' : 's'}</Badge>
+                    </Group>
+                    {(pipelineSearch.trim() || modelTrainingDatasetFilters.length || modelPreprocessingFilters.length || modelMethodFilters.length || modelInferenceDatasetFilters.length || modelRoiFilters.length || modelMetricFilters.length || modelAggregationFilters.length) ? (
+                      <Button variant="subtle" color="gray" size="compact-sm" onClick={() => {
+                        setPipelineSearch('');
+                        setModelTrainingDatasetFilters([]);
+                        setModelPreprocessingFilters([]);
+                        setModelMethodFilters([]);
+                        setModelInferenceDatasetFilters([]);
+                        setModelRoiFilters([]);
+                        setModelMetricFilters([]);
+                        setModelAggregationFilters([]);
+                      }}>Reset filters</Button>
+                    ) : null}
+                  </Group>
+                  <Collapse in={analysisFiltersOpen}>
+                    <Stack gap="sm">
+                      <TextInput
+                        placeholder="Search models, pipelines and inference runs"
+                        leftSection={<Search size={16} />}
+                        value={pipelineSearch}
+                        onChange={(event) => setPipelineSearch(event.currentTarget.value)}
+                      />
+                      <SimpleGrid cols={{ base: 1, sm: 2, lg: 4 }}>
+                        <MultiSelect label="Training datasets" data={trainingDatasetFacetOptions} value={modelTrainingDatasetFilters} onChange={setModelTrainingDatasetFilters} searchable clearable />
+                        <MultiSelect label="Preprocessing" data={preprocessingFacetOptions} value={modelPreprocessingFilters} onChange={setModelPreprocessingFilters} searchable clearable />
+                        <MultiSelect label="Methods" data={methodFacetOptions} value={modelMethodFilters} onChange={setModelMethodFilters} searchable clearable />
+                        <MultiSelect label="Inference datasets" data={inferenceDatasetFacetOptions} value={modelInferenceDatasetFilters} onChange={setModelInferenceDatasetFilters} searchable clearable />
+                        <MultiSelect label="ROI" data={roiFacetOptions} value={modelRoiFilters} onChange={setModelRoiFilters} searchable clearable />
+                        <MultiSelect label="Metrics" data={metricFacetOptions} value={modelMetricFilters} onChange={setModelMetricFilters} searchable clearable />
+                        <MultiSelect label="Score aggregation" data={aggregationFacetOptions} value={modelAggregationFilters} onChange={setModelAggregationFilters} searchable clearable />
+                      </SimpleGrid>
+                      <Text size="xs" c="dimmed">Counts show unique models that would remain after the search and all other filter categories. Values inside one category use OR.</Text>
+                    </Stack>
+                  </Collapse>
                   <MultiSelect
                     label="Selected models"
                     placeholder="Choose one or more trained models"
-                    data={analysableModelRows.map((row) => ({ value: String(row.id), label: row.label }))}
+                    data={selectedOrFilteredModelRows.map((row) => ({ value: String(row.id), label: row.label }))}
                     value={selectedModelIds}
                     searchable
                     clearable
                     onChange={(values) => {
                       setSelectedModelIds(values);
-                      setSelectedInferenceDatasetId(null);
-                      setSelectedMetricKeys([]);
-                      setSelectedAggregationKeys([]);
-                      setSelectedRoiKey('none');
                       setSelectedSources([]);
                       resetSelectionPreview();
                     }}
@@ -4713,7 +4888,7 @@ export function AnalysisPage({ active = true }: { active?: boolean }) {
                         </Table.Tr>
                       </Table.Thead>
                       <Table.Tbody>
-                        {analysableModelRows.map((row) => {
+                        {pagedAnalysableModelRows.map((row) => {
                           const selected = selectedModelIds.includes(String(row.id));
                           const metrics = [...new Set(row.testingRuns.map(metricKeyForRun))].sort((left, right) => metricOrder(left) - metricOrder(right));
                           const datasets = [...new Set(row.testingRuns.map((run) => run.training_dataset_name))];
@@ -4744,10 +4919,6 @@ export function AnalysisPage({ active = true }: { active?: boolean }) {
                                           ? current.filter((id) => id !== String(row.id))
                                           : [...current, String(row.id)],
                                       );
-                                      setSelectedInferenceDatasetId(null);
-                                      setSelectedMetricKeys([]);
-                                      setSelectedAggregationKeys([]);
-                                      setSelectedRoiKey('none');
                                       setSelectedSources([]);
                                       resetSelectionPreview();
                                     }}
@@ -4771,12 +4942,24 @@ export function AnalysisPage({ active = true }: { active?: boolean }) {
                       </Table.Tbody>
                     </Table>
                   </ScrollArea>
+                  <TablePagination totalItems={analysableModelRows.length} page={analysisModelPage} onChange={setAnalysisModelPage} />
                 </Stack>
               </StepCard>
 
               {selectedModelIds.length > 0 && (
                 <StepCard index={2} title="Inference datasets" color="teal">
                   <Stack gap="sm">
+                    <Group justify="space-between" wrap="wrap">
+                      <TextInput
+                        placeholder="Search common inference datasets"
+                        leftSection={<Search size={16} />}
+                        value={commonDatasetSearch}
+                        onChange={(event) => setCommonDatasetSearch(event.currentTarget.value)}
+                        style={{ flex: 1 }}
+                      />
+                      <Badge variant="light" color="teal">{filteredCommonDatasetOptions.length} matching dataset{filteredCommonDatasetOptions.length === 1 ? '' : 's'}</Badge>
+                      {commonDatasetSearch && <Button variant="subtle" color="gray" size="compact-sm" onClick={() => setCommonDatasetSearch('')}>Reset</Button>}
+                    </Group>
                     <Paper withBorder radius="sm" className="analysis-run-picker">
                       <ScrollArea>
                         <Table striped highlightOnHover verticalSpacing="sm" miw={900}>
@@ -4794,7 +4977,7 @@ export function AnalysisPage({ active = true }: { active?: boolean }) {
                             </Table.Tr>
                           </Table.Thead>
                           <Table.Tbody>
-                            {commonDatasetOptions.map((option) => {
+                            {pagedCommonDatasetOptions.map((option) => {
                               const dataset = option.dataset;
                               const selected = selectedInferenceDatasetId === option.value;
                               return (
@@ -4836,9 +5019,6 @@ export function AnalysisPage({ active = true }: { active?: boolean }) {
                                       color={selected ? 'green' : 'blue'}
                                       onClick={() => {
                                         setSelectedInferenceDatasetId(option.value);
-                                        setSelectedMetricKeys([]);
-                                        setSelectedAggregationKeys([]);
-                                        setSelectedRoiKey('none');
                                         setSelectedSources([]);
                                         resetSelectionPreview();
                                         const bounds = sourceBounds(dataset);
@@ -4851,11 +5031,11 @@ export function AnalysisPage({ active = true }: { active?: boolean }) {
                                 </Table.Tr>
                               );
                             })}
-                            {commonDatasetOptions.length === 0 && (
+                            {filteredCommonDatasetOptions.length === 0 && (
                               <Table.Tr>
                                 <Table.Td colSpan={9}>
                                   <Text c="dimmed" ta="center" py="md">
-                                    No inference dataset is available for all selected models.
+                                    {commonDatasetOptions.length === 0 ? 'No inference dataset is available for all selected models.' : 'No common inference dataset matches the search.'}
                                   </Text>
                                 </Table.Td>
                               </Table.Tr>
@@ -4864,6 +5044,7 @@ export function AnalysisPage({ active = true }: { active?: boolean }) {
                         </Table>
                       </ScrollArea>
                     </Paper>
+                    <TablePagination totalItems={filteredCommonDatasetOptions.length} page={commonDatasetPage} onChange={setCommonDatasetPage} />
                   </Stack>
                 </StepCard>
               )}
@@ -4878,9 +5059,7 @@ export function AnalysisPage({ active = true }: { active?: boolean }) {
                       value={selectedRoiKey}
                       searchable
                       onChange={(value) => {
-                        setSelectedRoiKey(value ?? 'none');
-                        setSelectedMetricKeys([]);
-                        setSelectedAggregationKeys([]);
+                        setSelectedRoiKey(value);
                         setSelectedSources([]);
                         resetSelectionPreview();
                       }}
@@ -4902,6 +5081,7 @@ export function AnalysisPage({ active = true }: { active?: boolean }) {
                     />
                   </SimpleGrid>
                   {selectedRoiKey === 'none' && <Text size="sm" c="dimmed" mt="xs">No ROI is selected. Scores use the full image result from the matching inference runs.</Text>}
+                  {roiOptionsForSelection.length === 0 && <Alert color="yellow" mt="sm">No ROI variant is available for every selected model on this inference dataset.</Alert>}
                 </StepCard>
               )}
 

@@ -6,6 +6,7 @@ import {
   Collapse,
   Group,
   Loader,
+  MultiSelect,
   NumberInput,
   Paper,
   Progress,
@@ -22,7 +23,7 @@ import {
   Tooltip,
 } from '@mantine/core';
 import { notifications } from '@mantine/notifications';
-import { Activity, ChevronDown, ChevronRight, Info, Play, RefreshCw, Trash2 } from 'lucide-react';
+import { Activity, ChevronDown, ChevronRight, Info, Play, RefreshCw, Search, SlidersHorizontal, Trash2 } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 
 import {
@@ -39,6 +40,21 @@ import { DateTime24Input } from '../components/DateTime24Input';
 import { PlotlyChart, type PlotlyChartSelection } from '../components/PlotlyChart';
 import { DEFAULT_TABLE_PAGE_SIZE, TablePagination } from '../components/TablePagination';
 import type { Data, Layout } from '../lib/plotly';
+import {
+  countFacetValues,
+  facetOption,
+  matchingFacetRecords,
+  type FacetFilterState,
+  type FacetRecord,
+} from '../testing/facetFilters';
+import {
+  aggregationKeyForRun,
+  aggregationLabel,
+  metricKeyForRun,
+  metricLabel,
+  roiKeyForRun,
+  roiLabelForRun,
+} from '../testing/inferenceRunMetadata';
 import type {
   AnomalyDetectionConfig,
   AnomalyDetectionAlgorithm,
@@ -239,12 +255,6 @@ function formatDuration(start: string, end: string): string {
   return `${Math.round(minutes)} min`;
 }
 
-function uniqueOptions(runs: TestingRun[], value: (run: TestingRun) => number | string, label: (run: TestingRun) => string) {
-  const options = new Map<string, string>();
-  runs.forEach((run) => options.set(String(value(run)), label(run)));
-  return [...options.entries()].map(([optionValue, optionLabel]) => ({ value: optionValue, label: optionLabel }));
-}
-
 function scoreValue(result: TestingRunResult, series: AnomalyDetectionScoreSeries): number | null {
   if (series === 'score') return result.score;
   if (series === 'full_mse') return result.full_mse;
@@ -280,6 +290,32 @@ function compatibleThresholdRun(
   if (scoreSeries === 'roi_mse' && candidate.roi_mse_mean === null) return false;
   if ((scoreSeries === 'score' || scoreSeries === 'roi_mse') && !sameJson(candidate.roi_geometry, target.roi_geometry)) return false;
   return true;
+}
+
+function inferenceFacetRecord(run: TestingRun): FacetRecord {
+  return {
+    id: String(run.id),
+    facets: {
+      model: [String(run.training_run_id)],
+      dataset: [String(run.training_dataset_id)],
+      roi: [roiKeyForRun(run)],
+      metric: [metricKeyForRun(run)],
+      aggregation: [aggregationKeyForRun(run)],
+      preprocessing: run.preprocessing_pipeline_name ? [run.preprocessing_pipeline_name] : [],
+      method: run.method_type ? [run.method_type] : [],
+    },
+    searchableValues: [
+      run.name,
+      run.training_run_name,
+      run.training_pipeline_name,
+      run.training_dataset_name,
+      roiLabelForRun(run),
+      run.preprocessing_pipeline_name,
+      run.method_type,
+      metricLabel(metricKeyForRun(run)),
+      aggregationLabel(aggregationKeyForRun(run)),
+    ].filter(Boolean),
+  };
 }
 
 function progressToken(): string {
@@ -347,9 +383,16 @@ function DetectionProgressPanel({
 export function AnomalyDetectionPage({ active }: { active: boolean }) {
   const [testingRuns, setTestingRuns] = useState<TestingRun[]>([]);
   const [savedRuns, setSavedRuns] = useState<AnomalyDetectionRunSummary[]>([]);
-  const [modelFilter, setModelFilter] = useState<string | null>(null);
-  const [datasetFilter, setDatasetFilter] = useState<string | null>(null);
-  const [roiFilter, setRoiFilter] = useState<string | null>(null);
+  const [sourceFiltersOpen, setSourceFiltersOpen] = useState(true);
+  const [sourceSearch, setSourceSearch] = useState('');
+  const [sourceModelFilters, setSourceModelFilters] = useState<string[]>([]);
+  const [sourceDatasetFilters, setSourceDatasetFilters] = useState<string[]>([]);
+  const [sourceRoiFilters, setSourceRoiFilters] = useState<string[]>([]);
+  const [sourceMetricFilters, setSourceMetricFilters] = useState<string[]>([]);
+  const [sourceAggregationFilters, setSourceAggregationFilters] = useState<string[]>([]);
+  const [sourcePreprocessingFilters, setSourcePreprocessingFilters] = useState<string[]>([]);
+  const [sourceMethodFilters, setSourceMethodFilters] = useState<string[]>([]);
+  const [sourcePage, setSourcePage] = useState(1);
   const [testingRunId, setTestingRunId] = useState<string | null>(null);
   const [previewResults, setPreviewResults] = useState<TestingRunResult[]>([]);
   const [previewDecimated, setPreviewDecimated] = useState(false);
@@ -364,6 +407,9 @@ export function AnomalyDetectionPage({ active }: { active: boolean }) {
   const [preset, setPreset] = useState('fast');
   const [config, setConfig] = useState<AnomalyDetectionConfig>({ ...FAST_CONFIG });
   const [thresholdTestingRunId, setThresholdTestingRunId] = useState<string | null>(null);
+  const [thresholdRunSearch, setThresholdRunSearch] = useState('');
+  const [thresholdDatasetFilters, setThresholdDatasetFilters] = useState<string[]>([]);
+  const [thresholdRunPage, setThresholdRunPage] = useState(1);
   const [thresholdResults, setThresholdResults] = useState<TestingRunResult[]>([]);
   const [thresholdDecimated, setThresholdDecimated] = useState(false);
   const [thresholdLoading, setThresholdLoading] = useState(false);
@@ -382,6 +428,12 @@ export function AnomalyDetectionPage({ active }: { active: boolean }) {
   const [loadingSavedRunId, setLoadingSavedRunId] = useState<number | null>(null);
   const [detailsOpen, setDetailsOpen] = useState(true);
   const [savedPage, setSavedPage] = useState(1);
+  const [savedSearch, setSavedSearch] = useState('');
+  const [savedAlgorithmFilters, setSavedAlgorithmFilters] = useState<string[]>([]);
+  const [savedModelFilters, setSavedModelFilters] = useState<string[]>([]);
+  const [savedDatasetFilters, setSavedDatasetFilters] = useState<string[]>([]);
+  const [savedRoiFilters, setSavedRoiFilters] = useState<string[]>([]);
+  const [savedScoreFilters, setSavedScoreFilters] = useState<string[]>([]);
 
   const refresh = useCallback(async () => {
     const [inferences, detections] = await Promise.all([listTestingRuns(), listAnomalyDetectionRuns()]);
@@ -394,15 +446,6 @@ export function AnomalyDetectionPage({ active }: { active: boolean }) {
     refresh().catch((error) => notifications.show({ color: 'red', title: 'Could not load anomaly detection', message: errorMessage(error) }));
   }, [active, refresh]);
 
-  const pagedSavedRuns = useMemo(
-    () => savedRuns.slice((savedPage - 1) * DEFAULT_TABLE_PAGE_SIZE, savedPage * DEFAULT_TABLE_PAGE_SIZE),
-    [savedRuns, savedPage],
-  );
-
-  useEffect(() => {
-    setSavedPage((page) => Math.min(page, Math.max(1, Math.ceil(savedRuns.length / DEFAULT_TABLE_PAGE_SIZE))));
-  }, [savedRuns.length]);
-
   useEffect(() => {
     if (!running && loadingSavedRunId === null) return;
     const startedAt = Date.now();
@@ -413,19 +456,58 @@ export function AnomalyDetectionPage({ active }: { active: boolean }) {
     return () => window.clearInterval(timer);
   }, [running, loadingSavedRunId]);
 
-  const modelRuns = useMemo(
-    () => testingRuns.filter((run) => !modelFilter || run.training_run_id === Number(modelFilter)),
-    [testingRuns, modelFilter],
-  );
-  const datasetRuns = useMemo(
-    () => modelRuns.filter((run) => !datasetFilter || run.training_dataset_id === Number(datasetFilter)),
-    [modelRuns, datasetFilter],
-  );
-  const filteredRuns = useMemo(
-    () => datasetRuns.filter((run) => !roiFilter || (run.roi_id === null ? 'none' : String(run.roi_id)) === roiFilter),
-    [datasetRuns, roiFilter],
-  );
   const selectedRun = testingRuns.find((run) => run.id === Number(testingRunId)) ?? null;
+  const inferenceFacetRecords = useMemo(() => testingRuns.map(inferenceFacetRecord), [testingRuns]);
+  const sourceFacetState = useMemo<FacetFilterState>(() => ({
+    query: sourceSearch,
+    selections: {
+      model: sourceModelFilters,
+      dataset: sourceDatasetFilters,
+      roi: sourceRoiFilters,
+      metric: sourceMetricFilters,
+      aggregation: sourceAggregationFilters,
+      preprocessing: sourcePreprocessingFilters,
+      method: sourceMethodFilters,
+    },
+  }), [sourceAggregationFilters, sourceDatasetFilters, sourceMethodFilters, sourceMetricFilters, sourceModelFilters, sourcePreprocessingFilters, sourceRoiFilters, sourceSearch]);
+  const filteredRunRecords = useMemo(
+    () => matchingFacetRecords(inferenceFacetRecords, sourceFacetState),
+    [inferenceFacetRecords, sourceFacetState],
+  );
+  const testingRunById = useMemo(() => new Map(testingRuns.map((run) => [run.id, run])), [testingRuns]);
+  const filteredRuns = useMemo(
+    () => filteredRunRecords.map((record) => testingRunById.get(Number(record.id))).filter((run): run is TestingRun => Boolean(run)),
+    [filteredRunRecords, testingRunById],
+  );
+  const pagedFilteredRuns = useMemo(
+    () => filteredRuns.slice((sourcePage - 1) * DEFAULT_TABLE_PAGE_SIZE, sourcePage * DEFAULT_TABLE_PAGE_SIZE),
+    [filteredRuns, sourcePage],
+  );
+  const sourceFacetCounts = useMemo(() => ({
+    model: countFacetValues(inferenceFacetRecords, sourceFacetState, 'model'),
+    dataset: countFacetValues(inferenceFacetRecords, sourceFacetState, 'dataset'),
+    roi: countFacetValues(inferenceFacetRecords, sourceFacetState, 'roi'),
+    metric: countFacetValues(inferenceFacetRecords, sourceFacetState, 'metric'),
+    aggregation: countFacetValues(inferenceFacetRecords, sourceFacetState, 'aggregation'),
+    preprocessing: countFacetValues(inferenceFacetRecords, sourceFacetState, 'preprocessing'),
+    method: countFacetValues(inferenceFacetRecords, sourceFacetState, 'method'),
+  }), [inferenceFacetRecords, sourceFacetState]);
+  const sourceModelOptions = useMemo(() => {
+    const labels = new Map(testingRuns.map((run) => [String(run.training_run_id), run.training_pipeline_name || run.training_run_name || `Training run #${run.training_run_id}`]));
+    return [...labels].map(([value, label]) => facetOption(value, label, sourceFacetCounts.model, sourceModelFilters)).sort((a, b) => a.label.localeCompare(b.label));
+  }, [sourceFacetCounts.model, sourceModelFilters, testingRuns]);
+  const sourceDatasetOptions = useMemo(() => {
+    const labels = new Map(testingRuns.map((run) => [String(run.training_dataset_id), run.training_dataset_name || `Inference dataset #${run.training_dataset_id}`]));
+    return [...labels].map(([value, label]) => facetOption(value, label, sourceFacetCounts.dataset, sourceDatasetFilters)).sort((a, b) => a.label.localeCompare(b.label));
+  }, [sourceDatasetFilters, sourceFacetCounts.dataset, testingRuns]);
+  const sourceRoiOptions = useMemo(() => {
+    const labels = new Map(testingRuns.map((run) => [roiKeyForRun(run), roiLabelForRun(run)]));
+    return [...labels].map(([value, label]) => facetOption(value, label, sourceFacetCounts.roi, sourceRoiFilters)).sort((a, b) => a.label.localeCompare(b.label));
+  }, [sourceFacetCounts.roi, sourceRoiFilters, testingRuns]);
+  const sourceMetricOptions = useMemo(() => [...new Set(testingRuns.map(metricKeyForRun))].map((value) => facetOption(value, metricLabel(value), sourceFacetCounts.metric, sourceMetricFilters)), [sourceFacetCounts.metric, sourceMetricFilters, testingRuns]);
+  const sourceAggregationOptions = useMemo(() => [...new Set(testingRuns.map(aggregationKeyForRun))].map((value) => facetOption(value, aggregationLabel(value), sourceFacetCounts.aggregation, sourceAggregationFilters)), [sourceAggregationFilters, sourceFacetCounts.aggregation, testingRuns]);
+  const sourcePreprocessingOptions = useMemo(() => [...new Set(testingRuns.map((run) => run.preprocessing_pipeline_name).filter(Boolean))].map((value) => facetOption(value, value, sourceFacetCounts.preprocessing, sourcePreprocessingFilters)).sort((a, b) => a.label.localeCompare(b.label)), [sourceFacetCounts.preprocessing, sourcePreprocessingFilters, testingRuns]);
+  const sourceMethodOptions = useMemo(() => [...new Set(testingRuns.map((run) => run.method_type).filter(Boolean))].map((value) => facetOption(value, value, sourceFacetCounts.method, sourceMethodFilters)).sort((a, b) => a.label.localeCompare(b.label)), [sourceFacetCounts.method, sourceMethodFilters, testingRuns]);
   const compatibleThresholdRuns = useMemo(
     () => selectedRun
       ? testingRuns.filter((run) => compatibleThresholdRun(selectedRun, run, scoreSeries))
@@ -435,12 +517,91 @@ export function AnomalyDetectionPage({ active }: { active: boolean }) {
   const thresholdTestingRun = compatibleThresholdRuns.find(
     (run) => run.id === Number(thresholdTestingRunId),
   ) ?? null;
+  const thresholdFacetRecords = useMemo(() => compatibleThresholdRuns.map(inferenceFacetRecord), [compatibleThresholdRuns]);
+  const thresholdFacetState = useMemo<FacetFilterState>(() => ({
+    query: thresholdRunSearch,
+    selections: { dataset: thresholdDatasetFilters },
+  }), [thresholdDatasetFilters, thresholdRunSearch]);
+  const filteredThresholdRuns = useMemo(() => {
+    const ids = new Set(matchingFacetRecords(thresholdFacetRecords, thresholdFacetState).map((record) => Number(record.id)));
+    return compatibleThresholdRuns.filter((run) => ids.has(run.id));
+  }, [compatibleThresholdRuns, thresholdFacetRecords, thresholdFacetState]);
+  const pagedThresholdRuns = useMemo(
+    () => filteredThresholdRuns.slice((thresholdRunPage - 1) * DEFAULT_TABLE_PAGE_SIZE, thresholdRunPage * DEFAULT_TABLE_PAGE_SIZE),
+    [filteredThresholdRuns, thresholdRunPage],
+  );
+  const thresholdDatasetCounts = useMemo(() => countFacetValues(thresholdFacetRecords, thresholdFacetState, 'dataset'), [thresholdFacetRecords, thresholdFacetState]);
+  const thresholdDatasetOptions = useMemo(() => {
+    const labels = new Map(compatibleThresholdRuns.map((run) => [String(run.training_dataset_id), run.training_dataset_name || `Inference dataset #${run.training_dataset_id}`]));
+    return [...labels].map(([value, label]) => facetOption(value, label, thresholdDatasetCounts, thresholdDatasetFilters)).sort((a, b) => a.label.localeCompare(b.label));
+  }, [compatibleThresholdRuns, thresholdDatasetCounts, thresholdDatasetFilters]);
+
+  const savedFacetRecords = useMemo<FacetRecord[]>(() => savedRuns.map((run) => {
+    const source = testingRunById.get(run.testing_run_id) ?? null;
+    return {
+      id: String(run.id),
+      facets: {
+        algorithm: [run.config.algorithm],
+        model: source ? [String(source.training_run_id)] : [],
+        dataset: source ? [String(source.training_dataset_id)] : [],
+        roi: source ? [roiKeyForRun(source)] : [],
+        score: [run.score_series],
+      },
+      searchableValues: [run.name, run.testing_run_name, source?.training_pipeline_name, source?.training_dataset_name, source ? roiLabelForRun(source) : null, algorithmDefinition(run.config.algorithm).label, run.score_series].filter((value): value is string => Boolean(value)),
+    };
+  }), [savedRuns, testingRunById]);
+  const savedFacetState = useMemo<FacetFilterState>(() => ({
+    query: savedSearch,
+    selections: {
+      algorithm: savedAlgorithmFilters,
+      model: savedModelFilters,
+      dataset: savedDatasetFilters,
+      roi: savedRoiFilters,
+      score: savedScoreFilters,
+    },
+  }), [savedAlgorithmFilters, savedDatasetFilters, savedModelFilters, savedRoiFilters, savedScoreFilters, savedSearch]);
+  const filteredSavedRuns = useMemo(() => {
+    const ids = new Set(matchingFacetRecords(savedFacetRecords, savedFacetState).map((record) => Number(record.id)));
+    return savedRuns.filter((run) => ids.has(run.id));
+  }, [savedFacetRecords, savedFacetState, savedRuns]);
+  const pagedSavedRuns = useMemo(
+    () => filteredSavedRuns.slice((savedPage - 1) * DEFAULT_TABLE_PAGE_SIZE, savedPage * DEFAULT_TABLE_PAGE_SIZE),
+    [filteredSavedRuns, savedPage],
+  );
+  const savedFacetCounts = useMemo(() => ({
+    algorithm: countFacetValues(savedFacetRecords, savedFacetState, 'algorithm'),
+    model: countFacetValues(savedFacetRecords, savedFacetState, 'model'),
+    dataset: countFacetValues(savedFacetRecords, savedFacetState, 'dataset'),
+    roi: countFacetValues(savedFacetRecords, savedFacetState, 'roi'),
+    score: countFacetValues(savedFacetRecords, savedFacetState, 'score'),
+  }), [savedFacetRecords, savedFacetState]);
+  const savedAlgorithmOptions = useMemo(() => [...new Set(savedRuns.map((run) => run.config.algorithm))].map((value) => facetOption(value, algorithmDefinition(value).label, savedFacetCounts.algorithm, savedAlgorithmFilters)), [savedAlgorithmFilters, savedFacetCounts.algorithm, savedRuns]);
+  const savedModelOptions = useMemo(() => {
+    const labels = new Map(testingRuns.map((run) => [String(run.training_run_id), run.training_pipeline_name || run.training_run_name || `Training run #${run.training_run_id}`]));
+    return [...labels].map(([value, label]) => facetOption(value, label, savedFacetCounts.model, savedModelFilters)).sort((a, b) => a.label.localeCompare(b.label));
+  }, [savedFacetCounts.model, savedModelFilters, testingRuns]);
+  const savedDatasetOptions = useMemo(() => {
+    const labels = new Map(testingRuns.map((run) => [String(run.training_dataset_id), run.training_dataset_name || `Inference dataset #${run.training_dataset_id}`]));
+    return [...labels].map(([value, label]) => facetOption(value, label, savedFacetCounts.dataset, savedDatasetFilters)).sort((a, b) => a.label.localeCompare(b.label));
+  }, [savedDatasetFilters, savedFacetCounts.dataset, testingRuns]);
+  const savedRoiOptions = useMemo(() => {
+    const labels = new Map(testingRuns.map((run) => [roiKeyForRun(run), roiLabelForRun(run)]));
+    return [...labels].map(([value, label]) => facetOption(value, label, savedFacetCounts.roi, savedRoiFilters)).sort((a, b) => a.label.localeCompare(b.label));
+  }, [savedFacetCounts.roi, savedRoiFilters, testingRuns]);
+  const savedScoreOptions = useMemo(() => [...new Set(savedRuns.map((run) => run.score_series))].map((value) => facetOption(value, value.replaceAll('_', ' ').toUpperCase(), savedFacetCounts.score, savedScoreFilters)), [savedFacetCounts.score, savedRuns, savedScoreFilters]);
+
+  useEffect(() => setSourcePage(1), [sourceSearch, sourceModelFilters, sourceDatasetFilters, sourceRoiFilters, sourceMetricFilters, sourceAggregationFilters, sourcePreprocessingFilters, sourceMethodFilters]);
+  useEffect(() => setSourcePage((page) => Math.min(page, Math.max(1, Math.ceil(filteredRuns.length / DEFAULT_TABLE_PAGE_SIZE)))), [filteredRuns.length]);
+  useEffect(() => setThresholdRunPage(1), [thresholdRunSearch, thresholdDatasetFilters, selectedRun?.id, scoreSeries]);
+  useEffect(() => setThresholdRunPage((page) => Math.min(page, Math.max(1, Math.ceil(filteredThresholdRuns.length / DEFAULT_TABLE_PAGE_SIZE)))), [filteredThresholdRuns.length]);
+  useEffect(() => setSavedPage(1), [savedSearch, savedAlgorithmFilters, savedModelFilters, savedDatasetFilters, savedRoiFilters, savedScoreFilters]);
+  useEffect(() => setSavedPage((page) => Math.min(page, Math.max(1, Math.ceil(filteredSavedRuns.length / DEFAULT_TABLE_PAGE_SIZE)))), [filteredSavedRuns.length]);
 
   useEffect(() => {
-    if (!testingRunId || filteredRuns.some((run) => run.id === Number(testingRunId))) return;
+    if (!testingRunId || testingRuns.some((run) => run.id === Number(testingRunId))) return;
     setTestingRunId(null);
     setPreviewResults([]);
-  }, [filteredRuns, testingRunId]);
+  }, [testingRunId, testingRuns]);
 
   useEffect(() => {
     if (!testingRunId) return;
@@ -801,19 +962,73 @@ export function AnomalyDetectionPage({ active }: { active: boolean }) {
 
       <Paper withBorder p="md">
         <Stack gap="md">
-          <Text fw={700}>1. Select inference source</Text>
-          <SimpleGrid cols={{ base: 1, md: 4 }}>
-            <Select label="Model" searchable clearable data={uniqueOptions(testingRuns, (run) => run.training_run_id, (run) => run.training_run_name)} value={modelFilter} onChange={(value) => { setModelFilter(value); setDatasetFilter(null); setRoiFilter(null); }} />
-            <Select label="Inference dataset" searchable clearable data={uniqueOptions(modelRuns, (run) => run.training_dataset_id, (run) => run.training_dataset_name)} value={datasetFilter} onChange={(value) => { setDatasetFilter(value); setRoiFilter(null); }} />
-            <Select label="ROI" clearable data={uniqueOptions(datasetRuns, (run) => run.roi_id ?? 'none', (run) => run.roi_name ?? 'No ROI')} value={roiFilter} onChange={setRoiFilter} />
-            <Select label="Finished inference" searchable data={filteredRuns.map((run) => ({ value: String(run.id), label: run.name }))} value={testingRunId} onChange={setTestingRunId} placeholder="Select inference" disabled={running || thresholdCalculating} />
-          </SimpleGrid>
+          <Group justify="space-between" wrap="wrap">
+            <Text fw={700}>1. Select inference source</Text>
+            <Badge variant="light">{filteredRuns.length} matching inference{filteredRuns.length === 1 ? '' : 's'}</Badge>
+          </Group>
+          <Group justify="space-between" wrap="wrap">
+            <Button variant="subtle" size="compact-sm" leftSection={<SlidersHorizontal size={16} />} rightSection={sourceFiltersOpen ? <ChevronDown size={14} /> : <ChevronRight size={14} />} onClick={() => setSourceFiltersOpen((open) => !open)}>Filters</Button>
+            {(sourceSearch.trim() || sourceModelFilters.length || sourceDatasetFilters.length || sourceRoiFilters.length || sourceMetricFilters.length || sourceAggregationFilters.length || sourcePreprocessingFilters.length || sourceMethodFilters.length) ? (
+              <Button variant="subtle" color="gray" size="compact-sm" onClick={() => {
+                setSourceSearch('');
+                setSourceModelFilters([]);
+                setSourceDatasetFilters([]);
+                setSourceRoiFilters([]);
+                setSourceMetricFilters([]);
+                setSourceAggregationFilters([]);
+                setSourcePreprocessingFilters([]);
+                setSourceMethodFilters([]);
+              }}>Reset filters</Button>
+            ) : null}
+          </Group>
+          <Collapse in={sourceFiltersOpen}>
+            <Stack gap="sm">
+              <TextInput placeholder="Search inference, model, pipeline or dataset" leftSection={<Search size={16} />} value={sourceSearch} onChange={(event) => setSourceSearch(event.currentTarget.value)} />
+              <SimpleGrid cols={{ base: 1, sm: 2, lg: 4 }}>
+                <MultiSelect label="Models" searchable clearable data={sourceModelOptions} value={sourceModelFilters} onChange={setSourceModelFilters} />
+                <MultiSelect label="Inference datasets" searchable clearable data={sourceDatasetOptions} value={sourceDatasetFilters} onChange={setSourceDatasetFilters} />
+                <MultiSelect label="ROI" searchable clearable data={sourceRoiOptions} value={sourceRoiFilters} onChange={setSourceRoiFilters} />
+                <MultiSelect label="Metrics" searchable clearable data={sourceMetricOptions} value={sourceMetricFilters} onChange={setSourceMetricFilters} />
+                <MultiSelect label="Score aggregation" searchable clearable data={sourceAggregationOptions} value={sourceAggregationFilters} onChange={setSourceAggregationFilters} />
+                <MultiSelect label="Preprocessing" searchable clearable data={sourcePreprocessingOptions} value={sourcePreprocessingFilters} onChange={setSourcePreprocessingFilters} />
+                <MultiSelect label="Methods" searchable clearable data={sourceMethodOptions} value={sourceMethodFilters} onChange={setSourceMethodFilters} />
+              </SimpleGrid>
+              <Text size="xs" c="dimmed">Counts show finished inferences available after the search and all other categories. Multiple values inside one category use OR.</Text>
+            </Stack>
+          </Collapse>
+          <ScrollArea.Autosize mah={360} type="auto">
+            <Table striped highlightOnHover miw={1040}>
+              <Table.Thead><Table.Tr><Table.Th>Inference</Table.Th><Table.Th>Model</Table.Th><Table.Th>Dataset</Table.Th><Table.Th>ROI</Table.Th><Table.Th>Score configuration</Table.Th><Table.Th>Frames</Table.Th><Table.Th>Finished</Table.Th><Table.Th /></Table.Tr></Table.Thead>
+              <Table.Tbody>
+                {pagedFilteredRuns.map((run) => {
+                  const selected = testingRunId === String(run.id);
+                  return <Table.Tr key={run.id} bg={selected ? 'var(--mantine-color-green-light)' : undefined}>
+                    <Table.Td><Text fw={selected ? 700 : 500}>{run.name}</Text></Table.Td>
+                    <Table.Td>{run.training_pipeline_name || run.training_run_name || `Training run #${run.training_run_id}`}</Table.Td>
+                    <Table.Td>{run.training_dataset_name || `Inference dataset #${run.training_dataset_id}`}</Table.Td>
+                    <Table.Td>{roiLabelForRun(run)}</Table.Td>
+                    <Table.Td>{metricLabel(metricKeyForRun(run))} · {aggregationLabel(aggregationKeyForRun(run))}</Table.Td>
+                    <Table.Td>{(run.image_count ?? 0).toLocaleString()}</Table.Td>
+                    <Table.Td>{formatTimestamp(run.ended_at)}</Table.Td>
+                    <Table.Td><Button size="compact-sm" variant={selected ? 'filled' : 'light'} color={selected ? 'green' : 'blue'} disabled={running || thresholdCalculating || previewLoading} onClick={() => setTestingRunId(String(run.id))}>{selected ? 'Selected' : 'Use'}</Button></Table.Td>
+                  </Table.Tr>;
+                })}
+                {filteredRuns.length === 0 && <Table.Tr><Table.Td colSpan={8}><Stack align="center" gap="xs" py="md"><Text size="sm" c="dimmed">No finished inference matches the combined filters.</Text><Button variant="light" size="compact-sm" onClick={() => { setSourceSearch(''); setSourceModelFilters([]); setSourceDatasetFilters([]); setSourceRoiFilters([]); setSourceMetricFilters([]); setSourceAggregationFilters([]); setSourcePreprocessingFilters([]); setSourceMethodFilters([]); }}>Reset filters</Button></Stack></Table.Td></Table.Tr>}
+              </Table.Tbody>
+            </Table>
+          </ScrollArea.Autosize>
+          <TablePagination totalItems={filteredRuns.length} page={sourcePage} onChange={setSourcePage} />
           {selectedRun && (
-            <Group gap="xs">
-              <Badge variant="light">{selectedRun.training_run_name}</Badge>
+            <Alert color="green" title="Selected inference">
+              <Group gap="xs">
+              <Badge variant="light">{selectedRun.name}</Badge>
+              <Badge variant="light">{selectedRun.training_pipeline_name || selectedRun.training_run_name}</Badge>
               <Badge variant="light" color="teal">{selectedRun.training_dataset_name}</Badge>
+              <Badge variant="light" color="violet">{roiLabelForRun(selectedRun)}</Badge>
               <Badge variant="light" color="gray">{selectedRun.image_count ?? 0} frames</Badge>
-            </Group>
+              {!filteredRuns.some((run) => run.id === selectedRun.id) && <Badge variant="light" color="yellow">Hidden by current filters</Badge>}
+              </Group>
+            </Alert>
           )}
         </Stack>
       </Paper>
@@ -916,15 +1131,36 @@ export function AnomalyDetectionPage({ active }: { active: boolean }) {
                         </div>
                         {thresholdLoading && <Loader size="sm" />}
                       </Group>
-                      <Select
-                        label={<InfoLabel label="Validation inference" description="This inference must contain normal operation only. Its scores never come from the analyzed target range." />}
-                        searchable
-                        data={compatibleThresholdRuns.map((run) => ({ value: String(run.id), label: `${run.name} · ${run.training_dataset_name}` }))}
-                        value={thresholdTestingRunId}
-                        placeholder={compatibleThresholdRuns.length ? 'Select normal inference' : 'No compatible inference available'}
-                        disabled={running || thresholdCalculating}
-                        onChange={setThresholdTestingRunId}
-                      />
+                      <Text size="sm" fw={500}><InfoLabel label="Validation inference" description="This inference must contain normal operation only. Its scores never come from the analyzed target range." /></Text>
+                      <SimpleGrid cols={{ base: 1, md: 2 }}>
+                        <TextInput placeholder="Search compatible inference or dataset" leftSection={<Search size={16} />} value={thresholdRunSearch} onChange={(event) => setThresholdRunSearch(event.currentTarget.value)} />
+                        <MultiSelect label="Inference datasets" searchable clearable data={thresholdDatasetOptions} value={thresholdDatasetFilters} onChange={setThresholdDatasetFilters} />
+                      </SimpleGrid>
+                      <Group justify="space-between" wrap="wrap">
+                        <Badge variant="light" color="teal">{filteredThresholdRuns.length} compatible match{filteredThresholdRuns.length === 1 ? '' : 'es'}</Badge>
+                        {(thresholdRunSearch || thresholdDatasetFilters.length > 0) && <Button variant="subtle" color="gray" size="compact-sm" onClick={() => { setThresholdRunSearch(''); setThresholdDatasetFilters([]); }}>Reset filters</Button>}
+                      </Group>
+                      <ScrollArea.Autosize mah={280} type="auto">
+                        <Table striped highlightOnHover miw={760}>
+                          <Table.Thead><Table.Tr><Table.Th>Inference</Table.Th><Table.Th>Dataset</Table.Th><Table.Th>ROI</Table.Th><Table.Th>Frames</Table.Th><Table.Th>Finished</Table.Th><Table.Th /></Table.Tr></Table.Thead>
+                          <Table.Tbody>
+                            {pagedThresholdRuns.map((run) => {
+                              const selected = thresholdTestingRunId === String(run.id);
+                              return <Table.Tr key={run.id} bg={selected ? 'var(--mantine-color-teal-light)' : undefined}>
+                                <Table.Td><Text fw={selected ? 700 : 500}>{run.name}</Text></Table.Td>
+                                <Table.Td>{run.training_dataset_name}</Table.Td>
+                                <Table.Td>{roiLabelForRun(run)}</Table.Td>
+                                <Table.Td>{(run.image_count ?? 0).toLocaleString()}</Table.Td>
+                                <Table.Td>{formatTimestamp(run.ended_at)}</Table.Td>
+                                <Table.Td><Button size="compact-sm" variant={selected ? 'filled' : 'light'} color="teal" disabled={running || thresholdCalculating || thresholdLoading} onClick={() => setThresholdTestingRunId(String(run.id))}>{selected ? 'Selected' : 'Use'}</Button></Table.Td>
+                              </Table.Tr>;
+                            })}
+                            {filteredThresholdRuns.length === 0 && <Table.Tr><Table.Td colSpan={6}><Text c="dimmed" size="sm" ta="center" py="md">{compatibleThresholdRuns.length ? 'No compatible validation inference matches the filters.' : 'No compatible validation inference is available.'}</Text></Table.Td></Table.Tr>}
+                          </Table.Tbody>
+                        </Table>
+                      </ScrollArea.Autosize>
+                      <TablePagination totalItems={filteredThresholdRuns.length} page={thresholdRunPage} onChange={setThresholdRunPage} />
+                      {thresholdTestingRun && !filteredThresholdRuns.some((run) => run.id === thresholdTestingRun.id) && <Alert color="yellow">Selected validation inference: {thresholdTestingRun.name}. It is hidden by the current filters.</Alert>}
                       {thresholdTestingRun && (
                         <>
                           <SegmentedControl
@@ -1093,8 +1329,19 @@ export function AnomalyDetectionPage({ active }: { active: boolean }) {
 
       <Paper withBorder p="md">
         <Stack gap="sm">
-          <Group justify="space-between"><Text fw={700}>Saved detection runs</Text><Badge variant="light">{savedRuns.length}</Badge></Group>
-          {savedRuns.length === 0 ? <Text size="sm" c="dimmed">No saved anomaly detection runs yet.</Text> : (
+          <Group justify="space-between"><Text fw={700}>Saved detection runs</Text><Badge variant="light">{filteredSavedRuns.length} matching</Badge></Group>
+          <TextInput placeholder="Search detection name, source, model or dataset" leftSection={<Search size={16} />} value={savedSearch} onChange={(event) => setSavedSearch(event.currentTarget.value)} />
+          <SimpleGrid cols={{ base: 1, sm: 2, lg: 5 }}>
+            <MultiSelect label="Algorithms" searchable clearable data={savedAlgorithmOptions} value={savedAlgorithmFilters} onChange={setSavedAlgorithmFilters} />
+            <MultiSelect label="Models" searchable clearable data={savedModelOptions} value={savedModelFilters} onChange={setSavedModelFilters} />
+            <MultiSelect label="Inference datasets" searchable clearable data={savedDatasetOptions} value={savedDatasetFilters} onChange={setSavedDatasetFilters} />
+            <MultiSelect label="ROI" searchable clearable data={savedRoiOptions} value={savedRoiFilters} onChange={setSavedRoiFilters} />
+            <MultiSelect label="Score series" searchable clearable data={savedScoreOptions} value={savedScoreFilters} onChange={setSavedScoreFilters} />
+          </SimpleGrid>
+          {(savedSearch || savedAlgorithmFilters.length || savedModelFilters.length || savedDatasetFilters.length || savedRoiFilters.length || savedScoreFilters.length) ? <Group justify="flex-end"><Button variant="subtle" color="gray" size="compact-sm" onClick={() => { setSavedSearch(''); setSavedAlgorithmFilters([]); setSavedModelFilters([]); setSavedDatasetFilters([]); setSavedRoiFilters([]); setSavedScoreFilters([]); }}>Reset filters</Button></Group> : null}
+          {savedRuns.length === 0 ? <Text size="sm" c="dimmed">No saved anomaly detection runs yet.</Text> : filteredSavedRuns.length === 0 ? (
+            <Stack align="center" gap="xs" py="md"><Text size="sm" c="dimmed">No saved detection run matches the combined filters.</Text><Button variant="light" size="compact-sm" onClick={() => { setSavedSearch(''); setSavedAlgorithmFilters([]); setSavedModelFilters([]); setSavedDatasetFilters([]); setSavedRoiFilters([]); setSavedScoreFilters([]); }}>Reset filters</Button></Stack>
+          ) : (
             <ScrollArea.Autosize mah={360} type="auto">
               <Table highlightOnHover>
                 <Table.Thead><Table.Tr><Table.Th>Name</Table.Th><Table.Th>Algorithm</Table.Th><Table.Th>Inference</Table.Th><Table.Th>Range</Table.Th><Table.Th>Warnings</Table.Th><Table.Th>Anomalies</Table.Th><Table.Th /></Table.Tr></Table.Thead>
@@ -1123,7 +1370,8 @@ export function AnomalyDetectionPage({ active }: { active: boolean }) {
               </Table>
             </ScrollArea.Autosize>
           )}
-          <TablePagination totalItems={savedRuns.length} page={savedPage} onChange={setSavedPage} />
+          <TablePagination totalItems={filteredSavedRuns.length} page={savedPage} onChange={setSavedPage} />
+          {activeRun && !filteredSavedRuns.some((run) => run.id === activeRun.id) && <Alert color="yellow">The opened run remains visible below but is hidden by the current Saved Runs filters.</Alert>}
           {loadingSavedRunId !== null && (
             <DetectionProgressPanel
               progress={operationProgress}
