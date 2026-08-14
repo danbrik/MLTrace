@@ -933,7 +933,7 @@ export function InspectPage({ active = true }: { active?: boolean }) {
   return (
     <Stack gap="lg">
       <div>
-        <Title order={2}>Inspect</Title>
+        <Title order={2}>Inspect Dataset</Title>
         <Text c="dimmed" size="sm">
           Inspect preprocessed image sequences with videos, diagnostics, and training-free temporal analysis.
         </Text>

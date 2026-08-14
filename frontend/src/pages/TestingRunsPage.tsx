@@ -691,7 +691,7 @@ export function TestingRunsPage({ active = true, onRunQueued }: { active?: boole
     <>
     <Stack gap="lg">
       <div>
-        <Title order={2}>Testing</Title>
+        <Title order={2}>Model Inference</Title>
         <Text c="dimmed" size="sm">
           Pick a trained model, choose a size-compatible inference dataset, optionally focus on an ROI, then queue an
           inference run. Progress and results appear on the Scheduler page.

@@ -4544,9 +4544,9 @@ export function AnalysisPage({ active = true }: { active?: boolean }) {
     <Stack gap="lg">
       <Group justify="space-between" align="flex-start">
         <div>
-          <Title order={2}>Analysis</Title>
+          <Title order={2}>Model Analysis</Title>
           <Text c="dimmed" size="sm">
-            Compose interactive plots from saved testing runs and compare them on one board.
+            Compose interactive plots from saved inference runs and compare them on one board.
           </Text>
         </div>
         <Button
