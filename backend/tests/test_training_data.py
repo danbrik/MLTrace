@@ -9,6 +9,7 @@ from sqlalchemy.pool import StaticPool
 from app import models
 from app.database import Base
 from app import services
+from app.training import data as data_module
 from app.training.data import (
     enumerate_training_dataset_clip_samples,
     enumerate_training_dataset_image_records,
@@ -122,6 +123,80 @@ def test_runtime_resolver_enumerates_real_files_not_representative_rows(tmp_path
             "frame_20260204_153040.tif",
         ]
         assert enumerate_training_pipeline_images(db, pipeline) == [record.file_path for record in records]
+    finally:
+        db.close()
+
+
+def test_pipeline_lists_shared_folder_once_for_overlapping_rules(tmp_path: Path, monkeypatch) -> None:
+    db = make_memory_session()
+    try:
+        for index in range(8):
+            timestamp = datetime(2026, 2, 4, 15, 30, 0) + timedelta(seconds=index * 10)
+            write_tiff(tmp_path / f"frame_{timestamp:%Y%m%d_%H%M%S}.tif")
+
+        dataset = models.Dataset(
+            name="A",
+            root_path=str(tmp_path),
+            status="ready",
+            timestamp_regex=r"(?P<timestamp>\d{8}_\d{6})",
+            timestamp_format="%Y%m%d_%H%M%S",
+        )
+        db.add(dataset)
+        db.flush()
+        folder = models.DatasetFolder(dataset_id=dataset.id, relative_path=".", image_count=8)
+        db.add(folder)
+        db.flush()
+        train_set = models.TrainingDataset(name="Windows", usage_label="train")
+        db.add(train_set)
+        db.flush()
+        window_start = datetime(2026, 2, 4, 15, 30, 0)
+        for start_second, end_second in ((0, 50), (20, 70)):
+            db.add(
+                models.TrainingDatasetRule(
+                    training_dataset_id=train_set.id,
+                    folder_id=folder.id,
+                    start_timestamp=window_start + timedelta(seconds=start_second),
+                    end_timestamp=window_start + timedelta(seconds=end_second),
+                    stride=2,
+                )
+            )
+        pipeline = models.TrainingPipeline(
+            name="P",
+            preprocessing_pipeline_id=1,
+            method_configuration_id=1,
+            training_parameters={},
+        )
+        db.add(pipeline)
+        db.flush()
+        db.add(
+            models.TrainingPipelineDataset(
+                training_pipeline_id=pipeline.id,
+                training_dataset_id=train_set.id,
+                position=0,
+            )
+        )
+        db.commit()
+        db.refresh(pipeline)
+
+        monkeypatch.setattr(data_module, "data_dir", lambda: tmp_path / "cache")
+        scans = {"count": 0}
+        real_direct_tiff_files = data_module.direct_tiff_files
+
+        def counting_direct_tiff_files(path):
+            scans["count"] += 1
+            return real_direct_tiff_files(path)
+
+        monkeypatch.setattr(data_module, "direct_tiff_files", counting_direct_tiff_files)
+
+        paths = enumerate_training_pipeline_images(db, pipeline)
+
+        assert scans["count"] == 1
+        assert [Path(path).name for path in paths] == [
+            "frame_20260204_153000.tif",
+            "frame_20260204_153020.tif",
+            "frame_20260204_153040.tif",
+            "frame_20260204_153100.tif",
+        ]
     finally:
         db.close()
 

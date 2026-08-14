@@ -1537,8 +1537,14 @@ def run_training(run_id: int, abort_event: threading.Event | None = None) -> Non
 
             if configuration.builder_kind == "form":
                 logger.info("Training run %s resolving training image paths", run_id)
+                resolution_started = time.perf_counter()
                 image_paths = enumerate_or_fail(db, pipeline)
-                logger.info("Training run %s resolved %s training image paths", run_id, len(image_paths))
+                logger.info(
+                    "Training run %s resolved %s training image paths in %.3fs",
+                    run_id,
+                    len(image_paths),
+                    time.perf_counter() - resolution_started,
+                )
                 # Fit-style methods (mean image) are pure numpy → always CPU.
                 run.device = "CPU"
                 _commit_noncritical(db, run.id, "device status")
@@ -1553,11 +1559,14 @@ def run_training(run_id: int, abort_event: threading.Event | None = None) -> Non
                 run.artifact_kind = "mean_image"
             elif configuration.builder_kind == "spatiotemporal_autoencoder":
                 logger.info("Training run %s resolving sequence clips", run_id)
+                resolution_started = time.perf_counter()
                 clips, clip_summary = enumerate_clips_or_fail(pipeline, configuration.method_config)
                 logger.info(
-                    "Training run %s resolved %s clips (%s skipped, %s selected frames, %s possible clips, mode=%s)",
+                    "Training run %s resolved %s clips in %.3fs "
+                    "(%s skipped, %s selected frames, %s possible clips, mode=%s)",
                     run_id,
                     len(clips),
+                    time.perf_counter() - resolution_started,
                     clip_summary.skipped_missing,
                     clip_summary.selected_frame_count,
                     clip_summary.possible_clip_count,
@@ -1580,8 +1589,14 @@ def run_training(run_id: int, abort_event: threading.Event | None = None) -> Non
                 run.artifact_kind = "weights"
             elif configuration.builder_kind == "fast_anogan":
                 logger.info("Training run %s resolving training image paths", run_id)
+                resolution_started = time.perf_counter()
                 image_paths = enumerate_or_fail(db, pipeline)
-                logger.info("Training run %s resolved %s training image paths", run_id, len(image_paths))
+                logger.info(
+                    "Training run %s resolved %s training image paths in %.3fs",
+                    run_id,
+                    len(image_paths),
+                    time.perf_counter() - resolution_started,
+                )
                 artifact_path = artifact_dir / "artifact.pt"
                 count = train_fast_anogan(
                     db, run, configuration, image_paths, graph, run.training_parameters, artifact_path, abort_event
@@ -1589,8 +1604,14 @@ def run_training(run_id: int, abort_event: threading.Event | None = None) -> Non
                 run.artifact_kind = "gan_bundle"
             else:
                 logger.info("Training run %s resolving training image paths", run_id)
+                resolution_started = time.perf_counter()
                 image_paths = enumerate_or_fail(db, pipeline)
-                logger.info("Training run %s resolved %s training image paths", run_id, len(image_paths))
+                logger.info(
+                    "Training run %s resolved %s training image paths in %.3fs",
+                    run_id,
+                    len(image_paths),
+                    time.perf_counter() - resolution_started,
+                )
                 artifact_path = artifact_dir / "artifact.pt"
                 count = train_gradient(
                     db, run, configuration, image_paths, graph, run.training_parameters, artifact_path, abort_event

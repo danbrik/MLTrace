@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from bisect import bisect_left, bisect_right
 from dataclasses import dataclass
 from datetime import datetime
@@ -90,18 +91,20 @@ def _folder_index_cache_path(folder_id: int) -> Path:
     return data_dir() / "folder_index" / f"{folder_id}.json"
 
 
-def _folder_dir_signature(folder_path: Path, file_count: int) -> str:
-    """Cheap fingerprint that changes when files are added/removed. Combines the
-    directory mtime with the file count; avoids ``stat`` on every file."""
+def _folder_dir_mtime_ns(folder_path: Path) -> int:
     try:
-        mtime_ns = folder_path.stat().st_mtime_ns
+        return folder_path.stat().st_mtime_ns
     except OSError:
-        mtime_ns = 0
-    return f"{file_count}:{mtime_ns}"
+        return 0
+
+
+def _folder_dir_signature(folder_path: Path, file_count: int) -> str:
+    """Fingerprint the directory contents without statting every file."""
+    return f"{file_count}:{_folder_dir_mtime_ns(folder_path)}"
 
 
 def _load_folder_index_cache(
-    folder_id: int, signature: str, folder_path: Path
+    folder_id: int, directory_mtime_ns: int, folder_path: Path
 ) -> list[TimestampIndexEntry] | None:
     path = _folder_index_cache_path(folder_id)
     try:
@@ -109,7 +112,8 @@ def _load_folder_index_cache(
             payload = json.load(handle)
     except (OSError, ValueError):
         return None
-    if payload.get("signature") != signature:
+    signature = payload.get("signature")
+    if not isinstance(signature, str) or signature.rpartition(":")[2] != str(directory_mtime_ns):
         return None
     try:
         # Stored compactly as [iso, name]; reconstruct the absolute path on load.
@@ -151,16 +155,16 @@ def _folder_timestamp_index(
     if cache is not None and folder.id in cache:
         return cache[folder.id]
 
+    started = time.perf_counter()
     dataset = folder.dataset
     if not dataset.timestamp_regex or not dataset.timestamp_format:
         raise ValueError(f"Dataset '{dataset.name}' has no confirmed timestamp parser.")
 
     folder_path = _folder_path(folder)
-    files = direct_tiff_files(folder_path)
-    signature = _folder_dir_signature(folder_path, len(files))
-
-    entries = _load_folder_index_cache(folder.id, signature, folder_path)
+    entries = _load_folder_index_cache(folder.id, _folder_dir_mtime_ns(folder_path), folder_path)
     if entries is None:
+        files = direct_tiff_files(folder_path)
+        signature = _folder_dir_signature(folder_path, len(files))
         entries = []
         for path in files:
             try:
@@ -172,6 +176,19 @@ def _folder_timestamp_index(
             entries.append((timestamp, path.name, str(path)))
         entries.sort()
         _save_folder_index_cache(folder.id, signature, entries)
+        logger.info(
+            "Rebuilt folder timestamp index folder=%s entries=%s duration_seconds=%.3f",
+            folder.id,
+            len(entries),
+            time.perf_counter() - started,
+        )
+    else:
+        logger.info(
+            "Loaded folder timestamp index folder=%s entries=%s duration_seconds=%.3f",
+            folder.id,
+            len(entries),
+            time.perf_counter() - started,
+        )
 
     if cache is not None:
         cache[folder.id] = entries
@@ -182,11 +199,12 @@ def _matching_folder_images(
     folder: models.DatasetFolder,
     start_timestamp: datetime,
     end_timestamp: datetime,
+    cache: FolderTimestampCache | None = None,
 ) -> list[ResolvedDatasetImage]:
     """Return all files in a timestamp range without opening image pixels."""
     dataset = folder.dataset
     matching: list[ResolvedDatasetImage] = []
-    entries = _folder_timestamp_index(folder)
+    entries = _folder_timestamp_index(folder, cache)
     left = bisect_left(entries, (start_timestamp, "", ""))
     right = bisect_right(entries, (end_timestamp, _HIGH_SORT_SENTINEL, _HIGH_SORT_SENTINEL))
     for timestamp, file_name, file_path in entries[left:right]:
@@ -231,13 +249,16 @@ def count_folder_range_images(
     return RuleImageCount(matching_images=matching_count, selected_images=selected_count)
 
 
-def enumerate_rule_images(rule: models.TrainingDatasetRule) -> list[ResolvedDatasetImage]:
+def enumerate_rule_images(
+    rule: models.TrainingDatasetRule,
+    cache: FolderTimestampCache | None = None,
+) -> list[ResolvedDatasetImage]:
     """Return concrete files selected by one rule, ordered by timestamp.
 
     This intentionally does not rely on ``dataset_images`` rows because the fast
     scanner only persists representative rows for large folders.
     """
-    selected = _matching_folder_images(rule.folder, rule.start_timestamp, rule.end_timestamp)
+    selected = _matching_folder_images(rule.folder, rule.start_timestamp, rule.end_timestamp, cache)
     return selected[:: max(1, rule.stride)]
 
 
@@ -256,12 +277,13 @@ def enumerate_training_dataset_image_records_for_range(
     """
     records: list[ResolvedDatasetImage] = []
     seen: set[str] = set()
+    cache: FolderTimestampCache = {}
     for rule in _sorted_rules(training_dataset):
         clipped_start = max(rule.start_timestamp, start_timestamp)
         clipped_end = min(rule.end_timestamp, end_timestamp)
         if clipped_end < clipped_start:
             continue
-        selected = _matching_folder_images(rule.folder, clipped_start, clipped_end)
+        selected = _matching_folder_images(rule.folder, clipped_start, clipped_end, cache)
         for image in selected[:: max(1, rule.stride)]:
             if image.file_path in seen:
                 continue
@@ -294,6 +316,7 @@ def enumerate_head_records_for_range(
     per_rule_cap = limit * extra_stride
 
     candidates: list[ResolvedDatasetImage] = []
+    cache: FolderTimestampCache = {}
     for rule in _sorted_rules(training_dataset):
         clipped_start = max(rule.start_timestamp, start_timestamp)
         clipped_end = min(rule.end_timestamp, end_timestamp)
@@ -301,7 +324,7 @@ def enumerate_head_records_for_range(
             continue
         folder = rule.folder
         dataset = folder.dataset
-        entries = _folder_timestamp_index(folder)
+        entries = _folder_timestamp_index(folder, cache)
         left = bisect_left(entries, (clipped_start, "", ""))
         right = bisect_right(entries, (clipped_end, _HIGH_SORT_SENTINEL, _HIGH_SORT_SENTINEL))
         step = max(1, rule.stride)
@@ -336,11 +359,13 @@ def enumerate_head_records_for_range(
 
 def enumerate_training_dataset_image_records(
     training_dataset: models.TrainingDataset,
+    cache: FolderTimestampCache | None = None,
 ) -> list[ResolvedDatasetImage]:
+    cache = cache if cache is not None else {}
     records: list[ResolvedDatasetImage] = []
     seen: set[str] = set()
     for rule in _sorted_rules(training_dataset):
-        for image in enumerate_rule_images(rule):
+        for image in enumerate_rule_images(rule, cache):
             if image.file_path in seen:
                 continue
             seen.add(image.file_path)
@@ -354,9 +379,10 @@ def enumerate_training_pipeline_image_records(
     """Return ordered, de-duplicated image records for a training pipeline."""
     records: list[ResolvedDatasetImage] = []
     seen: set[str] = set()
+    cache: FolderTimestampCache = {}
 
     for entry in sorted(pipeline.entries, key=lambda item: item.position):
-        for image in enumerate_training_dataset_image_records(entry.training_dataset):
+        for image in enumerate_training_dataset_image_records(entry.training_dataset, cache):
             if image.file_path in seen:
                 continue
             seen.add(image.file_path)
@@ -425,6 +451,7 @@ def enumerate_rule_clip_samples(
     missing_frame_policy: str = "skip",
     score_timestamp_mode: str = "last_input",
     sequence_contiguity_mode: str = "ordered_index",
+    cache: FolderTimestampCache | None = None,
 ) -> ClipEnumerationSummary:
     """Build clip samples from one rule without opening image pixels.
 
@@ -432,7 +459,7 @@ def enumerate_rule_clip_samples(
     inference would use. Cadence metadata is used to detect gaps introduced by
     missing files; ``skip`` drops those clips while ``fail`` raises.
     """
-    records = enumerate_rule_images(rule)
+    records = enumerate_rule_images(rule, cache)
     clip_length = max(1, int(clip_length))
     future_length = max(0, int(future_length))
     temporal_stride = max(1, int(temporal_stride))
@@ -509,7 +536,9 @@ def enumerate_training_dataset_clip_samples(
     missing_frame_policy: str = "skip",
     score_timestamp_mode: str = "last_input",
     sequence_contiguity_mode: str = "ordered_index",
+    cache: FolderTimestampCache | None = None,
 ) -> ClipEnumerationSummary:
+    cache = cache if cache is not None else {}
     clips: list[ResolvedClipSample] = []
     skipped = 0
     selected_frame_count = 0
@@ -525,6 +554,7 @@ def enumerate_training_dataset_clip_samples(
             missing_frame_policy=missing_frame_policy,
             score_timestamp_mode=score_timestamp_mode,
             sequence_contiguity_mode=contiguity_mode,
+            cache=cache,
         )
         clips.extend(summary.clips)
         skipped += summary.skipped_missing
@@ -548,6 +578,7 @@ def enumerate_training_pipeline_clip_samples(
     skipped = 0
     selected_frame_count = 0
     possible_clip_count = 0
+    cache: FolderTimestampCache = {}
     future_length = int(method_config.get("future_length") or 0) if method_config.get("prediction_branch") else 0
     contiguity_mode = _sequence_contiguity_mode(str(method_config.get("sequence_contiguity_mode") or "ordered_index"))
     for entry in sorted(pipeline.entries, key=lambda item: item.position):
@@ -560,6 +591,7 @@ def enumerate_training_pipeline_clip_samples(
             missing_frame_policy=str(method_config.get("missing_frame_policy") or "skip"),
             score_timestamp_mode=str(method_config.get("score_timestamp_mode") or "last_input"),
             sequence_contiguity_mode=contiguity_mode,
+            cache=cache,
         )
         clips.extend(summary.clips)
         skipped += summary.skipped_missing
