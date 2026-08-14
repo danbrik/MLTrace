@@ -3,11 +3,14 @@ import {
   Alert,
   Badge,
   Button,
+  Collapse,
   Group,
   Modal,
+  MultiSelect,
   Paper,
   ScrollArea,
   Select,
+  SimpleGrid,
   Stack,
   Switch,
   Table,
@@ -17,7 +20,7 @@ import {
   Tooltip,
 } from '@mantine/core';
 import { notifications } from '@mantine/notifications';
-import { Check, Image as ImageIcon, Info, Play, Search, Trash2 } from 'lucide-react';
+import { Check, ChevronDown, ChevronRight, Image as ImageIcon, Info, Play, Search, SlidersHorizontal, Trash2 } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { PointerEvent } from 'react';
 import type React from 'react';
@@ -26,6 +29,8 @@ import {
   bulkEnqueueTestingRuns,
   createRoi,
   deleteRoi,
+  getPreprocessingPipeline,
+  getTrainingDataset,
   listMethodConfigurations,
   listPreprocessingPipelines,
   listRois,
@@ -257,30 +262,32 @@ function renderPipelineDatasets(pipeline: TrainingPipeline | null, datasets: Tra
                     Label {dataset.usage_label ?? 'train'} · Sizes {datasetResolutions(dataset).join(', ') || 'n/a'} · Sources{' '}
                     {dataset.dataset_names.join(', ')}
                   </Text>
-                  <Table striped verticalSpacing="xs">
-                    <Table.Thead>
-                      <Table.Tr>
-                        <Table.Th>Dataset</Table.Th>
-                        <Table.Th>Folder</Table.Th>
-                        <Table.Th>Start</Table.Th>
-                        <Table.Th>End</Table.Th>
-                        <Table.Th>Stride</Table.Th>
-                        <Table.Th>Images</Table.Th>
-                      </Table.Tr>
-                    </Table.Thead>
-                    <Table.Tbody>
-                      {dataset.rules.map((rule) => (
-                        <Table.Tr key={rule.id}>
-                          <Table.Td>{rule.dataset_name}</Table.Td>
-                          <Table.Td>{rule.folder_relative_path}</Table.Td>
-                          <Table.Td>{new Date(rule.start_timestamp).toLocaleString()}</Table.Td>
-                          <Table.Td>{new Date(rule.end_timestamp).toLocaleString()}</Table.Td>
-                          <Table.Td>{rule.stride}</Table.Td>
-                          <Table.Td>{rule.selected_images == null ? 'Needs refresh' : rule.selected_images}</Table.Td>
+                  <ScrollArea type="auto">
+                    <Table striped verticalSpacing="xs" miw={760}>
+                      <Table.Thead>
+                        <Table.Tr>
+                          <Table.Th>Dataset</Table.Th>
+                          <Table.Th>Folder</Table.Th>
+                          <Table.Th>Start</Table.Th>
+                          <Table.Th>End</Table.Th>
+                          <Table.Th>Stride</Table.Th>
+                          <Table.Th>Images</Table.Th>
                         </Table.Tr>
-                      ))}
-                    </Table.Tbody>
-                  </Table>
+                      </Table.Thead>
+                      <Table.Tbody>
+                        {dataset.rules.map((rule) => (
+                          <Table.Tr key={rule.id}>
+                            <Table.Td>{rule.dataset_name}</Table.Td>
+                            <Table.Td>{rule.folder_relative_path}</Table.Td>
+                            <Table.Td>{new Date(rule.start_timestamp).toLocaleString()}</Table.Td>
+                            <Table.Td>{new Date(rule.end_timestamp).toLocaleString()}</Table.Td>
+                            <Table.Td>{rule.stride}</Table.Td>
+                            <Table.Td>{rule.selected_images == null ? 'Needs refresh' : rule.selected_images}</Table.Td>
+                          </Table.Tr>
+                        ))}
+                      </Table.Tbody>
+                    </Table>
+                  </ScrollArea>
                 </>
               ) : (
                 <Text size="sm" c="dimmed">
@@ -297,6 +304,7 @@ function renderPipelineDatasets(pipeline: TrainingPipeline | null, datasets: Tra
 
 function renderPreprocessingDetails(pipeline: PreprocessingPipeline | null) {
   if (!pipeline) return <Alert color="yellow">Preprocessing pipeline details are not available.</Alert>;
+  const nodes = orderedGraphNodes(pipeline);
   return (
     <Stack gap="sm">
       <Group>
@@ -305,7 +313,8 @@ function renderPreprocessingDetails(pipeline: PreprocessingPipeline | null) {
           Output {pipeline.output_width && pipeline.output_height ? `${pipeline.output_width}x${pipeline.output_height}` : 'n/a'}
         </Badge>
       </Group>
-      {orderedGraphNodes(pipeline).map((node, index) => (
+      {nodes.length === 0 && <Alert color="yellow">This preprocessing pipeline does not contain any saved steps.</Alert>}
+      {nodes.map((node, index) => (
         <Paper key={node.id} withBorder p="sm" radius="sm">
           <Text fw={700} size="sm">
             {index + 1}. {node.type}
@@ -399,7 +408,10 @@ export function TestingRunsPage({ active = true, onRunQueued }: { active?: boole
 
   // Model selection + filters.
   const [modelSearch, setModelSearch] = useState('');
-  const [modelMethodFilter, setModelMethodFilter] = useState<string | null>(null);
+  const [modelDatasetFilters, setModelDatasetFilters] = useState<string[]>([]);
+  const [modelPreprocessingFilters, setModelPreprocessingFilters] = useState<string[]>([]);
+  const [modelMethodFilters, setModelMethodFilters] = useState<string[]>([]);
+  const [modelFiltersOpen, setModelFiltersOpen] = useState(false);
   const [selectedModelIds, setSelectedModelIds] = useState<number[]>([]);
 
   // Dataset + ROI selection.
@@ -420,6 +432,8 @@ export function TestingRunsPage({ active = true, onRunQueued }: { active?: boole
   const [running, setRunning] = useState(false);
   const rowActions = usePendingIds();
   const [detailModal, setDetailModal] = useState<{ title: string; body: React.ReactNode } | null>(null);
+  const trainingDatasetDetailCache = useRef(new Map<number, TrainingDataset>());
+  const preprocessingDetailCache = useRef(new Map<number, PreprocessingPipeline>());
   const [modelPage, setModelPage] = useState(1);
   const [datasetPage, setDatasetPage] = useState(1);
   const [roiPage, setRoiPage] = useState(1);
@@ -471,9 +485,43 @@ export function TestingRunsPage({ active = true, onRunQueued }: { active?: boole
     () => trainingRuns.filter((run) => run.status === 'finished' && run.artifact_path),
     [trainingRuns],
   );
+  const modelDatasetOptions = useMemo(() => {
+    const options = new Map<number, string>();
+    models.forEach((run) => {
+      pipelineById.get(run.training_pipeline_id)?.training_datasets.forEach((entry) => {
+        const dataset = trainingDatasets.find((candidate) => candidate.id === entry.training_dataset_id);
+        options.set(entry.training_dataset_id, dataset?.name ?? entry.name);
+      });
+    });
+    return [...options.entries()]
+      .map(([id, label]) => ({ value: String(id), label }))
+      .sort((left, right) => left.label.localeCompare(right.label));
+  }, [models, pipelineById, trainingDatasets]);
+  const modelPreprocessingOptions = useMemo(() => {
+    const options = new Map<number, string>();
+    models.forEach((run) => {
+      const pipeline = pipelineById.get(run.training_pipeline_id);
+      if (pipeline) options.set(pipeline.preprocessing_pipeline_id, pipeline.preprocessing_pipeline_name);
+    });
+    return [...options.entries()]
+      .map(([id, label]) => ({ value: String(id), label }))
+      .sort((left, right) => left.label.localeCompare(right.label));
+  }, [models, pipelineById]);
   const methodOptions = useMemo(
-    () => [...new Set(models.map((run) => run.method_type))].map((type) => ({ value: type, label: type })),
-    [models],
+    () => {
+      const options = new Map<number, string>();
+      models.forEach((run) => {
+        const pipeline = pipelineById.get(run.training_pipeline_id);
+        if (!pipeline) return;
+        const configuration = methodConfigById.get(pipeline.method_configuration_id);
+        const label = configuration ? `${configuration.name} (${run.method_type})` : pipeline.method_configuration_name;
+        options.set(pipeline.method_configuration_id, label);
+      });
+      return [...options.entries()]
+        .map(([id, label]) => ({ value: String(id), label }))
+        .sort((left, right) => left.label.localeCompare(right.label));
+    },
+    [methodConfigById, models, pipelineById],
   );
   const selectedModels = useMemo(
     () => selectedModelIds.map((id) => models.find((run) => run.id === id)).filter((run): run is TrainingRun => Boolean(run)),
@@ -505,16 +553,40 @@ export function TestingRunsPage({ active = true, onRunQueued }: { active?: boole
   const filteredModels = useMemo(() => {
     const query = modelSearch.trim().toLowerCase();
     return models.filter((run) => {
-      if (modelMethodFilter && run.method_type !== modelMethodFilter) return false;
+      const pipeline = pipelineById.get(run.training_pipeline_id);
+      if (
+        modelDatasetFilters.length > 0
+        && !pipeline?.training_datasets.some((entry) => modelDatasetFilters.includes(String(entry.training_dataset_id)))
+      ) return false;
+      if (
+        modelPreprocessingFilters.length > 0
+        && (!pipeline || !modelPreprocessingFilters.includes(String(pipeline.preprocessing_pipeline_id)))
+      ) return false;
+      if (
+        modelMethodFilters.length > 0
+        && (!pipeline || !modelMethodFilters.includes(String(pipeline.method_configuration_id)))
+      ) return false;
       if (requiredInputResolution) {
-        const pipeline = pipelineById.get(run.training_pipeline_id);
         const inputRes = pipeline ? formatResolution(pipeline.preprocessing_input_width, pipeline.preprocessing_input_height) : null;
         if (inputRes !== requiredInputResolution && !selectedModelIds.includes(run.id)) return false;
       }
       if (!query) return true;
-      return run.training_pipeline_name.toLowerCase().includes(query) || run.method_type.toLowerCase().includes(query);
+      const searchable = [
+        run.training_pipeline_name,
+        run.method_type,
+        run.preprocessing_pipeline_name,
+        pipeline?.method_configuration_name,
+        ...run.dataset_names,
+        ...(pipeline?.training_datasets.map((entry) => entry.name) ?? []),
+      ];
+      return searchable.some((value) => value?.toLowerCase().includes(query));
     });
-  }, [models, modelSearch, modelMethodFilter, pipelineById, requiredInputResolution, selectedModelIds]);
+  }, [models, modelSearch, modelDatasetFilters, modelPreprocessingFilters, modelMethodFilters, pipelineById, requiredInputResolution, selectedModelIds]);
+
+  const unselectedFilteredModels = useMemo(
+    () => filteredModels.filter((run) => !selectedModelIds.includes(run.id)),
+    [filteredModels, selectedModelIds],
+  );
 
   const compatibleDatasets = useMemo(() => {
     if (selectedModels.length === 0) return [];
@@ -522,8 +594,11 @@ export function TestingRunsPage({ active = true, onRunQueued }: { active?: boole
     return trainingDatasets.filter((dataset) => datasetResolutions(dataset).includes(requiredInputResolution));
   }, [selectedModels.length, requiredInputResolution, trainingDatasets]);
   const pagedModels = useMemo(
-    () => filteredModels.slice((modelPage - 1) * DEFAULT_TABLE_PAGE_SIZE, modelPage * DEFAULT_TABLE_PAGE_SIZE),
-    [filteredModels, modelPage],
+    () => [
+      ...selectedModels,
+      ...unselectedFilteredModels.slice((modelPage - 1) * DEFAULT_TABLE_PAGE_SIZE, modelPage * DEFAULT_TABLE_PAGE_SIZE),
+    ],
+    [selectedModels, unselectedFilteredModels, modelPage],
   );
   const pagedDatasets = useMemo(
     () => compatibleDatasets.slice((datasetPage - 1) * DEFAULT_TABLE_PAGE_SIZE, datasetPage * DEFAULT_TABLE_PAGE_SIZE),
@@ -534,10 +609,10 @@ export function TestingRunsPage({ active = true, onRunQueued }: { active?: boole
     [rois, roiPage],
   );
 
-  useEffect(() => setModelPage(1), [modelSearch, modelMethodFilter]);
+  useEffect(() => setModelPage(1), [modelSearch, modelDatasetFilters, modelPreprocessingFilters, modelMethodFilters]);
   useEffect(() => {
-    setModelPage((page) => Math.min(page, Math.max(1, Math.ceil(filteredModels.length / DEFAULT_TABLE_PAGE_SIZE))));
-  }, [filteredModels.length]);
+    setModelPage((page) => Math.min(page, Math.max(1, Math.ceil(unselectedFilteredModels.length / DEFAULT_TABLE_PAGE_SIZE))));
+  }, [unselectedFilteredModels.length]);
   useEffect(() => {
     setDatasetPage((page) => Math.min(page, Math.max(1, Math.ceil(compatibleDatasets.length / DEFAULT_TABLE_PAGE_SIZE))));
   }, [compatibleDatasets.length]);
@@ -599,6 +674,66 @@ export function TestingRunsPage({ active = true, onRunQueued }: { active?: boole
     setPoints(null);
     setRoiEnabled(false);
     setRunNameTouched(false);
+  }
+
+  function clearModelFilters() {
+    setModelSearch('');
+    setModelDatasetFilters([]);
+    setModelPreprocessingFilters([]);
+    setModelMethodFilters([]);
+  }
+
+  async function showTrainingDatasetDetails(pipeline: TrainingPipeline | null) {
+    if (!pipeline) {
+      setDetailModal({ title: 'Trainsets', body: renderPipelineDatasets(null, []) });
+      return;
+    }
+    setDetailModal({ title: `Trainsets: ${pipeline.name}`, body: <Text c="dimmed">Loading trainset details...</Text> });
+    const results = await Promise.allSettled(
+      pipeline.training_datasets.map(async (entry) => {
+        const cached = trainingDatasetDetailCache.current.get(entry.training_dataset_id);
+        if (cached) return cached;
+        const dataset = await getTrainingDataset(entry.training_dataset_id);
+        trainingDatasetDetailCache.current.set(dataset.id, dataset);
+        return dataset;
+      }),
+    );
+    const datasets = results
+      .filter((result): result is PromiseFulfilledResult<TrainingDataset> => result.status === 'fulfilled')
+      .map((result) => result.value);
+    const failedCount = results.length - datasets.length;
+    if (failedCount > 0) notifyError('Could not load all trainset details', new Error(`${failedCount} trainset${failedCount === 1 ? '' : 's'} unavailable.`));
+    setDetailModal({
+      title: `Trainsets: ${pipeline.name}`,
+      body: (
+        <Stack gap="sm">
+          {failedCount > 0 && <Alert color="yellow">Some trainsets no longer exist or could not be loaded. Snapshot information is shown where available.</Alert>}
+          {renderPipelineDatasets(pipeline, datasets)}
+        </Stack>
+      ),
+    });
+  }
+
+  async function showPreprocessingDetails(pipeline: TrainingPipeline | null) {
+    if (!pipeline) {
+      setDetailModal({ title: 'Preprocessing pipeline', body: renderPreprocessingDetails(null) });
+      return;
+    }
+    setDetailModal({ title: `Preprocessing: ${pipeline.preprocessing_pipeline_name}`, body: <Text c="dimmed">Loading preprocessing steps...</Text> });
+    try {
+      let preprocessing = preprocessingDetailCache.current.get(pipeline.preprocessing_pipeline_id);
+      if (!preprocessing) {
+        preprocessing = await getPreprocessingPipeline(pipeline.preprocessing_pipeline_id);
+        preprocessingDetailCache.current.set(preprocessing.id, preprocessing);
+      }
+      setDetailModal({ title: `Preprocessing: ${preprocessing.name}`, body: renderPreprocessingDetails(preprocessing) });
+    } catch (error) {
+      notifyError('Could not load preprocessing details', error);
+      setDetailModal({
+        title: `Preprocessing: ${pipeline.preprocessing_pipeline_name}`,
+        body: <Alert color="yellow">The full preprocessing pipeline is unavailable. It may have been deleted.</Alert>,
+      });
+    }
   }
 
   async function handlePreview() {
@@ -741,15 +876,64 @@ export function TestingRunsPage({ active = true, onRunQueued }: { active?: boole
               </Stack>
             </Alert>
           )}
-              <TextInput
-                placeholder="Search by pipeline or method"
-                leftSection={<Search size={16} />}
-                value={modelSearch}
-                onChange={(event) => setModelSearch(event.currentTarget.value)}
-              />
-              <Group grow>
-                <Select placeholder="Method type" data={methodOptions} value={modelMethodFilter} onChange={setModelMethodFilter} clearable />
+              <Group justify="space-between">
+                <Button
+                  variant="subtle"
+                  size="compact-sm"
+                  leftSection={<SlidersHorizontal size={16} />}
+                  rightSection={modelFiltersOpen ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+                  onClick={() => setModelFiltersOpen((current) => !current)}
+                >
+                  Filters
+                  {(modelSearch.trim() || modelDatasetFilters.length + modelPreprocessingFilters.length + modelMethodFilters.length > 0) && (
+                    <Badge size="xs" ml="xs" variant="filled">
+                      {(modelSearch.trim() ? 1 : 0) + modelDatasetFilters.length + modelPreprocessingFilters.length + modelMethodFilters.length}
+                    </Badge>
+                  )}
+                </Button>
+                {(modelSearch.trim() || modelDatasetFilters.length + modelPreprocessingFilters.length + modelMethodFilters.length > 0) && (
+                  <Button variant="subtle" color="gray" size="compact-sm" onClick={clearModelFilters}>Reset filters</Button>
+                )}
               </Group>
+              <Collapse in={modelFiltersOpen}>
+                <Stack gap="sm">
+                  <TextInput
+                    placeholder="Search pipeline, trainset, preprocessing or method"
+                    leftSection={<Search size={16} />}
+                    value={modelSearch}
+                    onChange={(event) => setModelSearch(event.currentTarget.value)}
+                  />
+                  <SimpleGrid cols={{ base: 1, sm: 3 }}>
+                    <MultiSelect
+                      label="Trainsets"
+                      placeholder="All trainsets"
+                      data={modelDatasetOptions}
+                      value={modelDatasetFilters}
+                      onChange={setModelDatasetFilters}
+                      searchable
+                      clearable
+                    />
+                    <MultiSelect
+                      label="Preprocessing"
+                      placeholder="All pipelines"
+                      data={modelPreprocessingOptions}
+                      value={modelPreprocessingFilters}
+                      onChange={setModelPreprocessingFilters}
+                      searchable
+                      clearable
+                    />
+                    <MultiSelect
+                      label="Methods"
+                      placeholder="All methods"
+                      data={methodOptions}
+                      value={modelMethodFilters}
+                      onChange={setModelMethodFilters}
+                      searchable
+                      clearable
+                    />
+                  </SimpleGrid>
+                </Stack>
+              </Collapse>
               <ScrollArea h={240}>
                 <Table striped highlightOnHover verticalSpacing="sm">
                   <Table.Thead>
@@ -758,19 +942,13 @@ export function TestingRunsPage({ active = true, onRunQueued }: { active?: boole
                       <Table.Th>Trainsets</Table.Th>
                       <Table.Th>Preprocessing</Table.Th>
                       <Table.Th>Method</Table.Th>
-                      <Table.Th>Artifact</Table.Th>
-                      <Table.Th>Input size</Table.Th>
                       <Table.Th />
                     </Table.Tr>
                   </Table.Thead>
                   <Table.Tbody>
                     {pagedModels.map((run) => {
                       const pipeline = pipelineById.get(run.training_pipeline_id);
-                      const preprocessing = pipeline ? preprocessingById.get(pipeline.preprocessing_pipeline_id) ?? null : null;
                       const configuration = pipeline ? methodConfigById.get(pipeline.method_configuration_id) ?? null : null;
-                      const inputRes = pipeline
-                        ? formatResolution(pipeline.preprocessing_input_width, pipeline.preprocessing_input_height)
-                        : null;
                       const outputRes = pipeline
                         ? formatResolution(pipeline.preprocessing_output_width, pipeline.preprocessing_output_height)
                         : null;
@@ -789,7 +967,7 @@ export function TestingRunsPage({ active = true, onRunQueued }: { active?: boole
                                   size="sm"
                                   variant="subtle"
                                   aria-label={`Inspect trainsets for ${run.training_pipeline_name}`}
-                                  onClick={() => setDetailModal({ title: 'Trainsets', body: renderPipelineDatasets(pipeline ?? null, trainingDatasets) })}
+                                  onClick={() => void showTrainingDatasetDetails(pipeline ?? null)}
                                 >
                                   <Info size={14} />
                                 </ActionIcon>
@@ -804,7 +982,7 @@ export function TestingRunsPage({ active = true, onRunQueued }: { active?: boole
                                   size="sm"
                                   variant="subtle"
                                   aria-label={`Inspect preprocessing for ${run.training_pipeline_name}`}
-                                  onClick={() => setDetailModal({ title: 'Preprocessing pipeline', body: renderPreprocessingDetails(preprocessing) })}
+                                  onClick={() => void showPreprocessingDetails(pipeline ?? null)}
                                 >
                                   <Info size={14} />
                                 </ActionIcon>
@@ -825,12 +1003,6 @@ export function TestingRunsPage({ active = true, onRunQueued }: { active?: boole
                                 </ActionIcon>
                               </Tooltip>
                             </Group>
-                          </Table.Td>
-                          <Table.Td>{run.artifact_kind}</Table.Td>
-                          <Table.Td>
-                            <Badge size="xs" variant="light" color="blue">
-                              {inputRes ?? 'n/a'}
-                            </Badge>
                           </Table.Td>
                           <Table.Td>
                             <Group justify="flex-end">
@@ -853,8 +1025,9 @@ export function TestingRunsPage({ active = true, onRunQueued }: { active?: boole
                   </Table.Tbody>
                 </Table>
               </ScrollArea>
-              <TablePagination totalItems={filteredModels.length} page={modelPage} onChange={setModelPage} />
+              <TablePagination totalItems={unselectedFilteredModels.length} page={modelPage} onChange={setModelPage} />
               {models.length === 0 && <Alert color="blue">No trained models yet. Run a training pipeline first.</Alert>}
+              {models.length > 0 && pagedModels.length === 0 && <Alert color="blue">No trained models match the combined filters.</Alert>}
       </StepCard>
 
       {/* Step 2: compatible dataset + ROI + run */}
