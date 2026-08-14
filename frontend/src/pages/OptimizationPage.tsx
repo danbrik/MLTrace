@@ -33,6 +33,7 @@ import {
   startOptimizationStudy,
 } from '../api';
 import { PlotlyChart } from '../components/PlotlyChart';
+import { DEFAULT_TABLE_PAGE_SIZE, TablePagination } from '../components/TablePagination';
 import type { Data, Layout } from '../lib/plotly';
 import type {
   MethodConfiguration,
@@ -160,6 +161,7 @@ export function OptimizationPage({ active = true }: { active?: boolean }) {
   const [selectedStudyId, setSelectedStudyId] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [pending, setPending] = useState<string | null>(null);
+  const [trialPage, setTrialPage] = useState(1);
 
   const [name, setName] = useState('Optimization Study');
   const [description, setDescription] = useState('');
@@ -214,6 +216,15 @@ export function OptimizationPage({ active = true }: { active?: boolean }) {
     () => studies.find((study) => String(study.id) === selectedStudyId) ?? null,
     [selectedStudyId, studies],
   );
+  const pagedTrials = useMemo(
+    () => (selectedStudy?.trials ?? []).slice((trialPage - 1) * DEFAULT_TABLE_PAGE_SIZE, trialPage * DEFAULT_TABLE_PAGE_SIZE),
+    [selectedStudy?.trials, trialPage],
+  );
+
+  useEffect(() => setTrialPage(1), [selectedStudyId]);
+  useEffect(() => {
+    setTrialPage((page) => Math.min(page, Math.max(1, Math.ceil((selectedStudy?.trials.length ?? 0) / DEFAULT_TABLE_PAGE_SIZE))));
+  }, [selectedStudy?.trials.length]);
 
   const datasetOptions = datasets.map((dataset) => ({
     value: String(dataset.id),
@@ -465,7 +476,7 @@ export function OptimizationPage({ active = true }: { active?: boolean }) {
                   </Table.Tr>
                 </Table.Thead>
                 <Table.Tbody>
-                  {selectedStudy.trials.map((trial) => (
+                  {pagedTrials.map((trial) => (
                     <Table.Tr key={trial.id}>
                       <Table.Td>{trial.number}</Table.Td>
                       <Table.Td><Badge color={statusColor(trial.status)}>{trial.status}</Badge></Table.Td>
@@ -478,6 +489,7 @@ export function OptimizationPage({ active = true }: { active?: boolean }) {
                   ))}
                 </Table.Tbody>
               </Table>
+              <TablePagination totalItems={selectedStudy.trials.length} page={trialPage} onChange={setTrialPage} />
             </>
           ) : (
             <Alert color="blue">Create or select an optimization study.</Alert>

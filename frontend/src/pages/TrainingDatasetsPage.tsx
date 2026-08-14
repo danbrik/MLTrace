@@ -3,6 +3,7 @@ import {
   Alert,
   Badge,
   Button,
+  Collapse,
   Group,
   Modal,
   NumberInput,
@@ -20,7 +21,8 @@ import {
 import { notifications } from '@mantine/notifications';
 
 import { StepCard } from '../components/StepCard';
-import { Copy, Edit3, Info, Plus, RefreshCw, Save, Trash2 } from 'lucide-react';
+import { DEFAULT_TABLE_PAGE_SIZE, TablePagination } from '../components/TablePagination';
+import { ChevronDown, ChevronRight, Copy, Edit3, Info, Plus, RefreshCw, Save, Trash2 } from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
 
 import {
@@ -198,6 +200,9 @@ export function TrainingDatasetsPage({ active = true }: { active?: boolean }) {
   const [rules, setRules] = useState<RuleRow[]>([]);
   const [preview, setPreview] = useState<TrainingDatasetPreview | null>(null);
   const [loading, setLoading] = useState(false);
+  const [createOpen, setCreateOpen] = useState(true);
+  const [savedOpen, setSavedOpen] = useState(true);
+  const [savedPage, setSavedPage] = useState(1);
   const rowActions = usePendingIds();
   const isReadOnly = Boolean(loadedDataset && !isEditingLoaded);
 
@@ -297,6 +302,15 @@ export function TrainingDatasetsPage({ active = true }: { active?: boolean }) {
     () => trainingDatasets.filter((dataset) => !usageFilter || (dataset.usage_label ?? 'train') === usageFilter),
     [trainingDatasets, usageFilter],
   );
+  const pagedTrainingDatasets = useMemo(
+    () => filteredTrainingDatasets.slice((savedPage - 1) * DEFAULT_TABLE_PAGE_SIZE, savedPage * DEFAULT_TABLE_PAGE_SIZE),
+    [filteredTrainingDatasets, savedPage],
+  );
+
+  useEffect(() => setSavedPage(1), [usageFilter]);
+  useEffect(() => {
+    setSavedPage((page) => Math.min(page, Math.max(1, Math.ceil(filteredTrainingDatasets.length / DEFAULT_TABLE_PAGE_SIZE))));
+  }, [filteredTrainingDatasets.length]);
 
   const nameClash = useMemo(() => {
     const trimmed = name.trim().toLowerCase();
@@ -632,7 +646,19 @@ export function TrainingDatasetsPage({ active = true }: { active?: boolean }) {
         </Text>
       </div>
 
-      <StepCard title="Create train/test dataset" color="blue">
+      <StepCard
+        title="Create train/test dataset"
+        color="blue"
+        action={
+          <Tooltip label={createOpen ? 'Collapse creator' : 'Expand creator'}>
+            <ActionIcon variant="subtle" onClick={() => setCreateOpen((open) => !open)} aria-label="Toggle dataset creator">
+              {createOpen ? <ChevronDown size={18} /> : <ChevronRight size={18} />}
+            </ActionIcon>
+          </Tooltip>
+        }
+      >
+        <Collapse in={createOpen}>
+          <Stack gap="md">
           {loadedDataset && (
             <Alert
               color={loadedDataset.is_update_locked ? 'yellow' : 'blue'}
@@ -929,21 +955,32 @@ export function TrainingDatasetsPage({ active = true }: { active?: boolean }) {
               </Group>
             </>
           )}
+          </Stack>
+        </Collapse>
       </StepCard>
 
       <StepCard
-        title="Saved train/test datasets"
+        title={`Saved train/test datasets (${filteredTrainingDatasets.length})`}
         color="cyan"
         action={
-          <Select
-            label="Label filter"
-            data={USAGE_OPTIONS}
-            value={usageFilter}
-            onChange={setUsageFilter}
-            clearable
-          />
+          <Group align="flex-end" gap="xs">
+            <Select
+              label="Label filter"
+              data={USAGE_OPTIONS}
+              value={usageFilter}
+              onChange={setUsageFilter}
+              clearable
+            />
+            <Tooltip label={savedOpen ? 'Collapse saved datasets' : 'Expand saved datasets'}>
+              <ActionIcon mb={4} variant="subtle" onClick={() => setSavedOpen((open) => !open)} aria-label="Toggle saved datasets">
+                {savedOpen ? <ChevronDown size={18} /> : <ChevronRight size={18} />}
+              </ActionIcon>
+            </Tooltip>
+          </Group>
         }
       >
+        <Collapse in={savedOpen}>
+          <Stack gap="md">
           <ScrollArea>
             <Table verticalSpacing="sm" striped>
               <Table.Thead>
@@ -961,7 +998,7 @@ export function TrainingDatasetsPage({ active = true }: { active?: boolean }) {
                 </Table.Tr>
               </Table.Thead>
               <Table.Tbody>
-                {filteredTrainingDatasets.map((trainingDataset) => (
+                {pagedTrainingDatasets.map((trainingDataset) => (
                   <Table.Tr key={trainingDataset.id}>
                     <Table.Td>
                       <Stack gap={4}>
@@ -1085,6 +1122,10 @@ export function TrainingDatasetsPage({ active = true }: { active?: boolean }) {
               </Table.Tbody>
             </Table>
           </ScrollArea>
+          {filteredTrainingDatasets.length === 0 && <Alert color="blue">No saved train/test datasets match this filter.</Alert>}
+          <TablePagination totalItems={filteredTrainingDatasets.length} page={savedPage} onChange={setSavedPage} />
+          </Stack>
+        </Collapse>
       </StepCard>
 
       <Modal

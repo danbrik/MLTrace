@@ -35,6 +35,7 @@ import {
   previewRoi,
 } from '../api';
 import { StepCard } from '../components/StepCard';
+import { DEFAULT_TABLE_PAGE_SIZE, TablePagination } from '../components/TablePagination';
 import { usePendingIds } from '../hooks/usePendingIds';
 import { formatValue, methodLabel } from '../methods/utils';
 import { datasetResolutions, formatResolution, orderedGraphNodes, stepDetail } from '../training/graph';
@@ -419,6 +420,9 @@ export function TestingRunsPage({ active = true, onRunQueued }: { active?: boole
   const [running, setRunning] = useState(false);
   const rowActions = usePendingIds();
   const [detailModal, setDetailModal] = useState<{ title: string; body: React.ReactNode } | null>(null);
+  const [modelPage, setModelPage] = useState(1);
+  const [datasetPage, setDatasetPage] = useState(1);
+  const [roiPage, setRoiPage] = useState(1);
 
   async function refresh() {
     const [nextRuns, nextPipelines, nextPreprocessing, nextMethods, nextDatasets, nextDefs, nextRois] = await Promise.all([
@@ -517,6 +521,29 @@ export function TestingRunsPage({ active = true, onRunQueued }: { active?: boole
     if (!requiredInputResolution) return trainingDatasets;
     return trainingDatasets.filter((dataset) => datasetResolutions(dataset).includes(requiredInputResolution));
   }, [selectedModels.length, requiredInputResolution, trainingDatasets]);
+  const pagedModels = useMemo(
+    () => filteredModels.slice((modelPage - 1) * DEFAULT_TABLE_PAGE_SIZE, modelPage * DEFAULT_TABLE_PAGE_SIZE),
+    [filteredModels, modelPage],
+  );
+  const pagedDatasets = useMemo(
+    () => compatibleDatasets.slice((datasetPage - 1) * DEFAULT_TABLE_PAGE_SIZE, datasetPage * DEFAULT_TABLE_PAGE_SIZE),
+    [compatibleDatasets, datasetPage],
+  );
+  const pagedRois = useMemo(
+    () => rois.slice((roiPage - 1) * DEFAULT_TABLE_PAGE_SIZE, roiPage * DEFAULT_TABLE_PAGE_SIZE),
+    [rois, roiPage],
+  );
+
+  useEffect(() => setModelPage(1), [modelSearch, modelMethodFilter]);
+  useEffect(() => {
+    setModelPage((page) => Math.min(page, Math.max(1, Math.ceil(filteredModels.length / DEFAULT_TABLE_PAGE_SIZE))));
+  }, [filteredModels.length]);
+  useEffect(() => {
+    setDatasetPage((page) => Math.min(page, Math.max(1, Math.ceil(compatibleDatasets.length / DEFAULT_TABLE_PAGE_SIZE))));
+  }, [compatibleDatasets.length]);
+  useEffect(() => {
+    setRoiPage((page) => Math.min(page, Math.max(1, Math.ceil(rois.length / DEFAULT_TABLE_PAGE_SIZE))));
+  }, [rois.length]);
 
   const selectedDatasets = selectedDatasetIds
     .map((id) => trainingDatasets.find((dataset) => dataset.id === id))
@@ -737,7 +764,7 @@ export function TestingRunsPage({ active = true, onRunQueued }: { active?: boole
                     </Table.Tr>
                   </Table.Thead>
                   <Table.Tbody>
-                    {filteredModels.map((run) => {
+                    {pagedModels.map((run) => {
                       const pipeline = pipelineById.get(run.training_pipeline_id);
                       const preprocessing = pipeline ? preprocessingById.get(pipeline.preprocessing_pipeline_id) ?? null : null;
                       const configuration = pipeline ? methodConfigById.get(pipeline.method_configuration_id) ?? null : null;
@@ -826,6 +853,7 @@ export function TestingRunsPage({ active = true, onRunQueued }: { active?: boole
                   </Table.Tbody>
                 </Table>
               </ScrollArea>
+              <TablePagination totalItems={filteredModels.length} page={modelPage} onChange={setModelPage} />
               {models.length === 0 && <Alert color="blue">No trained models yet. Run a training pipeline first.</Alert>}
       </StepCard>
 
@@ -847,7 +875,7 @@ export function TestingRunsPage({ active = true, onRunQueued }: { active?: boole
                   </Table.Tr>
                 </Table.Thead>
                 <Table.Tbody>
-                  {compatibleDatasets.map((dataset) => {
+                  {pagedDatasets.map((dataset) => {
                     const selected = selectedDatasetIds.includes(dataset.id);
                     return (
                       <Table.Tr
@@ -882,6 +910,7 @@ export function TestingRunsPage({ active = true, onRunQueued }: { active?: boole
                 </Table.Tbody>
               </Table>
             </ScrollArea>
+            <TablePagination totalItems={compatibleDatasets.length} page={datasetPage} onChange={setDatasetPage} />
             {compatibleDatasets.length === 0 && (
               <Alert color="yellow">No size-compatible inference datasets found for input {requiredInputResolution ?? 'n/a'}.</Alert>
             )}
@@ -1071,7 +1100,7 @@ export function TestingRunsPage({ active = true, onRunQueued }: { active?: boole
                   </Table.Tr>
               </Table.Thead>
               <Table.Tbody>
-                {rois.map((roi) => (
+                {pagedRois.map((roi) => (
                   <Table.Tr key={roi.id}>
                     <Table.Td>{roi.name}</Table.Td>
                     <Table.Td>{roi.image_width}x{roi.image_height}</Table.Td>
@@ -1103,6 +1132,7 @@ export function TestingRunsPage({ active = true, onRunQueued }: { active?: boole
             </Table>
           </ScrollArea>
           {rois.length === 0 && <Alert color="blue">No ROIs saved yet.</Alert>}
+          <TablePagination totalItems={rois.length} page={roiPage} onChange={setRoiPage} />
       </StepCard>
     </Stack>
     <Modal

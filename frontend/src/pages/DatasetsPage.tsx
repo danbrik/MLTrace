@@ -1,7 +1,9 @@
 import {
+  ActionIcon,
   Alert,
   Badge,
   Button,
+  Collapse,
   Divider,
   Group,
   Loader,
@@ -18,7 +20,8 @@ import {
 import { notifications } from '@mantine/notifications';
 
 import { StepCard } from '../components/StepCard';
-import { Check, FileSearch, Info, RefreshCw, ScanLine, Trash2 } from 'lucide-react';
+import { DEFAULT_TABLE_PAGE_SIZE, TablePagination } from '../components/TablePagination';
+import { Check, ChevronDown, ChevronRight, FileSearch, Info, RefreshCw, ScanLine, Trash2 } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState } from 'react';
 
 import {
@@ -94,9 +97,20 @@ export function DatasetsPage({ active = true }: { active?: boolean }) {
   const [scanning, setScanning] = useState(false);
   const [activityLog, setActivityLog] = useState<ActivityLogEntry[]>([]);
   const [runningOperation, setRunningOperation] = useState<RunningOperation | null>(null);
+  const [activityOpen, setActivityOpen] = useState(true);
+  const [registeredOpen, setRegisteredOpen] = useState(true);
+  const [datasetPage, setDatasetPage] = useState(1);
   const rowActions = usePendingIds();
   const [, setElapsedTick] = useState(0);
   const lastWaitLogSecondRef = useRef(0);
+  const pagedDatasets = useMemo(
+    () => datasets.slice((datasetPage - 1) * DEFAULT_TABLE_PAGE_SIZE, datasetPage * DEFAULT_TABLE_PAGE_SIZE),
+    [datasets, datasetPage],
+  );
+
+  useEffect(() => {
+    setDatasetPage((page) => Math.min(page, Math.max(1, Math.ceil(datasets.length / DEFAULT_TABLE_PAGE_SIZE))));
+  }, [datasets.length]);
 
   function addActivity(level: ActivityLogEntry['level'], message: string) {
     setActivityLog((current) => [
@@ -399,44 +413,65 @@ export function DatasetsPage({ active = true }: { active?: boolean }) {
               <Text fw={600} size="sm">
                 Activity log
               </Text>
-              {runningOperation ? (
-                <Badge color="blue" variant="light">
-                  {runningOperation.label} · {runningElapsedSeconds}s
-                </Badge>
-              ) : (
-                <Badge color="gray" variant="light">
-                  idle
-                </Badge>
-              )}
-            </Group>
-            <ScrollArea h={120} mt="xs">
-              <Stack gap={4}>
-                {runningOperation && (
-                  <Text size="xs" c="blue">
-                    Waiting for response since {runningElapsedSeconds}s.
-                  </Text>
-                )}
-                {activityLog.length === 0 ? (
-                  <Text size="xs" c="dimmed">
-                    No dataset actions yet.
-                  </Text>
+              <Group gap="xs">
+                {runningOperation ? (
+                  <Badge color="blue" variant="light">
+                    {runningOperation.label} · {runningElapsedSeconds}s
+                  </Badge>
                 ) : (
-                  activityLog.map((entry) => (
-                    <Text
-                      key={entry.id}
-                      size="xs"
-                      c={entry.level === 'error' ? 'red' : entry.level === 'success' ? 'green' : 'dimmed'}
-                    >
-                      <span className="mono">{entry.time}</span> {entry.message}
-                    </Text>
-                  ))
+                  <Badge color="gray" variant="light">
+                    idle
+                  </Badge>
                 )}
-              </Stack>
-            </ScrollArea>
+                <Tooltip label={activityOpen ? 'Collapse activity log' : 'Expand activity log'}>
+                  <ActionIcon variant="subtle" onClick={() => setActivityOpen((open) => !open)} aria-label="Toggle activity log">
+                    {activityOpen ? <ChevronDown size={18} /> : <ChevronRight size={18} />}
+                  </ActionIcon>
+                </Tooltip>
+              </Group>
+            </Group>
+            <Collapse in={activityOpen}>
+              <ScrollArea h={120} mt="xs">
+                <Stack gap={4}>
+                  {runningOperation && (
+                    <Text size="xs" c="blue">
+                      Waiting for response since {runningElapsedSeconds}s.
+                    </Text>
+                  )}
+                  {activityLog.length === 0 ? (
+                    <Text size="xs" c="dimmed">
+                      No dataset actions yet.
+                    </Text>
+                  ) : (
+                    activityLog.map((entry) => (
+                      <Text
+                        key={entry.id}
+                        size="xs"
+                        c={entry.level === 'error' ? 'red' : entry.level === 'success' ? 'green' : 'dimmed'}
+                      >
+                        <span className="mono">{entry.time}</span> {entry.message}
+                      </Text>
+                    ))
+                  )}
+                </Stack>
+              </ScrollArea>
+            </Collapse>
           </Stack>
       </StepCard>
 
-      <StepCard title="Registered datasets" color="cyan">
+      <StepCard
+        title={`Registered datasets (${datasets.length})`}
+        color="cyan"
+        action={
+          <Tooltip label={registeredOpen ? 'Collapse registered datasets' : 'Expand registered datasets'}>
+            <ActionIcon variant="subtle" onClick={() => setRegisteredOpen((open) => !open)} aria-label="Toggle registered datasets">
+              {registeredOpen ? <ChevronDown size={18} /> : <ChevronRight size={18} />}
+            </ActionIcon>
+          </Tooltip>
+        }
+      >
+        <Collapse in={registeredOpen}>
+          <Stack gap="md">
           <ScrollArea>
             <Table highlightOnHover verticalSpacing="sm">
               <Table.Thead>
@@ -462,7 +497,7 @@ export function DatasetsPage({ active = true }: { active?: boolean }) {
                 </Table.Tr>
               </Table.Thead>
               <Table.Tbody>
-                {datasets.map((dataset) => {
+                {pagedDatasets.map((dataset) => {
                   const folder = dataset.folders[0];
                   return (
                     <Table.Tr key={dataset.id}>
@@ -528,6 +563,10 @@ export function DatasetsPage({ active = true }: { active?: boolean }) {
               </Table.Tbody>
             </Table>
           </ScrollArea>
+          {datasets.length === 0 && <Alert color="blue">No registered datasets yet.</Alert>}
+          <TablePagination totalItems={datasets.length} page={datasetPage} onChange={setDatasetPage} />
+          </Stack>
+        </Collapse>
       </StepCard>
 
       <Modal

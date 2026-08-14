@@ -57,6 +57,7 @@ import {
 import { DateTime24Input } from '../components/DateTime24Input';
 import { PlotlyChart, type PlotlyChartClick, type PlotlyChartDoubleClick, type PlotlyChartSelection } from '../components/PlotlyChart';
 import { StepCard } from '../components/StepCard';
+import { DEFAULT_TABLE_PAGE_SIZE, TablePagination } from '../components/TablePagination';
 import type { Data, Layout, PlotRelayoutEvent } from '../lib/plotly';
 import { formatValue } from '../methods/utils';
 import { datasetResolutions, formatResolution, orderedGraphNodes, stepDetail } from '../training/graph';
@@ -2901,6 +2902,7 @@ function ExistingHeatmapArtifacts({
   const [loadingSingleId, setLoadingSingleId] = useState<number | null>(null);
   const [renderingVideoId, setRenderingVideoId] = useState<number | null>(null);
   const [selectedVideoError, setSelectedVideoError] = useState<string | null>(null);
+  const [artifactPage, setArtifactPage] = useState(1);
 
   async function openSingle(summary: HeatmapRunSummary) {
     setSelectedVideo(null);
@@ -2959,6 +2961,17 @@ function ExistingHeatmapArtifacts({
   }
 
   const total = singles.length + videos.length;
+  const pageStart = (artifactPage - 1) * DEFAULT_TABLE_PAGE_SIZE;
+  const pageEnd = artifactPage * DEFAULT_TABLE_PAGE_SIZE;
+  const pagedSingles = singles.slice(pageStart, pageEnd);
+  const videoStart = Math.max(0, pageStart - singles.length);
+  const videoEnd = Math.max(0, pageEnd - singles.length);
+  const pagedVideos = videos.slice(videoStart, videoEnd);
+
+  useEffect(() => {
+    setArtifactPage((page) => Math.min(page, Math.max(1, Math.ceil(total / DEFAULT_TABLE_PAGE_SIZE))));
+  }, [total]);
+
   return (
     <Paper withBorder p="md" radius="sm" className="analysis-artifact-browser">
       <Stack gap="md">
@@ -3001,7 +3014,7 @@ function ExistingHeatmapArtifacts({
                 </Table.Tr>
               </Table.Thead>
               <Table.Tbody>
-                {singles.map((item) => (
+                {pagedSingles.map((item) => (
                   <Table.Tr key={`single-${item.id}`}>
                     <Table.Td><Badge leftSection={<Image size={12} />} color="violet" variant="light">Single heatmap</Badge></Table.Td>
                     <Table.Td>{testingRunById.get(item.testing_run_id)?.name ?? `Run #${item.testing_run_id}`}</Table.Td>
@@ -3017,7 +3030,7 @@ function ExistingHeatmapArtifacts({
                     </Table.Td>
                   </Table.Tr>
                 ))}
-                {videos.map((item) => {
+                {pagedVideos.map((item) => {
                   const progress = item.frame_count ? Math.min(100, (item.done_count / item.frame_count) * 100) : 0;
                   const unavailableReason = videoUnavailableReason(item);
                   const canShow = item.status === 'finished' && Boolean(item.video_path);
@@ -3060,6 +3073,7 @@ function ExistingHeatmapArtifacts({
             </Table>
           </ScrollArea>
         )}
+        <TablePagination totalItems={total} page={artifactPage} onChange={setArtifactPage} />
 
         {selectedSingle && (
           <Paper withBorder p="sm" radius="sm" className="analysis-saved-artifact-preview">

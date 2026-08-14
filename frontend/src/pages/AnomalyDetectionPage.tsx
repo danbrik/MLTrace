@@ -37,6 +37,7 @@ import {
 } from '../api';
 import { DateTime24Input } from '../components/DateTime24Input';
 import { PlotlyChart, type PlotlyChartSelection } from '../components/PlotlyChart';
+import { DEFAULT_TABLE_PAGE_SIZE, TablePagination } from '../components/TablePagination';
 import type { Data, Layout } from '../lib/plotly';
 import type {
   AnomalyDetectionConfig,
@@ -380,6 +381,7 @@ export function AnomalyDetectionPage({ active }: { active: boolean }) {
   const [activeRun, setActiveRun] = useState<AnomalyDetectionRun | null>(null);
   const [loadingSavedRunId, setLoadingSavedRunId] = useState<number | null>(null);
   const [detailsOpen, setDetailsOpen] = useState(true);
+  const [savedPage, setSavedPage] = useState(1);
 
   const refresh = useCallback(async () => {
     const [inferences, detections] = await Promise.all([listTestingRuns(), listAnomalyDetectionRuns()]);
@@ -391,6 +393,15 @@ export function AnomalyDetectionPage({ active }: { active: boolean }) {
     if (!active) return;
     refresh().catch((error) => notifications.show({ color: 'red', title: 'Could not load anomaly detection', message: errorMessage(error) }));
   }, [active, refresh]);
+
+  const pagedSavedRuns = useMemo(
+    () => savedRuns.slice((savedPage - 1) * DEFAULT_TABLE_PAGE_SIZE, savedPage * DEFAULT_TABLE_PAGE_SIZE),
+    [savedRuns, savedPage],
+  );
+
+  useEffect(() => {
+    setSavedPage((page) => Math.min(page, Math.max(1, Math.ceil(savedRuns.length / DEFAULT_TABLE_PAGE_SIZE))));
+  }, [savedRuns.length]);
 
   useEffect(() => {
     if (!running && loadingSavedRunId === null) return;
@@ -1087,7 +1098,7 @@ export function AnomalyDetectionPage({ active }: { active: boolean }) {
             <ScrollArea.Autosize mah={360} type="auto">
               <Table highlightOnHover>
                 <Table.Thead><Table.Tr><Table.Th>Name</Table.Th><Table.Th>Algorithm</Table.Th><Table.Th>Inference</Table.Th><Table.Th>Range</Table.Th><Table.Th>Warnings</Table.Th><Table.Th>Anomalies</Table.Th><Table.Th /></Table.Tr></Table.Thead>
-                <Table.Tbody>{savedRuns.map((run) => <Table.Tr key={run.id} bg={activeRun?.id === run.id ? 'var(--mantine-color-violet-light)' : undefined}>
+                <Table.Tbody>{pagedSavedRuns.map((run) => <Table.Tr key={run.id} bg={activeRun?.id === run.id ? 'var(--mantine-color-violet-light)' : undefined}>
                   <Table.Td><Text fw={activeRun?.id === run.id ? 700 : 500}>{run.name}</Text></Table.Td>
                   <Table.Td><Badge variant="light" color="violet">{algorithmDefinition(run.config.algorithm).label}</Badge></Table.Td>
                   <Table.Td>{run.testing_run_name}</Table.Td><Table.Td>{formatDuration(run.start_timestamp, run.end_timestamp)}</Table.Td><Table.Td>{run.warning_count}</Table.Td><Table.Td><Badge color={run.anomaly_count ? 'red' : 'gray'}>{run.anomaly_count}</Badge></Table.Td>
@@ -1112,6 +1123,7 @@ export function AnomalyDetectionPage({ active }: { active: boolean }) {
               </Table>
             </ScrollArea.Autosize>
           )}
+          <TablePagination totalItems={savedRuns.length} page={savedPage} onChange={setSavedPage} />
           {loadingSavedRunId !== null && (
             <DetectionProgressPanel
               progress={operationProgress}

@@ -24,6 +24,7 @@ import {
 import { notifications } from '@mantine/notifications';
 
 import { StepCard } from '../components/StepCard';
+import { DEFAULT_TABLE_PAGE_SIZE, TablePagination } from '../components/TablePagination';
 import { usePendingIds } from '../hooks/usePendingIds';
 import { ArrowDown, ArrowUp, FileText, Info, RotateCcw, Search, StopCircle, Trash2 } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState } from 'react';
@@ -250,6 +251,8 @@ export function SchedulerPage({ active = true }: { active?: boolean }) {
   const [typeFilter, setTypeFilter] = useState<string | null>(null);
   const [statusFilter, setStatusFilter] = useState<string | null>(null);
   const [methodFilter, setMethodFilter] = useState<string | null>(null);
+  const [jobsPage, setJobsPage] = useState(1);
+  const [heatmapsPage, setHeatmapsPage] = useState(1);
 
   const [logJob, setLogJob] = useState<DisplayJob | null>(null);
   const [detailJob, setDetailJob] = useState<SchedulerJob | null>(null);
@@ -368,6 +371,22 @@ export function SchedulerPage({ active = true }: { active?: boolean }) {
   }, [jobs, search, typeFilter, statusFilter, methodFilter]);
 
   const heatmapGroups = useMemo(() => summarizeHeatmaps(heatmaps), [heatmaps]);
+  const pagedJobs = useMemo(
+    () => filteredJobs.slice((jobsPage - 1) * DEFAULT_TABLE_PAGE_SIZE, jobsPage * DEFAULT_TABLE_PAGE_SIZE),
+    [filteredJobs, jobsPage],
+  );
+  const pagedHeatmapGroups = useMemo(
+    () => heatmapGroups.slice((heatmapsPage - 1) * DEFAULT_TABLE_PAGE_SIZE, heatmapsPage * DEFAULT_TABLE_PAGE_SIZE),
+    [heatmapGroups, heatmapsPage],
+  );
+
+  useEffect(() => setJobsPage(1), [scope, search, typeFilter, statusFilter, methodFilter]);
+  useEffect(() => {
+    setJobsPage((page) => Math.min(page, Math.max(1, Math.ceil(filteredJobs.length / DEFAULT_TABLE_PAGE_SIZE))));
+  }, [filteredJobs.length]);
+  useEffect(() => {
+    setHeatmapsPage((page) => Math.min(page, Math.max(1, Math.ceil(heatmapGroups.length / DEFAULT_TABLE_PAGE_SIZE))));
+  }, [heatmapGroups.length]);
 
   async function withRefresh(actionId: string, action: () => Promise<unknown>, errorTitle: string) {
     await rowActions.runPending(actionId, async () => {
@@ -608,7 +627,7 @@ export function SchedulerPage({ active = true }: { active?: boolean }) {
                 </Table.Tr>
               </Table.Thead>
               <Table.Tbody>
-                {filteredJobs.map((job) => {
+                {pagedJobs.map((job) => {
                   const run = job.run;
                   const testRun = job.kind === 'test' ? job.run : null;
                   const terminal = TERMINAL.has(run.status);
@@ -812,6 +831,7 @@ export function SchedulerPage({ active = true }: { active?: boolean }) {
             </Table>
           </ScrollArea>
           {filteredJobs.length === 0 && <Alert color="blue">No jobs match the current filters.</Alert>}
+          <TablePagination totalItems={filteredJobs.length} page={jobsPage} onChange={setJobsPage} />
       </StepCard>
 
       <Paper withBorder p="md" radius="sm" style={{ borderLeft: '4px solid var(--mantine-color-grape-5)' }}>
@@ -850,7 +870,7 @@ export function SchedulerPage({ active = true }: { active?: boolean }) {
                 </Table.Tr>
               </Table.Thead>
               <Table.Tbody>
-                {heatmapGroups.map((group) => (
+                {pagedHeatmapGroups.map((group) => (
                   <Table.Tr key={group.key}>
                     <Table.Td>{new Date(group.createdAt).toLocaleString()}</Table.Td>
                     <Table.Td>
@@ -879,6 +899,7 @@ export function SchedulerPage({ active = true }: { active?: boolean }) {
             </Table>
           </ScrollArea>
           {heatmapGroups.length === 0 && <Alert color="blue">Computed heatmaps will appear here.</Alert>}
+          <TablePagination totalItems={heatmapGroups.length} page={heatmapsPage} onChange={setHeatmapsPage} />
         </Stack>
       </Paper>
 

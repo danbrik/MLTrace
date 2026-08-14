@@ -25,6 +25,7 @@ import { useDebouncedValue } from '@mantine/hooks';
 import { notifications } from '@mantine/notifications';
 
 import { StepCard } from '../components/StepCard';
+import { DEFAULT_TABLE_PAGE_SIZE, TablePagination } from '../components/TablePagination';
 import { ArrowDown, ArrowUp, Eye, Info, Pencil, Plus, Save, Settings2, Trash2, Upload } from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
 import type { ReactNode } from 'react';
@@ -190,6 +191,7 @@ export function PreprocessingPipelinesPage({ active = true }: { active?: boolean
   const [isEditingLoadedPipeline, setIsEditingLoadedPipeline] = useState(true);
   const [designResolution, setDesignResolution] = useState<PipelineDesignResolution>(EMPTY_DESIGN_RESOLUTION);
   const [previewError, setPreviewError] = useState<string | null>(null);
+  const [savedPage, setSavedPage] = useState(1);
   const [nodes, setNodes] = useState<PipelineNode[]>([
     {
       id: 'load',
@@ -245,6 +247,14 @@ export function PreprocessingPipelinesPage({ active = true }: { active?: boolean
     () => folderOptions.find((option) => option.value === selectedFolderId) ?? null,
     [folderOptions, selectedFolderId],
   );
+  const pagedPipelines = useMemo(
+    () => pipelines.slice((savedPage - 1) * DEFAULT_TABLE_PAGE_SIZE, savedPage * DEFAULT_TABLE_PAGE_SIZE),
+    [pipelines, savedPage],
+  );
+
+  useEffect(() => {
+    setSavedPage((page) => Math.min(page, Math.max(1, Math.ceil(pipelines.length / DEFAULT_TABLE_PAGE_SIZE))));
+  }, [pipelines.length]);
 
   // A pipeline name must be unique (case-insensitive), ignoring the pipeline currently loaded.
   const nameClash = useMemo(() => {
@@ -1189,7 +1199,7 @@ export function PreprocessingPipelinesPage({ active = true }: { active?: boolean
                 </Table.Tr>
               </Table.Thead>
               <Table.Tbody>
-                {pipelines.map((pipeline) => (
+                {pagedPipelines.map((pipeline) => (
                   <Table.Tr key={pipeline.id}>
                     <Table.Td>{pipeline.name}</Table.Td>
                     <Table.Td>{pipeline.step_count ?? pipeline.graph.nodes.length}</Table.Td>
@@ -1226,6 +1236,7 @@ export function PreprocessingPipelinesPage({ active = true }: { active?: boolean
               </Table.Tbody>
             </Table>
           </ScrollArea>
+          <TablePagination totalItems={pipelines.length} page={savedPage} onChange={setSavedPage} />
       </StepCard>
     </Stack>
   );
