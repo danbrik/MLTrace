@@ -690,8 +690,12 @@ export type TestingRunResults = {
 };
 
 export type AnomalyDetectionScoreSeries = 'score' | 'full_mse' | 'roi_mse';
-export type AnomalyDetectionAlgorithm = 'robust_zscore' | 'robust_cusum' | 'event_threshold' | 'rolling_sigma';
+export type AnomalyDetectionAlgorithm = 'robust_zscore' | 'robust_cusum' | 'event_threshold' | 'rolling_sigma' | 'simple_threshold';
 export type AnomalyDetectionCalibrationProfile = 'sensitive' | 'balanced' | 'conservative';
+export type AnomalyDetectionTimeRange = {
+  start_timestamp: string;
+  end_timestamp: string;
+};
 
 export type AnomalyDetectionConfig = {
   algorithm: AnomalyDetectionAlgorithm;
@@ -703,6 +707,7 @@ export type AnomalyDetectionConfig = {
   high_z: number;
   minimum_score_for_detection: number;
   minimum_delta_for_detection: number | null;
+  robust_zscore_baseline_rebuild_mode: 'disabled' | 'after_warning' | 'after_confirmed';
   minimum_scale_relative: number;
   minimum_scale_absolute: number;
   cusum_drift: number;
@@ -730,6 +735,13 @@ export type AnomalyDetectionConfig = {
   merge_gap_seconds: number;
   event_minimum_gap_seconds: number;
   sigma_threshold: number;
+  simple_threshold_mode: 'manual' | 'quantile';
+  simple_threshold_signal: 'raw' | 'ewma';
+  simple_threshold_value: number | null;
+  simple_threshold_quantile: number;
+  simple_threshold_quantile_source: 'normal_ranges' | 'full_range';
+  simple_threshold_ewma_half_life_minutes: number;
+  simple_threshold_normal_ranges: AnomalyDetectionTimeRange[];
 };
 
 export type AnomalyDetectionCalibration = {
@@ -825,6 +837,10 @@ export type AnomalyDetectionRunSummary = {
 export type AnomalyDetectionRun = AnomalyDetectionRunSummary & {
   events: AnomalyDetectionEvent[];
   series: AnomalyDetectionSeriesPoint[];
+  baseline_transitions: Array<{
+    timestamp: string;
+    kind: 'frozen' | 'rebuilding' | 'ready';
+  }>;
   total: number;
   decimated: boolean;
 };
@@ -850,6 +866,21 @@ export type AnomalyDetectionThresholdPreview = {
   point_count: number;
   quantile: number;
   threshold: number;
+};
+
+export type AnomalyDetectionSimpleThresholdPreview = {
+  testing_run_id: number;
+  testing_run_name: string;
+  score_series: AnomalyDetectionScoreSeries;
+  start_timestamp: string;
+  end_timestamp: string;
+  signal: 'raw' | 'ewma';
+  quantile: number;
+  quantile_source: 'normal_ranges' | 'full_range';
+  normal_ranges: AnomalyDetectionTimeRange[];
+  point_count: number;
+  threshold: number;
+  warnings: string[];
 };
 
 export type TestingRunResultImage = {

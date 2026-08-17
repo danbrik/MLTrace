@@ -17,6 +17,8 @@ from app.main import app
 from app.schemas import AnomalyDetectionConfig
 from app.schemas import AnomalyDetectionCalibrationRequest
 from app.schemas import AnomalyDetectionRunCreate
+from app.schemas import AnomalyDetectionSimpleThresholdPreviewRequest
+from app.schemas import AnomalyDetectionTimeRange
 from app.schemas import AnomalyDetectionThresholdPreviewRequest
 from app.testing import service as testing_service
 
@@ -55,6 +57,31 @@ def test_absolute_detection_gate_config_rejects_negative_values() -> None:
         _fast_config(minimum_delta_for_detection=-0.1)
 
 
+def test_simple_threshold_validation_rejects_missing_or_outside_normal_ranges() -> None:
+    with pytest.raises(ValueError, match="At least one normal range"):
+        AnomalyDetectionSimpleThresholdPreviewRequest(
+            testing_run_id=1,
+            start_timestamp=BASE,
+            end_timestamp=BASE + timedelta(minutes=10),
+            quantile_source="normal_ranges",
+        )
+    with pytest.raises(ValueError, match="inside the analysis range"):
+        AnomalyDetectionRunCreate(
+            name="Invalid normal range",
+            testing_run_id=1,
+            start_timestamp=BASE,
+            end_timestamp=BASE + timedelta(minutes=10),
+            config=AnomalyDetectionConfig(
+                algorithm="simple_threshold",
+                simple_threshold_quantile_source="normal_ranges",
+                simple_threshold_normal_ranges=[AnomalyDetectionTimeRange(
+                    start_timestamp=BASE - timedelta(minutes=1),
+                    end_timestamp=BASE + timedelta(minutes=1),
+                )],
+            ),
+        )
+
+
 def _event_config(**overrides) -> AnomalyDetectionConfig:
     values = {
         "algorithm": "event_threshold",
@@ -84,6 +111,20 @@ def _sigma_config(**overrides) -> AnomalyDetectionConfig:
         "minimum_warmup_points": 3,
         "sigma_threshold": 3,
         "preroll_minutes": 10,
+        "gap_multiplier": 5,
+        "minimum_gap_minutes": 10,
+    }
+    values.update(overrides)
+    return AnomalyDetectionConfig(**values)
+
+
+def _simple_threshold_config(**overrides) -> AnomalyDetectionConfig:
+    values = {
+        "algorithm": "simple_threshold",
+        "simple_threshold_mode": "manual",
+        "simple_threshold_value": 2.0,
+        "simple_threshold_signal": "raw",
+        "preroll_minutes": 0,
         "gap_multiplier": 5,
         "minimum_gap_minutes": 10,
     }
@@ -259,6 +300,94 @@ def test_robust_cusum_ignores_robust_zscore_absolute_gates() -> None:
     assert [event.__dict__ for event in normal.events] == [event.__dict__ for event in gated.events]
 
 
+def test_robust_zscore_disabled_rebuild_mode_preserves_v4_behavior() -> None:
+    points = _points([1.0] * 12 + [3.0] * 3 + [1.0] * 8)
+    implicit = detect(points, _fast_config(algorithm="robust_zscore"))
+    explicit = detect(points, _fast_config(
+        algorithm="robust_zscore",
+        robust_zscore_baseline_rebuild_mode="disabled",
+    ))
+
+    assert [point.model_dump() for point in implicit.series] == [
+        point.model_dump() for point in explicit.series
+    ]
+    assert [event.__dict__ for event in implicit.events] == [event.__dict__ for event in explicit.events]
+    assert explicit.baseline_transitions == []
+
+
+def test_robust_zscore_rebuilds_after_every_warning_and_rearms() -> None:
+    output = detect(
+        _points([1.0] * 12 + [3.0] + [1.0] * 10),
+        _fast_config(
+            algorithm="robust_zscore",
+            smoothing_half_life_minutes=1e-6,
+            confirmation_mode="samples",
+            confirmation_samples=5,
+            robust_zscore_baseline_rebuild_mode="after_warning",
+        ),
+    )
+
+    assert output.events and output.events[0].confirmed_at is None
+    assert [transition.kind for transition in output.baseline_transitions] == [
+        "frozen", "rebuilding", "ready"
+    ]
+    rebuilding = output.baseline_transitions[1].timestamp
+    ready = output.baseline_transitions[2].timestamp
+    rebuilding_point = next(point for point in output.series if point.timestamp == rebuilding)
+    assert rebuilding_point.state == "warmup"
+    assert rebuilding_point.baseline is None
+    assert ready > rebuilding
+    assert next(point for point in output.series if point.timestamp == ready).state == "normal"
+
+
+def test_robust_zscore_after_confirmed_ignores_unconfirmed_warning() -> None:
+    output = detect(
+        _points([1.0] * 12 + [3.0] + [1.0] * 8),
+        _fast_config(
+            algorithm="robust_zscore",
+            smoothing_half_life_minutes=1e-6,
+            confirmation_mode="samples",
+            confirmation_samples=5,
+            robust_zscore_baseline_rebuild_mode="after_confirmed",
+        ),
+    )
+
+    assert output.events and output.events[0].confirmed_at is None
+    assert output.baseline_transitions == []
+
+
+def test_robust_zscore_after_confirmed_rebuilds_confirmed_event() -> None:
+    output = detect(
+        _points([1.0] * 12 + [3.0] * 2 + [1.0] * 10),
+        _fast_config(
+            algorithm="robust_zscore",
+            smoothing_half_life_minutes=1e-6,
+            confirmation_mode="samples",
+            confirmation_samples=1,
+            robust_zscore_baseline_rebuild_mode="after_confirmed",
+        ),
+    )
+
+    assert output.events and output.events[0].confirmed_at is not None
+    assert [transition.kind for transition in output.baseline_transitions] == [
+        "frozen", "rebuilding", "ready"
+    ]
+
+
+def test_robust_cusum_ignores_baseline_rebuild_mode() -> None:
+    points = _points([1.0] * 12 + [3.0] * 3 + [1.0] * 8)
+    normal = detect(points, _fast_config())
+    configured = detect(points, _fast_config(
+        robust_zscore_baseline_rebuild_mode="after_warning",
+    ))
+
+    assert [point.model_dump() for point in normal.series] == [
+        point.model_dump() for point in configured.series
+    ]
+    assert [event.__dict__ for event in normal.events] == [event.__dict__ for event in configured.events]
+    assert configured.baseline_transitions == []
+
+
 def test_sustained_shift_confirms_and_frozen_baseline_does_not_follow() -> None:
     values = [1.0] * 12 + [3.0] * 10 + [1.0] * 5
     output = detect(_points(values), _fast_config())
@@ -376,6 +505,60 @@ def test_event_threshold_merges_close_events_but_not_across_data_gap() -> None:
     ))
     assert len(separated.events) == 2
     assert separated.events[0].end_reason == "data_gap"
+
+
+def test_simple_threshold_is_inclusive_and_groups_only_consecutive_points() -> None:
+    output = detect(
+        _points([1.0, 2.0, 3.0, 1.0, 2.0]),
+        _simple_threshold_config(),
+        resolved_threshold=2.0,
+    )
+
+    assert [point.candidate for point in output.series] == [False, True, True, False, True]
+    assert len(output.events) == 2
+    assert output.events[0].warning_start == BASE + timedelta(minutes=1)
+    assert output.events[0].confirmed_at == output.events[0].warning_start
+    assert output.events[0].end_timestamp == BASE + timedelta(minutes=2)
+    assert output.events[0].end_reason == "recovered"
+    assert output.events[1].warning_start == BASE + timedelta(minutes=4)
+    assert output.events[1].end_reason == "range_end"
+
+
+def test_simple_threshold_raw_and_ewma_use_the_selected_signal() -> None:
+    points = _points([0.0, 4.0, 0.0], seconds=60)
+    raw = detect(points, _simple_threshold_config(), resolved_threshold=3.0)
+    ewma = detect(
+        points,
+        _simple_threshold_config(
+            simple_threshold_signal="ewma",
+            simple_threshold_ewma_half_life_minutes=10,
+        ),
+        resolved_threshold=3.0,
+    )
+
+    assert len(raw.events) == 1
+    assert ewma.events == []
+    assert ewma.series[1].smoothed < 3.0
+
+
+def test_simple_threshold_gap_resets_ewma_and_splits_events() -> None:
+    points = _points([3.0, 3.0], seconds=60)
+    points.extend([
+        SignalPoint(BASE + timedelta(hours=1), 3.0),
+        SignalPoint(BASE + timedelta(hours=1, minutes=1), 1.0),
+    ])
+    output = detect(
+        points,
+        _simple_threshold_config(
+            simple_threshold_signal="ewma",
+            simple_threshold_ewma_half_life_minutes=5,
+        ),
+        resolved_threshold=2.0,
+    )
+
+    assert len(output.events) == 2
+    assert output.events[0].end_reason == "data_gap"
+    assert output.series[2].smoothed == 3.0
 
 
 def test_rolling_sigma_uses_raw_score_and_triggers_immediately() -> None:
@@ -578,7 +761,7 @@ def _seed_testing_run(
     return run
 
 
-def test_saved_robust_zscore_v3_run_uses_neutral_absolute_gate_defaults() -> None:
+def test_saved_robust_zscore_v4_run_uses_disabled_rebuild_default() -> None:
     engine = create_engine("sqlite+pysqlite:///:memory:", poolclass=StaticPool)
     SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
     Base.metadata.create_all(engine)
@@ -594,22 +777,51 @@ def test_saved_robust_zscore_v3_run_uses_neutral_absolute_gate_defaults() -> Non
         stored = db.get(models.AnomalyDetectionRun, created.id)
         assert stored is not None
         legacy_config = dict(stored.config)
-        legacy_config.pop("minimum_score_for_detection")
-        legacy_config.pop("minimum_delta_for_detection")
+        legacy_config.pop("robust_zscore_baseline_rebuild_mode")
         stored.config = legacy_config
-        stored.algorithm_version = "robust_zscore_v3"
+        stored.algorithm_version = "robust_zscore_v4"
         db.commit()
 
         loaded = anomaly_service.get_run(db, created.id, max_points=None)
 
     assert loaded is not None
-    assert loaded.algorithm_version == "robust_zscore_v3"
+    assert loaded.algorithm_version == "robust_zscore_v4"
     assert loaded.config.minimum_score_for_detection == 0.0
     assert loaded.config.minimum_delta_for_detection is None
+    assert loaded.config.robust_zscore_baseline_rebuild_mode == "disabled"
     assert loaded.warning_count == created.warning_count
     assert loaded.anomaly_count == created.anomaly_count
     assert [point.model_dump() for point in loaded.series] == [
         point.model_dump() for point in created.series
+    ]
+
+
+def test_baseline_transitions_survive_series_decimation() -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:", poolclass=StaticPool)
+    SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+    Base.metadata.create_all(engine)
+    values = [1.0] * 12 + [3.0] * 2 + [1.0] * 20
+    with SessionLocal() as db:
+        testing_run = _seed_testing_run(db, count=len(values), values=values)
+        created = anomaly_service.create_run(db, AnomalyDetectionRunCreate(
+            name="Rebuilding robust z-score",
+            testing_run_id=testing_run.id,
+            start_timestamp=BASE,
+            end_timestamp=BASE + timedelta(minutes=len(values) - 1),
+            config=_fast_config(
+                algorithm="robust_zscore",
+                smoothing_half_life_minutes=1e-6,
+                confirmation_mode="samples",
+                confirmation_samples=1,
+                robust_zscore_baseline_rebuild_mode="after_confirmed",
+            ),
+        ))
+        decimated = anomaly_service.get_run(db, created.id, max_points=4)
+
+    assert decimated is not None and decimated.decimated is True
+    assert len(decimated.series) <= 4
+    assert [item.model_dump() for item in decimated.baseline_transitions] == [
+        item.model_dump() for item in created.baseline_transitions
     ]
 
 
@@ -636,6 +848,64 @@ def test_quantile_preview_uses_only_selected_smoothed_validation_range() -> None
         ))
         assert preview.point_count == 3
         assert preview.threshold == 1.0
+
+
+def test_simple_threshold_preview_pools_and_merges_normal_ranges() -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:", poolclass=StaticPool)
+    SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+    Base.metadata.create_all(engine)
+    values = [float(index) for index in range(10)]
+    with SessionLocal() as db:
+        run = _seed_testing_run(db, count=len(values), values=values)
+        preview = anomaly_service.preview_simple_threshold(
+            db,
+            AnomalyDetectionSimpleThresholdPreviewRequest(
+                testing_run_id=run.id,
+                start_timestamp=BASE,
+                end_timestamp=BASE + timedelta(minutes=9),
+                signal="raw",
+                quantile=0.5,
+                quantile_source="normal_ranges",
+                normal_ranges=[
+                    AnomalyDetectionTimeRange(
+                        start_timestamp=BASE,
+                        end_timestamp=BASE + timedelta(minutes=4),
+                    ),
+                    AnomalyDetectionTimeRange(
+                        start_timestamp=BASE + timedelta(minutes=4),
+                        end_timestamp=BASE + timedelta(minutes=6),
+                    ),
+                ],
+            ),
+        )
+
+    assert preview.point_count == 7
+    assert preview.threshold == 3.0
+    assert len(preview.normal_ranges) == 1
+    assert preview.normal_ranges[0].start_timestamp == BASE
+    assert preview.normal_ranges[0].end_timestamp == BASE + timedelta(minutes=6)
+
+
+def test_simple_threshold_preview_full_range_warns_about_anomalies() -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:", poolclass=StaticPool)
+    SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+    Base.metadata.create_all(engine)
+    with SessionLocal() as db:
+        run = _seed_testing_run(db, count=5, values=[1.0, 1.0, 1.0, 1.0, 10.0])
+        preview = anomaly_service.preview_simple_threshold(
+            db,
+            AnomalyDetectionSimpleThresholdPreviewRequest(
+                testing_run_id=run.id,
+                start_timestamp=BASE,
+                end_timestamp=BASE + timedelta(minutes=4),
+                quantile=0.8,
+                quantile_source="full_range",
+            ),
+        )
+
+    assert preview.point_count == 5
+    assert preview.threshold == pytest.approx(2.8)
+    assert any("may contain anomalies" in warning for warning in preview.warnings)
 
 
 def test_calibration_profiles_are_monotonic_and_finite() -> None:
@@ -985,6 +1255,35 @@ def test_anomaly_detection_api_crud_and_decimation(monkeypatch: pytest.MonkeyPat
             assert threshold_preview.json()["point_count"] == 80
             assert threshold_preview.json()["threshold"] == 1.0
 
+            simple_preview = client.post("/api/anomaly-detection-simple-threshold-preview", json={
+                "testing_run_id": testing_run_id,
+                "score_series": "score",
+                "start_timestamp": BASE.isoformat(),
+                "end_timestamp": (BASE + timedelta(minutes=79)).isoformat(),
+                "signal": "raw",
+                "quantile": 0.5,
+                "quantile_source": "full_range",
+            })
+            assert simple_preview.status_code == 200, simple_preview.text
+            assert simple_preview.json()["threshold"] == 1.0
+            simple_run = client.post("/api/anomaly-detection-runs", json={
+                "name": "Simple threshold detector",
+                "testing_run_id": testing_run_id,
+                "score_series": "score",
+                "start_timestamp": BASE.isoformat(),
+                "end_timestamp": (BASE + timedelta(minutes=79)).isoformat(),
+                "config": _simple_threshold_config(
+                    simple_threshold_mode="quantile",
+                    simple_threshold_value=None,
+                    simple_threshold_quantile=0.5,
+                    simple_threshold_quantile_source="full_range",
+                ).model_dump(),
+            })
+            assert simple_run.status_code == 200, simple_run.text
+            assert simple_run.json()["algorithm_version"] == "simple_threshold_v1"
+            assert simple_run.json()["resolved_threshold"] == simple_preview.json()["threshold"]
+            assert client.delete(f"/api/anomaly-detection-runs/{simple_run.json()['id']}").status_code == 204
+
             event_run = client.post("/api/anomaly-detection-runs", json={
                 "name": "K-out-of-N detector",
                 "testing_run_id": testing_run_id,
@@ -1032,7 +1331,7 @@ def test_anomaly_detection_api_crud_and_decimation(monkeypatch: pytest.MonkeyPat
                 "config": _fast_config(algorithm="robust_zscore").model_dump(),
             })
             assert zscore.status_code == 200, zscore.text
-            assert zscore.json()["algorithm_version"] == "robust_zscore_v4"
+            assert zscore.json()["algorithm_version"] == "robust_zscore_v5"
             assert zscore.json()["config"]["algorithm"] == "robust_zscore"
             assert all(point["cusum"] == 0 for point in zscore.json()["series"])
             assert client.delete(f"/api/anomaly-detection-runs/{zscore.json()['id']}").status_code == 204

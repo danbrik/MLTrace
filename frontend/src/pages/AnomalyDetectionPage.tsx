@@ -36,6 +36,7 @@ import {
   listAnomalyDetectionRuns,
   listTestingRuns,
   previewAnomalyDetectionCalibration,
+  previewAnomalyDetectionSimpleThreshold,
   previewAnomalyDetectionThreshold,
 } from '../api';
 import { DateTime24Input } from '../components/DateTime24Input';
@@ -67,7 +68,9 @@ import type {
   AnomalyDetectionRunSummary,
   AnomalyDetectionScoreSeries,
   AnomalyDetectionSeriesPoint,
+  AnomalyDetectionSimpleThresholdPreview,
   AnomalyDetectionThresholdPreview,
+  AnomalyDetectionTimeRange,
   TestingRun,
   TestingRunResult,
 } from '../types';
@@ -84,6 +87,7 @@ const FAST_CONFIG: AnomalyDetectionConfig = {
   high_z: 5,
   minimum_score_for_detection: 0,
   minimum_delta_for_detection: null,
+  robust_zscore_baseline_rebuild_mode: 'disabled',
   minimum_scale_relative: 1e-3,
   minimum_scale_absolute: 1e-9,
   cusum_drift: 1,
@@ -111,6 +115,13 @@ const FAST_CONFIG: AnomalyDetectionConfig = {
   merge_gap_seconds: 60,
   event_minimum_gap_seconds: 15,
   sigma_threshold: 3,
+  simple_threshold_mode: 'quantile',
+  simple_threshold_signal: 'raw',
+  simple_threshold_value: null,
+  simple_threshold_quantile: 0.999,
+  simple_threshold_quantile_source: 'normal_ranges',
+  simple_threshold_ewma_half_life_minutes: 5,
+  simple_threshold_normal_ranges: [],
 };
 
 const EVENT_CONFIG: AnomalyDetectionConfig = {
@@ -128,6 +139,12 @@ const SIGMA_CONFIG: AnomalyDetectionConfig = {
   preroll_minutes: 30,
   confirmation_mode: 'samples',
   confirmation_samples: 1,
+};
+
+const SIMPLE_THRESHOLD_CONFIG: AnomalyDetectionConfig = {
+  ...FAST_CONFIG,
+  algorithm: 'simple_threshold',
+  preroll_minutes: 120,
 };
 
 const BALANCED_CONFIG: AnomalyDetectionConfig = {
@@ -182,6 +199,11 @@ const ALGORITHMS: Array<{
     description: 'Uses the rolling median and MAD only. It confirms an event when the high Z-score remains present for the confirmation time.',
   },
   {
+    value: 'simple_threshold',
+    label: 'Simple Threshold',
+    description: 'Immediately confirms each consecutive interval where the raw score or EWMA reaches a manual or data-derived threshold.',
+  },
+  {
     value: 'event_threshold',
     label: 'Event Threshold (K-out-of-N)',
     description: 'Smooths the reconstruction error, applies a manual or validation quantile threshold, and confirms an event when K of the last N samples exceed it.',
@@ -224,7 +246,7 @@ const PARAMETER_DEFINITIONS: Array<{
   { key: 'fallback_recovery_minutes', label: 'Fallback recovery (min)', description: 'Closes an event after this continuous time below Warning Z-score. Set to 0 to disable.', min: 0, algorithms: ROBUST_ALGORITHMS },
   { key: 'preroll_minutes', label: 'Pre-roll (min)', description: 'Hidden history loaded before a selected range so its baseline is already initialized.', min: 0 },
   { key: 'gap_multiplier', label: 'Gap multiplier', description: 'A time gap larger than this multiple of the normal sample interval resets detector state.', min: 1.1, decimalScale: 1 },
-  { key: 'minimum_gap_minutes', label: 'Minimum gap (min)', description: 'Absolute minimum duration that is treated as a data gap and resets the baseline.', min: 0.1, algorithms: BASELINE_ALGORITHMS },
+  { key: 'minimum_gap_minutes', label: 'Minimum gap (min)', description: 'Absolute minimum duration that is treated as a data gap and resets detector state.', min: 0.1, algorithms: [...BASELINE_ALGORITHMS, 'simple_threshold'] },
   { key: 'sigma_threshold', label: 'Standard-deviation threshold (σ)', description: 'A raw score is marked anomalous when it is strictly greater than rolling mean plus this many standard deviations. The default is 3σ.', min: 0.1, decimalScale: 2, algorithms: ['rolling_sigma'] },
   { key: 'event_smoothing_window_seconds', label: 'Smoothing window (s)', description: 'Trailing causal time window (t − window, t] used by median or moving-average smoothing.', min: 0.1, algorithms: ['event_threshold'] },
   { key: 'persistence_k', label: 'Required candidates K', description: 'Number of above-threshold samples required within the last N samples.', min: 1, algorithms: ['event_threshold'] },
@@ -258,6 +280,22 @@ function errorMessage(error: unknown): string {
 
 function localInput(timestamp: string): string {
   return timestamp ? timestamp.slice(0, 19) : '';
+}
+
+function canonicalTimeRanges(ranges: AnomalyDetectionTimeRange[]): AnomalyDetectionTimeRange[] {
+  const ordered = [...ranges].sort((left, right) => Date.parse(left.start_timestamp) - Date.parse(right.start_timestamp));
+  const merged: AnomalyDetectionTimeRange[] = [];
+  ordered.forEach((range) => {
+    const previous = merged.at(-1);
+    if (previous && Date.parse(range.start_timestamp) <= Date.parse(previous.end_timestamp)) {
+      previous.end_timestamp = Date.parse(range.end_timestamp) > Date.parse(previous.end_timestamp)
+        ? range.end_timestamp
+        : previous.end_timestamp;
+    } else {
+      merged.push({ ...range });
+    }
+  });
+  return merged;
 }
 
 function formatTimestamp(timestamp: string | null): string {
@@ -452,6 +490,10 @@ export function AnomalyDetectionPage({ active }: { active: boolean }) {
   const [thresholdEnd, setThresholdEnd] = useState('');
   const [thresholdPreview, setThresholdPreview] = useState<AnomalyDetectionThresholdPreview | null>(null);
   const [thresholdCalculating, setThresholdCalculating] = useState(false);
+  const [simpleRangeStart, setSimpleRangeStart] = useState('');
+  const [simpleRangeEnd, setSimpleRangeEnd] = useState('');
+  const [simpleThresholdPreview, setSimpleThresholdPreview] = useState<AnomalyDetectionSimpleThresholdPreview | null>(null);
+  const [simpleThresholdPreviewSignature, setSimpleThresholdPreviewSignature] = useState('');
   const [calibrationStart, setCalibrationStart] = useState('');
   const [calibrationEnd, setCalibrationEnd] = useState('');
   const [calibrationProfile, setCalibrationProfile] = useState<AnomalyDetectionCalibrationProfile>('balanced');
@@ -498,6 +540,37 @@ export function AnomalyDetectionPage({ active }: { active: boolean }) {
   }, [running, loadingSavedRunId]);
 
   const selectedRun = testingRuns.find((run) => run.id === Number(testingRunId)) ?? null;
+  const analysisStart = rangeMode === 'full' ? fullStart : start;
+  const analysisEnd = rangeMode === 'full' ? fullEnd : end;
+  const simpleThresholdSignature = useMemo(() => JSON.stringify({
+    testingRunId,
+    scoreSeries,
+    start: analysisStart,
+    end: analysisEnd,
+    signal: config.simple_threshold_signal,
+    halfLife: config.simple_threshold_ewma_half_life_minutes,
+    quantile: config.simple_threshold_quantile,
+    source: config.simple_threshold_quantile_source,
+    ranges: config.simple_threshold_normal_ranges,
+    preroll: config.preroll_minutes,
+    gapMultiplier: config.gap_multiplier,
+    minimumGapMinutes: config.minimum_gap_minutes,
+  }), [
+    analysisEnd,
+    analysisStart,
+    config.gap_multiplier,
+    config.minimum_gap_minutes,
+    config.preroll_minutes,
+    config.simple_threshold_ewma_half_life_minutes,
+    config.simple_threshold_normal_ranges,
+    config.simple_threshold_quantile,
+    config.simple_threshold_quantile_source,
+    config.simple_threshold_signal,
+    scoreSeries,
+    testingRunId,
+  ]);
+  const simpleThresholdPreviewStale = simpleThresholdPreview !== null
+    && simpleThresholdPreviewSignature !== simpleThresholdSignature;
   const calibrationSignature = useMemo(() => JSON.stringify({
     testingRunId,
     scoreSeries,
@@ -511,6 +584,7 @@ export function AnomalyDetectionPage({ active }: { active: boolean }) {
     minimumWarmupPoints: config.minimum_warmup_points,
     minimumScoreForDetection: config.minimum_score_for_detection,
     minimumDeltaForDetection: config.minimum_delta_for_detection,
+    baselineRebuildMode: config.robust_zscore_baseline_rebuild_mode,
     gapMultiplier: config.gap_multiplier,
     minimumGapMinutes: config.minimum_gap_minutes,
   }), [
@@ -524,6 +598,7 @@ export function AnomalyDetectionPage({ active }: { active: boolean }) {
     config.minimum_delta_for_detection,
     config.minimum_score_for_detection,
     config.minimum_warmup_points,
+    config.robust_zscore_baseline_rebuild_mode,
     config.smoothing_half_life_minutes,
     config.warmup_minutes,
     scoreSeries,
@@ -681,6 +756,10 @@ export function AnomalyDetectionPage({ active }: { active: boolean }) {
     let cancelled = false;
     setCalibrationStart('');
     setCalibrationEnd('');
+    setSimpleRangeStart('');
+    setSimpleRangeEnd('');
+    setSimpleThresholdPreview(null);
+    setConfig((current) => ({ ...current, simple_threshold_normal_ranges: [] }));
     setPreviewLoading(true);
     getTestingRunResults(Number(testingRunId), MAX_PREVIEW_POINTS)
       .then((response) => {
@@ -794,6 +873,38 @@ export function AnomalyDetectionPage({ active }: { active: boolean }) {
     showlegend: false,
   }), [scoreSeries, thresholdRangeMode]);
 
+  const simpleThresholdRangeData = useMemo<Data[]>(() => [{
+    type: 'scatter',
+    mode: 'lines+markers',
+    name: scoreSeries.replace('_', ' ').toUpperCase(),
+    x: previewResults.map((result) => result.timestamp),
+    y: previewResults.map((result) => scoreValue(result, scoreSeries)),
+    line: { color: '#0ca678', width: 1.5 },
+    marker: { size: 4 },
+    connectgaps: false,
+  }], [previewResults, scoreSeries]);
+
+  const simpleThresholdRangeLayout = useMemo<Partial<Layout>>(() => ({
+    title: { text: 'Drag across a known normal period', font: { size: 14 } },
+    dragmode: 'select',
+    hovermode: 'x unified',
+    xaxis: { type: 'date', title: { text: 'Time' }, range: analysisStart && analysisEnd ? [analysisStart, analysisEnd] : undefined },
+    yaxis: { title: { text: scoreSeries.replace('_', ' ').toUpperCase() } },
+    showlegend: false,
+    shapes: config.simple_threshold_normal_ranges.map((range) => ({
+      type: 'rect',
+      xref: 'x',
+      yref: 'paper',
+      x0: range.start_timestamp,
+      x1: range.end_timestamp,
+      y0: 0,
+      y1: 1,
+      fillcolor: 'rgba(18,184,134,0.16)',
+      line: { color: '#12b886', width: 1 },
+      layer: 'below',
+    })),
+  }), [analysisEnd, analysisStart, config.simple_threshold_normal_ranges, scoreSeries]);
+
   const calibrationPreviewData = useMemo<Data[]>(() => [{
     type: 'scatter',
     mode: 'lines+markers',
@@ -844,8 +955,18 @@ export function AnomalyDetectionPage({ active }: { active: boolean }) {
     setCalibrationEnd(localInput(last.replace(' ', 'T')));
   }, []);
 
+  const selectSimpleThresholdRange = useCallback((selection: PlotlyChartSelection) => {
+    const left = new Date(selection.start);
+    const right = new Date(selection.end);
+    if (Number.isNaN(left.getTime()) || Number.isNaN(right.getTime())) return;
+    const first = left <= right ? selection.start : selection.end;
+    const last = left <= right ? selection.end : selection.start;
+    setSimpleRangeStart(localInput(first.replace(' ', 'T')));
+    setSimpleRangeEnd(localInput(last.replace(' ', 'T')));
+  }, []);
+
   function applyPreset(value: string | null) {
-    const next = value ?? (config.algorithm === 'event_threshold' ? 'prototype' : config.algorithm === 'rolling_sigma' ? 'simple' : 'fast');
+    const next = value ?? (config.algorithm === 'event_threshold' ? 'prototype' : config.algorithm === 'simple_threshold' ? 'threshold' : config.algorithm === 'rolling_sigma' ? 'simple' : 'fast');
     setPreset(next);
     if (next === 'prototype') {
       setConfig({ ...EVENT_CONFIG });
@@ -853,6 +974,10 @@ export function AnomalyDetectionPage({ active }: { active: boolean }) {
     }
     if (next === 'simple') {
       setConfig({ ...SIGMA_CONFIG });
+      return;
+    }
+    if (next === 'threshold') {
+      setConfig({ ...SIMPLE_THRESHOLD_CONFIG });
       return;
     }
     if (PRESETS[next]) {
@@ -873,6 +998,9 @@ export function AnomalyDetectionPage({ active }: { active: boolean }) {
     } else if (algorithm === 'rolling_sigma') {
       setConfig({ ...SIGMA_CONFIG });
       setPreset('simple');
+    } else if (algorithm === 'simple_threshold') {
+      setConfig({ ...SIMPLE_THRESHOLD_CONFIG });
+      setPreset('threshold');
     } else {
       setConfig({ ...FAST_CONFIG, algorithm });
       setPreset('fast');
@@ -901,6 +1029,67 @@ export function AnomalyDetectionPage({ active }: { active: boolean }) {
       setThresholdPreview(calculated);
     } catch (error) {
       notifications.show({ color: 'red', title: 'Threshold calculation failed', message: errorMessage(error) });
+    } finally {
+      setThresholdCalculating(false);
+    }
+  }
+
+  function addSimpleThresholdRange() {
+    const rangeStart = Date.parse(simpleRangeStart);
+    const rangeEnd = Date.parse(simpleRangeEnd);
+    if (
+      !Number.isFinite(rangeStart)
+      || !Number.isFinite(rangeEnd)
+      || rangeStart >= rangeEnd
+      || rangeStart < Date.parse(analysisStart)
+      || rangeEnd > Date.parse(analysisEnd)
+    ) {
+      notifications.show({ color: 'yellow', title: 'Invalid normal range', message: 'Select a non-empty range inside the current analysis period.' });
+      return;
+    }
+    setPreset('custom');
+    setConfig((current) => ({
+      ...current,
+      simple_threshold_normal_ranges: canonicalTimeRanges([
+        ...current.simple_threshold_normal_ranges,
+        { start_timestamp: simpleRangeStart, end_timestamp: simpleRangeEnd },
+      ]),
+    }));
+    setSimpleRangeStart('');
+    setSimpleRangeEnd('');
+  }
+
+  async function calculateSimpleThreshold() {
+    if (!selectedRun || !analysisStart || !analysisEnd) return;
+    if (
+      config.simple_threshold_quantile_source === 'normal_ranges'
+      && config.simple_threshold_normal_ranges.length === 0
+    ) {
+      notifications.show({ color: 'yellow', title: 'No normal range', message: 'Add at least one known normal range.' });
+      return;
+    }
+    const requestSignature = simpleThresholdSignature;
+    setThresholdCalculating(true);
+    try {
+      const result = await previewAnomalyDetectionSimpleThreshold({
+        testing_run_id: selectedRun.id,
+        score_series: scoreSeries,
+        start_timestamp: analysisStart,
+        end_timestamp: analysisEnd,
+        signal: config.simple_threshold_signal,
+        ewma_half_life_minutes: config.simple_threshold_ewma_half_life_minutes,
+        preroll_minutes: config.preroll_minutes,
+        gap_multiplier: config.gap_multiplier,
+        minimum_gap_minutes: config.minimum_gap_minutes,
+        quantile: config.simple_threshold_quantile,
+        quantile_source: config.simple_threshold_quantile_source,
+        normal_ranges: config.simple_threshold_normal_ranges,
+      });
+      setSimpleThresholdPreview(result);
+      setSimpleThresholdPreviewSignature(requestSignature);
+      setConfig((current) => ({ ...current, simple_threshold_normal_ranges: result.normal_ranges }));
+    } catch (error) {
+      notifications.show({ color: 'red', title: 'Simple threshold calculation failed', message: errorMessage(error) });
     } finally {
       setThresholdCalculating(false);
     }
@@ -964,6 +1153,19 @@ export function AnomalyDetectionPage({ active }: { active: boolean }) {
     }
     if (config.algorithm === 'event_threshold' && config.threshold_mode === 'manual' && config.manual_threshold === null) {
       notifications.show({ color: 'yellow', title: 'Missing threshold', message: 'Enter a manual Threshold On value.' });
+      return;
+    }
+    if (config.algorithm === 'simple_threshold' && config.simple_threshold_mode === 'manual' && config.simple_threshold_value === null) {
+      notifications.show({ color: 'yellow', title: 'Missing threshold', message: 'Enter a manual simple-threshold value.' });
+      return;
+    }
+    if (
+      config.algorithm === 'simple_threshold'
+      && config.simple_threshold_mode === 'quantile'
+      && config.simple_threshold_quantile_source === 'normal_ranges'
+      && config.simple_threshold_normal_ranges.length === 0
+    ) {
+      notifications.show({ color: 'yellow', title: 'Missing normal range', message: 'Add at least one normal range or use the full analysis period.' });
       return;
     }
     const token = progressToken();
@@ -1031,12 +1233,17 @@ export function AnomalyDetectionPage({ active }: { active: boolean }) {
   const resultShapes = useMemo(() => {
     if (!activeRun) return [];
     const shapes: NonNullable<Partial<Layout>['shapes']> = [];
-    const warmup = activeRun.series.filter((point) => point.state === 'warmup');
-    if (warmup.length) {
-      shapes.push({ type: 'rect', xref: 'x', yref: 'paper', x0: warmup[0].timestamp, x1: warmup.at(-1)?.timestamp, y0: 0, y1: 1, fillcolor: 'rgba(134,142,150,0.14)', line: { width: 0 }, layer: 'below' });
-    }
+    let warmupStart: string | null = null;
+    activeRun.series.forEach((point, index) => {
+      if (point.state === 'warmup' && warmupStart === null) warmupStart = point.timestamp;
+      const nextIsWarmup = activeRun.series[index + 1]?.state === 'warmup';
+      if (warmupStart !== null && !nextIsWarmup) {
+        shapes.push({ type: 'rect', xref: 'x', yref: 'paper', x0: warmupStart, x1: point.timestamp, y0: 0, y1: 1, fillcolor: 'rgba(134,142,150,0.14)', line: { width: 0 }, layer: 'below' });
+        warmupStart = null;
+      }
+    });
     activeRun.events.forEach((event) => {
-      if (activeRun.config.algorithm !== 'event_threshold') {
+      if (!['event_threshold', 'simple_threshold'].includes(activeRun.config.algorithm)) {
         const yellowEnd = event.confirmed_at ?? event.end_timestamp;
         shapes.push({ type: 'rect', xref: 'x', yref: 'paper', x0: event.warning_start, x1: yellowEnd, y0: 0, y1: 1, fillcolor: 'rgba(250,176,5,0.20)', line: { width: 0 }, layer: 'below' });
       }
@@ -1044,12 +1251,58 @@ export function AnomalyDetectionPage({ active }: { active: boolean }) {
         shapes.push({ type: 'rect', xref: 'x', yref: 'paper', x0: event.confirmed_at, x1: event.end_timestamp, y0: 0, y1: 1, fillcolor: 'rgba(250,82,82,0.22)', line: { width: 0 }, layer: 'below' });
       }
     });
+    const transitionStyles = {
+      frozen: { color: '#f08c00', dash: 'dash' as const },
+      rebuilding: { color: '#1c7ed6', dash: 'dot' as const },
+      ready: { color: '#2f9e44', dash: 'dashdot' as const },
+    };
+    activeRun.baseline_transitions.forEach((transition) => {
+      const style = transitionStyles[transition.kind];
+      shapes.push({
+        type: 'line',
+        xref: 'x',
+        yref: 'paper',
+        x0: transition.timestamp,
+        x1: transition.timestamp,
+        y0: 0,
+        y1: 1,
+        line: { color: style.color, width: 2, dash: style.dash },
+      });
+    });
     return shapes;
+  }, [activeRun]);
+
+  const resultAnnotations = useMemo<NonNullable<Partial<Layout>['annotations']>>(() => {
+    if (!activeRun) return [];
+    const labels = { frozen: 'Baseline frozen', rebuilding: 'Baseline rebuilding', ready: 'Detection ready' };
+    const colors = { frozen: '#f08c00', rebuilding: '#1c7ed6', ready: '#2f9e44' };
+    return activeRun.baseline_transitions.map((transition) => ({
+      x: transition.timestamp,
+      xref: 'x',
+      y: 1,
+      yref: 'paper',
+      text: labels[transition.kind],
+      textangle: '-90',
+      showarrow: false,
+      yanchor: 'top',
+      xanchor: 'right',
+      font: { size: 10, color: colors[transition.kind] },
+    }));
   }, [activeRun]);
 
   const resultData = useMemo<Data[]>(() => {
     if (!activeRun) return [];
     const timestamps = activeRun.series.map((point) => point.timestamp);
+    if (activeRun.config.algorithm === 'simple_threshold') {
+      const data: Data[] = [
+        { type: 'scatter', mode: 'lines', name: 'Raw score', x: timestamps, y: activeRun.series.map((point) => point.score), line: { color: '#868e96', width: activeRun.config.simple_threshold_signal === 'raw' ? 2 : 1 } },
+      ];
+      if (activeRun.config.simple_threshold_signal === 'ewma') {
+        data.push({ type: 'scatter', mode: 'lines', name: 'EWMA', x: timestamps, y: activeRun.series.map((point) => point.smoothed), line: { color: '#228be6', width: 2 } });
+      }
+      data.push({ type: 'scatter', mode: 'lines', name: 'Threshold', x: timestamps, y: activeRun.series.map((point) => point.threshold_on), line: { color: '#fa5252', width: 1.5, dash: 'dash' } });
+      return data;
+    }
     if (activeRun.config.algorithm === 'event_threshold') {
       const smoothingLabel = !activeRun.config.event_smoothing_enabled
         ? 'Raw score (smoothing disabled)'
@@ -1101,6 +1354,16 @@ export function AnomalyDetectionPage({ active }: { active: boolean }) {
 
   const diagnosticData = useMemo<Data[]>(() => {
     if (!activeRun) return [];
+    if (activeRun.config.algorithm === 'simple_threshold') {
+      return [{
+        type: 'scatter',
+        mode: 'lines',
+        name: 'Threshold candidate',
+        x: activeRun.series.map((point) => point.timestamp),
+        y: activeRun.series.map((point) => Number(point.candidate)),
+        line: { color: '#e8590c', width: 1.5, shape: 'hv' },
+      }];
+    }
     if (activeRun.config.algorithm === 'event_threshold') {
       const candidatePoints = activeRun.series.filter((point) => point.candidate);
       return [
@@ -1314,6 +1577,8 @@ export function AnomalyDetectionPage({ active }: { active: boolean }) {
                 value={preset}
                 data={config.algorithm === 'event_threshold'
                   ? [{ value: 'prototype', label: 'Prototype defaults (recommended)' }, { value: 'custom', label: 'Custom', disabled: preset !== 'custom' }]
+                  : config.algorithm === 'simple_threshold'
+                    ? [{ value: 'threshold', label: '99.9% simple threshold (recommended)' }, { value: 'custom', label: 'Custom', disabled: preset !== 'custom' }]
                   : config.algorithm === 'rolling_sigma'
                     ? [{ value: 'simple', label: '30 min baseline · 3σ (recommended)' }, { value: 'custom', label: 'Custom', disabled: preset !== 'custom' }]
                   : [{ value: 'fast', label: 'Fast response (recommended)' }, { value: 'balanced', label: 'Balanced' }, { value: 'robust', label: 'Very robust' }, { value: 'custom', label: 'Custom', disabled: preset !== 'custom' }]}
@@ -1422,6 +1687,157 @@ export function AnomalyDetectionPage({ active }: { active: boolean }) {
                   )}
                 </Stack>
               </Paper>
+            )}
+            {config.algorithm === 'simple_threshold' && (
+              <Stack gap="md">
+                <SimpleGrid cols={{ base: 1, md: 3 }}>
+                  <Select
+                    label={<InfoLabel label="Threshold mode" description="Manual uses a fixed value. Quantile derives the threshold from full-resolution values in the chosen reference period." />}
+                    value={config.simple_threshold_mode}
+                    data={[{ value: 'quantile', label: 'Quantile from data' }, { value: 'manual', label: 'Manual threshold' }]}
+                    disabled={running || thresholdCalculating}
+                    onChange={(value) => {
+                      setPreset('custom');
+                      setConfig((current) => ({ ...current, simple_threshold_mode: (value ?? 'quantile') as 'manual' | 'quantile' }));
+                    }}
+                  />
+                  <Select
+                    label={<InfoLabel label="Detection signal" description="The same signal is used both for quantile calculation and anomaly detection." />}
+                    value={config.simple_threshold_signal}
+                    data={[{ value: 'raw', label: 'Raw score' }, { value: 'ewma', label: 'EWMA' }]}
+                    disabled={running || thresholdCalculating}
+                    onChange={(value) => {
+                      setPreset('custom');
+                      setConfig((current) => ({ ...current, simple_threshold_signal: (value ?? 'raw') as 'raw' | 'ewma' }));
+                    }}
+                  />
+                  {config.simple_threshold_signal === 'ewma' && (
+                    <NumberInput
+                      label={<InfoLabel label="EWMA half-life (min)" description="Causal smoothing half-life. EWMA is initialized from pre-roll and reset after data gaps." />}
+                      min={0.1}
+                      decimalScale={3}
+                      value={config.simple_threshold_ewma_half_life_minutes}
+                      disabled={running || thresholdCalculating}
+                      onChange={(value) => patchConfig('simple_threshold_ewma_half_life_minutes', value)}
+                    />
+                  )}
+                  {config.simple_threshold_mode === 'manual' && (
+                    <NumberInput
+                      label={<InfoLabel label="Simple threshold" description="Every point whose selected signal is greater than or equal to this value belongs to an anomaly event." />}
+                      min={0}
+                      decimalScale={12}
+                      value={config.simple_threshold_value ?? ''}
+                      disabled={running || thresholdCalculating}
+                      onChange={(value) => {
+                        setPreset('custom');
+                        setConfig((current) => ({ ...current, simple_threshold_value: typeof value === 'number' ? value : null }));
+                      }}
+                    />
+                  )}
+                </SimpleGrid>
+
+                {config.simple_threshold_mode === 'quantile' && (
+                  <Paper withBorder p="md" radius="sm">
+                    <Stack gap="md">
+                      <div>
+                        <Text fw={700}>Data-derived simple threshold</Text>
+                        <Text size="sm" c="dimmed">The calculation uses every stored point, even when this selection plot is decimated.</Text>
+                      </div>
+                      <SegmentedControl
+                        fullWidth
+                        value={config.simple_threshold_quantile_source}
+                        data={[
+                          { value: 'normal_ranges', label: 'Selected normal ranges' },
+                          { value: 'full_range', label: 'Entire analysis period' },
+                        ]}
+                        disabled={running || thresholdCalculating}
+                        onChange={(value) => {
+                          setPreset('custom');
+                          setConfig((current) => ({ ...current, simple_threshold_quantile_source: value as 'normal_ranges' | 'full_range' }));
+                        }}
+                      />
+                      {config.simple_threshold_quantile_source === 'full_range' ? (
+                        <Alert color="yellow">The analysis period may contain anomalies. High anomalous values can raise the calculated threshold.</Alert>
+                      ) : (
+                        <Stack gap="sm">
+                          <PlotlyChart
+                            data={simpleThresholdRangeData}
+                            layout={simpleThresholdRangeLayout}
+                            height={300}
+                            onSelected={selectSimpleThresholdRange}
+                          />
+                          <SimpleGrid cols={{ base: 1, md: 3 }}>
+                            <DateTime24Input label="Normal range start" value={simpleRangeStart} min={analysisStart} max={analysisEnd} disabled={running || thresholdCalculating} onChange={setSimpleRangeStart} />
+                            <DateTime24Input label="Normal range end" value={simpleRangeEnd} min={analysisStart} max={analysisEnd} disabled={running || thresholdCalculating} onChange={setSimpleRangeEnd} />
+                            <Button mt={25} variant="light" color="teal" disabled={!simpleRangeStart || !simpleRangeEnd || simpleRangeStart >= simpleRangeEnd} onClick={addSimpleThresholdRange}>Add range</Button>
+                          </SimpleGrid>
+                          {config.simple_threshold_normal_ranges.length === 0 ? (
+                            <Alert color="yellow">Add at least one period known to contain normal operation.</Alert>
+                          ) : (
+                            <Table striped withColumnBorders>
+                              <Table.Thead><Table.Tr><Table.Th>Start</Table.Th><Table.Th>End</Table.Th><Table.Th /></Table.Tr></Table.Thead>
+                              <Table.Tbody>{config.simple_threshold_normal_ranges.map((range, index) => (
+                                <Table.Tr key={`${range.start_timestamp}-${range.end_timestamp}`}>
+                                  <Table.Td>{formatTimestamp(range.start_timestamp)}</Table.Td>
+                                  <Table.Td>{formatTimestamp(range.end_timestamp)}</Table.Td>
+                                  <Table.Td>
+                                    <Group gap="xs" justify="flex-end">
+                                      <Button size="compact-xs" variant="subtle" onClick={() => {
+                                        setSimpleRangeStart(localInput(range.start_timestamp));
+                                        setSimpleRangeEnd(localInput(range.end_timestamp));
+                                        setConfig((current) => ({ ...current, simple_threshold_normal_ranges: current.simple_threshold_normal_ranges.filter((_item, itemIndex) => itemIndex !== index) }));
+                                        setPreset('custom');
+                                      }}>Edit</Button>
+                                      <ActionIcon color="red" variant="subtle" aria-label="Remove normal range" onClick={() => {
+                                        setConfig((current) => ({ ...current, simple_threshold_normal_ranges: current.simple_threshold_normal_ranges.filter((_item, itemIndex) => itemIndex !== index) }));
+                                        setPreset('custom');
+                                      }}><Trash2 size={15} /></ActionIcon>
+                                    </Group>
+                                  </Table.Td>
+                                </Table.Tr>
+                              ))}</Table.Tbody>
+                            </Table>
+                          )}
+                        </Stack>
+                      )}
+                      <SimpleGrid cols={{ base: 1, md: 2 }}>
+                        <div>
+                          <NumberInput
+                            label={<InfoLabel label="Quantile (%)" description="The simple threshold is this quantile of the selected Raw or EWMA reference values." />}
+                            value={config.simple_threshold_quantile * 100}
+                            min={0.000001}
+                            max={99.999999}
+                            decimalScale={6}
+                            disabled={running || thresholdCalculating}
+                            onChange={(value) => {
+                              const percent = numberValue(value, config.simple_threshold_quantile * 100);
+                              setPreset('custom');
+                              setConfig((current) => ({ ...current, simple_threshold_quantile: percent / 100 }));
+                            }}
+                          />
+                          <Group gap={4} mt={6}>{[99, 99.9, 99.99].map((quantile) => (
+                            <Button key={quantile} size="compact-xs" variant="light" onClick={() => {
+                              setPreset('custom');
+                              setConfig((current) => ({ ...current, simple_threshold_quantile: quantile / 100 }));
+                            }}>{quantile}%</Button>
+                          ))}</Group>
+                        </div>
+                        <Button mt={25} variant="light" color="teal" loading={thresholdCalculating} disabled={config.simple_threshold_quantile_source === 'normal_ranges' && config.simple_threshold_normal_ranges.length === 0} onClick={calculateSimpleThreshold}>Calculate threshold</Button>
+                      </SimpleGrid>
+                      {simpleThresholdPreview && (
+                        <Stack gap="xs">
+                          {simpleThresholdPreviewStale && <Alert color="yellow" title="Preview is out of date">The source, analysis range, signal, quantile or normal ranges changed. Calculate again for an updated preview.</Alert>}
+                          <Alert color="teal" title="Calculated full-resolution threshold">
+                            <Text size="sm">{(simpleThresholdPreview.quantile * 100).toFixed(6)}% quantile · {simpleThresholdPreview.point_count.toLocaleString()} points · {simpleThresholdPreview.signal.toUpperCase()}</Text>
+                            <Text fw={700} mt={4}>Threshold: {simpleThresholdPreview.threshold.toPrecision(8)}</Text>
+                          </Alert>
+                          {simpleThresholdPreview.warnings.map((warning) => <Alert key={warning} color="yellow">{warning}</Alert>)}
+                        </Stack>
+                      )}
+                    </Stack>
+                  </Paper>
+                )}
+              </Stack>
             )}
             {config.algorithm === 'event_threshold' && (
               <Stack gap="md">
@@ -1633,6 +2049,25 @@ export function AnomalyDetectionPage({ active }: { active: boolean }) {
                     <Text size="sm" mt={4}>Both floors are parameters below. Calibrate them from a known healthy period: divide a high percentile (for example 99.9%) of the normal EWMA-to-median residual by Warning Z. Use the relative residual for scores away from zero and the absolute residual near zero.</Text>
                   </Alert>
                 )}
+                {config.algorithm === 'robust_zscore' && (
+                  <Select
+                    label={<InfoLabel label="Baseline rebuild after interval" description="The baseline is always frozen while a warning is active. Choose whether the frozen baseline is reused afterwards or discarded and rebuilt before detection resumes." />}
+                    value={config.robust_zscore_baseline_rebuild_mode}
+                    data={[
+                      { value: 'disabled', label: 'Disabled — reuse previous baseline' },
+                      { value: 'after_warning', label: 'After every warning interval' },
+                      { value: 'after_confirmed', label: 'After confirmed anomalies only' },
+                    ]}
+                    disabled={running || thresholdCalculating}
+                    onChange={(value) => {
+                      setPreset('custom');
+                      setConfig((current) => ({
+                        ...current,
+                        robust_zscore_baseline_rebuild_mode: (value ?? 'disabled') as 'disabled' | 'after_warning' | 'after_confirmed',
+                      }));
+                    }}
+                  />
+                )}
                 <SimpleGrid cols={{ base: 1, sm: 2, lg: 4 }}>
                   {config.algorithm === 'robust_zscore' && (
                     <NumberInput
@@ -1752,7 +2187,7 @@ export function AnomalyDetectionPage({ active }: { active: boolean }) {
               <div><Title order={3}>{activeRun.name}</Title><Text size="sm" c="dimmed">{activeRun.testing_run_name} · {formatTimestamp(activeRun.start_timestamp)} – {formatTimestamp(activeRun.end_timestamp)}</Text></div>
               <Group gap="xs">
                 <Badge color="violet">{algorithmDefinition(activeRun.config.algorithm).label}</Badge>
-                {activeRun.config.algorithm === 'event_threshold' || activeRun.config.algorithm === 'rolling_sigma'
+                {['event_threshold', 'simple_threshold', 'rolling_sigma'].includes(activeRun.config.algorithm)
                   ? <Badge color="red">{activeRun.anomaly_count} events</Badge>
                   : <><Badge color="yellow">{activeRun.warning_count} warnings</Badge><Badge color="red">{activeRun.anomaly_count} confirmed</Badge></>}
                 <Badge color="gray">{activeRun.point_count} points</Badge>
@@ -1766,12 +2201,22 @@ export function AnomalyDetectionPage({ active }: { active: boolean }) {
                 <Text size="sm">Threshold Off: {activeRun.resolved_threshold == null ? '—' : (activeRun.resolved_threshold * activeRun.config.threshold_off_factor).toPrecision(8)}</Text>
               </Alert>
             )}
+            {activeRun.config.algorithm === 'simple_threshold' && (
+              <Alert color="teal" title={`Threshold: ${activeRun.resolved_threshold?.toPrecision(8) ?? '—'}`}>
+                <Text size="sm">
+                  {activeRun.config.simple_threshold_mode === 'manual'
+                    ? 'Manual threshold'
+                    : `${(activeRun.config.simple_threshold_quantile * 100).toFixed(6)}% quantile from ${activeRun.config.simple_threshold_quantile_source === 'full_range' ? 'the entire analysis period' : `${activeRun.config.simple_threshold_normal_ranges.length} normal range(s)`}`}
+                  {' · '}{activeRun.config.simple_threshold_signal === 'raw' ? 'Raw score' : `EWMA (${activeRun.config.simple_threshold_ewma_half_life_minutes} min half-life)`}
+                </Text>
+              </Alert>
+            )}
             {activeRun.decimated && <Alert color="blue">Plot reduced from {activeRun.total.toLocaleString()} points; event detection used the full series.</Alert>}
-            <PlotlyChart data={resultData} layout={{ hovermode: 'x unified', shapes: resultShapes, xaxis: { type: 'date', title: { text: 'Time' } }, yaxis: { title: { text: activeRun.score_series.replace('_', ' ').toUpperCase() } }, legend: { orientation: 'h' } }} height={480} />
+            <PlotlyChart data={resultData} layout={{ hovermode: 'x unified', shapes: resultShapes, annotations: resultAnnotations, xaxis: { type: 'date', title: { text: 'Time' } }, yaxis: { title: { text: activeRun.score_series.replace('_', ' ').toUpperCase() } }, legend: { orientation: 'h' } }} height={480} />
             <Button variant="subtle" justify="space-between" rightSection={detailsOpen ? <ChevronDown size={16} /> : <ChevronRight size={16} />} onClick={() => setDetailsOpen((value) => !value)}>Diagnostics</Button>
             <Collapse in={detailsOpen}>
               <Stack gap="md">
-                <PlotlyChart data={diagnosticData} layout={{ hovermode: 'x unified', xaxis: { type: 'date' }, yaxis: { title: { text: activeRun.config.algorithm === 'event_threshold' ? 'Candidate count' : activeRun.config.algorithm === 'rolling_sigma' ? 'Standard deviations' : 'Robust z-score' } }, ...(activeRun.config.algorithm === 'robust_cusum' ? { yaxis2: { title: { text: 'CUSUM' }, overlaying: 'y', side: 'right' } } : {}), legend: { orientation: 'h' } }} height={300} />
+                <PlotlyChart data={diagnosticData} layout={{ hovermode: 'x unified', xaxis: { type: 'date' }, yaxis: { title: { text: ['event_threshold', 'simple_threshold'].includes(activeRun.config.algorithm) ? 'Candidate count' : activeRun.config.algorithm === 'rolling_sigma' ? 'Standard deviations' : 'Robust z-score' } }, ...(activeRun.config.algorithm === 'robust_cusum' ? { yaxis2: { title: { text: 'CUSUM' }, overlaying: 'y', side: 'right' } } : {}), legend: { orientation: 'h' } }} height={300} />
                 {ROBUST_ALGORITHMS.includes(activeRun.config.algorithm) && (
                   <Stack gap="sm">
                     <Group justify="space-between" align="flex-end" wrap="wrap">
@@ -1825,10 +2270,10 @@ export function AnomalyDetectionPage({ active }: { active: boolean }) {
                 )}
               </Stack>
             </Collapse>
-            <Text fw={700}>{activeRun.config.algorithm === 'event_threshold' ? 'Detected events' : 'Detected intervals'}</Text>
+            <Text fw={700}>{['event_threshold', 'simple_threshold'].includes(activeRun.config.algorithm) ? 'Detected events' : 'Detected intervals'}</Text>
             {activeRun.events.length === 0 ? <Alert color="green">No warnings or confirmed anomalies detected.</Alert> : (
               <ScrollArea>
-                {activeRun.config.algorithm === 'event_threshold' ? (
+                {['event_threshold', 'simple_threshold'].includes(activeRun.config.algorithm) ? (
                   <Table striped highlightOnHover>
                     <Table.Thead><Table.Tr><Table.Th>Start</Table.Th><Table.Th>End</Table.Th><Table.Th>Duration</Table.Th><Table.Th>Raw peak</Table.Th><Table.Th>Max smoothed</Table.Th><Table.Th>Mean smoothed</Table.Th><Table.Th>Threshold</Table.Th><Table.Th>End reason</Table.Th></Table.Tr></Table.Thead>
                     <Table.Tbody>{activeRun.events.map((event) => <Table.Tr key={event.id}>

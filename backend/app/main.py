@@ -31,6 +31,8 @@ from app.schemas import (
     AnomalyDetectionRunRead,
     AnomalyDetectionRunSummary,
     AnomalyDetectionSeriesPoint,
+    AnomalyDetectionSimpleThresholdPreviewRead,
+    AnomalyDetectionSimpleThresholdPreviewRequest,
     AnomalyDetectionThresholdPreviewRead,
     AnomalyDetectionThresholdPreviewRequest,
     DatasetConnectionTestRequest,
@@ -369,6 +371,19 @@ def create_app() -> FastAPI:
     ):
         try:
             return anomaly_detection_service.preview_threshold(db, payload)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.post(
+        "/api/anomaly-detection-simple-threshold-preview",
+        response_model=AnomalyDetectionSimpleThresholdPreviewRead,
+    )
+    def api_preview_anomaly_detection_simple_threshold(
+        payload: AnomalyDetectionSimpleThresholdPreviewRequest,
+        db: Session = Depends(get_db),
+    ):
+        try:
+            return anomaly_detection_service.preview_simple_threshold(db, payload)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 

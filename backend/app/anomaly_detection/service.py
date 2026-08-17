@@ -6,7 +6,7 @@ import threading
 import time
 from bisect import bisect_left, bisect_right, insort
 from collections import deque
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Callable
 
@@ -20,6 +20,7 @@ from app.schemas import (
     AnomalyDetectionCalibrationRead,
     AnomalyDetectionCalibrationRecommendation,
     AnomalyDetectionCalibrationRequest,
+    AnomalyDetectionBaselineTransition,
     AnomalyDetectionConfig,
     AnomalyDetectionEventRead,
     AnomalyDetectionProgressRead,
@@ -27,16 +28,20 @@ from app.schemas import (
     AnomalyDetectionRunRead,
     AnomalyDetectionRunSummary,
     AnomalyDetectionSeriesPoint,
+    AnomalyDetectionSimpleThresholdPreviewRead,
+    AnomalyDetectionSimpleThresholdPreviewRequest,
+    AnomalyDetectionTimeRange,
     AnomalyDetectionThresholdPreviewRead,
     AnomalyDetectionThresholdPreviewRequest,
 )
 
 
 ALGORITHM_VERSIONS = {
-    "robust_zscore": "robust_zscore_v4",
+    "robust_zscore": "robust_zscore_v5",
     "robust_cusum": "robust_cusum_v3",
     "event_threshold": "event_threshold_v1",
     "rolling_sigma": "rolling_sigma_v2",
+    "simple_threshold": "simple_threshold_v1",
 }
 
 _PROGRESS_TTL_SECONDS = 10 * 60
@@ -79,6 +84,7 @@ class DetectionEvent:
 class DetectionOutput:
     series: list[AnomalyDetectionSeriesPoint]
     events: list[DetectionEvent]
+    baseline_transitions: list[AnomalyDetectionBaselineTransition] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -486,6 +492,121 @@ def _detect_event_threshold(
     return DetectionOutput(series=series, events=events)
 
 
+def _simple_threshold_signal(
+    points: list[SignalPoint],
+    config: AnomalyDetectionConfig,
+    progress_callback: ProgressCallback | None = None,
+) -> tuple[list[SignalPoint], list[float], list[bool]]:
+    ordered = sorted(points, key=lambda item: item.timestamp)
+    if not ordered:
+        return [], [], []
+    cadence = _median_positive_delta_seconds(ordered)
+    gap_seconds = max(config.minimum_gap_minutes * 60.0, cadence * config.gap_multiplier)
+    half_life_seconds = config.simple_threshold_ewma_half_life_minutes * 60.0
+    signal_values: list[float] = []
+    gap_flags: list[bool] = []
+    previous_timestamp: datetime | None = None
+    ewma = ordered[0].score
+    total = len(ordered)
+    stride = max(1, total // 100)
+    if progress_callback is not None:
+        progress_callback("smoothing", 0, total, "Preparing the simple-threshold signal")
+    for index, point in enumerate(ordered):
+        dt = 0.0 if previous_timestamp is None else max(
+            0.0, (point.timestamp - previous_timestamp).total_seconds()
+        )
+        is_gap = previous_timestamp is not None and dt > gap_seconds
+        if index == 0 or is_gap:
+            ewma = point.score
+        elif config.simple_threshold_signal == "ewma" and dt > 0.0:
+            alpha = 1.0 - math.exp(-math.log(2.0) * dt / half_life_seconds)
+            ewma = alpha * point.score + (1.0 - alpha) * ewma
+        signal_values.append(point.score if config.simple_threshold_signal == "raw" else ewma)
+        gap_flags.append(is_gap)
+        previous_timestamp = point.timestamp
+        if progress_callback is not None and ((index + 1) % stride == 0 or index + 1 == total):
+            progress_callback("smoothing", index + 1, total, "Preparing the simple-threshold signal")
+    return ordered, signal_values, gap_flags
+
+
+def _detect_simple_threshold(
+    points: list[SignalPoint],
+    config: AnomalyDetectionConfig,
+    threshold: float,
+    progress_callback: ProgressCallback | None = None,
+) -> DetectionOutput:
+    ordered, signal_values, gap_flags = _simple_threshold_signal(points, config, progress_callback)
+    if not ordered:
+        return DetectionOutput(series=[], events=[])
+    active: DetectionEvent | None = None
+    active_signal_values: list[float] = []
+    events: list[DetectionEvent] = []
+    series: list[AnomalyDetectionSeriesPoint] = []
+    total = len(ordered)
+    stride = max(1, total // 100)
+
+    def close_active(reason: str) -> None:
+        nonlocal active, active_signal_values
+        if active is not None:
+            active.end_reason = reason
+            active.duration_seconds = max(
+                0.0, (active.end_timestamp - active.warning_start).total_seconds()
+            )
+            if active_signal_values:
+                active.max_smoothed_score = max(active_signal_values)
+                active.mean_smoothed_score = statistics.fmean(active_signal_values)
+            events.append(active)
+        active = None
+        active_signal_values = []
+
+    if progress_callback is not None:
+        progress_callback("detecting", 0, total, "Applying simple-threshold detection")
+    for index, point in enumerate(ordered):
+        signal = signal_values[index]
+        if gap_flags[index]:
+            close_active("data_gap")
+        candidate = signal >= threshold
+        if candidate and active is None:
+            active = DetectionEvent(
+                warning_start=point.timestamp,
+                confirmed_at=point.timestamp,
+                end_timestamp=point.timestamp,
+                end_reason="range_end",
+                peak_timestamp=point.timestamp,
+                max_score=point.score,
+                max_robust_z=None,
+                threshold=threshold,
+            )
+        if candidate and active is not None:
+            active.end_timestamp = point.timestamp
+            if point.score > active.max_score:
+                active.max_score = point.score
+                active.peak_timestamp = point.timestamp
+            active_signal_values.append(signal)
+        elif active is not None:
+            close_active("recovered")
+
+        series.append(AnomalyDetectionSeriesPoint(
+            timestamp=point.timestamp,
+            score=point.score,
+            smoothed=signal,
+            baseline=None,
+            warning_threshold=None,
+            high_threshold=None,
+            robust_z=None,
+            cusum=0.0,
+            threshold_on=threshold,
+            candidate=candidate,
+            persistence_count=int(candidate),
+            state="confirmed" if candidate else "normal",
+        ))
+        if progress_callback is not None and ((index + 1) % stride == 0 or index + 1 == total):
+            progress_callback("detecting", index + 1, total, "Applying simple-threshold detection")
+    if active is not None:
+        close_active("range_end")
+    return DetectionOutput(series=series, events=events)
+
+
 def detect(
     points: list[SignalPoint],
     config: AnomalyDetectionConfig,
@@ -499,6 +620,10 @@ def detect(
         if threshold is None or not math.isfinite(threshold):
             raise ValueError("A finite resolved threshold is required for event-threshold detection.")
         return _detect_event_threshold(points, config, float(threshold), progress_callback)
+    if config.algorithm == "simple_threshold":
+        if resolved_threshold is None or not math.isfinite(resolved_threshold):
+            raise ValueError("A finite resolved threshold is required for simple-threshold detection.")
+        return _detect_simple_threshold(points, config, float(resolved_threshold), progress_callback)
     if config.algorithm == "rolling_sigma":
         return _detect_rolling_sigma(points, config, progress_callback)
     return _detect_robust(
@@ -756,11 +881,26 @@ def _detect_robust(
     confirmation_count = 0
     output_events: list[DetectionEvent] = []
     series: list[AnomalyDetectionSeriesPoint] = []
+    baseline_transitions: list[AnomalyDetectionBaselineTransition] = []
+    rebuild_in_progress = False
+    active_freeze_recorded = False
 
-    def close_active(at: datetime, reason: str) -> None:
+    def close_active(at: datetime, reason: str) -> bool:
         nonlocal active, state, cusum, recovery_started, fallback_recovery_started
-        nonlocal confirmation_started, confirmation_count
+        nonlocal confirmation_started, confirmation_count, active_freeze_recorded
+        rebuild = False
         if active is not None:
+            rebuild = (
+                config.algorithm == "robust_zscore"
+                and reason != "range_end"
+                and (
+                    config.robust_zscore_baseline_rebuild_mode == "after_warning"
+                    or (
+                        config.robust_zscore_baseline_rebuild_mode == "after_confirmed"
+                        and active.confirmed_at is not None
+                    )
+                )
+            )
             active.end_timestamp = at
             active.end_reason = reason
             output_events.append(active)
@@ -771,6 +911,15 @@ def _detect_robust(
         fallback_recovery_started = None
         confirmation_started = None
         confirmation_count = 0
+        active_freeze_recorded = False
+        return rebuild
+
+    def reset_baseline() -> None:
+        nonlocal baseline_values, normal_clock, first_baseline_clock
+        baseline_buffer.clear()
+        baseline_values = _FenwickMultiset(sorted(set(smoothed_values)))
+        normal_clock = 0.0
+        first_baseline_clock = None
 
     if progress_callback is not None:
         progress_callback("detecting", 0, total_points, "Detecting warnings and anomalies")
@@ -778,13 +927,18 @@ def _detect_robust(
         dt = elapsed_seconds[index]
         is_gap = gap_flags[index]
         smoothed = smoothed_values[index]
+        rebuild_started_now = False
         if is_gap:
-            close_active(ordered[index - 1].timestamp, "data_gap")
+            rebuild_after_gap = close_active(ordered[index - 1].timestamp, "data_gap")
             if not legacy_behavior:
-                baseline_buffer.clear()
-                baseline_values = _FenwickMultiset(sorted(set(smoothed_values)))
-                normal_clock = 0.0
-                first_baseline_clock = None
+                reset_baseline()
+            if rebuild_after_gap:
+                rebuild_in_progress = True
+                rebuild_started_now = True
+                baseline_transitions.append(AnomalyDetectionBaselineTransition(
+                    timestamp=point.timestamp,
+                    kind="rebuilding",
+                ))
 
         if state == "normal":
             normal_clock += dt
@@ -804,6 +958,12 @@ def _detect_robust(
             )
         baseline_span = 0.0 if first_baseline_clock is None else normal_clock - first_baseline_clock
         ready = baseline_values.size >= config.minimum_warmup_points and baseline_span >= warmup_seconds
+        if ready and rebuild_in_progress:
+            baseline_transitions.append(AnomalyDetectionBaselineTransition(
+                timestamp=point.timestamp,
+                kind="ready",
+            ))
+            rebuild_in_progress = False
 
         robust_z = (smoothed - baseline) / scale if ready and baseline is not None and scale is not None else None
         warning_threshold = baseline + config.warning_z * scale if ready and baseline is not None and scale is not None else None
@@ -842,6 +1002,15 @@ def _detect_robust(
                     max_score=point.score,
                     max_robust_z=robust_z,
                 )
+                if (
+                    config.algorithm == "robust_zscore"
+                    and config.robust_zscore_baseline_rebuild_mode == "after_warning"
+                ):
+                    baseline_transitions.append(AnomalyDetectionBaselineTransition(
+                        timestamp=point.timestamp,
+                        kind="frozen",
+                    ))
+                    active_freeze_recorded = True
             if active is not None:
                 if point.score > active.max_score:
                     active.max_score = point.score
@@ -869,11 +1038,28 @@ def _detect_robust(
                 ):
                     state = "confirmed"
                     active.confirmed_at = point.timestamp
+                    if (
+                        config.algorithm == "robust_zscore"
+                        and config.robust_zscore_baseline_rebuild_mode == "after_confirmed"
+                        and not active_freeze_recorded
+                    ):
+                        baseline_transitions.append(AnomalyDetectionBaselineTransition(
+                            timestamp=active.warning_start,
+                            kind="frozen",
+                        ))
+                        active_freeze_recorded = True
 
                 if robust_z < config.recovery_z:
                     recovery_started = recovery_started or point.timestamp
                     if (point.timestamp - recovery_started).total_seconds() >= recovery_seconds:
-                        close_active(point.timestamp, "recovered")
+                        if close_active(point.timestamp, "recovered"):
+                            reset_baseline()
+                            rebuild_in_progress = True
+                            rebuild_started_now = True
+                            baseline_transitions.append(AnomalyDetectionBaselineTransition(
+                                timestamp=point.timestamp,
+                                kind="rebuilding",
+                            ))
                 else:
                     recovery_started = None
                 if fallback_recovery_seconds > 0.0 and robust_z < config.warning_z:
@@ -881,24 +1067,32 @@ def _detect_robust(
                     if (
                         point.timestamp - fallback_recovery_started
                     ).total_seconds() >= fallback_recovery_seconds:
-                        close_active(point.timestamp, "recovered")
+                        if close_active(point.timestamp, "recovered"):
+                            reset_baseline()
+                            rebuild_in_progress = True
+                            rebuild_started_now = True
+                            baseline_transitions.append(AnomalyDetectionBaselineTransition(
+                                timestamp=point.timestamp,
+                                kind="rebuilding",
+                            ))
                 else:
                     fallback_recovery_started = None
         else:
             cusum = 0.0
             cusum_increment = None
 
-        display_state = "warmup" if not ready else state
+        display_ready = ready and not rebuild_started_now
+        display_state = "warmup" if not display_ready else state
         series.append(AnomalyDetectionSeriesPoint(
             timestamp=point.timestamp,
             score=point.score,
             smoothed=smoothed,
-            baseline=baseline if ready else None,
-            mad=mad if ready else None,
-            scale=scale if ready else None,
-            warning_threshold=warning_threshold,
-            high_threshold=high_threshold,
-            robust_z=robust_z,
+            baseline=baseline if display_ready else None,
+            mad=mad if display_ready else None,
+            scale=scale if display_ready else None,
+            warning_threshold=warning_threshold if display_ready else None,
+            high_threshold=high_threshold if display_ready else None,
+            robust_z=robust_z if display_ready else None,
             cusum_increment=cusum_increment,
             cusum=cusum,
             state=display_state,
@@ -916,7 +1110,12 @@ def _detect_robust(
 
     if active is not None:
         close_active(ordered[-1].timestamp, "range_end")
-    return DetectionOutput(series=series, events=output_events)
+    baseline_transitions.sort(key=lambda item: item.timestamp)
+    return DetectionOutput(
+        series=series,
+        events=output_events,
+        baseline_transitions=baseline_transitions,
+    )
 
 
 def _score_column(score_series: str):
@@ -1380,6 +1579,116 @@ def preview_threshold(
     )
 
 
+def _canonical_normal_ranges(
+    ranges: list[AnomalyDetectionTimeRange],
+) -> list[AnomalyDetectionTimeRange]:
+    ordered = sorted(ranges, key=lambda item: (item.start_timestamp, item.end_timestamp))
+    merged: list[AnomalyDetectionTimeRange] = []
+    for item in ordered:
+        if merged and item.start_timestamp <= merged[-1].end_timestamp:
+            merged[-1] = AnomalyDetectionTimeRange(
+                start_timestamp=merged[-1].start_timestamp,
+                end_timestamp=max(merged[-1].end_timestamp, item.end_timestamp),
+            )
+        else:
+            merged.append(item)
+    return merged
+
+
+def _calculate_simple_threshold(
+    points: list[SignalPoint],
+    config: AnomalyDetectionConfig,
+    start_timestamp: datetime,
+    end_timestamp: datetime,
+) -> tuple[float, int, list[AnomalyDetectionTimeRange], list[str]]:
+    ordered, signal_values, _gap_flags = _simple_threshold_signal(points, config)
+    canonical_ranges = _canonical_normal_ranges(config.simple_threshold_normal_ranges)
+    if config.simple_threshold_quantile_source == "full_range":
+        selected = [
+            value
+            for point, value in zip(ordered, signal_values)
+            if start_timestamp <= point.timestamp <= end_timestamp
+        ]
+        warnings = [
+            "The full analysis range may contain anomalies that raise the calculated threshold."
+        ]
+    else:
+        selected = [
+            value
+            for point, value in zip(ordered, signal_values)
+            if any(
+                item.start_timestamp <= point.timestamp <= item.end_timestamp
+                for item in canonical_ranges
+            )
+        ]
+        warnings = []
+    if not selected:
+        raise ValueError("No finite scores exist in the selected simple-threshold reference range.")
+    threshold = float(np.quantile(
+        np.asarray(selected, dtype=np.float64),
+        config.simple_threshold_quantile,
+        method="linear",
+    ))
+    if not math.isfinite(threshold) or threshold < 0.0:
+        raise ValueError("The calculated simple threshold must be finite and non-negative.")
+    if len(selected) < 100:
+        warnings.append(
+            f"Only {len(selected)} reference points are available; high quantiles may be unstable."
+        )
+    return threshold, len(selected), canonical_ranges, warnings
+
+
+def preview_simple_threshold(
+    db: Session,
+    payload: AnomalyDetectionSimpleThresholdPreviewRequest,
+) -> AnomalyDetectionSimpleThresholdPreviewRead:
+    testing_run = db.get(models.TestingRun, payload.testing_run_id)
+    if testing_run is None:
+        raise ValueError("Inference run not found.")
+    if testing_run.status != "finished":
+        raise ValueError("Only finished inference runs can provide threshold scores.")
+    config = AnomalyDetectionConfig(
+        algorithm="simple_threshold",
+        simple_threshold_mode="quantile",
+        simple_threshold_signal=payload.signal,
+        simple_threshold_quantile=payload.quantile,
+        simple_threshold_quantile_source=payload.quantile_source,
+        simple_threshold_ewma_half_life_minutes=payload.ewma_half_life_minutes,
+        simple_threshold_normal_ranges=payload.normal_ranges,
+        preroll_minutes=payload.preroll_minutes,
+        gap_multiplier=payload.gap_multiplier,
+        minimum_gap_minutes=payload.minimum_gap_minutes,
+    )
+    points = _load_points(
+        db,
+        testing_run.id,
+        payload.score_series,
+        payload.start_timestamp,
+        payload.end_timestamp,
+        payload.preroll_minutes,
+    )
+    threshold, point_count, ranges, warnings = _calculate_simple_threshold(
+        points,
+        config,
+        payload.start_timestamp,
+        payload.end_timestamp,
+    )
+    return AnomalyDetectionSimpleThresholdPreviewRead(
+        testing_run_id=testing_run.id,
+        testing_run_name=testing_run.name,
+        score_series=payload.score_series,
+        start_timestamp=payload.start_timestamp,
+        end_timestamp=payload.end_timestamp,
+        signal=payload.signal,
+        quantile=payload.quantile,
+        quantile_source=payload.quantile_source,
+        normal_ranges=ranges,
+        point_count=point_count,
+        threshold=threshold,
+        warnings=warnings,
+    )
+
+
 def _visible_output(output: DetectionOutput, start: datetime, end: datetime) -> DetectionOutput:
     timestamps = [point.timestamp for point in output.series]
     visible_start = bisect_left(timestamps, start)
@@ -1416,7 +1725,12 @@ def _visible_output(output: DetectionOutput, start: datetime, end: datetime) -> 
             mean_smoothed_score=(statistics.fmean(visible_smoothed) if visible_smoothed else event.mean_smoothed_score),
             threshold=event.threshold,
         ))
-    return DetectionOutput(series=series, events=events)
+    transitions = [
+        transition
+        for transition in output.baseline_transitions
+        if start <= transition.timestamp <= end
+    ]
+    return DetectionOutput(series=series, events=events, baseline_transitions=transitions)
 
 
 def _compute_for_run(
@@ -1509,6 +1823,7 @@ def _run_read(
         **summary.model_dump(),
         events=[AnomalyDetectionEventRead.model_validate(event) for event in run.events],
         series=visible_series,
+        baseline_transitions=output.baseline_transitions,
         total=len(output.series),
         decimated=decimated,
     )
@@ -1527,11 +1842,12 @@ def create_run(db: Session, payload: AnomalyDetectionRunCreate) -> AnomalyDetect
         name = payload.name.strip()
         if not name:
             raise ValueError("Run name is required.")
+        run_config = payload.config
         threshold_testing_run: models.TestingRun | None = None
         resolved_threshold: float | None = None
-        if payload.config.algorithm == "event_threshold":
-            if payload.config.threshold_mode == "manual":
-                resolved_threshold = payload.config.manual_threshold
+        if run_config.algorithm == "event_threshold":
+            if run_config.threshold_mode == "manual":
+                resolved_threshold = run_config.manual_threshold
             else:
                 threshold_testing_run = db.get(models.TestingRun, payload.threshold_testing_run_id)
                 if threshold_testing_run is None:
@@ -1543,12 +1859,35 @@ def create_run(db: Session, payload: AnomalyDetectionRunCreate) -> AnomalyDetect
                     payload.score_series,
                     payload.threshold_start_timestamp,
                     payload.threshold_end_timestamp,
-                    smoothing_enabled=payload.config.event_smoothing_enabled,
-                    smoothing_method=payload.config.event_smoothing_method,
-                    smoothing_window_seconds=payload.config.event_smoothing_window_seconds,
-                    gap_multiplier=payload.config.gap_multiplier,
-                    minimum_gap_seconds=payload.config.event_minimum_gap_seconds,
-                    quantile=payload.config.threshold_quantile,
+                    smoothing_enabled=run_config.event_smoothing_enabled,
+                    smoothing_method=run_config.event_smoothing_method,
+                    smoothing_window_seconds=run_config.event_smoothing_window_seconds,
+                    gap_multiplier=run_config.gap_multiplier,
+                    minimum_gap_seconds=run_config.event_minimum_gap_seconds,
+                    quantile=run_config.threshold_quantile,
+                )
+        elif run_config.algorithm == "simple_threshold":
+            canonical_ranges = _canonical_normal_ranges(run_config.simple_threshold_normal_ranges)
+            run_config = AnomalyDetectionConfig.model_validate({
+                **run_config.model_dump(),
+                "simple_threshold_normal_ranges": [item.model_dump() for item in canonical_ranges],
+            })
+            if run_config.simple_threshold_mode == "manual":
+                resolved_threshold = run_config.simple_threshold_value
+            else:
+                threshold_points = _load_points(
+                    db,
+                    testing_run.id,
+                    payload.score_series,
+                    payload.start_timestamp,
+                    payload.end_timestamp,
+                    run_config.preroll_minutes,
+                )
+                resolved_threshold, _point_count, _ranges, _warnings = _calculate_simple_threshold(
+                    threshold_points,
+                    run_config,
+                    payload.start_timestamp,
+                    payload.end_timestamp,
                 )
         run = models.AnomalyDetectionRun(
             name=name,
@@ -1562,8 +1901,8 @@ def create_run(db: Session, payload: AnomalyDetectionRunCreate) -> AnomalyDetect
             score_series=payload.score_series,
             start_timestamp=payload.start_timestamp,
             end_timestamp=payload.end_timestamp,
-            algorithm_version=ALGORITHM_VERSIONS[payload.config.algorithm],
-            config=payload.config.model_dump(mode="json"),
+            algorithm_version=ALGORITHM_VERSIONS[run_config.algorithm],
+            config=run_config.model_dump(mode="json"),
         )
         db.add(run)
         db.flush()

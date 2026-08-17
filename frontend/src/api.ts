@@ -7,7 +7,9 @@ import type {
   AnomalyDetectionRunSummary,
   AnomalyDetectionScoreSeries,
   AnomalyDetectionSeriesPoint,
+  AnomalyDetectionSimpleThresholdPreview,
   AnomalyDetectionThresholdPreview,
+  AnomalyDetectionTimeRange,
   CacheRevisions,
   Dataset,
   DatasetConnectionTest,
@@ -934,6 +936,26 @@ export function previewAnomalyDetectionThreshold(payload: {
   quantile: number;
 }): Promise<AnomalyDetectionThresholdPreview> {
   return request<AnomalyDetectionThresholdPreview>('/api/anomaly-detection-threshold-preview', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  }, 15 * 60_000);
+}
+
+export function previewAnomalyDetectionSimpleThreshold(payload: {
+  testing_run_id: number;
+  score_series: AnomalyDetectionScoreSeries;
+  start_timestamp: string;
+  end_timestamp: string;
+  signal: 'raw' | 'ewma';
+  ewma_half_life_minutes: number;
+  preroll_minutes: number;
+  gap_multiplier: number;
+  minimum_gap_minutes: number;
+  quantile: number;
+  quantile_source: 'normal_ranges' | 'full_range';
+  normal_ranges: AnomalyDetectionTimeRange[];
+}): Promise<AnomalyDetectionSimpleThresholdPreview> {
+  return request<AnomalyDetectionSimpleThresholdPreview>('/api/anomaly-detection-simple-threshold-preview', {
     method: 'POST',
     body: JSON.stringify(payload),
   }, 15 * 60_000);

@@ -1333,8 +1333,21 @@ class TestingRunResultsResponse(BaseModel):
     decimated: bool = False
 
 
+class AnomalyDetectionTimeRange(BaseModel):
+    start_timestamp: datetime
+    end_timestamp: datetime
+
+    @model_validator(mode="after")
+    def validate_time_range(self):
+        if self.end_timestamp <= self.start_timestamp:
+            raise ValueError("Normal-range end must be after its start.")
+        return self
+
+
 class AnomalyDetectionConfig(BaseModel):
-    algorithm: Literal["robust_zscore", "robust_cusum", "event_threshold", "rolling_sigma"] = "robust_cusum"
+    algorithm: Literal[
+        "robust_zscore", "robust_cusum", "event_threshold", "rolling_sigma", "simple_threshold"
+    ] = "robust_cusum"
     smoothing_half_life_minutes: float = Field(default=5.0, gt=0.0, le=1440.0)
     baseline_window_minutes: float = Field(default=120.0, gt=0.0, le=43200.0)
     warmup_minutes: float = Field(default=30.0, ge=0.0, le=43200.0)
@@ -1343,6 +1356,9 @@ class AnomalyDetectionConfig(BaseModel):
     high_z: float = Field(default=5.0, gt=0.0, le=1000.0)
     minimum_score_for_detection: float = Field(default=0.0, ge=0.0, le=1000000.0)
     minimum_delta_for_detection: float | None = Field(default=None, ge=0.0, le=1000000.0)
+    robust_zscore_baseline_rebuild_mode: Literal[
+        "disabled", "after_warning", "after_confirmed"
+    ] = "disabled"
     minimum_scale_relative: float = Field(default=1e-3, ge=0.0, le=1.0)
     minimum_scale_absolute: float = Field(default=1e-9, ge=0.0, le=1000000.0)
     cusum_drift: float = Field(default=1.0, ge=0.0, le=1000.0)
@@ -1370,6 +1386,13 @@ class AnomalyDetectionConfig(BaseModel):
     merge_gap_seconds: float = Field(default=60.0, ge=0.0, le=86400.0)
     event_minimum_gap_seconds: float = Field(default=15.0, gt=0.0, le=86400.0)
     sigma_threshold: float = Field(default=3.0, gt=0.0, le=1000.0)
+    simple_threshold_mode: Literal["manual", "quantile"] = "quantile"
+    simple_threshold_signal: Literal["raw", "ewma"] = "raw"
+    simple_threshold_value: float | None = Field(default=None, ge=0.0)
+    simple_threshold_quantile: float = Field(default=0.999, gt=0.0, lt=1.0)
+    simple_threshold_quantile_source: Literal["normal_ranges", "full_range"] = "normal_ranges"
+    simple_threshold_ewma_half_life_minutes: float = Field(default=5.0, gt=0.0, le=1440.0)
+    simple_threshold_normal_ranges: list[AnomalyDetectionTimeRange] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def validate_threshold_order(self):
@@ -1392,6 +1415,17 @@ class AnomalyDetectionConfig(BaseModel):
                 raise ValueError("manual_threshold is required for a manual event threshold.")
             if self.manual_threshold is not None and not math.isfinite(self.manual_threshold):
                 raise ValueError("manual_threshold must be finite.")
+        if self.algorithm == "simple_threshold":
+            if self.simple_threshold_mode == "manual" and self.simple_threshold_value is None:
+                raise ValueError("simple_threshold_value is required in manual mode.")
+            if self.simple_threshold_value is not None and not math.isfinite(self.simple_threshold_value):
+                raise ValueError("simple_threshold_value must be finite.")
+            if (
+                self.simple_threshold_mode == "quantile"
+                and self.simple_threshold_quantile_source == "normal_ranges"
+                and not self.simple_threshold_normal_ranges
+            ):
+                raise ValueError("At least one normal range is required for a normal-range quantile.")
         return self
 
 
@@ -1423,6 +1457,13 @@ class AnomalyDetectionRunCreate(BaseModel):
                 raise ValueError("threshold_end_timestamp must be after threshold_start_timestamp.")
             if self.threshold_testing_run_id == self.testing_run_id:
                 raise ValueError("The validation inference must differ from the analyzed inference.")
+        if self.config.algorithm == "simple_threshold":
+            for normal_range in self.config.simple_threshold_normal_ranges:
+                if (
+                    normal_range.start_timestamp < self.start_timestamp
+                    or normal_range.end_timestamp > self.end_timestamp
+                ):
+                    raise ValueError("Simple-threshold normal ranges must lie inside the analysis range.")
         return self
 
 
@@ -1454,6 +1495,50 @@ class AnomalyDetectionThresholdPreviewRead(BaseModel):
     point_count: int
     quantile: float
     threshold: float
+
+
+class AnomalyDetectionSimpleThresholdPreviewRequest(BaseModel):
+    testing_run_id: int
+    score_series: Literal["score", "full_mse", "roi_mse"] = "score"
+    start_timestamp: datetime
+    end_timestamp: datetime
+    signal: Literal["raw", "ewma"] = "raw"
+    ewma_half_life_minutes: float = Field(default=5.0, gt=0.0, le=1440.0)
+    preroll_minutes: float = Field(default=120.0, ge=0.0, le=43200.0)
+    gap_multiplier: float = Field(default=5.0, gt=1.0, le=1000.0)
+    minimum_gap_minutes: float = Field(default=15.0, gt=0.0, le=43200.0)
+    quantile: float = Field(default=0.999, gt=0.0, lt=1.0)
+    quantile_source: Literal["normal_ranges", "full_range"] = "normal_ranges"
+    normal_ranges: list[AnomalyDetectionTimeRange] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def validate_time_range(self):
+        if self.end_timestamp <= self.start_timestamp:
+            raise ValueError("Analysis end must be after its start.")
+        if self.quantile_source == "normal_ranges" and not self.normal_ranges:
+            raise ValueError("At least one normal range is required.")
+        for normal_range in self.normal_ranges:
+            if (
+                normal_range.start_timestamp < self.start_timestamp
+                or normal_range.end_timestamp > self.end_timestamp
+            ):
+                raise ValueError("Normal ranges must lie inside the analysis range.")
+        return self
+
+
+class AnomalyDetectionSimpleThresholdPreviewRead(BaseModel):
+    testing_run_id: int
+    testing_run_name: str
+    score_series: str
+    start_timestamp: datetime
+    end_timestamp: datetime
+    signal: Literal["raw", "ewma"]
+    quantile: float
+    quantile_source: Literal["normal_ranges", "full_range"]
+    normal_ranges: list[AnomalyDetectionTimeRange]
+    point_count: int
+    threshold: float
+    warnings: list[str] = Field(default_factory=list)
 
 
 class AnomalyDetectionCalibrationRequest(BaseModel):
@@ -1572,9 +1657,15 @@ class AnomalyDetectionSeriesPoint(BaseModel):
     state: Literal["warmup", "normal", "warning", "confirmed"]
 
 
+class AnomalyDetectionBaselineTransition(BaseModel):
+    timestamp: datetime
+    kind: Literal["frozen", "rebuilding", "ready"]
+
+
 class AnomalyDetectionRunRead(AnomalyDetectionRunSummary):
     events: list[AnomalyDetectionEventRead]
     series: list[AnomalyDetectionSeriesPoint]
+    baseline_transitions: list[AnomalyDetectionBaselineTransition] = Field(default_factory=list)
     total: int
     decimated: bool
 
