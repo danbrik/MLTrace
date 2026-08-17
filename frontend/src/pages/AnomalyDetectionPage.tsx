@@ -35,6 +35,7 @@ import {
   getTestingRunResults,
   listAnomalyDetectionRuns,
   listTestingRuns,
+  previewAnomalyDetectionCalibration,
   previewAnomalyDetectionThreshold,
 } from '../api';
 import { DateTime24Input } from '../components/DateTime24Input';
@@ -57,6 +58,8 @@ import {
   roiLabelForRun,
 } from '../testing/inferenceRunMetadata';
 import type {
+  AnomalyDetectionCalibration,
+  AnomalyDetectionCalibrationProfile,
   AnomalyDetectionConfig,
   AnomalyDetectionAlgorithm,
   AnomalyDetectionProgress,
@@ -70,7 +73,6 @@ import type {
 } from '../types';
 
 const MAX_PREVIEW_POINTS = 8000;
-const MAX_DIAGNOSTIC_POINTS = 50000;
 
 const FAST_CONFIG: AnomalyDetectionConfig = {
   algorithm: 'robust_cusum',
@@ -210,8 +212,8 @@ const PARAMETER_DEFINITIONS: Array<{
   { key: 'minimum_warmup_points', label: 'Minimum warm-up points', description: 'Minimum number of valid normal measurements required before the baseline is considered reliable.', min: 3, algorithms: BASELINE_ALGORITHMS },
   { key: 'warning_z', label: 'Warning Z-score', description: 'Starts a yellow early-warning interval when the robust Z-score reaches this value.', min: 0.1, decimalScale: 2, algorithms: ROBUST_ALGORITHMS },
   { key: 'high_z', label: 'Confirmation Z-score', description: 'Confirms a red anomaly when this robust Z-score persists for the confirmation time.', min: 0.1, decimalScale: 2, algorithms: ROBUST_ALGORITHMS },
-  { key: 'minimum_scale_relative', label: 'Relative scale floor', description: 'Minimum robust scale as a fraction of the rolling median magnitude. Increase this if a near-zero MAD creates implausibly large Z-scores.', min: 0, decimalScale: 6, algorithms: ROBUST_ALGORITHMS },
-  { key: 'minimum_scale_absolute', label: 'Absolute scale floor', description: 'Absolute lower bound for the robust scale in score units. Use this when the normal score level is near zero.', min: 0, decimalScale: 12, algorithms: ROBUST_ALGORITHMS },
+  { key: 'minimum_scale_relative', label: 'Relative scale floor', description: 'Configurable fraction of |rolling median| used as a minimum scale. For healthy data, a starting estimate is a high percentile of |EWMA − median| / |median| divided by Warning Z.', min: 0, decimalScale: 6, algorithms: ROBUST_ALGORITHMS },
+  { key: 'minimum_scale_absolute', label: 'Absolute scale floor', description: 'Configurable minimum scale in score units for cases where the median is near zero. Estimate it as a high percentile of healthy |EWMA − median| divided by Warning Z.', min: 0, decimalScale: 12, algorithms: ROBUST_ALGORITHMS },
   { key: 'cusum_drift', label: 'CUSUM drift', description: 'Evidence subtracted during every minute. Larger values make CUSUM less sensitive to small shifts.', min: 0, decimalScale: 2, algorithms: ['robust_cusum'] },
   { key: 'cusum_threshold', label: 'CUSUM threshold', description: 'Accumulated positive evidence required to confirm an anomaly when the high Z-score is not reached.', min: 0.1, decimalScale: 2, algorithms: ['robust_cusum'] },
   { key: 'cusum_z_cap', label: 'CUSUM Z-score cap', description: 'Maximum Z-score contribution used by CUSUM per update. The displayed Robust Z-score remains uncapped.', min: 0.1, decimalScale: 2, algorithms: ['robust_cusum'] },
@@ -433,6 +435,12 @@ export function AnomalyDetectionPage({ active }: { active: boolean }) {
   const [thresholdEnd, setThresholdEnd] = useState('');
   const [thresholdPreview, setThresholdPreview] = useState<AnomalyDetectionThresholdPreview | null>(null);
   const [thresholdCalculating, setThresholdCalculating] = useState(false);
+  const [calibrationStart, setCalibrationStart] = useState('');
+  const [calibrationEnd, setCalibrationEnd] = useState('');
+  const [calibrationProfile, setCalibrationProfile] = useState<AnomalyDetectionCalibrationProfile>('balanced');
+  const [calibrationResult, setCalibrationResult] = useState<AnomalyDetectionCalibration | null>(null);
+  const [calibrationResultSignature, setCalibrationResultSignature] = useState('');
+  const [calibrationLoading, setCalibrationLoading] = useState(false);
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const [running, setRunning] = useState(false);
   const [operationProgress, setOperationProgress] = useState<AnomalyDetectionProgress | null>(null);
@@ -473,6 +481,34 @@ export function AnomalyDetectionPage({ active }: { active: boolean }) {
   }, [running, loadingSavedRunId]);
 
   const selectedRun = testingRuns.find((run) => run.id === Number(testingRunId)) ?? null;
+  const calibrationSignature = useMemo(() => JSON.stringify({
+    testingRunId,
+    scoreSeries,
+    algorithm: config.algorithm,
+    profile: calibrationProfile,
+    start: calibrationStart,
+    end: calibrationEnd,
+    smoothingHalfLife: config.smoothing_half_life_minutes,
+    baselineWindow: config.baseline_window_minutes,
+    warmup: config.warmup_minutes,
+    minimumWarmupPoints: config.minimum_warmup_points,
+    gapMultiplier: config.gap_multiplier,
+    minimumGapMinutes: config.minimum_gap_minutes,
+  }), [
+    calibrationEnd,
+    calibrationProfile,
+    calibrationStart,
+    config.algorithm,
+    config.baseline_window_minutes,
+    config.gap_multiplier,
+    config.minimum_gap_minutes,
+    config.minimum_warmup_points,
+    config.smoothing_half_life_minutes,
+    config.warmup_minutes,
+    scoreSeries,
+    testingRunId,
+  ]);
+  const calibrationStale = calibrationResult !== null && calibrationResultSignature !== calibrationSignature;
   const inferenceFacetRecords = useMemo(() => testingRuns.map(inferenceFacetRecord), [testingRuns]);
   const sourceFacetState = useMemo<FacetFilterState>(() => ({
     query: sourceSearch,
@@ -622,6 +658,8 @@ export function AnomalyDetectionPage({ active }: { active: boolean }) {
   useEffect(() => {
     if (!testingRunId) return;
     let cancelled = false;
+    setCalibrationStart('');
+    setCalibrationEnd('');
     setPreviewLoading(true);
     getTestingRunResults(Number(testingRunId), MAX_PREVIEW_POINTS)
       .then((response) => {
@@ -735,6 +773,26 @@ export function AnomalyDetectionPage({ active }: { active: boolean }) {
     showlegend: false,
   }), [scoreSeries, thresholdRangeMode]);
 
+  const calibrationPreviewData = useMemo<Data[]>(() => [{
+    type: 'scatter',
+    mode: 'lines+markers',
+    name: 'Healthy calibration score',
+    x: previewResults.map((result) => result.timestamp),
+    y: previewResults.map((result) => scoreValue(result, scoreSeries)),
+    line: { color: '#7950f2', width: 1.5 },
+    marker: { size: 4 },
+    connectgaps: false,
+  }], [previewResults, scoreSeries]);
+
+  const calibrationPreviewLayout = useMemo<Partial<Layout>>(() => ({
+    title: { text: 'Drag across a known healthy period', font: { size: 14 } },
+    dragmode: 'select',
+    hovermode: 'x unified',
+    xaxis: { type: 'date', title: { text: 'Time' } },
+    yaxis: { title: { text: scoreSeries.replace('_', ' ').toUpperCase() } },
+    showlegend: false,
+  }), [scoreSeries]);
+
   const selectRange = useCallback((selection: PlotlyChartSelection) => {
     const left = new Date(selection.start);
     const right = new Date(selection.end);
@@ -753,6 +811,16 @@ export function AnomalyDetectionPage({ active }: { active: boolean }) {
     const last = left <= right ? selection.end : selection.start;
     setThresholdStart(localInput(first.replace(' ', 'T')));
     setThresholdEnd(localInput(last.replace(' ', 'T')));
+  }, []);
+
+  const selectCalibrationRange = useCallback((selection: PlotlyChartSelection) => {
+    const left = new Date(selection.start);
+    const right = new Date(selection.end);
+    if (Number.isNaN(left.getTime()) || Number.isNaN(right.getTime())) return;
+    const first = left <= right ? selection.start : selection.end;
+    const last = left <= right ? selection.end : selection.start;
+    setCalibrationStart(localInput(first.replace(' ', 'T')));
+    setCalibrationEnd(localInput(last.replace(' ', 'T')));
   }, []);
 
   function applyPreset(value: string | null) {
@@ -817,6 +885,49 @@ export function AnomalyDetectionPage({ active }: { active: boolean }) {
     }
   }
 
+  async function calculateCalibration() {
+    if (!selectedRun || !calibrationStart || !calibrationEnd || !ROBUST_ALGORITHMS.includes(config.algorithm)) {
+      notifications.show({ color: 'yellow', title: 'Incomplete healthy range', message: 'Select a known healthy time range before calculating recommendations.' });
+      return;
+    }
+    const requestSignature = calibrationSignature;
+    setCalibrationLoading(true);
+    try {
+      const result = await previewAnomalyDetectionCalibration({
+        testing_run_id: selectedRun.id,
+        score_series: scoreSeries,
+        start_timestamp: calibrationStart,
+        end_timestamp: calibrationEnd,
+        algorithm: config.algorithm as 'robust_zscore' | 'robust_cusum',
+        profile: calibrationProfile,
+        config,
+      });
+      setCalibrationResult(result);
+      setCalibrationResultSignature(requestSignature);
+    } catch (error) {
+      notifications.show({ color: 'red', title: 'Calibration failed', message: errorMessage(error) });
+    } finally {
+      setCalibrationLoading(false);
+    }
+  }
+
+  function applyCalibrationRecommendations() {
+    if (!calibrationResult || calibrationStale) return;
+    const recommendation = calibrationResult.recommendation;
+    setConfig((current) => ({
+      ...current,
+      minimum_scale_relative: recommendation.minimum_scale_relative,
+      minimum_scale_absolute: recommendation.minimum_scale_absolute,
+      warning_z: recommendation.warning_z,
+      high_z: recommendation.high_z,
+      ...(recommendation.cusum_drift !== null ? { cusum_drift: recommendation.cusum_drift } : {}),
+      ...(recommendation.cusum_threshold !== null ? { cusum_threshold: recommendation.cusum_threshold } : {}),
+    }));
+    setPreset('custom');
+    setAdvancedOpen(true);
+    notifications.show({ color: 'green', title: 'Recommendations applied', message: 'The suggested values are now editable under Advanced detector parameters.' });
+  }
+
   async function executeDetection() {
     if (!selectedRun || !start || !end || !runName.trim()) {
       notifications.show({ color: 'yellow', title: 'Incomplete configuration', message: 'Select an inference, time range and run name.' });
@@ -854,10 +965,7 @@ export function AnomalyDetectionPage({ active }: { active: boolean }) {
         } : {}),
         progress_token: token,
       });
-      const fullResolution = created.point_count <= MAX_DIAGNOSTIC_POINTS
-        ? await getAnomalyDetectionRun(created.id, MAX_DIAGNOSTIC_POINTS)
-        : created;
-      setActiveRun(fullResolution);
+      setActiveRun(created);
       await refresh();
       notifications.show({ color: 'green', title: 'Anomaly detection complete', message: `${created.anomaly_count} confirmed anomalies detected.` });
     } catch (error) {
@@ -876,7 +984,7 @@ export function AnomalyDetectionPage({ active }: { active: boolean }) {
     setLoadingSavedRunId(runId);
     const stopPolling = beginProgressPolling(token, setOperationProgress);
     try {
-      const loaded = await getAnomalyDetectionRun(runId, MAX_DIAGNOSTIC_POINTS, token);
+      const loaded = await getAnomalyDetectionRun(runId, MAX_PREVIEW_POINTS, token);
       setActiveRun(loaded);
       setDetailsOpen(true);
     } catch (error) {
@@ -972,6 +1080,7 @@ export function AnomalyDetectionPage({ active }: { active: boolean }) {
   useEffect(() => {
     if (!activeRun) {
       setDiagnosticAnchor('');
+      setExactDiagnosticRows(null);
       return;
     }
     setDiagnosticAnchor(activeRun.events.find((event) => event.confirmed_at)?.peak_timestamp ?? activeRun.start_timestamp);
@@ -984,7 +1093,8 @@ export function AnomalyDetectionPage({ active }: { active: boolean }) {
     const startIndex = Number.isFinite(anchorTime)
       ? activeRun.series.findIndex((point) => Date.parse(point.timestamp) >= anchorTime)
       : 0;
-    return activeRun.series.slice(Math.max(0, startIndex), Math.max(0, startIndex) + 200);
+    if (startIndex < 0) return [];
+    return activeRun.series.slice(startIndex, startIndex + 200);
   }, [activeRun, diagnosticAnchor]);
 
   const displayedDiagnosticRows = exactDiagnosticRows ?? diagnosticRows;
@@ -1169,6 +1279,104 @@ export function AnomalyDetectionPage({ active }: { active: boolean }) {
               <Text fw={600}>{algorithmDefinition(config.algorithm).label}</Text>
               <Text size="sm">{algorithmDefinition(config.algorithm).description}</Text>
             </Alert>
+            {ROBUST_ALGORITHMS.includes(config.algorithm) && (
+              <Paper withBorder p="md" radius="sm">
+                <Stack gap="md">
+                  <div>
+                    <Text fw={700}>Automatic calibration from healthy data</Text>
+                    <Text size="sm" c="dimmed">Select a period known to contain normal operation only. The result is a recommendation and is never applied automatically.</Text>
+                  </div>
+                  <SegmentedControl
+                    fullWidth
+                    value={calibrationProfile}
+                    data={[
+                      { value: 'sensitive', label: 'Sensitive' },
+                      { value: 'balanced', label: 'Balanced' },
+                      { value: 'conservative', label: 'Conservative' },
+                    ]}
+                    disabled={running || calibrationLoading}
+                    onChange={(value) => setCalibrationProfile(value as AnomalyDetectionCalibrationProfile)}
+                  />
+                  <PlotlyChart
+                    data={calibrationPreviewData}
+                    layout={calibrationPreviewLayout}
+                    height={280}
+                    onSelected={selectCalibrationRange}
+                  />
+                  <SimpleGrid cols={{ base: 1, md: 2 }}>
+                    <DateTime24Input
+                      label="Healthy range start"
+                      value={calibrationStart}
+                      min={fullStart}
+                      max={fullEnd}
+                      disabled={running || calibrationLoading}
+                      onChange={setCalibrationStart}
+                    />
+                    <DateTime24Input
+                      label="Healthy range end"
+                      value={calibrationEnd}
+                      min={fullStart}
+                      max={fullEnd}
+                      disabled={running || calibrationLoading}
+                      onChange={setCalibrationEnd}
+                    />
+                  </SimpleGrid>
+                  {previewDecimated && <Alert color="blue">The selection plot is decimated. Calibration analyzes every stored point inside the selected timestamps.</Alert>}
+                  <Group justify="flex-end">
+                    <Button
+                      variant="light"
+                      color="violet"
+                      loading={calibrationLoading}
+                      disabled={running || !calibrationStart || !calibrationEnd || calibrationStart >= calibrationEnd}
+                      onClick={calculateCalibration}
+                    >
+                      Analyze healthy range
+                    </Button>
+                  </Group>
+                  {calibrationResult && (
+                    <Stack gap="sm">
+                      {calibrationStale && <Alert color="yellow" title="Recommendation is out of date">The source, profile, healthy range, algorithm, or a structural detector parameter changed. Analyze the healthy range again before applying.</Alert>}
+                      <Group gap="xs">
+                        <Badge color={calibrationResult.confidence === 'high' ? 'green' : calibrationResult.confidence === 'medium' ? 'yellow' : 'orange'}>
+                          {calibrationResult.confidence} confidence
+                        </Badge>
+                        <Badge variant="light">{calibrationResult.metrics.point_count.toLocaleString()} points</Badge>
+                        <Badge variant="light">{calibrationResult.metrics.ready_point_count.toLocaleString()} ready</Badge>
+                        <Badge variant="light">{calibrationResult.metrics.gap_count} gaps</Badge>
+                        <Badge color={calibrationResult.metrics.confirmed_event_count ? 'red' : 'green'}>
+                          {calibrationResult.metrics.confirmed_event_count} confirmed in backtest
+                        </Badge>
+                      </Group>
+                      <Alert color="violet" variant="light" title="Healthy-range backtest">
+                        <Text size="sm">Observed warning rate: {(calibrationResult.metrics.warning_rate * 100).toFixed(4)}% · Max CUSUM: {calibrationResult.metrics.max_cusum.toPrecision(6)}</Text>
+                        <Text size="sm">Warning quantile: {(calibrationResult.metrics.warning_quantile * 100).toFixed(4)}% · High quantile: {(calibrationResult.metrics.high_quantile * 100).toFixed(5)}%</Text>
+                      </Alert>
+                      {calibrationResult.warnings.map((warning) => <Alert key={warning} color="yellow">{warning}</Alert>)}
+                      <ScrollArea>
+                        <Table striped withColumnBorders miw={620}>
+                          <Table.Thead><Table.Tr><Table.Th>Parameter</Table.Th><Table.Th>Current</Table.Th><Table.Th>Recommended</Table.Th></Table.Tr></Table.Thead>
+                          <Table.Tbody>
+                            <Table.Tr><Table.Td>Relative scale floor</Table.Td><Table.Td>{config.minimum_scale_relative.toPrecision(8)}</Table.Td><Table.Td>{calibrationResult.recommendation.minimum_scale_relative.toPrecision(8)}</Table.Td></Table.Tr>
+                            <Table.Tr><Table.Td>Absolute scale floor</Table.Td><Table.Td>{config.minimum_scale_absolute.toPrecision(8)}</Table.Td><Table.Td>{calibrationResult.recommendation.minimum_scale_absolute.toPrecision(8)}</Table.Td></Table.Tr>
+                            <Table.Tr><Table.Td>Warning Z-score</Table.Td><Table.Td>{config.warning_z.toPrecision(6)}</Table.Td><Table.Td>{calibrationResult.recommendation.warning_z.toPrecision(6)}</Table.Td></Table.Tr>
+                            <Table.Tr><Table.Td>Confirmation Z-score</Table.Td><Table.Td>{config.high_z.toPrecision(6)}</Table.Td><Table.Td>{calibrationResult.recommendation.high_z.toPrecision(6)}</Table.Td></Table.Tr>
+                            {config.algorithm === 'robust_cusum' && calibrationResult.recommendation.cusum_drift !== null && calibrationResult.recommendation.cusum_threshold !== null && (
+                              <>
+                                <Table.Tr><Table.Td>CUSUM drift</Table.Td><Table.Td>{config.cusum_drift.toPrecision(6)}</Table.Td><Table.Td>{calibrationResult.recommendation.cusum_drift.toPrecision(6)}</Table.Td></Table.Tr>
+                                <Table.Tr><Table.Td>CUSUM threshold</Table.Td><Table.Td>{config.cusum_threshold.toPrecision(6)}</Table.Td><Table.Td>{calibrationResult.recommendation.cusum_threshold.toPrecision(6)}</Table.Td></Table.Tr>
+                              </>
+                            )}
+                          </Table.Tbody>
+                        </Table>
+                      </ScrollArea>
+                      <Group justify="flex-end">
+                        <Button color="violet" disabled={calibrationStale} onClick={applyCalibrationRecommendations}>Apply recommendations</Button>
+                      </Group>
+                    </Stack>
+                  )}
+                </Stack>
+              </Paper>
+            )}
             {config.algorithm === 'event_threshold' && (
               <Stack gap="md">
                 <SimpleGrid cols={{ base: 1, md: 2 }}>
@@ -1373,6 +1581,12 @@ export function AnomalyDetectionPage({ active }: { active: boolean }) {
                     )}
                   </SimpleGrid>
                 )}
+                {ROBUST_ALGORITHMS.includes(config.algorithm) && (
+                  <Alert color="violet" variant="light" title="How the robust scale floor works">
+                    <Text size="sm">Effective scale = max(1.4826 × MAD, |median| × relative floor, absolute floor).</Text>
+                    <Text size="sm" mt={4}>Both floors are parameters below. Calibrate them from a known healthy period: divide a high percentile (for example 99.9%) of the normal EWMA-to-median residual by Warning Z. Use the relative residual for scores away from zero and the absolute residual near zero.</Text>
+                  </Alert>
+                )}
                 <SimpleGrid cols={{ base: 1, sm: 2, lg: 4 }}>
                 {PARAMETER_DEFINITIONS
                   .filter((parameter) => !parameter.algorithms || parameter.algorithms.includes(config.algorithm))
@@ -1489,11 +1703,11 @@ export function AnomalyDetectionPage({ active }: { active: boolean }) {
                   <Stack gap="sm">
                     <Group justify="space-between" align="flex-end" wrap="wrap">
                       <DateTime24Input
-                        label="Diagnostic anchor"
+                        label="Diagnostic start"
                         value={diagnosticAnchor}
                         min={activeRun.start_timestamp}
                         max={activeRun.end_timestamp}
-                        description="Shows the first 200 points at or after this physical event-end timestamp."
+                        description="Shows the first 200 points at or after the selected timestamp. For recovery analysis, select the physically observed event end."
                         onChange={(value) => {
                           setDiagnosticAnchor(value);
                           setExactDiagnosticRows(null);
@@ -1507,7 +1721,7 @@ export function AnomalyDetectionPage({ active }: { active: boolean }) {
                       </Group>
                     </Group>
                     {activeRun.decimated && exactDiagnosticRows === null && (
-                      <Alert color="yellow">The plot is decimated. Select the physical event-end timestamp and load the exact 200 full-resolution points before exporting.</Alert>
+                      <Alert color="yellow">The plot is decimated. Select the timestamp of interest and load the exact 200 full-resolution points before exporting.</Alert>
                     )}
                     <ScrollArea h={360}>
                       <Table striped highlightOnHover withColumnBorders>

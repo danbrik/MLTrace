@@ -1,4 +1,5 @@
 from datetime import datetime, timedelta
+import math
 import random
 import statistics
 
@@ -14,6 +15,7 @@ from app.anomaly_detection import service as anomaly_service
 from app.database import Base, get_db
 from app.main import app
 from app.schemas import AnomalyDetectionConfig
+from app.schemas import AnomalyDetectionCalibrationRequest
 from app.schemas import AnomalyDetectionRunCreate
 from app.schemas import AnomalyDetectionThresholdPreviewRequest
 from app.testing import service as testing_service
@@ -493,6 +495,122 @@ def test_quantile_preview_uses_only_selected_smoothed_validation_range() -> None
         assert preview.threshold == 1.0
 
 
+def test_calibration_profiles_are_monotonic_and_finite() -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:", poolclass=StaticPool)
+    SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+    Base.metadata.create_all(engine)
+    values = [1.0 + 0.01 * math.sin(index / 7) + (index % 11) * 0.0002 for index in range(500)]
+    with SessionLocal() as db:
+        run = _seed_testing_run(db, count=len(values), values=values)
+        config = _fast_config(algorithm="robust_cusum", baseline_window_minutes=30)
+        results = [
+            anomaly_service.preview_calibration(db, AnomalyDetectionCalibrationRequest(
+                testing_run_id=run.id,
+                start_timestamp=BASE,
+                end_timestamp=BASE + timedelta(minutes=len(values) - 1),
+                algorithm="robust_cusum",
+                profile=profile,
+                config=config,
+            ))
+            for profile in ("sensitive", "balanced", "conservative")
+        ]
+
+    for result in results:
+        recommendation = result.recommendation
+        assert math.isfinite(recommendation.minimum_scale_relative)
+        assert math.isfinite(recommendation.minimum_scale_absolute)
+        assert math.isfinite(recommendation.warning_z)
+        assert math.isfinite(recommendation.high_z)
+        assert recommendation.cusum_drift is not None and math.isfinite(recommendation.cusum_drift)
+        assert recommendation.cusum_threshold is not None and math.isfinite(recommendation.cusum_threshold)
+        assert result.metrics.confirmed_event_count == 0
+    assert [result.recommendation.warning_z for result in results] == sorted(
+        result.recommendation.warning_z for result in results
+    )
+    assert [result.recommendation.high_z for result in results] == sorted(
+        result.recommendation.high_z for result in results
+    )
+    assert [result.recommendation.cusum_threshold for result in results] == sorted(
+        result.recommendation.cusum_threshold for result in results
+    )
+
+
+def test_calibration_constant_signal_retains_floors_and_reports_low_confidence() -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:", poolclass=StaticPool)
+    SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+    Base.metadata.create_all(engine)
+    with SessionLocal() as db:
+        run = _seed_testing_run(db, count=80, values=[1.0] * 80)
+        config = _fast_config(algorithm="robust_zscore")
+        result = anomaly_service.preview_calibration(db, AnomalyDetectionCalibrationRequest(
+            testing_run_id=run.id,
+            start_timestamp=BASE,
+            end_timestamp=BASE + timedelta(minutes=79),
+            algorithm="robust_zscore",
+            profile="balanced",
+            config=config,
+        ))
+
+    assert result.recommendation.minimum_scale_relative == config.minimum_scale_relative
+    assert result.recommendation.minimum_scale_absolute == config.minimum_scale_absolute
+    assert result.recommendation.warning_z == config.warning_z
+    assert result.recommendation.high_z == config.high_z
+    assert result.recommendation.cusum_drift is None
+    assert result.recommendation.cusum_threshold is None
+    assert result.confidence == "low"
+    assert result.metrics.confirmed_event_count == 0
+    assert any("MAD was zero" in warning for warning in result.warnings)
+
+
+def test_calibration_near_zero_signal_produces_finite_scale_recommendations() -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:", poolclass=StaticPool)
+    SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+    Base.metadata.create_all(engine)
+    values = [1e-10 + (index % 7) * 1e-12 for index in range(100)]
+    with SessionLocal() as db:
+        run = _seed_testing_run(db, count=len(values), values=values)
+        result = anomaly_service.preview_calibration(db, AnomalyDetectionCalibrationRequest(
+            testing_run_id=run.id,
+            start_timestamp=BASE,
+            end_timestamp=BASE + timedelta(minutes=len(values) - 1),
+            algorithm="robust_cusum",
+            profile="sensitive",
+            config=_fast_config(),
+        ))
+
+    assert math.isfinite(result.recommendation.minimum_scale_absolute)
+    assert math.isfinite(result.recommendation.minimum_scale_relative)
+    assert result.recommendation.minimum_scale_absolute >= 0
+    assert result.recommendation.minimum_scale_relative >= 0
+
+
+def test_calibration_resets_after_gap_and_rejects_too_few_points() -> None:
+    config = _fast_config(baseline_window_minutes=5, warmup_minutes=2, minimum_warmup_points=3)
+    points = _points([1.0 + (index % 3) * 0.001 for index in range(30)])
+    points[15:] = [
+        SignalPoint(point.timestamp + timedelta(hours=1), point.score)
+        for point in points[15:]
+    ]
+    samples, gap_count = anomaly_service._calibration_trace(points, config)
+    assert gap_count == 1
+    assert samples
+    assert len({sample.segment for sample in samples}) == 2
+
+    engine = create_engine("sqlite+pysqlite:///:memory:", poolclass=StaticPool)
+    SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+    Base.metadata.create_all(engine)
+    with SessionLocal() as db:
+        run = _seed_testing_run(db, count=8, values=[1.0] * 8)
+        with pytest.raises(ValueError, match="at least 9 finite points"):
+            anomaly_service.preview_calibration(db, AnomalyDetectionCalibrationRequest(
+                testing_run_id=run.id,
+                start_timestamp=BASE,
+                end_timestamp=BASE + timedelta(minutes=7),
+                algorithm="robust_cusum",
+                config=config,
+            ))
+
+
 def test_event_threshold_run_persists_reference_and_resolved_threshold() -> None:
     engine = create_engine("sqlite+pysqlite:///:memory:", poolclass=StaticPool)
     SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
@@ -588,7 +706,7 @@ def test_quantile_reference_must_have_matching_model_and_scoring() -> None:
                 ))
 
 
-def test_anomaly_detection_api_crud_and_decimation() -> None:
+def test_anomaly_detection_api_crud_and_decimation(monkeypatch: pytest.MonkeyPatch) -> None:
     engine = create_engine(
         "sqlite+pysqlite:///:memory:",
         connect_args={"check_same_thread": False},
@@ -622,6 +740,42 @@ def test_anomaly_detection_api_crud_and_decimation() -> None:
             assert body["point_count"] == 80
             assert body["anomaly_count"] == 1
             assert body["algorithm_version"] == "robust_cusum_v3"
+            calibration = client.post("/api/anomaly-detection-calibration-preview", json={
+                "testing_run_id": testing_run_id,
+                "score_series": "score",
+                "start_timestamp": BASE.isoformat(),
+                "end_timestamp": (BASE + timedelta(minutes=79)).isoformat(),
+                "algorithm": "robust_cusum",
+                "profile": "balanced",
+                "config": _fast_config().model_dump(),
+            })
+            assert calibration.status_code == 200, calibration.text
+            calibration_body = calibration.json()
+            assert calibration_body["profile"] == "balanced"
+            assert calibration_body["metrics"]["point_count"] == 80
+            assert calibration_body["recommendation"]["cusum_threshold"] is not None
+            loaded_end_timestamps: list[datetime] = []
+            original_load_points = anomaly_service._load_points
+
+            def tracked_load_points(
+                db: Session,
+                testing_run_id: int,
+                score_series: str,
+                start_timestamp: datetime,
+                end_timestamp: datetime,
+                preroll_minutes: float,
+            ):
+                loaded_end_timestamps.append(end_timestamp)
+                return original_load_points(
+                    db,
+                    testing_run_id,
+                    score_series,
+                    start_timestamp,
+                    end_timestamp,
+                    preroll_minutes,
+                )
+
+            monkeypatch.setattr(anomaly_service, "_load_points", tracked_load_points)
             diagnostics = client.get(
                 f"/api/anomaly-detection-runs/{body['id']}/diagnostics",
                 params={"anchor": (BASE + timedelta(minutes=35)).isoformat(), "count": 3},
@@ -633,6 +787,7 @@ def test_anomaly_detection_api_crud_and_decimation() -> None:
             assert diagnostic_points[0]["mad"] is not None
             assert diagnostic_points[0]["scale"] is not None
             assert diagnostic_points[0]["cusum_increment"] is not None
+            assert loaded_end_timestamps == [BASE + timedelta(minutes=37)]
             assert body["config"]["algorithm"] == "robust_cusum"
             run_id = body["id"]
             progress = client.get(f"/api/anomaly-detection-progress/{progress_token}")

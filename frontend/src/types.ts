@@ -691,6 +691,7 @@ export type TestingRunResults = {
 
 export type AnomalyDetectionScoreSeries = 'score' | 'full_mse' | 'roi_mse';
 export type AnomalyDetectionAlgorithm = 'robust_zscore' | 'robust_cusum' | 'event_threshold' | 'rolling_sigma';
+export type AnomalyDetectionCalibrationProfile = 'sensitive' | 'balanced' | 'conservative';
 
 export type AnomalyDetectionConfig = {
   algorithm: AnomalyDetectionAlgorithm;
@@ -727,6 +728,39 @@ export type AnomalyDetectionConfig = {
   merge_gap_seconds: number;
   event_minimum_gap_seconds: number;
   sigma_threshold: number;
+};
+
+export type AnomalyDetectionCalibration = {
+  testing_run_id: number;
+  testing_run_name: string;
+  score_series: AnomalyDetectionScoreSeries;
+  start_timestamp: string;
+  end_timestamp: string;
+  algorithm: 'robust_zscore' | 'robust_cusum';
+  profile: AnomalyDetectionCalibrationProfile;
+  confidence: 'low' | 'medium' | 'high';
+  recommendation: {
+    minimum_scale_relative: number;
+    minimum_scale_absolute: number;
+    warning_z: number;
+    high_z: number;
+    cusum_drift: number | null;
+    cusum_threshold: number | null;
+  };
+  metrics: {
+    point_count: number;
+    ready_point_count: number;
+    duration_minutes: number;
+    gap_count: number;
+    warning_quantile: number;
+    high_quantile: number;
+    observed_warning_z: number;
+    observed_high_z: number;
+    warning_rate: number;
+    confirmed_event_count: number;
+    max_cusum: number;
+  };
+  warnings: string[];
 };
 
 export type AnomalyDetectionEvent = {

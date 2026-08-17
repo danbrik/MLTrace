@@ -24,6 +24,8 @@ from app.projects import (
 from app.schemas import (
     AnalysisImageComparisonRequest,
     AnalysisImageComparisonResponse,
+    AnomalyDetectionCalibrationRead,
+    AnomalyDetectionCalibrationRequest,
     AnomalyDetectionRunCreate,
     AnomalyDetectionProgressRead,
     AnomalyDetectionRunRead,
@@ -367,6 +369,19 @@ def create_app() -> FastAPI:
     ):
         try:
             return anomaly_detection_service.preview_threshold(db, payload)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.post(
+        "/api/anomaly-detection-calibration-preview",
+        response_model=AnomalyDetectionCalibrationRead,
+    )
+    def api_preview_anomaly_detection_calibration(
+        payload: AnomalyDetectionCalibrationRequest,
+        db: Session = Depends(get_db),
+    ):
+        try:
+            return anomaly_detection_service.preview_calibration(db, payload)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 

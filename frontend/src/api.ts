@@ -2,6 +2,8 @@ import type {
   AnomalyDetectionConfig,
   AnomalyDetectionProgress,
   AnomalyDetectionRun,
+  AnomalyDetectionCalibration,
+  AnomalyDetectionCalibrationProfile,
   AnomalyDetectionRunSummary,
   AnomalyDetectionScoreSeries,
   AnomalyDetectionSeriesPoint,
@@ -932,6 +934,21 @@ export function previewAnomalyDetectionThreshold(payload: {
   quantile: number;
 }): Promise<AnomalyDetectionThresholdPreview> {
   return request<AnomalyDetectionThresholdPreview>('/api/anomaly-detection-threshold-preview', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  }, 15 * 60_000);
+}
+
+export function previewAnomalyDetectionCalibration(payload: {
+  testing_run_id: number;
+  score_series: AnomalyDetectionScoreSeries;
+  start_timestamp: string;
+  end_timestamp: string;
+  algorithm: 'robust_zscore' | 'robust_cusum';
+  profile: AnomalyDetectionCalibrationProfile;
+  config: AnomalyDetectionConfig;
+}): Promise<AnomalyDetectionCalibration> {
+  return request<AnomalyDetectionCalibration>('/api/anomaly-detection-calibration-preview', {
     method: 'POST',
     body: JSON.stringify(payload),
   }, 15 * 60_000);

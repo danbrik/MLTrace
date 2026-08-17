@@ -1454,6 +1454,61 @@ class AnomalyDetectionThresholdPreviewRead(BaseModel):
     threshold: float
 
 
+class AnomalyDetectionCalibrationRequest(BaseModel):
+    testing_run_id: int
+    score_series: Literal["score", "full_mse", "roi_mse"] = "score"
+    start_timestamp: datetime
+    end_timestamp: datetime
+    algorithm: Literal["robust_zscore", "robust_cusum"]
+    profile: Literal["sensitive", "balanced", "conservative"] = "balanced"
+    config: AnomalyDetectionConfig
+
+    @model_validator(mode="after")
+    def validate_calibration(self):
+        if self.end_timestamp <= self.start_timestamp:
+            raise ValueError("end_timestamp must be after start_timestamp.")
+        if self.config.algorithm != self.algorithm:
+            raise ValueError("config.algorithm must match algorithm.")
+        return self
+
+
+class AnomalyDetectionCalibrationRecommendation(BaseModel):
+    minimum_scale_relative: float
+    minimum_scale_absolute: float
+    warning_z: float
+    high_z: float
+    cusum_drift: float | None = None
+    cusum_threshold: float | None = None
+
+
+class AnomalyDetectionCalibrationMetrics(BaseModel):
+    point_count: int
+    ready_point_count: int
+    duration_minutes: float
+    gap_count: int
+    warning_quantile: float
+    high_quantile: float
+    observed_warning_z: float
+    observed_high_z: float
+    warning_rate: float
+    confirmed_event_count: int
+    max_cusum: float
+
+
+class AnomalyDetectionCalibrationRead(BaseModel):
+    testing_run_id: int
+    testing_run_name: str
+    score_series: str
+    start_timestamp: datetime
+    end_timestamp: datetime
+    algorithm: Literal["robust_zscore", "robust_cusum"]
+    profile: Literal["sensitive", "balanced", "conservative"]
+    confidence: Literal["low", "medium", "high"]
+    recommendation: AnomalyDetectionCalibrationRecommendation
+    metrics: AnomalyDetectionCalibrationMetrics
+    warnings: list[str] = Field(default_factory=list)
+
+
 class AnomalyDetectionEventRead(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 

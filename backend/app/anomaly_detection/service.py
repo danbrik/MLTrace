@@ -16,6 +16,10 @@ from sqlalchemy.orm import Session, selectinload
 
 from app import models
 from app.schemas import (
+    AnomalyDetectionCalibrationMetrics,
+    AnomalyDetectionCalibrationRead,
+    AnomalyDetectionCalibrationRecommendation,
+    AnomalyDetectionCalibrationRequest,
     AnomalyDetectionConfig,
     AnomalyDetectionEventRead,
     AnomalyDetectionProgressRead,
@@ -75,6 +79,41 @@ class DetectionEvent:
 class DetectionOutput:
     series: list[AnomalyDetectionSeriesPoint]
     events: list[DetectionEvent]
+
+
+@dataclass(frozen=True)
+class _CalibrationSample:
+    timestamp: datetime
+    smoothed: float
+    baseline: float
+    raw_scale: float
+    elapsed_minutes: float
+    segment: int
+
+
+_CALIBRATION_PROFILES = {
+    "sensitive": {
+        "warning_quantile": 0.99,
+        "high_quantile": 0.999,
+        "drift_quantile": 0.50,
+        "cusum_factor": 1.10,
+        "cusum_minimum": 5.0,
+    },
+    "balanced": {
+        "warning_quantile": 0.999,
+        "high_quantile": 0.9999,
+        "drift_quantile": 0.75,
+        "cusum_factor": 1.25,
+        "cusum_minimum": 10.0,
+    },
+    "conservative": {
+        "warning_quantile": 0.9999,
+        "high_quantile": 0.99999,
+        "drift_quantile": 0.90,
+        "cusum_factor": 1.50,
+        "cusum_minimum": 15.0,
+    },
+}
 
 
 class _FenwickMultiset:
@@ -902,6 +941,341 @@ def _load_points(
     return [SignalPoint(timestamp=timestamp, score=float(score)) for timestamp, score in rows if _finite(score)]
 
 
+def _quantile(values: list[float], quantile: float) -> float:
+    if not values:
+        raise ValueError("A quantile requires at least one finite value.")
+    return float(np.quantile(np.asarray(values, dtype=np.float64), quantile, method="linear"))
+
+
+def _calibration_trace(
+    points: list[SignalPoint],
+    config: AnomalyDetectionConfig,
+) -> tuple[list[_CalibrationSample], int]:
+    ordered = sorted(points, key=lambda item: item.timestamp)
+    if not ordered:
+        return [], 0
+    cadence = _median_positive_delta_seconds(ordered)
+    gap_seconds = max(config.minimum_gap_minutes * 60.0, cadence * config.gap_multiplier)
+    half_life_seconds = config.smoothing_half_life_minutes * 60.0
+    baseline_window_seconds = config.baseline_window_minutes * 60.0
+    warmup_seconds = config.warmup_minutes * 60.0
+
+    smoothed_values: list[float] = []
+    elapsed_seconds: list[float] = []
+    gap_flags: list[bool] = []
+    smoothed = ordered[0].score
+    previous_timestamp: datetime | None = None
+    for point in ordered:
+        elapsed = 0.0 if previous_timestamp is None else max(
+            0.0, (point.timestamp - previous_timestamp).total_seconds()
+        )
+        is_gap = previous_timestamp is not None and elapsed > gap_seconds
+        if is_gap or previous_timestamp is None:
+            smoothed = point.score
+            effective_elapsed = 0.0
+        else:
+            effective_elapsed = elapsed
+            alpha = (
+                1.0 - math.exp(-math.log(2.0) * elapsed / half_life_seconds)
+                if elapsed > 0.0
+                else 0.0
+            )
+            smoothed = alpha * point.score + (1.0 - alpha) * smoothed
+        smoothed_values.append(smoothed)
+        elapsed_seconds.append(effective_elapsed)
+        gap_flags.append(is_gap)
+        previous_timestamp = point.timestamp
+
+    baseline_buffer: deque[tuple[float, float]] = deque()
+    baseline_values = _FenwickMultiset(sorted(set(smoothed_values)))
+    normal_clock = 0.0
+    first_baseline_clock: float | None = None
+    segment = 0
+    gap_count = 0
+    samples: list[_CalibrationSample] = []
+    for index, point in enumerate(ordered):
+        elapsed = elapsed_seconds[index]
+        if gap_flags[index]:
+            baseline_buffer.clear()
+            baseline_values = _FenwickMultiset(sorted(set(smoothed_values)))
+            normal_clock = 0.0
+            first_baseline_clock = None
+            segment += 1
+            gap_count += 1
+        normal_clock += elapsed
+        cutoff = normal_clock - baseline_window_seconds
+        while baseline_buffer and baseline_buffer[0][0] < cutoff:
+            _, expired = baseline_buffer.popleft()
+            baseline_values.add(expired, -1)
+
+        baseline = baseline_values.median()
+        mad = baseline_values.median_absolute_deviation(baseline) if baseline is not None else None
+        baseline_span = 0.0 if first_baseline_clock is None else normal_clock - first_baseline_clock
+        ready = (
+            baseline is not None
+            and mad is not None
+            and baseline_values.size >= config.minimum_warmup_points
+            and baseline_span >= warmup_seconds
+        )
+        if ready:
+            samples.append(_CalibrationSample(
+                timestamp=point.timestamp,
+                smoothed=smoothed_values[index],
+                baseline=baseline,
+                raw_scale=1.4826 * mad,
+                elapsed_minutes=elapsed / 60.0,
+                segment=segment,
+            ))
+
+        if first_baseline_clock is None:
+            first_baseline_clock = normal_clock
+        baseline_buffer.append((normal_clock, smoothed_values[index]))
+        baseline_values.add(smoothed_values[index], 1)
+    return samples, gap_count
+
+
+def _simulate_calibration_cusum(
+    z_values: list[float],
+    samples: list[_CalibrationSample],
+    drift: float,
+    z_cap: float,
+) -> float:
+    maximum = 0.0
+    accumulator = 0.0
+    previous_segment: int | None = None
+    for z_value, sample in zip(z_values, samples):
+        if previous_segment is not None and sample.segment != previous_segment:
+            accumulator = 0.0
+        accumulator = max(
+            0.0,
+            accumulator + (min(z_value, z_cap) - drift) * max(0.0, sample.elapsed_minutes),
+        )
+        maximum = max(maximum, accumulator)
+        previous_segment = sample.segment
+    return maximum
+
+
+def _calibration_config(
+    config: AnomalyDetectionConfig,
+    recommendation: dict[str, float],
+) -> AnomalyDetectionConfig:
+    return AnomalyDetectionConfig.model_validate({
+        **config.model_dump(),
+        **recommendation,
+    })
+
+
+def preview_calibration(
+    db: Session,
+    payload: AnomalyDetectionCalibrationRequest,
+) -> AnomalyDetectionCalibrationRead:
+    testing_run = db.get(models.TestingRun, payload.testing_run_id)
+    if testing_run is None:
+        raise ValueError("Inference run not found.")
+    if testing_run.status != "finished":
+        raise ValueError("Only finished inference runs can be calibrated.")
+    points = _load_points(
+        db,
+        testing_run.id,
+        payload.score_series,
+        payload.start_timestamp,
+        payload.end_timestamp,
+        0.0,
+    )
+    if not points:
+        raise ValueError("No finite scores exist in the selected healthy range.")
+    minimum_points = 3 * payload.config.minimum_warmup_points
+    if len(points) < minimum_points:
+        raise ValueError(
+            f"The healthy range needs at least {minimum_points} finite points "
+            f"(3 × minimum warm-up points); found {len(points)}."
+        )
+    duration_minutes = max(
+        0.0,
+        (points[-1].timestamp - points[0].timestamp).total_seconds() / 60.0,
+    )
+    minimum_duration = payload.config.warmup_minutes + payload.config.baseline_window_minutes
+    if duration_minutes < minimum_duration:
+        raise ValueError(
+            f"The healthy range needs at least {minimum_duration:g} minutes "
+            f"(warm-up + baseline window); found {duration_minutes:.1f}."
+        )
+
+    samples, gap_count = _calibration_trace(points, payload.config)
+    if len(samples) < payload.config.minimum_warmup_points:
+        raise ValueError(
+            "Too few ready points remain after warm-up and data-gap resets. "
+            "Select a longer continuous healthy range."
+        )
+
+    warnings: list[str] = []
+    positive_raw_scales = [sample.raw_scale for sample in samples if sample.raw_scale > 0.0]
+    if positive_raw_scales:
+        absolute_floor = _quantile(positive_raw_scales, 0.10)
+    else:
+        absolute_floor = payload.config.minimum_scale_absolute
+        warnings.append(
+            "MAD was zero throughout the ready range; the current absolute scale floor was retained."
+        )
+    relative_raw_scales = [
+        sample.raw_scale / abs(sample.baseline)
+        for sample in samples
+        if sample.raw_scale > 0.0
+        and abs(sample.baseline) > max(absolute_floor, 1e-12)
+    ]
+    if relative_raw_scales:
+        relative_floor = min(1.0, _quantile(relative_raw_scales, 0.10))
+    else:
+        relative_floor = payload.config.minimum_scale_relative
+        warnings.append(
+            "The relative scale floor could not be identified reliably; the current value was retained."
+        )
+    absolute_floor = min(1_000_000.0, max(0.0, absolute_floor))
+
+    z_values = []
+    for sample in samples:
+        scale = max(
+            sample.raw_scale,
+            abs(sample.baseline) * relative_floor,
+            absolute_floor,
+        )
+        z_values.append(max(0.0, (sample.smoothed - sample.baseline) / scale))
+
+    positive_z = [value for value in z_values if value > 0.0]
+    quantile_source = positive_z or [0.0]
+    if not positive_z:
+        warnings.append(
+            "No positive normal deviations were observed; the current Z-score and CUSUM thresholds were retained."
+        )
+    sensitive_drift = _quantile(quantile_source, _CALIBRATION_PROFILES["sensitive"]["drift_quantile"])
+    reference_max_cusum = _simulate_calibration_cusum(
+        z_values,
+        samples,
+        sensitive_drift,
+        payload.config.cusum_z_cap,
+    )
+
+    recommendations: dict[str, dict[str, float]] = {}
+    previous: dict[str, float] | None = None
+    for profile_name in ("sensitive", "balanced", "conservative"):
+        profile = _CALIBRATION_PROFILES[profile_name]
+        if positive_z:
+            warning_z = max(
+                payload.config.recovery_z + 0.1,
+                0.1,
+                _quantile(quantile_source, profile["warning_quantile"]),
+            )
+            high_z = max(
+                warning_z + 0.5,
+                _quantile(quantile_source, profile["high_quantile"]),
+            )
+            drift = max(0.0, _quantile(quantile_source, profile["drift_quantile"]))
+            threshold = max(
+                profile["cusum_minimum"],
+                reference_max_cusum * profile["cusum_factor"],
+            )
+        else:
+            warning_z = payload.config.warning_z
+            high_z = payload.config.high_z
+            drift = payload.config.cusum_drift
+            threshold = payload.config.cusum_threshold
+        if previous is not None:
+            warning_z = max(warning_z, previous["warning_z"])
+            high_z = max(high_z, previous["high_z"])
+            drift = max(drift, previous["cusum_drift"])
+            threshold = max(threshold, previous["cusum_threshold"])
+        if payload.algorithm == "robust_cusum":
+            warning_ceiling = max(
+                payload.config.recovery_z + 1e-6,
+                payload.config.cusum_z_cap - 0.5,
+            )
+            warning_z = min(warning_z, warning_ceiling)
+            high_z = min(payload.config.cusum_z_cap, max(high_z, warning_z))
+        recommendation = {
+            "minimum_scale_relative": relative_floor,
+            "minimum_scale_absolute": absolute_floor,
+            "warning_z": min(1000.0, warning_z),
+            "high_z": min(1000.0, high_z),
+            "cusum_drift": min(1000.0, drift),
+            "cusum_threshold": min(1_000_000.0, threshold),
+        }
+
+        for _attempt in range(8):
+            backtest = detect(points, _calibration_config(payload.config, recommendation))
+            confirmed = sum(event.confirmed_at is not None for event in backtest.events)
+            if confirmed == 0:
+                break
+            high_limit = payload.config.cusum_z_cap if payload.algorithm == "robust_cusum" else 1000.0
+            recommendation["high_z"] = min(
+                high_limit,
+                max(recommendation["warning_z"], recommendation["high_z"] * 1.25),
+            )
+            recommendation["cusum_threshold"] = min(
+                1_000_000.0,
+                recommendation["cusum_threshold"] * 1.25,
+            )
+        recommendations[profile_name] = recommendation
+        previous = recommendation
+
+    selected = recommendations[payload.profile]
+    selected_config = _calibration_config(payload.config, selected)
+    backtest = detect(points, selected_config)
+    confirmed_count = sum(event.confirmed_at is not None for event in backtest.events)
+    ready_backtest = [point for point in backtest.series if point.robust_z is not None]
+    warning_rate = (
+        sum(point.robust_z >= selected["warning_z"] for point in ready_backtest) / len(ready_backtest)
+        if ready_backtest
+        else 0.0
+    )
+    max_cusum = max((point.cusum for point in backtest.series), default=0.0)
+    selected_profile = _CALIBRATION_PROFILES[payload.profile]
+    tail_observations = len(quantile_source) * (1.0 - selected_profile["warning_quantile"])
+    confidence = "high" if tail_observations >= 20.0 else "medium" if tail_observations >= 5.0 else "low"
+    if confidence != "high":
+        warnings.append(
+            "The selected range contains too few tail observations for high-confidence quantiles; "
+            "treat the recommendation as a starting point."
+        )
+    if confirmed_count:
+        warnings.append(
+            f"The recommended configuration still confirmed {confirmed_count} event(s) in the healthy range."
+        )
+
+    recommendation = AnomalyDetectionCalibrationRecommendation(
+        minimum_scale_relative=float(selected["minimum_scale_relative"]),
+        minimum_scale_absolute=float(selected["minimum_scale_absolute"]),
+        warning_z=float(selected["warning_z"]),
+        high_z=float(selected["high_z"]),
+        cusum_drift=(float(selected["cusum_drift"]) if payload.algorithm == "robust_cusum" else None),
+        cusum_threshold=(float(selected["cusum_threshold"]) if payload.algorithm == "robust_cusum" else None),
+    )
+    return AnomalyDetectionCalibrationRead(
+        testing_run_id=testing_run.id,
+        testing_run_name=testing_run.name,
+        score_series=payload.score_series,
+        start_timestamp=payload.start_timestamp,
+        end_timestamp=payload.end_timestamp,
+        algorithm=payload.algorithm,
+        profile=payload.profile,
+        confidence=confidence,
+        recommendation=recommendation,
+        metrics=AnomalyDetectionCalibrationMetrics(
+            point_count=len(points),
+            ready_point_count=len(samples),
+            duration_minutes=duration_minutes,
+            gap_count=gap_count,
+            warning_quantile=selected_profile["warning_quantile"],
+            high_quantile=selected_profile["high_quantile"],
+            observed_warning_z=_quantile(quantile_source, selected_profile["warning_quantile"]),
+            observed_high_z=_quantile(quantile_source, selected_profile["high_quantile"]),
+            warning_rate=warning_rate,
+            confirmed_event_count=confirmed_count,
+            max_cusum=max_cusum,
+        ),
+        warnings=warnings,
+    )
+
+
 def _validate_threshold_reference(
     target: models.TestingRun,
     reference: models.TestingRun,
@@ -1038,6 +1412,8 @@ def _compute_for_run(
     db: Session,
     run: models.AnomalyDetectionRun,
     progress_token: str | None = None,
+    *,
+    computation_end: datetime | None = None,
 ) -> DetectionOutput:
     config_data = dict(run.config)
     legacy_robust_behavior = run.algorithm_version in {
@@ -1053,12 +1429,13 @@ def _compute_for_run(
         config_data.setdefault("fallback_recovery_minutes", 0.0)
     config = AnomalyDetectionConfig.model_validate(config_data)
     _set_progress(db, progress_token, "loading", 0, 0, "Loading the full-resolution score series")
+    effective_end = min(computation_end, run.end_timestamp) if computation_end else run.end_timestamp
     points = _load_points(
         db,
         run.testing_run_id,
         run.score_series,
         run.start_timestamp,
-        run.end_timestamp,
+        effective_end,
         config.preroll_minutes,
     )
     _set_progress(
@@ -1076,7 +1453,7 @@ def _compute_for_run(
         resolved_threshold=run.resolved_threshold,
         legacy_robust_behavior=legacy_robust_behavior,
     )
-    return _visible_output(detected, run.start_timestamp, run.end_timestamp)
+    return _visible_output(detected, run.start_timestamp, effective_end)
 
 
 def _decimate_series(
@@ -1289,9 +1666,24 @@ def get_run_diagnostics(
     run = db.get(models.AnomalyDetectionRun, run_id)
     if run is None:
         return None
-    output = _compute_for_run(db, run)
+    diagnostic_start = max(anchor, run.start_timestamp)
+    score_column = _score_column(run.score_series)
+    diagnostic_timestamps = db.scalars(
+        select(models.TestingRunResult.timestamp)
+        .where(
+            models.TestingRunResult.testing_run_id == run.testing_run_id,
+            models.TestingRunResult.timestamp >= diagnostic_start,
+            models.TestingRunResult.timestamp <= run.end_timestamp,
+            score_column.is_not(None),
+        )
+        .order_by(models.TestingRunResult.timestamp, models.TestingRunResult.position)
+        .limit(count)
+    ).all()
+    if not diagnostic_timestamps:
+        return []
+    output = _compute_for_run(db, run, computation_end=diagnostic_timestamps[-1])
     timestamps = [point.timestamp for point in output.series]
-    start = bisect_left(timestamps, anchor)
+    start = bisect_left(timestamps, diagnostic_start)
     return output.series[start:start + count]
 
 
