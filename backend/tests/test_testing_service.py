@@ -273,6 +273,7 @@ def test_analysis_image_comparison_supports_input_and_reconstruction_modes(tmp_p
             db,
             TestingRunCreatePayload(training_run_id=training_run_id, training_dataset_id=test_set_id),
         )
+        assert testing_run.model_training_dataset_names == ["Test Set"]
         root = tmp_path / "test_images"
         timestamps = [datetime(2026, 4, 1, 12, 0, index * 10) for index in range(3)]
         rows = []

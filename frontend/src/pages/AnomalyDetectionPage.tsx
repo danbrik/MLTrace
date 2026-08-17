@@ -6,6 +6,7 @@ import {
   Collapse,
   Group,
   Loader,
+  Modal,
   MultiSelect,
   NumberInput,
   Paper,
@@ -375,6 +376,7 @@ function inferenceFacetRecord(run: TestingRun): FacetRecord {
     id: String(run.id),
     facets: {
       model: [String(run.training_run_id)],
+      trainingDataset: run.model_training_dataset_names ?? [],
       dataset: [String(run.training_dataset_id)],
       roi: [roiKeyForRun(run)],
       metric: [metricKeyForRun(run)],
@@ -386,6 +388,7 @@ function inferenceFacetRecord(run: TestingRun): FacetRecord {
       run.name,
       run.training_run_name,
       run.training_pipeline_name,
+      ...(run.model_training_dataset_names ?? []),
       run.training_dataset_name,
       roiLabelForRun(run),
       run.preprocessing_pipeline_name,
@@ -464,6 +467,7 @@ export function AnomalyDetectionPage({ active }: { active: boolean }) {
   const [sourceFiltersOpen, setSourceFiltersOpen] = useState(true);
   const [sourceSearch, setSourceSearch] = useState('');
   const [sourceModelFilters, setSourceModelFilters] = useState<string[]>([]);
+  const [sourceTrainingDatasetFilters, setSourceTrainingDatasetFilters] = useState<string[]>([]);
   const [sourceDatasetFilters, setSourceDatasetFilters] = useState<string[]>([]);
   const [sourceRoiFilters, setSourceRoiFilters] = useState<string[]>([]);
   const [sourceMetricFilters, setSourceMetricFilters] = useState<string[]>([]);
@@ -508,6 +512,7 @@ export function AnomalyDetectionPage({ active }: { active: boolean }) {
   const [calibrationResult, setCalibrationResult] = useState<AnomalyDetectionCalibration | null>(null);
   const [calibrationResultSignature, setCalibrationResultSignature] = useState('');
   const [calibrationLoading, setCalibrationLoading] = useState(false);
+  const [calibrationOpened, setCalibrationOpened] = useState(false);
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const [running, setRunning] = useState(false);
   const [operationProgress, setOperationProgress] = useState<AnomalyDetectionProgress | null>(null);
@@ -618,6 +623,7 @@ export function AnomalyDetectionPage({ active }: { active: boolean }) {
     query: sourceSearch,
     selections: {
       model: sourceModelFilters,
+      trainingDataset: sourceTrainingDatasetFilters,
       dataset: sourceDatasetFilters,
       roi: sourceRoiFilters,
       metric: sourceMetricFilters,
@@ -625,7 +631,7 @@ export function AnomalyDetectionPage({ active }: { active: boolean }) {
       preprocessing: sourcePreprocessingFilters,
       method: sourceMethodFilters,
     },
-  }), [sourceAggregationFilters, sourceDatasetFilters, sourceMethodFilters, sourceMetricFilters, sourceModelFilters, sourcePreprocessingFilters, sourceRoiFilters, sourceSearch]);
+  }), [sourceAggregationFilters, sourceDatasetFilters, sourceMethodFilters, sourceMetricFilters, sourceModelFilters, sourcePreprocessingFilters, sourceRoiFilters, sourceSearch, sourceTrainingDatasetFilters]);
   const filteredRunRecords = useMemo(
     () => matchingFacetRecords(inferenceFacetRecords, sourceFacetState),
     [inferenceFacetRecords, sourceFacetState],
@@ -641,6 +647,7 @@ export function AnomalyDetectionPage({ active }: { active: boolean }) {
   );
   const sourceFacetCounts = useMemo(() => ({
     model: countFacetValues(inferenceFacetRecords, sourceFacetState, 'model'),
+    trainingDataset: countFacetValues(inferenceFacetRecords, sourceFacetState, 'trainingDataset'),
     dataset: countFacetValues(inferenceFacetRecords, sourceFacetState, 'dataset'),
     roi: countFacetValues(inferenceFacetRecords, sourceFacetState, 'roi'),
     metric: countFacetValues(inferenceFacetRecords, sourceFacetState, 'metric'),
@@ -652,6 +659,9 @@ export function AnomalyDetectionPage({ active }: { active: boolean }) {
     const labels = new Map(testingRuns.map((run) => [String(run.training_run_id), run.training_pipeline_name || run.training_run_name || `Training run #${run.training_run_id}`]));
     return [...labels].map(([value, label]) => facetOption(value, label, sourceFacetCounts.model, sourceModelFilters)).sort((a, b) => a.label.localeCompare(b.label));
   }, [sourceFacetCounts.model, sourceModelFilters, testingRuns]);
+  const sourceTrainingDatasetOptions = useMemo(() => [...new Set(testingRuns.flatMap((run) => run.model_training_dataset_names ?? []))]
+    .map((value) => facetOption(value, value, sourceFacetCounts.trainingDataset, sourceTrainingDatasetFilters))
+    .sort((a, b) => a.label.localeCompare(b.label)), [sourceFacetCounts.trainingDataset, sourceTrainingDatasetFilters, testingRuns]);
   const sourceDatasetOptions = useMemo(() => {
     const labels = new Map(testingRuns.map((run) => [String(run.training_dataset_id), run.training_dataset_name || `Inference dataset #${run.training_dataset_id}`]));
     return [...labels].map(([value, label]) => facetOption(value, label, sourceFacetCounts.dataset, sourceDatasetFilters)).sort((a, b) => a.label.localeCompare(b.label));
@@ -746,7 +756,7 @@ export function AnomalyDetectionPage({ active }: { active: boolean }) {
   }, [savedFacetCounts.roi, savedRoiFilters, testingRuns]);
   const savedScoreOptions = useMemo(() => [...new Set(savedRuns.map((run) => run.score_series))].map((value) => facetOption(value, value.replaceAll('_', ' ').toUpperCase(), savedFacetCounts.score, savedScoreFilters)), [savedFacetCounts.score, savedRuns, savedScoreFilters]);
 
-  useEffect(() => setSourcePage(1), [sourceSearch, sourceModelFilters, sourceDatasetFilters, sourceRoiFilters, sourceMetricFilters, sourceAggregationFilters, sourcePreprocessingFilters, sourceMethodFilters]);
+  useEffect(() => setSourcePage(1), [sourceSearch, sourceModelFilters, sourceTrainingDatasetFilters, sourceDatasetFilters, sourceRoiFilters, sourceMetricFilters, sourceAggregationFilters, sourcePreprocessingFilters, sourceMethodFilters]);
   useEffect(() => setSourcePage((page) => Math.min(page, Math.max(1, Math.ceil(filteredRuns.length / DEFAULT_TABLE_PAGE_SIZE)))), [filteredRuns.length]);
   useEffect(() => setThresholdRunPage(1), [thresholdRunSearch, thresholdDatasetFilters, selectedRun?.id, scoreSeries]);
   useEffect(() => setThresholdRunPage((page) => Math.min(page, Math.max(1, Math.ceil(filteredThresholdRuns.length / DEFAULT_TABLE_PAGE_SIZE)))), [filteredThresholdRuns.length]);
@@ -1000,6 +1010,7 @@ export function AnomalyDetectionPage({ active }: { active: boolean }) {
 
   function selectAlgorithm(value: string | null) {
     const algorithm = (value ?? 'robust_cusum') as AnomalyDetectionAlgorithm;
+    setCalibrationOpened(false);
     if (algorithm === 'event_threshold') {
       setConfig({ ...EVENT_CONFIG });
       setPreset('prototype');
@@ -1143,6 +1154,7 @@ export function AnomalyDetectionPage({ active }: { active: boolean }) {
     }));
     setPreset('custom');
     setAdvancedOpen(true);
+    setCalibrationOpened(false);
     notifications.show({ color: 'green', title: 'Recommendations applied', message: 'The suggested values are now editable under Advanced detector parameters.' });
   }
 
@@ -1473,10 +1485,11 @@ export function AnomalyDetectionPage({ active }: { active: boolean }) {
           </Group>
           <Group justify="space-between" wrap="wrap">
             <Button variant="subtle" size="compact-sm" leftSection={<SlidersHorizontal size={16} />} rightSection={sourceFiltersOpen ? <ChevronDown size={14} /> : <ChevronRight size={14} />} onClick={() => setSourceFiltersOpen((open) => !open)}>Filters</Button>
-            {(sourceSearch.trim() || sourceModelFilters.length || sourceDatasetFilters.length || sourceRoiFilters.length || sourceMetricFilters.length || sourceAggregationFilters.length || sourcePreprocessingFilters.length || sourceMethodFilters.length) ? (
+            {(sourceSearch.trim() || sourceModelFilters.length || sourceTrainingDatasetFilters.length || sourceDatasetFilters.length || sourceRoiFilters.length || sourceMetricFilters.length || sourceAggregationFilters.length || sourcePreprocessingFilters.length || sourceMethodFilters.length) ? (
               <Button variant="subtle" color="gray" size="compact-sm" onClick={() => {
                 setSourceSearch('');
                 setSourceModelFilters([]);
+                setSourceTrainingDatasetFilters([]);
                 setSourceDatasetFilters([]);
                 setSourceRoiFilters([]);
                 setSourceMetricFilters([]);
@@ -1491,6 +1504,7 @@ export function AnomalyDetectionPage({ active }: { active: boolean }) {
               <TextInput placeholder="Search inference, model, pipeline or dataset" leftSection={<Search size={16} />} value={sourceSearch} onChange={(event) => setSourceSearch(event.currentTarget.value)} />
               <SimpleGrid cols={{ base: 1, sm: 2, lg: 4 }}>
                 <MultiSelect label="Models" searchable clearable data={sourceModelOptions} value={sourceModelFilters} onChange={setSourceModelFilters} />
+                <MultiSelect label="Training datasets" searchable clearable data={sourceTrainingDatasetOptions} value={sourceTrainingDatasetFilters} onChange={setSourceTrainingDatasetFilters} />
                 <MultiSelect label="Inference datasets" searchable clearable data={sourceDatasetOptions} value={sourceDatasetFilters} onChange={setSourceDatasetFilters} />
                 <MultiSelect label="ROI" searchable clearable data={sourceRoiOptions} value={sourceRoiFilters} onChange={setSourceRoiFilters} />
                 <MultiSelect label="Metrics" searchable clearable data={sourceMetricOptions} value={sourceMetricFilters} onChange={setSourceMetricFilters} />
@@ -1518,7 +1532,7 @@ export function AnomalyDetectionPage({ active }: { active: boolean }) {
                     <Table.Td><Button size="compact-sm" variant={selected ? 'filled' : 'light'} color={selected ? 'green' : 'blue'} disabled={running || thresholdCalculating || previewLoading} onClick={() => setTestingRunId(String(run.id))}>{selected ? 'Selected' : 'Use'}</Button></Table.Td>
                   </Table.Tr>;
                 })}
-                {filteredRuns.length === 0 && <Table.Tr><Table.Td colSpan={8}><Stack align="center" gap="xs" py="md"><Text size="sm" c="dimmed">No finished inference matches the combined filters.</Text><Button variant="light" size="compact-sm" onClick={() => { setSourceSearch(''); setSourceModelFilters([]); setSourceDatasetFilters([]); setSourceRoiFilters([]); setSourceMetricFilters([]); setSourceAggregationFilters([]); setSourcePreprocessingFilters([]); setSourceMethodFilters([]); }}>Reset filters</Button></Stack></Table.Td></Table.Tr>}
+                {filteredRuns.length === 0 && <Table.Tr><Table.Td colSpan={8}><Stack align="center" gap="xs" py="md"><Text size="sm" c="dimmed">No finished inference matches the combined filters.</Text><Button variant="light" size="compact-sm" onClick={() => { setSourceSearch(''); setSourceModelFilters([]); setSourceTrainingDatasetFilters([]); setSourceDatasetFilters([]); setSourceRoiFilters([]); setSourceMetricFilters([]); setSourceAggregationFilters([]); setSourcePreprocessingFilters([]); setSourceMethodFilters([]); }}>Reset filters</Button></Stack></Table.Td></Table.Tr>}
               </Table.Tbody>
             </Table>
           </ScrollArea.Autosize>
@@ -1601,12 +1615,24 @@ export function AnomalyDetectionPage({ active }: { active: boolean }) {
               <Text size="sm">{algorithmDefinition(config.algorithm).description}</Text>
             </Alert>
             {ROBUST_ALGORITHMS.includes(config.algorithm) && (
-              <Paper withBorder p="md" radius="sm">
+              <>
+                <Button
+                  variant="light"
+                  color="violet"
+                  disabled={running}
+                  onClick={() => setCalibrationOpened(true)}
+                >
+                  Automatic calibration from healthy data
+                </Button>
+                <Modal
+                  opened={calibrationOpened}
+                  onClose={() => setCalibrationOpened(false)}
+                  title="Automatic calibration from healthy data"
+                  size="xl"
+                  centered
+                >
                 <Stack gap="md">
-                  <div>
-                    <Text fw={700}>Automatic calibration from healthy data</Text>
-                    <Text size="sm" c="dimmed">Select a period known to contain normal operation only. The result is a recommendation and is never applied automatically.</Text>
-                  </div>
+                  <Text size="sm" c="dimmed">Select a period known to contain normal operation only. The result is a recommendation and is never applied automatically.</Text>
                   <SegmentedControl
                     fullWidth
                     value={calibrationProfile}
@@ -1696,7 +1722,8 @@ export function AnomalyDetectionPage({ active }: { active: boolean }) {
                     </Stack>
                   )}
                 </Stack>
-              </Paper>
+                </Modal>
+              </>
             )}
             {config.algorithm === 'simple_threshold' && (
               <Stack gap="md">

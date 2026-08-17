@@ -633,6 +633,7 @@ export type TestingRun = {
   restart_mode: 'checkpoint' | null;
   training_run_name: string;
   training_pipeline_name: string;
+  model_training_dataset_names: string[];
   training_dataset_name: string;
   preprocessing_pipeline_name: string;
   method_type: string;

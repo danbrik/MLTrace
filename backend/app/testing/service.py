@@ -944,6 +944,7 @@ def _snapshot_name(training_run: models.TrainingRun) -> str:
 
 
 def _serialize_testing_run(run: models.TestingRun) -> TestingRunRead:
+    training_dataset_names = list(run.training_run.dataset_names or []) if run.training_run is not None else []
     return TestingRunRead(
         id=run.id,
         name=run.name,
@@ -976,6 +977,7 @@ def _serialize_testing_run(run: models.TestingRun) -> TestingRunRead:
         restart_mode=run.restart_mode,
         training_run_name=run.training_run_name,
         training_pipeline_name=run.training_pipeline_name,
+        model_training_dataset_names=training_dataset_names,
         training_dataset_name=run.training_dataset_name,
         preprocessing_pipeline_name=run.preprocessing_pipeline_name,
         method_type=run.method_type,
@@ -1009,7 +1011,11 @@ def _serialize_result(result: models.TestingRunResult, continuity_segment: int =
 
 
 def list_testing_runs(db: Session) -> list[TestingRunRead]:
-    runs = db.scalars(select(models.TestingRun).order_by(models.TestingRun.created_at.desc())).all()
+    runs = db.scalars(
+        select(models.TestingRun)
+        .options(selectinload(models.TestingRun.training_run))
+        .order_by(models.TestingRun.created_at.desc())
+    ).all()
     return [_serialize_testing_run(run) for run in runs]
 
 

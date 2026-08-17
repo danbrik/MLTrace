@@ -1303,6 +1303,7 @@ class TestingRunRead(BaseModel):
     restart_mode: Literal["checkpoint"] | None = None
     training_run_name: str
     training_pipeline_name: str
+    model_training_dataset_names: list[str] = []
     training_dataset_name: str
     preprocessing_pipeline_name: str
     method_type: str
