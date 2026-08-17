@@ -111,6 +111,44 @@ def test_backend_ewma_matches_causal_frontend_semantics() -> None:
     assert output == pytest.approx([0.0, 5.0, 7.5])
 
 
+def test_analysis_robust_z_uses_configurable_scale_floor() -> None:
+    start = datetime(2026, 1, 1)
+    values = [1.0] * 5 + [1.0001]
+    timestamps = [start + timedelta(seconds=index) for index in range(len(values))]
+
+    output = compute_analytics(
+        "robust_z",
+        {"alpha": 1.0, "windowSamples": 6, "minimumScaleRelative": 1e-3},
+        values,
+        timestamps,
+    )
+
+    assert output[-1] == pytest.approx(0.1)
+
+
+def test_analysis_state_machine_recovers_despite_high_prior_cusum() -> None:
+    start = datetime(2026, 1, 1)
+    values = [1.0] * 5 + [2.0, 2.0, 1.0]
+    timestamps = [start + timedelta(seconds=index) for index in range(len(values))]
+
+    output = compute_analytics(
+        "state_machine",
+        {
+            "alpha": 1.0,
+            "windowSamples": 5,
+            "minimumScaleAbsolute": 0.1,
+            "minimumScaleRelative": 0.0,
+            "hHigh": 5,
+            "offThreshold": 0.5,
+        },
+        values,
+        timestamps,
+    )
+
+    assert 3.0 in output
+    assert output[-1] == 0.0
+
+
 def test_region_signal_keeps_full_trace_history_for_causal_processing() -> None:
     db, run_id, start = _seed([0, 0, 0, 8, 8, 0, 0, 0, 0, 0])
     try:

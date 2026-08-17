@@ -4,6 +4,7 @@ import type {
   AnomalyDetectionRun,
   AnomalyDetectionRunSummary,
   AnomalyDetectionScoreSeries,
+  AnomalyDetectionSeriesPoint,
   AnomalyDetectionThresholdPreview,
   CacheRevisions,
   Dataset,
@@ -882,6 +883,15 @@ export function getAnomalyDetectionRun(runId: number, maxPoints = 8000, progress
   const query = new URLSearchParams({ max_points: String(maxPoints) });
   if (progressToken) query.set('progress_token', progressToken);
   return request<AnomalyDetectionRun>(`/api/anomaly-detection-runs/${runId}?${query}`, undefined, 15 * 60_000);
+}
+
+export function getAnomalyDetectionDiagnostics(
+  runId: number,
+  anchor: string,
+  count = 200,
+): Promise<AnomalyDetectionSeriesPoint[]> {
+  const query = new URLSearchParams({ anchor, count: String(count) });
+  return request<AnomalyDetectionSeriesPoint[]>(`/api/anomaly-detection-runs/${runId}/diagnostics?${query}`, undefined, 15 * 60_000);
 }
 
 export function getAnomalyDetectionProgress(progressToken: string): Promise<AnomalyDetectionProgress> {

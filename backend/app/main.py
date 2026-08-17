@@ -1,4 +1,5 @@
 from contextlib import asynccontextmanager
+from datetime import datetime
 import logging
 import time
 
@@ -27,6 +28,7 @@ from app.schemas import (
     AnomalyDetectionProgressRead,
     AnomalyDetectionRunRead,
     AnomalyDetectionRunSummary,
+    AnomalyDetectionSeriesPoint,
     AnomalyDetectionThresholdPreviewRead,
     AnomalyDetectionThresholdPreviewRequest,
     DatasetConnectionTestRequest,
@@ -391,6 +393,21 @@ def create_app() -> FastAPI:
         if run is None:
             raise HTTPException(status_code=404, detail="Anomaly detection run not found.")
         return run
+
+    @app.get(
+        "/api/anomaly-detection-runs/{run_id}/diagnostics",
+        response_model=list[AnomalyDetectionSeriesPoint],
+    )
+    def api_get_anomaly_detection_diagnostics(
+        run_id: int,
+        anchor: datetime = Query(),
+        count: int = Query(default=200, ge=1, le=1000),
+        db: Session = Depends(get_db),
+    ):
+        points = anomaly_detection_service.get_run_diagnostics(db, run_id, anchor, count)
+        if points is None:
+            raise HTTPException(status_code=404, detail="Anomaly detection run not found.")
+        return points
 
     @app.delete("/api/anomaly-detection-runs/{run_id}", status_code=204)
     def api_delete_anomaly_detection_run(run_id: int, db: Session = Depends(get_db)):

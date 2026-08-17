@@ -23,12 +23,13 @@ import {
   Tooltip,
 } from '@mantine/core';
 import { notifications } from '@mantine/notifications';
-import { Activity, ChevronDown, ChevronRight, Info, Play, RefreshCw, Search, SlidersHorizontal, Trash2 } from 'lucide-react';
+import { Activity, ChevronDown, ChevronRight, Download, Info, Play, RefreshCw, Search, SlidersHorizontal, Trash2 } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 
 import {
   createAnomalyDetectionRun,
   deleteAnomalyDetectionRun,
+  getAnomalyDetectionDiagnostics,
   getAnomalyDetectionProgress,
   getAnomalyDetectionRun,
   getTestingRunResults,
@@ -62,12 +63,14 @@ import type {
   AnomalyDetectionRun,
   AnomalyDetectionRunSummary,
   AnomalyDetectionScoreSeries,
+  AnomalyDetectionSeriesPoint,
   AnomalyDetectionThresholdPreview,
   TestingRun,
   TestingRunResult,
 } from '../types';
 
 const MAX_PREVIEW_POINTS = 8000;
+const MAX_DIAGNOSTIC_POINTS = 50000;
 
 const FAST_CONFIG: AnomalyDetectionConfig = {
   algorithm: 'robust_cusum',
@@ -77,13 +80,17 @@ const FAST_CONFIG: AnomalyDetectionConfig = {
   minimum_warmup_points: 30,
   warning_z: 3,
   high_z: 5,
+  minimum_scale_relative: 1e-3,
+  minimum_scale_absolute: 1e-9,
   cusum_drift: 1,
   cusum_threshold: 10,
+  cusum_z_cap: 20,
   confirmation_mode: 'minutes',
   confirmation_minutes: 5,
   confirmation_samples: 1,
   recovery_z: 1,
   recovery_minutes: 15,
+  fallback_recovery_minutes: 60,
   preroll_minutes: 120,
   gap_multiplier: 5,
   minimum_gap_minutes: 15,
@@ -130,6 +137,7 @@ const BALANCED_CONFIG: AnomalyDetectionConfig = {
   cusum_threshold: 12,
   confirmation_minutes: 10,
   recovery_minutes: 30,
+  fallback_recovery_minutes: 120,
 };
 
 const ROBUST_CONFIG: AnomalyDetectionConfig = {
@@ -145,6 +153,7 @@ const ROBUST_CONFIG: AnomalyDetectionConfig = {
   confirmation_minutes: 20,
   recovery_z: 0.75,
   recovery_minutes: 45,
+  fallback_recovery_minutes: 240,
 };
 
 const PRESETS: Record<string, AnomalyDetectionConfig> = {
@@ -201,10 +210,14 @@ const PARAMETER_DEFINITIONS: Array<{
   { key: 'minimum_warmup_points', label: 'Minimum warm-up points', description: 'Minimum number of valid normal measurements required before the baseline is considered reliable.', min: 3, algorithms: BASELINE_ALGORITHMS },
   { key: 'warning_z', label: 'Warning Z-score', description: 'Starts a yellow early-warning interval when the robust Z-score reaches this value.', min: 0.1, decimalScale: 2, algorithms: ROBUST_ALGORITHMS },
   { key: 'high_z', label: 'Confirmation Z-score', description: 'Confirms a red anomaly when this robust Z-score persists for the confirmation time.', min: 0.1, decimalScale: 2, algorithms: ROBUST_ALGORITHMS },
+  { key: 'minimum_scale_relative', label: 'Relative scale floor', description: 'Minimum robust scale as a fraction of the rolling median magnitude. Increase this if a near-zero MAD creates implausibly large Z-scores.', min: 0, decimalScale: 6, algorithms: ROBUST_ALGORITHMS },
+  { key: 'minimum_scale_absolute', label: 'Absolute scale floor', description: 'Absolute lower bound for the robust scale in score units. Use this when the normal score level is near zero.', min: 0, decimalScale: 12, algorithms: ROBUST_ALGORITHMS },
   { key: 'cusum_drift', label: 'CUSUM drift', description: 'Evidence subtracted during every minute. Larger values make CUSUM less sensitive to small shifts.', min: 0, decimalScale: 2, algorithms: ['robust_cusum'] },
   { key: 'cusum_threshold', label: 'CUSUM threshold', description: 'Accumulated positive evidence required to confirm an anomaly when the high Z-score is not reached.', min: 0.1, decimalScale: 2, algorithms: ['robust_cusum'] },
+  { key: 'cusum_z_cap', label: 'CUSUM Z-score cap', description: 'Maximum Z-score contribution used by CUSUM per update. The displayed Robust Z-score remains uncapped.', min: 0.1, decimalScale: 2, algorithms: ['robust_cusum'] },
   { key: 'recovery_z', label: 'Recovery Z-score', description: 'The signal must fall below this Z-score before recovery timing begins.', decimalScale: 2, algorithms: ROBUST_ALGORITHMS },
   { key: 'recovery_minutes', label: 'Recovery hold (min)', description: 'Continuous time below the recovery Z-score required to close an event.', min: 0, algorithms: ROBUST_ALGORITHMS },
+  { key: 'fallback_recovery_minutes', label: 'Fallback recovery (min)', description: 'Closes an event after this continuous time below Warning Z-score. Set to 0 to disable.', min: 0, algorithms: ROBUST_ALGORITHMS },
   { key: 'preroll_minutes', label: 'Pre-roll (min)', description: 'Hidden history loaded before a selected range so its baseline is already initialized.', min: 0 },
   { key: 'gap_multiplier', label: 'Gap multiplier', description: 'A time gap larger than this multiple of the normal sample interval resets detector state.', min: 1.1, decimalScale: 1 },
   { key: 'minimum_gap_minutes', label: 'Minimum gap (min)', description: 'Absolute minimum duration that is treated as a data gap and resets the baseline.', min: 0.1, algorithms: BASELINE_ALGORITHMS },
@@ -425,6 +438,9 @@ export function AnomalyDetectionPage({ active }: { active: boolean }) {
   const [operationProgress, setOperationProgress] = useState<AnomalyDetectionProgress | null>(null);
   const [runElapsedSeconds, setRunElapsedSeconds] = useState(0);
   const [activeRun, setActiveRun] = useState<AnomalyDetectionRun | null>(null);
+  const [diagnosticAnchor, setDiagnosticAnchor] = useState('');
+  const [exactDiagnosticRows, setExactDiagnosticRows] = useState<AnomalyDetectionSeriesPoint[] | null>(null);
+  const [diagnosticsLoading, setDiagnosticsLoading] = useState(false);
   const [loadingSavedRunId, setLoadingSavedRunId] = useState<number | null>(null);
   const [detailsOpen, setDetailsOpen] = useState(true);
   const [savedPage, setSavedPage] = useState(1);
@@ -838,7 +854,10 @@ export function AnomalyDetectionPage({ active }: { active: boolean }) {
         } : {}),
         progress_token: token,
       });
-      setActiveRun(created);
+      const fullResolution = created.point_count <= MAX_DIAGNOSTIC_POINTS
+        ? await getAnomalyDetectionRun(created.id, MAX_DIAGNOSTIC_POINTS)
+        : created;
+      setActiveRun(fullResolution);
       await refresh();
       notifications.show({ color: 'green', title: 'Anomaly detection complete', message: `${created.anomaly_count} confirmed anomalies detected.` });
     } catch (error) {
@@ -857,7 +876,7 @@ export function AnomalyDetectionPage({ active }: { active: boolean }) {
     setLoadingSavedRunId(runId);
     const stopPolling = beginProgressPolling(token, setOperationProgress);
     try {
-      const loaded = await getAnomalyDetectionRun(runId, MAX_PREVIEW_POINTS, token);
+      const loaded = await getAnomalyDetectionRun(runId, MAX_DIAGNOSTIC_POINTS, token);
       setActiveRun(loaded);
       setDetailsOpen(true);
     } catch (error) {
@@ -949,6 +968,63 @@ export function AnomalyDetectionPage({ active }: { active: boolean }) {
     }
     return data;
   }, [activeRun]);
+
+  useEffect(() => {
+    if (!activeRun) {
+      setDiagnosticAnchor('');
+      return;
+    }
+    setDiagnosticAnchor(activeRun.events.find((event) => event.confirmed_at)?.peak_timestamp ?? activeRun.start_timestamp);
+    setExactDiagnosticRows(null);
+  }, [activeRun?.id]);
+
+  const diagnosticRows = useMemo(() => {
+    if (!activeRun || !ROBUST_ALGORITHMS.includes(activeRun.config.algorithm)) return [];
+    const anchorTime = Date.parse(diagnosticAnchor);
+    const startIndex = Number.isFinite(anchorTime)
+      ? activeRun.series.findIndex((point) => Date.parse(point.timestamp) >= anchorTime)
+      : 0;
+    return activeRun.series.slice(Math.max(0, startIndex), Math.max(0, startIndex) + 200);
+  }, [activeRun, diagnosticAnchor]);
+
+  const displayedDiagnosticRows = exactDiagnosticRows ?? diagnosticRows;
+
+  async function loadExactDiagnostics() {
+    if (!activeRun || !diagnosticAnchor) return;
+    setDiagnosticsLoading(true);
+    try {
+      const rows = await getAnomalyDetectionDiagnostics(activeRun.id, diagnosticAnchor, 200);
+      setExactDiagnosticRows(rows);
+    } catch (error) {
+      notifications.show({ color: 'red', title: 'Could not load diagnostics', message: errorMessage(error) });
+    } finally {
+      setDiagnosticsLoading(false);
+    }
+  }
+
+  function downloadDiagnosticCsv() {
+    if (!activeRun || displayedDiagnosticRows.length === 0) return;
+    const header = ['timestamp', 'error', 'median', 'mad', 'scale', 'robust_z', 'ewma', 'cusum_increment', 'cusum', 'state'];
+    const rows = displayedDiagnosticRows.map((point) => [
+      point.timestamp,
+      point.score,
+      point.baseline ?? '',
+      point.mad ?? '',
+      point.scale ?? '',
+      point.robust_z ?? '',
+      point.smoothed,
+      point.cusum_increment ?? '',
+      point.cusum,
+      point.state,
+    ]);
+    const csv = [header, ...rows].map((row) => row.join(',')).join('\n');
+    const url = URL.createObjectURL(new Blob([csv], { type: 'text/csv;charset=utf-8' }));
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `anomaly-run-${activeRun.id}-diagnostics.csv`;
+    link.click();
+    URL.revokeObjectURL(url);
+  }
 
   return (
     <Stack gap="lg">
@@ -1407,7 +1483,54 @@ export function AnomalyDetectionPage({ active }: { active: boolean }) {
             <PlotlyChart data={resultData} layout={{ hovermode: 'x unified', shapes: resultShapes, xaxis: { type: 'date', title: { text: 'Time' } }, yaxis: { title: { text: activeRun.score_series.replace('_', ' ').toUpperCase() } }, legend: { orientation: 'h' } }} height={480} />
             <Button variant="subtle" justify="space-between" rightSection={detailsOpen ? <ChevronDown size={16} /> : <ChevronRight size={16} />} onClick={() => setDetailsOpen((value) => !value)}>Diagnostics</Button>
             <Collapse in={detailsOpen}>
-              <PlotlyChart data={diagnosticData} layout={{ hovermode: 'x unified', xaxis: { type: 'date' }, yaxis: { title: { text: activeRun.config.algorithm === 'event_threshold' ? 'Candidate count' : activeRun.config.algorithm === 'rolling_sigma' ? 'Standard deviations' : 'Robust z-score' } }, ...(activeRun.config.algorithm === 'robust_cusum' ? { yaxis2: { title: { text: 'CUSUM' }, overlaying: 'y', side: 'right' } } : {}), legend: { orientation: 'h' } }} height={300} />
+              <Stack gap="md">
+                <PlotlyChart data={diagnosticData} layout={{ hovermode: 'x unified', xaxis: { type: 'date' }, yaxis: { title: { text: activeRun.config.algorithm === 'event_threshold' ? 'Candidate count' : activeRun.config.algorithm === 'rolling_sigma' ? 'Standard deviations' : 'Robust z-score' } }, ...(activeRun.config.algorithm === 'robust_cusum' ? { yaxis2: { title: { text: 'CUSUM' }, overlaying: 'y', side: 'right' } } : {}), legend: { orientation: 'h' } }} height={300} />
+                {ROBUST_ALGORITHMS.includes(activeRun.config.algorithm) && (
+                  <Stack gap="sm">
+                    <Group justify="space-between" align="flex-end" wrap="wrap">
+                      <DateTime24Input
+                        label="Diagnostic anchor"
+                        value={diagnosticAnchor}
+                        min={activeRun.start_timestamp}
+                        max={activeRun.end_timestamp}
+                        description="Shows the first 200 points at or after this physical event-end timestamp."
+                        onChange={(value) => {
+                          setDiagnosticAnchor(value);
+                          setExactDiagnosticRows(null);
+                        }}
+                      />
+                      <Group gap="xs">
+                        <Button variant="light" loading={diagnosticsLoading} onClick={loadExactDiagnostics}>Load exact 200 points</Button>
+                        <Button variant="light" leftSection={<Download size={16} />} disabled={displayedDiagnosticRows.length === 0} onClick={downloadDiagnosticCsv}>
+                          Export CSV
+                        </Button>
+                      </Group>
+                    </Group>
+                    {activeRun.decimated && exactDiagnosticRows === null && (
+                      <Alert color="yellow">The plot is decimated. Select the physical event-end timestamp and load the exact 200 full-resolution points before exporting.</Alert>
+                    )}
+                    <ScrollArea h={360}>
+                      <Table striped highlightOnHover withColumnBorders>
+                        <Table.Thead><Table.Tr><Table.Th>Timestamp</Table.Th><Table.Th>Error</Table.Th><Table.Th>Median</Table.Th><Table.Th>MAD</Table.Th><Table.Th>Scale</Table.Th><Table.Th>Robust Z</Table.Th><Table.Th>EWMA</Table.Th><Table.Th>CUSUM Δ</Table.Th><Table.Th>CUSUM</Table.Th><Table.Th>State</Table.Th></Table.Tr></Table.Thead>
+                        <Table.Tbody>{displayedDiagnosticRows.map((point) => (
+                          <Table.Tr key={point.timestamp}>
+                            <Table.Td>{formatTimestamp(point.timestamp)}</Table.Td>
+                            <Table.Td>{point.score.toPrecision(8)}</Table.Td>
+                            <Table.Td>{point.baseline?.toPrecision(8) ?? '—'}</Table.Td>
+                            <Table.Td>{point.mad?.toPrecision(8) ?? '—'}</Table.Td>
+                            <Table.Td>{point.scale?.toPrecision(8) ?? '—'}</Table.Td>
+                            <Table.Td>{point.robust_z?.toPrecision(8) ?? '—'}</Table.Td>
+                            <Table.Td>{point.smoothed.toPrecision(8)}</Table.Td>
+                            <Table.Td>{point.cusum_increment?.toPrecision(8) ?? '—'}</Table.Td>
+                            <Table.Td>{point.cusum.toPrecision(8)}</Table.Td>
+                            <Table.Td><Badge variant="light">{point.state}</Badge></Table.Td>
+                          </Table.Tr>
+                        ))}</Table.Tbody>
+                      </Table>
+                    </ScrollArea>
+                  </Stack>
+                )}
+              </Stack>
             </Collapse>
             <Text fw={700}>{activeRun.config.algorithm === 'event_threshold' ? 'Detected events' : 'Detected intervals'}</Text>
             {activeRun.events.length === 0 ? <Alert color="green">No warnings or confirmed anomalies detected.</Alert> : (

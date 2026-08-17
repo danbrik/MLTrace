@@ -91,6 +91,33 @@ def test_constant_signal_is_stable_when_mad_is_zero() -> None:
     assert all(point.warning_threshold is not None for point in ready)
 
 
+def test_scale_floor_limits_small_residual_after_zero_mad_baseline() -> None:
+    output = detect(_points([1.0] * 12 + [1.0001]), _fast_config())
+    point = output.series[-1]
+
+    assert point.mad == 0
+    assert point.scale == pytest.approx(0.001)
+    assert point.robust_z == pytest.approx(0.1, rel=0.02)
+    assert point.state == "normal"
+
+
+def test_cusum_increment_is_capped_and_frozen_after_confirmation() -> None:
+    output = detect(
+        _points([1.0] * 12 + [2.0] * 4),
+        _fast_config(
+            confirmation_mode="samples",
+            confirmation_samples=1,
+            cusum_z_cap=6,
+        ),
+    )
+    confirmed = [point for point in output.series if point.state == "confirmed"]
+
+    assert confirmed
+    assert confirmed[0].cusum_increment == pytest.approx(5.0)
+    assert all(point.cusum_increment == 0 for point in confirmed[1:])
+    assert len({point.cusum for point in confirmed}) == 1
+
+
 def test_brief_peak_remains_unconfirmed() -> None:
     values = [1.0] * 12 + [3.0] + [1.0] * 12
     output = detect(_points(values), _fast_config(confirmation_minutes=3))
@@ -135,12 +162,32 @@ def test_sustained_shift_confirms_and_frozen_baseline_does_not_follow() -> None:
     assert event.end_reason == "recovered"
 
 
+def test_fallback_recovery_closes_event_below_warning() -> None:
+    values = [1.0] * 12 + [1.01] * 2 + [1.002] * 4
+    output = detect(
+        _points(values),
+        _fast_config(
+            confirmation_mode="samples",
+            confirmation_samples=1,
+            fallback_recovery_minutes=2,
+        ),
+    )
+
+    assert len(output.events) == 1
+    assert output.events[0].confirmed_at is not None
+    assert output.events[0].end_reason == "recovered"
+    assert output.series[-1].state == "normal"
+
+
 def test_large_gap_closes_active_event() -> None:
     points = _points([1.0] * 8 + [3.0] * 4)
     points.append(SignalPoint(points[-1].timestamp + timedelta(hours=1), 1.0))
     output = detect(points, _fast_config(confirmation_minutes=1))
     assert output.events
     assert output.events[0].end_reason == "data_gap"
+    assert output.series[-1].state == "warmup"
+    assert output.series[-1].baseline is None
+    assert output.series[-1].mad is None
 
 
 def test_event_threshold_median_smoothing_removes_single_peak() -> None:
@@ -574,7 +621,18 @@ def test_anomaly_detection_api_crud_and_decimation() -> None:
             body = created.json()
             assert body["point_count"] == 80
             assert body["anomaly_count"] == 1
-            assert body["algorithm_version"] == "robust_cusum_v2"
+            assert body["algorithm_version"] == "robust_cusum_v3"
+            diagnostics = client.get(
+                f"/api/anomaly-detection-runs/{body['id']}/diagnostics",
+                params={"anchor": (BASE + timedelta(minutes=35)).isoformat(), "count": 3},
+            )
+            assert diagnostics.status_code == 200, diagnostics.text
+            diagnostic_points = diagnostics.json()
+            assert len(diagnostic_points) == 3
+            assert diagnostic_points[0]["timestamp"].startswith((BASE + timedelta(minutes=35)).isoformat())
+            assert diagnostic_points[0]["mad"] is not None
+            assert diagnostic_points[0]["scale"] is not None
+            assert diagnostic_points[0]["cusum_increment"] is not None
             assert body["config"]["algorithm"] == "robust_cusum"
             run_id = body["id"]
             progress = client.get(f"/api/anomaly-detection-progress/{progress_token}")
@@ -659,7 +717,7 @@ def test_anomaly_detection_api_crud_and_decimation() -> None:
                 "config": _fast_config(algorithm="robust_zscore").model_dump(),
             })
             assert zscore.status_code == 200, zscore.text
-            assert zscore.json()["algorithm_version"] == "robust_zscore_v2"
+            assert zscore.json()["algorithm_version"] == "robust_zscore_v3"
             assert zscore.json()["config"]["algorithm"] == "robust_zscore"
             assert all(point["cusum"] == 0 for point in zscore.json()["series"])
             assert client.delete(f"/api/anomaly-detection-runs/{zscore.json()['id']}").status_code == 204

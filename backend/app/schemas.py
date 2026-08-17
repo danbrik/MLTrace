@@ -1341,13 +1341,17 @@ class AnomalyDetectionConfig(BaseModel):
     minimum_warmup_points: int = Field(default=30, ge=3, le=100000)
     warning_z: float = Field(default=3.0, gt=0.0, le=1000.0)
     high_z: float = Field(default=5.0, gt=0.0, le=1000.0)
+    minimum_scale_relative: float = Field(default=1e-3, ge=0.0, le=1.0)
+    minimum_scale_absolute: float = Field(default=1e-9, ge=0.0, le=1000000.0)
     cusum_drift: float = Field(default=1.0, ge=0.0, le=1000.0)
     cusum_threshold: float = Field(default=10.0, gt=0.0, le=1000000.0)
+    cusum_z_cap: float = Field(default=20.0, gt=0.0, le=1000000.0)
     confirmation_mode: Literal["minutes", "samples"] = "minutes"
     confirmation_minutes: float = Field(default=5.0, ge=0.0, le=43200.0)
     confirmation_samples: int = Field(default=1, ge=1, le=100000)
     recovery_z: float = Field(default=1.0, ge=-1000.0, le=1000.0)
     recovery_minutes: float = Field(default=15.0, ge=0.0, le=43200.0)
+    fallback_recovery_minutes: float = Field(default=60.0, ge=0.0, le=43200.0)
     preroll_minutes: float = Field(default=120.0, ge=0.0, le=43200.0)
     gap_multiplier: float = Field(default=5.0, gt=1.0, le=1000.0)
     minimum_gap_minutes: float = Field(default=15.0, gt=0.0, le=43200.0)
@@ -1377,6 +1381,8 @@ class AnomalyDetectionConfig(BaseModel):
                 raise ValueError("high_z must be greater than or equal to warning_z.")
             if self.recovery_z >= self.warning_z:
                 raise ValueError("recovery_z must be lower than warning_z.")
+            if self.algorithm == "robust_cusum" and self.cusum_z_cap < self.high_z:
+                raise ValueError("cusum_z_cap must be greater than or equal to high_z.")
         if self.algorithm == "event_threshold":
             if self.persistence_k > self.persistence_n:
                 raise ValueError("persistence_k must be lower than or equal to persistence_n.")
@@ -1494,9 +1500,12 @@ class AnomalyDetectionSeriesPoint(BaseModel):
     score: float
     smoothed: float
     baseline: float | None
+    mad: float | None = None
+    scale: float | None = None
     warning_threshold: float | None
     high_threshold: float | None
     robust_z: float | None
+    cusum_increment: float | None = None
     cusum: float
     threshold_on: float | None = None
     threshold_off: float | None = None

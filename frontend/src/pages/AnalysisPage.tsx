@@ -769,7 +769,7 @@ const ANALYTICS_DEFINITIONS: AnalyticsDefinition[] = [
   { kind: 'rolling_slope', label: 'Rolling slope', description: 'Causal slope over a past window.', defaultParams: { windowMode: 'samples', windowSamples: 12, windowMinutes: 3, alpha: 0.2, timeNormalized: false } },
   { kind: 'rolling_median', label: 'Rolling median baseline', description: 'Causal rolling median baseline.', defaultParams: { windowMode: 'samples', windowSamples: 60, windowMinutes: 60, alpha: 0.2 } },
   { kind: 'rolling_mad', label: 'Rolling MAD', description: 'Robust local spread around rolling median.', defaultParams: { windowMode: 'samples', windowSamples: 60, windowMinutes: 60, alpha: 0.2 } },
-  { kind: 'robust_z', label: 'Robust z-score', description: 'Score relative to rolling median and MAD.', defaultParams: { windowMode: 'samples', windowSamples: 60, windowMinutes: 60, alpha: 0.2, epsilon: 1e-12 } },
+  { kind: 'robust_z', label: 'Robust z-score', description: 'Score relative to rolling median and MAD.', defaultParams: { windowMode: 'samples', windowSamples: 60, windowMinutes: 60, alpha: 0.2, minimumScaleRelative: 1e-3, minimumScaleAbsolute: 1e-9 } },
   { kind: 'positive_exceedance', label: 'Positive exceedance', description: 'Positive part above a z-score threshold.', defaultParams: { windowMode: 'samples', windowSamples: 60, windowMinutes: 60, alpha: 0.2, threshold: 1, epsilon: 1e-12 } },
   { kind: 'rolling_area', label: 'Rolling area', description: 'Accumulated positive exceedance in a causal window.', defaultParams: { windowMode: 'samples', windowSamples: 12, windowMinutes: 3, baselineWindowSamples: 60, baselineWindowMinutes: 60, alpha: 0.2, threshold: 1, epsilon: 1e-12 } },
   { kind: 'rolling_mean', label: 'Rolling mean', description: 'Causal local average of the smoothed score.', defaultParams: { windowMode: 'samples', windowSamples: 12, windowMinutes: 3, alpha: 0.2 } },
@@ -778,7 +778,7 @@ const ANALYTICS_DEFINITIONS: AnalyticsDefinition[] = [
   { kind: 'positive_slope_count', label: 'Positive slope count', description: 'Number of positive slopes in the causal window.', defaultParams: { windowMode: 'samples', windowSamples: 12, windowMinutes: 3, alpha: 0.2, slopeThreshold: 0 } },
   { kind: 'positive_slope_fraction', label: 'Positive slope fraction', description: 'Fraction of slopes above threshold in the causal window.', defaultParams: { windowMode: 'samples', windowSamples: 12, windowMinutes: 3, alpha: 0.2, slopeThreshold: 0 } },
   { kind: 'rising_streak', label: 'Rising streak', description: 'Current consecutive count of positive slopes.', defaultParams: { alpha: 0.2, slopeThreshold: 0 } },
-  { kind: 'cusum', label: 'CUSUM', description: 'Positive evidence accumulator on robust z-score.', defaultParams: { windowMode: 'samples', windowSamples: 60, windowMinutes: 60, alpha: 0.2, k: 1, h: 8, epsilon: 1e-12 } },
+  { kind: 'cusum', label: 'CUSUM', description: 'Positive evidence accumulator on robust z-score.', defaultParams: { windowMode: 'samples', windowSamples: 60, windowMinutes: 60, alpha: 0.2, k: 1, h: 8, zCap: 20, minimumScaleRelative: 1e-3, minimumScaleAbsolute: 1e-9 } },
   { kind: 'page_hinkley', label: 'Page-Hinkley', description: 'Online mean-shift accumulator.', defaultParams: { windowMode: 'samples', windowSamples: 60, windowMinutes: 60, alpha: 0.2, delta: 0.2, lambda: 8, epsilon: 1e-12 } },
   { kind: 'evidence_score', label: 'Evidence score', description: 'Online positive/negative evidence score.', defaultParams: { windowMode: 'samples', windowSamples: 20, windowMinutes: 5, alpha: 0.2, zThreshold: 1, slopeThreshold: 0, w1: 1, w2: 1, w3: 0.2, v1: 1, v2: 0.5, v3: 1, epsilon: 1e-12 } },
   { kind: 'slope_height_ratio', label: 'Slope / height ratio', description: 'Current slope relative to robust z-score height.', defaultParams: { windowMode: 'samples', windowSamples: 60, windowMinutes: 60, alpha: 0.2, epsilon: 1e-12 } },
@@ -788,7 +788,7 @@ const ANALYTICS_DEFINITIONS: AnalyticsDefinition[] = [
   { kind: 'rolling_std', label: 'Rolling std', description: 'Causal local standard deviation.', defaultParams: { windowMode: 'samples', windowSamples: 20, windowMinutes: 5, alpha: 0.2 } },
   { kind: 'rolling_cv', label: 'Rolling coefficient of variation', description: 'Rolling std divided by rolling mean.', defaultParams: { windowMode: 'samples', windowSamples: 20, windowMinutes: 5, alpha: 0.2, epsilon: 1e-12 } },
   { kind: 'time_since_onset', label: 'Time since onset', description: 'Elapsed time since z and slope crossed onset thresholds.', defaultParams: { windowMode: 'samples', windowSamples: 60, windowMinutes: 60, alpha: 0.2, onsetThreshold: 1, slopeThreshold: 0, resetThreshold: 0.5, epsilon: 1e-12 } },
-  { kind: 'state_machine', label: 'State machine', description: 'Visual state band from z-score, slope and CUSUM thresholds.', defaultParams: { windowMode: 'samples', windowSamples: 60, windowMinutes: 60, alpha: 0.2, lowThreshold: 1, slopeThreshold: 0, hLow: 5, hHigh: 10, offThreshold: 0.5, epsilon: 1e-12 } },
+  { kind: 'state_machine', label: 'State machine', description: 'Visual state band from z-score, slope and CUSUM thresholds.', defaultParams: { windowMode: 'samples', windowSamples: 60, windowMinutes: 60, alpha: 0.2, lowThreshold: 1, slopeThreshold: 0, hLow: 5, hHigh: 10, offThreshold: 0.5, k: 1, zCap: 20, minimumScaleRelative: 1e-3, minimumScaleAbsolute: 1e-9 } },
 ];
 
 function analyticsDefinition(kind: AnalyticsKind): AnalyticsDefinition {
@@ -819,6 +819,9 @@ function analyticsParamLabel(key: string): string {
     offThreshold: 'Off threshold',
     zThreshold: 'Z threshold',
     epsilon: 'Epsilon',
+    minimumScaleRelative: 'Relative scale floor',
+    minimumScaleAbsolute: 'Absolute scale floor',
+    zCap: 'CUSUM z cap',
     k: 'CUSUM k',
     h: 'CUSUM h',
     hLow: 'Low evidence threshold',
@@ -859,6 +862,9 @@ function analyticsParamInfo(key: string): string {
     offThreshold: 'Level below which the state machine can return to normal.',
     zThreshold: 'Robust z-score threshold used for positive evidence.',
     epsilon: 'Small value added to denominators for numerical stability.',
+    minimumScaleRelative: 'Minimum robust scale as a fraction of the rolling median magnitude.',
+    minimumScaleAbsolute: 'Absolute lower bound for the robust scale in score units.',
+    zCap: 'Maximum robust z-score contribution added to CUSUM per sample.',
     k: 'CUSUM drift allowance. Larger values ignore more weak evidence.',
     h: 'CUSUM alarm threshold shown for interpretation.',
     hLow: 'Low CUSUM/evidence threshold for likely anomaly state.',
@@ -1207,7 +1213,8 @@ function rollingMap(values: number[], times: number[], config: AnalyticsMethodCo
 
 function robustZ(values: number[], times: number[], config: AnalyticsMethodConfig): { z: number[]; baseline: number[]; mad: number[] } {
   const alpha = numberParam(config, 'alpha', 0.2);
-  const epsilon = numberParam(config, 'epsilon', 1e-12);
+  const minimumScaleRelative = Math.max(0, numberParam(config, 'minimumScaleRelative', 1e-3));
+  const minimumScaleAbsolute = Math.max(0, numberParam(config, 'minimumScaleAbsolute', 1e-9));
   const smooth = ewma(values, alpha);
   const baseline = rollingMap(smooth, times, config, (slice) => median(slice));
   const mad = smooth.map((_, index) => {
@@ -1216,7 +1223,10 @@ function robustZ(values: number[], times: number[], config: AnalyticsMethodConfi
     return median(deviations);
   });
   return {
-    z: smooth.map((value, index) => (value - baseline[index]) / (1.4826 * mad[index] + epsilon)),
+    z: smooth.map((value, index) => {
+      const scale = Math.max(1.4826 * mad[index], Math.abs(baseline[index]) * minimumScaleRelative, minimumScaleAbsolute);
+      return (value - baseline[index]) / scale;
+    }),
     baseline,
     mad,
   };
@@ -1309,9 +1319,10 @@ function computeAnalyticsSeries(config: AnalyticsMethodConfig, values: number[],
     case 'cusum': {
       const z = robustZ(values, times, config).z;
       const k = numberParam(config, 'k', 1);
+      const zCap = numberParam(config, 'zCap', 20);
       let g = 0;
       return z.map((value) => {
-        g = Math.max(0, g + value - k);
+        g = Math.max(0, g + Math.min(value, zCap) - k);
         return finiteOrNull(g);
       });
     }
@@ -1394,19 +1405,24 @@ function computeAnalyticsSeries(config: AnalyticsMethodConfig, values: number[],
     }
     case 'state_machine': {
       const z = robustZ(values, times, config).z;
-      const cusumConfig = { ...config, kind: 'cusum' as AnalyticsKind, params: { ...config.params, h: numberParam(config, 'hHigh', 10) } };
-      const cusum = computeAnalyticsSeries(cusumConfig, values, timestamps).map((value) => value ?? 0);
       const low = numberParam(config, 'lowThreshold', 1);
       const slope = numberParam(config, 'slopeThreshold', 0);
       const hLow = numberParam(config, 'hLow', 5);
       const hHigh = numberParam(config, 'hHigh', 10);
       const off = numberParam(config, 'offThreshold', 0.5);
+      const k = numberParam(config, 'k', 1);
+      const zCap = numberParam(config, 'zCap', 20);
+      let cusum = 0;
       let state = 0;
       return z.map((value, index) => {
-        if (cusum[index] >= hHigh) state = 3;
-        else if (cusum[index] >= hLow) state = 2;
+        cusum = Math.max(0, cusum + Math.min(value, zCap) - k);
+        if (state > 0 && value < off) {
+          state = 0;
+          cusum = 0;
+        }
+        else if (cusum >= hHigh) state = 3;
+        else if (cusum >= hLow) state = 2;
         else if (value > low && d[index] > slope) state = 1;
-        else if (state > 0 && value < off) state = 0;
         return state;
       });
     }

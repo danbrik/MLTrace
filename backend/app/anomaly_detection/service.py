@@ -29,8 +29,8 @@ from app.schemas import (
 
 
 ALGORITHM_VERSIONS = {
-    "robust_zscore": "robust_zscore_v2",
-    "robust_cusum": "robust_cusum_v2",
+    "robust_zscore": "robust_zscore_v3",
+    "robust_cusum": "robust_cusum_v3",
     "event_threshold": "event_threshold_v1",
     "rolling_sigma": "rolling_sigma_v2",
 }
@@ -453,6 +453,7 @@ def detect(
     progress_callback: ProgressCallback | None = None,
     *,
     resolved_threshold: float | None = None,
+    legacy_robust_behavior: bool = False,
 ) -> DetectionOutput:
     if config.algorithm == "event_threshold":
         threshold = config.manual_threshold if config.threshold_mode == "manual" else resolved_threshold
@@ -461,7 +462,12 @@ def detect(
         return _detect_event_threshold(points, config, float(threshold), progress_callback)
     if config.algorithm == "rolling_sigma":
         return _detect_rolling_sigma(points, config, progress_callback)
-    return _detect_robust(points, config, progress_callback)
+    return _detect_robust(
+        points,
+        config,
+        progress_callback,
+        legacy_behavior=legacy_robust_behavior,
+    )
 
 
 def _detect_rolling_sigma(
@@ -646,6 +652,8 @@ def _detect_robust(
     points: list[SignalPoint],
     config: AnomalyDetectionConfig,
     progress_callback: ProgressCallback | None = None,
+    *,
+    legacy_behavior: bool = False,
 ) -> DetectionOutput:
     """Run the version-1 causal detector.
 
@@ -664,6 +672,7 @@ def _detect_robust(
     warmup_seconds = config.warmup_minutes * 60.0
     confirmation_seconds = config.confirmation_minutes * 60.0
     recovery_seconds = config.recovery_minutes * 60.0
+    fallback_recovery_seconds = config.fallback_recovery_minutes * 60.0
 
     total_points = len(ordered)
     progress_stride = max(1, total_points // 100)
@@ -703,13 +712,15 @@ def _detect_robust(
     cusum = 0.0
     active: DetectionEvent | None = None
     recovery_started: datetime | None = None
+    fallback_recovery_started: datetime | None = None
     confirmation_started: datetime | None = None
     confirmation_count = 0
     output_events: list[DetectionEvent] = []
     series: list[AnomalyDetectionSeriesPoint] = []
 
     def close_active(at: datetime, reason: str) -> None:
-        nonlocal active, state, cusum, recovery_started, confirmation_started, confirmation_count
+        nonlocal active, state, cusum, recovery_started, fallback_recovery_started
+        nonlocal confirmation_started, confirmation_count
         if active is not None:
             active.end_timestamp = at
             active.end_reason = reason
@@ -718,6 +729,7 @@ def _detect_robust(
         state = "normal"
         cusum = 0.0
         recovery_started = None
+        fallback_recovery_started = None
         confirmation_started = None
         confirmation_count = 0
 
@@ -729,6 +741,11 @@ def _detect_robust(
         smoothed = smoothed_values[index]
         if is_gap:
             close_active(ordered[index - 1].timestamp, "data_gap")
+            if not legacy_behavior:
+                baseline_buffer.clear()
+                baseline_values = _FenwickMultiset(sorted(set(smoothed_values)))
+                normal_clock = 0.0
+                first_baseline_clock = None
 
         if state == "normal":
             normal_clock += dt
@@ -741,7 +758,11 @@ def _detect_robust(
         mad = baseline_values.median_absolute_deviation(baseline) if baseline is not None else None
         scale = None
         if baseline is not None and mad is not None:
-            scale = max(1.4826 * mad, abs(baseline) * 1e-6, 1e-12)
+            scale = max(
+                1.4826 * mad,
+                abs(baseline) * config.minimum_scale_relative,
+                config.minimum_scale_absolute,
+            )
         baseline_span = 0.0 if first_baseline_clock is None else normal_clock - first_baseline_clock
         ready = baseline_values.size >= config.minimum_warmup_points and baseline_span >= warmup_seconds
 
@@ -751,10 +772,15 @@ def _detect_robust(
 
         if ready and robust_z is not None:
             evidence_minutes = max(0.0, dt) / 60.0
-            if config.algorithm == "robust_cusum":
-                cusum = max(0.0, cusum + (robust_z - config.cusum_drift) * evidence_minutes)
+            cusum_increment = 0.0
+            if config.algorithm == "robust_cusum" and (state != "confirmed" or legacy_behavior):
+                cusum_evidence = min(robust_z, config.cusum_z_cap)
+                cusum_increment = (cusum_evidence - config.cusum_drift) * evidence_minutes
+                cusum = max(0.0, cusum + cusum_increment)
             else:
-                cusum = 0.0
+                cusum_increment = 0.0
+                if config.algorithm != "robust_cusum":
+                    cusum = 0.0
             if state == "normal" and robust_z >= config.warning_z:
                 state = "warning"
                 active = DetectionEvent(
@@ -800,8 +826,17 @@ def _detect_robust(
                         close_active(point.timestamp, "recovered")
                 else:
                     recovery_started = None
+                if fallback_recovery_seconds > 0.0 and robust_z < config.warning_z:
+                    fallback_recovery_started = fallback_recovery_started or point.timestamp
+                    if (
+                        point.timestamp - fallback_recovery_started
+                    ).total_seconds() >= fallback_recovery_seconds:
+                        close_active(point.timestamp, "recovered")
+                else:
+                    fallback_recovery_started = None
         else:
             cusum = 0.0
+            cusum_increment = None
 
         display_state = "warmup" if not ready else state
         series.append(AnomalyDetectionSeriesPoint(
@@ -809,9 +844,12 @@ def _detect_robust(
             score=point.score,
             smoothed=smoothed,
             baseline=baseline if ready else None,
+            mad=mad if ready else None,
+            scale=scale if ready else None,
             warning_threshold=warning_threshold,
             high_threshold=high_threshold,
             robust_z=robust_z,
+            cusum_increment=cusum_increment,
             cusum=cusum,
             state=display_state,
         ))
@@ -1001,7 +1039,19 @@ def _compute_for_run(
     run: models.AnomalyDetectionRun,
     progress_token: str | None = None,
 ) -> DetectionOutput:
-    config = AnomalyDetectionConfig.model_validate(run.config)
+    config_data = dict(run.config)
+    legacy_robust_behavior = run.algorithm_version in {
+        "robust_zscore_v1",
+        "robust_zscore_v2",
+        "robust_cusum_v1",
+        "robust_cusum_v2",
+    }
+    if legacy_robust_behavior:
+        config_data.setdefault("minimum_scale_relative", 1e-6)
+        config_data.setdefault("minimum_scale_absolute", 1e-12)
+        config_data.setdefault("cusum_z_cap", 1000000.0)
+        config_data.setdefault("fallback_recovery_minutes", 0.0)
+    config = AnomalyDetectionConfig.model_validate(config_data)
     _set_progress(db, progress_token, "loading", 0, 0, "Loading the full-resolution score series")
     points = _load_points(
         db,
@@ -1024,6 +1074,7 @@ def _compute_for_run(
         config,
         _progress_callback(db, progress_token),
         resolved_threshold=run.resolved_threshold,
+        legacy_robust_behavior=legacy_robust_behavior,
     )
     return _visible_output(detected, run.start_timestamp, run.end_timestamp)
 
@@ -1227,6 +1278,21 @@ def get_run(
             error=str(exc),
         )
         raise
+
+
+def get_run_diagnostics(
+    db: Session,
+    run_id: int,
+    anchor: datetime,
+    count: int = 200,
+) -> list[AnomalyDetectionSeriesPoint] | None:
+    run = db.get(models.AnomalyDetectionRun, run_id)
+    if run is None:
+        return None
+    output = _compute_for_run(db, run)
+    timestamps = [point.timestamp for point in output.series]
+    start = bisect_left(timestamps, anchor)
+    return output.series[start:start + count]
 
 
 def delete_run(db: Session, run_id: int) -> bool:

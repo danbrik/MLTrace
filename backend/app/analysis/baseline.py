@@ -96,8 +96,13 @@ def _robust_z(values: list[float], times: list[float], params: dict[str, Any]) -
     for index, center in enumerate(baseline):
         start = _window_start(times, index, params)
         mad.append(_median([abs(value - center) for value in smooth[start:index + 1]]))
-    epsilon = _number(params, "epsilon", 1e-12)
-    z = [(value - baseline[index]) / (1.4826 * mad[index] + epsilon) for index, value in enumerate(smooth)]
+    minimum_scale_relative = max(0.0, _number(params, "minimumScaleRelative", 1e-3))
+    minimum_scale_absolute = max(0.0, _number(params, "minimumScaleAbsolute", 1e-9))
+    scales = [
+        max(1.4826 * mad[index], abs(baseline[index]) * minimum_scale_relative, minimum_scale_absolute)
+        for index in range(len(smooth))
+    ]
+    z = [(value - baseline[index]) / scales[index] for index, value in enumerate(smooth)]
     return z, baseline, mad
 
 
@@ -183,7 +188,8 @@ def compute_analytics(kind: str, params: dict[str, Any], values: list[float], ti
         running_mean = 0.0
         for index, value in enumerate(z):
             if kind == "cusum":
-                accumulator = max(0.0, accumulator + value - _number(params, "k", 1.0))
+                capped_value = min(value, _number(params, "zCap", 20.0))
+                accumulator = max(0.0, accumulator + capped_value - _number(params, "k", 1.0))
             else:
                 running_mean += (value - running_mean) / (index + 1)
                 accumulator = max(0.0, accumulator + value - running_mean - _number(params, "delta", 0.2))
@@ -251,18 +257,23 @@ def compute_analytics(kind: str, params: dict[str, Any], values: list[float], ti
         return finite(output)
     if kind == "state_machine":
         z, _, _ = _robust_z(values, times, params)
-        cusum = [value or 0.0 for value in compute_analytics("cusum", params, values, timestamps)]
+        accumulator = 0.0
         state = 0.0
         output = []
         for index, value in enumerate(z):
-            if cusum[index] >= _number(params, "hHigh", 10.0):
+            accumulator = max(
+                0.0,
+                accumulator + min(value, _number(params, "zCap", 20.0)) - _number(params, "k", 1.0),
+            )
+            if state > 0 and value < _number(params, "offThreshold", 0.5):
+                state = 0.0
+                accumulator = 0.0
+            elif accumulator >= _number(params, "hHigh", 10.0):
                 state = 3.0
-            elif cusum[index] >= _number(params, "hLow", 5.0):
+            elif accumulator >= _number(params, "hLow", 5.0):
                 state = 2.0
             elif value > _number(params, "lowThreshold", 1.0) and derivative[index] > _number(params, "slopeThreshold", 0.0):
                 state = 1.0
-            elif state > 0 and value < _number(params, "offThreshold", 0.5):
-                state = 0.0
             output.append(state)
         return output
     return finite(values)
