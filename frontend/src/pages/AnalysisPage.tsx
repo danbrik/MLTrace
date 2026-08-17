@@ -59,6 +59,7 @@ import { PlotlyChart, type PlotlyChartClick, type PlotlyChartDoubleClick, type P
 import { StepCard } from '../components/StepCard';
 import { DEFAULT_TABLE_PAGE_SIZE, TablePagination } from '../components/TablePagination';
 import type { Data, Layout, PlotRelayoutEvent } from '../lib/plotly';
+import { withLineGapPolicy } from '../lib/plotGaps';
 import { formatValue } from '../methods/utils';
 import { datasetResolutions, formatResolution, orderedGraphNodes, stepDetail } from '../training/graph';
 import {
@@ -1044,27 +1045,6 @@ function medianPositiveTimeDelta(timestamps: string[]): number | null {
   return deltas.length % 2 === 0 ? (deltas[middle - 1] + deltas[middle]) / 2 : deltas[middle];
 }
 
-function insertVisibleTimeGaps(timestamps: string[], values: Array<number | null>): { x: Array<string | null>; y: Array<number | null> } {
-  const typicalDelta = medianPositiveTimeDelta(timestamps);
-  if (typicalDelta === null || timestamps.length < 2) return { x: timestamps, y: values };
-  const gapThreshold = Math.max(15_000, typicalDelta * 5);
-  const x: Array<string | null> = [];
-  const y: Array<number | null> = [];
-  for (let index = 0; index < timestamps.length; index += 1) {
-    if (index > 0) {
-      const previous = new Date(timestamps[index - 1]).getTime();
-      const current = new Date(timestamps[index]).getTime();
-      if (Number.isFinite(previous) && Number.isFinite(current) && current - previous > gapThreshold) {
-        x.push(new Date(previous + Math.min(gapThreshold, (current - previous) / 2)).toISOString());
-        y.push(null);
-      }
-    }
-    x.push(timestamps[index]);
-    y.push(values[index] ?? null);
-  }
-  return { x, y };
-}
-
 function paddedAxisRange(minimum: number, maximum: number): TimeSeriesAxisRange {
   if (minimum === maximum) {
     const padding = Math.max(Math.abs(minimum) * 0.05, 1e-9);
@@ -1495,13 +1475,12 @@ function TimeSeriesPlot({
       });
       displayPanels.forEach((panel, panelIndex) => {
         const y = panel.kind === 'raw' ? stageOutputs.get('input') ?? [] : stageOutputs.get(panel.kind) ?? [];
-        const visibleSeries = insertVisibleTimeGaps(x, y);
-        nextTraces.push({
+        nextTraces.push(withLineGapPolicy({
           type: 'scatter',
           mode: selectionActive ? 'lines+markers' : 'lines',
           name: panelIndex === 0 ? group.name : `${group.name} · ${analyticsDefinition(panel.kind).label}`,
-          x: visibleSeries.x,
-          y: visibleSeries.y,
+          x,
+          y,
           xaxis: 'x',
           yaxis: panelIndex === 0 ? 'y' : `y${panelIndex + 1}`,
           line: { color: group.color || TRACE_COLORS[groupIndex % TRACE_COLORS.length], width: panel.kind === 'state_machine' ? 2.2 : 1.7, shape: panel.kind === 'state_machine' ? 'hv' : 'linear' },
@@ -1509,7 +1488,9 @@ function TimeSeriesPlot({
           ...(selectionActive ? { marker: { size: 8, color: group.color || TRACE_COLORS[groupIndex % TRACE_COLORS.length] } } : {}),
           showlegend: panelIndex === 0,
           hovertemplate: `%{x|%Y-%m-%d %H:%M:%S}<br>${analyticsDefinition(panel.kind).label} %{y:.5g}<extra>${group.name}</extra>`,
-        } as unknown as Data);
+        } as unknown as Data, {
+          continuity: orderedResults.map((result) => result.continuity_segment ?? 0),
+        }));
       });
     });
     return nextTraces;
@@ -2247,14 +2228,12 @@ function BaselineRegionResultPlot({
   const displayedDefinition = { ...definition, start: regionStart, end: regionEnd };
   const zData: Data[] = regionTraces.map(({ trace, region }) => {
     const series = legacyRegionSeries(trace, region, displayedDefinition);
-    const visibleSeries = insertVisibleTimeGaps(
-      series.map((point) => point.timestamp),
-      series.map((point) => point.z),
-    );
-    return {
-      type: 'scatter', mode: 'lines', name: trace.label, x: visibleSeries.x,
-      y: visibleSeries.y, line: { color: trace.color, width: 1.6 }, connectgaps: false,
-    } as unknown as Data;
+    return withLineGapPolicy({
+      type: 'scatter', mode: 'lines', name: trace.label, x: series.map((point) => point.timestamp),
+      y: series.map((point) => point.z), line: { color: trace.color, width: 1.6 }, connectgaps: false,
+    } as unknown as Data, {
+      continuity: series.map((point) => point.continuity_segment ?? 0),
+    });
   });
   const traceValues: TimeSeriesTraceValues[] = zData.map((trace) => {
     const value = trace as unknown as { x?: Array<string | number | Date | null>; y?: Array<number | null> };

@@ -72,3 +72,27 @@ def test_results_decimated_to_max_points_with_bounds(tmp_path: Path) -> None:
         assert positions == sorted(positions)
     finally:
         db.close()
+
+
+def test_decimation_preserves_full_resolution_continuity_segments() -> None:
+    db = make_db()
+    try:
+        run_id = _seed_run_with_results(db, count=1000)
+        rows = db.query(models.TestingRunResult).filter(
+            models.TestingRunResult.testing_run_id == run_id,
+            models.TestingRunResult.position >= 500,
+        ).all()
+        for row in rows:
+            row.timestamp += timedelta(seconds=1)
+        db.commit()
+
+        capped = get_testing_run_results(db, run_id, max_points=100)
+        assert capped is not None
+        assert capped.decimated is True
+        before = next(row for row in reversed(capped.results) if row.position < 500)
+        after = next(row for row in capped.results if row.position >= 500)
+        assert before.continuity_segment == 0
+        assert after.continuity_segment == 1
+        assert capped.results[-1].continuity_segment == 1
+    finally:
+        db.close()

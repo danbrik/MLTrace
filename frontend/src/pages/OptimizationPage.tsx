@@ -35,6 +35,7 @@ import {
 import { PlotlyChart } from '../components/PlotlyChart';
 import { DEFAULT_TABLE_PAGE_SIZE, TablePagination } from '../components/TablePagination';
 import type { Data, Layout } from '../lib/plotly';
+import { withLineGapPolicy } from '../lib/plotGaps';
 import type {
   MethodConfiguration,
   OptimizationParameterSpec,
@@ -82,16 +83,18 @@ function metricNumber(metrics: Record<string, unknown> | null, key: string): num
 }
 
 function objectivePlot(study: OptimizationStudy | null): { data: Data[]; layout: Partial<Layout> } {
-  const trials = study?.trials.filter((trial) => typeof trial.objective_value === 'number') ?? [];
+  const trials = [...(study?.trials ?? [])].sort((left, right) => left.number - right.number);
   return {
     data: [
-      {
+      withLineGapPolicy({
         type: 'scatter',
         mode: 'lines+markers',
         x: trials.map((trial) => trial.number),
-        y: trials.map((trial) => trial.objective_value),
+        y: trials.map((trial) => typeof trial.objective_value === 'number' && Number.isFinite(trial.objective_value)
+          ? trial.objective_value
+          : null),
         name: 'Objective',
-      } as Data,
+      } as Data, { discreteStep: 1 }),
     ],
     layout: {
       height: 260,

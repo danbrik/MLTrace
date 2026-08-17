@@ -15,6 +15,7 @@ from sqlalchemy import delete, or_, select
 from sqlalchemy.orm import Session, selectinload
 
 from app import models
+from app.continuity import continuity_segments, source_group
 from app.schemas import (
     AnomalyDetectionCalibrationMetrics,
     AnomalyDetectionCalibrationRead,
@@ -63,6 +64,7 @@ ProgressCallback = Callable[[str, int, int, str], None]
 class SignalPoint:
     timestamp: datetime
     score: float
+    continuity_segment: int = 0
 
 
 @dataclass
@@ -464,6 +466,7 @@ def _detect_event_threshold(
 
         series.append(AnomalyDetectionSeriesPoint(
             timestamp=point.timestamp,
+            continuity_segment=point.continuity_segment,
             score=point.score,
             smoothed=smoothed,
             baseline=None,
@@ -588,6 +591,7 @@ def _detect_simple_threshold(
 
         series.append(AnomalyDetectionSeriesPoint(
             timestamp=point.timestamp,
+            continuity_segment=point.continuity_segment,
             score=point.score,
             smoothed=signal,
             baseline=None,
@@ -784,6 +788,7 @@ def _detect_rolling_sigma(
         )
         series.append(AnomalyDetectionSeriesPoint(
             timestamp=point.timestamp,
+            continuity_segment=point.continuity_segment,
             score=point.score,
             smoothed=point.score,
             baseline=mean if ready else None,
@@ -1085,6 +1090,7 @@ def _detect_robust(
         display_state = "warmup" if not display_ready else state
         series.append(AnomalyDetectionSeriesPoint(
             timestamp=point.timestamp,
+            continuity_segment=point.continuity_segment,
             score=point.score,
             smoothed=smoothed,
             baseline=baseline if display_ready else None,
@@ -1139,7 +1145,11 @@ def _load_points(
     column = _score_column(score_series)
     query_start = start_timestamp - timedelta(minutes=preroll_minutes)
     rows = db.execute(
-        select(models.TestingRunResult.timestamp, column)
+        select(
+            models.TestingRunResult.timestamp,
+            column,
+            models.TestingRunResult.image_path,
+        )
         .where(
             models.TestingRunResult.testing_run_id == testing_run_id,
             models.TestingRunResult.timestamp >= query_start,
@@ -1148,7 +1158,15 @@ def _load_points(
         )
         .order_by(models.TestingRunResult.timestamp, models.TestingRunResult.position)
     ).all()
-    return [SignalPoint(timestamp=timestamp, score=float(score)) for timestamp, score in rows if _finite(score)]
+    finite_rows = [row for row in rows if _finite(row[1])]
+    segment_ids = continuity_segments(
+        [row[0] for row in finite_rows],
+        [source_group(row[2]) for row in finite_rows],
+    )
+    return [
+        SignalPoint(timestamp=timestamp, score=float(score), continuity_segment=segment)
+        for (timestamp, score, _image_path), segment in zip(finite_rows, segment_ids, strict=True)
+    ]
 
 
 def _quantile(values: list[float], quantile: float) -> float:

@@ -569,6 +569,7 @@ class BaselineSeriesPointRead(BaseModel):
     raw: float | None
     signal: float | None
     z: float | None
+    continuity_segment: int = 0
 
 
 class BaselineAnomalyEventRead(BaseModel):
@@ -1265,6 +1266,7 @@ class TestingRunResultRead(BaseModel):
     result_metadata: dict | None = None
     width: int
     height: int
+    continuity_segment: int = 0
 
 
 class TestingRunRead(BaseModel):
@@ -1655,6 +1657,7 @@ class AnomalyDetectionSeriesPoint(BaseModel):
     persistence_count: int = 0
     baseline_std: float | None = None
     state: Literal["warmup", "normal", "warning", "confirmed"]
+    continuity_segment: int = 0
 
 
 class AnomalyDetectionBaselineTransition(BaseModel):

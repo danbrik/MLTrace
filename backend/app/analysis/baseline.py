@@ -12,6 +12,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app import models
+from app.continuity import continuity_segments, source_group
 from app.schemas import (
     BaselineAnomalyEventRead,
     BaselineNormalizationRequest,
@@ -447,13 +448,20 @@ def calculate(db: Session, payload: BaselineNormalizationRequest) -> BaselineNor
             raise ValueError(f"Finished testing run #{trace.testing_run_id} was not found.")
         trace_start = _naive(trace.start)
         trace_end = _naive(trace.end)
-        rows = list(db.scalars(
+        full_rows = list(db.scalars(
             select(models.TestingRunResult)
             .where(models.TestingRunResult.testing_run_id == trace.testing_run_id)
             .where(models.TestingRunResult.timestamp >= trace_start)
             .where(models.TestingRunResult.timestamp <= trace_end)
             .order_by(models.TestingRunResult.timestamp, models.TestingRunResult.position)
-        ))[::payload.sampling]
+        ))
+        full_continuity = continuity_segments(
+            [row.timestamp for row in full_rows],
+            [source_group(row.image_path) for row in full_rows],
+        )
+        sampled_indices = list(range(0, len(full_rows), payload.sampling))
+        rows = [full_rows[index] for index in sampled_indices]
+        row_continuity = [full_continuity[index] for index in sampled_indices]
         if not rows:
             raise ValueError(f"Testing run #{trace.testing_run_id} has no results in the selected plot range.")
 
@@ -510,6 +518,7 @@ def calculate(db: Session, payload: BaselineNormalizationRequest) -> BaselineNor
                 raw=raw[index] if math.isfinite(raw[index]) else None,
                 signal=(float(signal[index]) if signal[index] is not None and math.isfinite(float(signal[index])) else None),
                 z=(float(z[index]) if z[index] is not None and math.isfinite(float(z[index])) else None),
+                continuity_segment=row_continuity[index],
             ) for index in region_indices]
             region_payloads.append({
                 "region_id": region.id,

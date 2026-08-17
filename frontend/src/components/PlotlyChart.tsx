@@ -1,6 +1,7 @@
-import { useEffect, useRef } from 'react';
+import { useEffect, useMemo, useRef } from 'react';
 import { useMantineColorScheme } from '@mantine/core';
 import Plotly, { type Data, type Layout, type Config, type PlotlyHTMLElement, type PlotMouseEvent, type PlotSelectionEvent, type PlotRelayoutEvent } from '../lib/plotly';
+import { preparePlotData } from '../lib/plotGaps';
 
 export type PlotlyChartClick = {
   timestamp: string;
@@ -50,6 +51,7 @@ export function PlotlyChart({ data, layout, config, height = 400, className, onC
   const ref = useRef<HTMLDivElement | null>(null);
   const { colorScheme } = useMantineColorScheme();
   const dark = colorScheme === 'dark';
+  const preparedData = useMemo(() => preparePlotData(data), [data]);
 
   useEffect(() => {
     const el = ref.current;
@@ -68,8 +70,8 @@ export function PlotlyChart({ data, layout, config, height = 400, className, onC
       ...layout,
     };
 
-    Plotly.react(el as unknown as PlotlyHTMLElement, data, themedLayout, { ...BASE_CONFIG, ...config });
-  }, [data, layout, config, dark]);
+    Plotly.react(el as unknown as PlotlyHTMLElement, preparedData, themedLayout, { ...BASE_CONFIG, ...config });
+  }, [preparedData, layout, config, dark]);
 
   useEffect(() => {
     const plot = ref.current as unknown as PlotlyHTMLElement | null;

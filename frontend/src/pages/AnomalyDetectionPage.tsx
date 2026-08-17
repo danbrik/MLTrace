@@ -43,6 +43,7 @@ import { DateTime24Input } from '../components/DateTime24Input';
 import { PlotlyChart, type PlotlyChartSelection } from '../components/PlotlyChart';
 import { DEFAULT_TABLE_PAGE_SIZE, TablePagination } from '../components/TablePagination';
 import type { Data, Layout } from '../lib/plotly';
+import { withLineGapPolicy } from '../lib/plotGaps';
 import {
   countFacetValues,
   facetOption,
@@ -322,6 +323,13 @@ function numberValue(value: string | number, fallback: number): number {
 
 function pointDelta(point: AnomalyDetectionSeriesPoint): number | null {
   return point.baseline === null ? null : point.smoothed - point.baseline;
+}
+
+function withContinuity(data: Data[], continuity: number[]): Data[] {
+  return data.map((trace) => {
+    const mode = (trace as { mode?: string }).mode ?? '';
+    return mode.includes('lines') ? withLineGapPolicy(trace, { continuity }) : trace;
+  });
 }
 
 function absoluteGatePassed(
@@ -833,7 +841,7 @@ export function AnomalyDetectionPage({ active }: { active: boolean }) {
     thresholdTestingRunId,
   ]);
 
-  const previewData = useMemo<Data[]>(() => [{
+  const previewData = useMemo<Data[]>(() => withContinuity([{
     type: 'scatter',
     mode: rangeMode === 'selection' ? 'lines+markers' : 'lines',
     name: scoreSeries.replace('_', ' ').toUpperCase(),
@@ -842,7 +850,7 @@ export function AnomalyDetectionPage({ active }: { active: boolean }) {
     line: { color: '#228be6', width: 1.6 },
     marker: { size: 5 },
     connectgaps: false,
-  }], [previewResults, rangeMode, scoreSeries]);
+  }], previewResults.map((result) => result.continuity_segment ?? 0)), [previewResults, rangeMode, scoreSeries]);
 
   const previewLayout = useMemo<Partial<Layout>>(() => ({
     title: { text: rangeMode === 'selection' ? 'Drag across the plot to select a time range' : 'Inference reconstruction error', font: { size: 14 } },
@@ -853,7 +861,7 @@ export function AnomalyDetectionPage({ active }: { active: boolean }) {
     showlegend: false,
   }), [rangeMode, scoreSeries]);
 
-  const thresholdPreviewData = useMemo<Data[]>(() => [{
+  const thresholdPreviewData = useMemo<Data[]>(() => withContinuity([{
     type: 'scatter',
     mode: thresholdRangeMode === 'selection' ? 'lines+markers' : 'lines',
     name: 'Validation score',
@@ -862,7 +870,7 @@ export function AnomalyDetectionPage({ active }: { active: boolean }) {
     line: { color: '#12b886', width: 1.5 },
     marker: { size: 5 },
     connectgaps: false,
-  }], [scoreSeries, thresholdRangeMode, thresholdResults]);
+  }], thresholdResults.map((result) => result.continuity_segment ?? 0)), [scoreSeries, thresholdRangeMode, thresholdResults]);
 
   const thresholdPreviewLayout = useMemo<Partial<Layout>>(() => ({
     title: { text: thresholdRangeMode === 'selection' ? 'Select normal validation range' : 'Normal validation scores', font: { size: 14 } },
@@ -873,7 +881,7 @@ export function AnomalyDetectionPage({ active }: { active: boolean }) {
     showlegend: false,
   }), [scoreSeries, thresholdRangeMode]);
 
-  const simpleThresholdRangeData = useMemo<Data[]>(() => [{
+  const simpleThresholdRangeData = useMemo<Data[]>(() => withContinuity([{
     type: 'scatter',
     mode: 'lines+markers',
     name: scoreSeries.replace('_', ' ').toUpperCase(),
@@ -882,7 +890,7 @@ export function AnomalyDetectionPage({ active }: { active: boolean }) {
     line: { color: '#0ca678', width: 1.5 },
     marker: { size: 4 },
     connectgaps: false,
-  }], [previewResults, scoreSeries]);
+  }], previewResults.map((result) => result.continuity_segment ?? 0)), [previewResults, scoreSeries]);
 
   const simpleThresholdRangeLayout = useMemo<Partial<Layout>>(() => ({
     title: { text: 'Drag across a known normal period', font: { size: 14 } },
@@ -905,7 +913,7 @@ export function AnomalyDetectionPage({ active }: { active: boolean }) {
     })),
   }), [analysisEnd, analysisStart, config.simple_threshold_normal_ranges, scoreSeries]);
 
-  const calibrationPreviewData = useMemo<Data[]>(() => [{
+  const calibrationPreviewData = useMemo<Data[]>(() => withContinuity([{
     type: 'scatter',
     mode: 'lines+markers',
     name: 'Healthy calibration score',
@@ -914,7 +922,7 @@ export function AnomalyDetectionPage({ active }: { active: boolean }) {
     line: { color: '#7950f2', width: 1.5 },
     marker: { size: 4 },
     connectgaps: false,
-  }], [previewResults, scoreSeries]);
+  }], previewResults.map((result) => result.continuity_segment ?? 0)), [previewResults, scoreSeries]);
 
   const calibrationPreviewLayout = useMemo<Partial<Layout>>(() => ({
     title: { text: 'Drag across a known healthy period', font: { size: 14 } },
@@ -1293,6 +1301,7 @@ export function AnomalyDetectionPage({ active }: { active: boolean }) {
   const resultData = useMemo<Data[]>(() => {
     if (!activeRun) return [];
     const timestamps = activeRun.series.map((point) => point.timestamp);
+    const continuity = activeRun.series.map((point) => point.continuity_segment ?? 0);
     if (activeRun.config.algorithm === 'simple_threshold') {
       const data: Data[] = [
         { type: 'scatter', mode: 'lines', name: 'Raw score', x: timestamps, y: activeRun.series.map((point) => point.score), line: { color: '#868e96', width: activeRun.config.simple_threshold_signal === 'raw' ? 2 : 1 } },
@@ -1301,25 +1310,25 @@ export function AnomalyDetectionPage({ active }: { active: boolean }) {
         data.push({ type: 'scatter', mode: 'lines', name: 'EWMA', x: timestamps, y: activeRun.series.map((point) => point.smoothed), line: { color: '#228be6', width: 2 } });
       }
       data.push({ type: 'scatter', mode: 'lines', name: 'Threshold', x: timestamps, y: activeRun.series.map((point) => point.threshold_on), line: { color: '#fa5252', width: 1.5, dash: 'dash' } });
-      return data;
+      return withContinuity(data, continuity);
     }
     if (activeRun.config.algorithm === 'event_threshold') {
       const smoothingLabel = !activeRun.config.event_smoothing_enabled
         ? 'Raw score (smoothing disabled)'
         : activeRun.config.event_smoothing_method === 'median' ? 'Rolling median' : 'Moving average';
-      return [
+      return withContinuity([
         { type: 'scatter', mode: 'lines', name: 'Raw error', x: timestamps, y: activeRun.series.map((point) => point.score), line: { color: '#868e96', width: 1 } },
         { type: 'scatter', mode: 'lines', name: smoothingLabel, x: timestamps, y: activeRun.series.map((point) => point.smoothed), line: { color: '#228be6', width: 2 } },
         { type: 'scatter', mode: 'lines', name: 'Threshold On', x: timestamps, y: activeRun.series.map((point) => point.threshold_on), line: { color: '#fa5252', width: 1.5, dash: 'dash' } },
         { type: 'scatter', mode: 'lines', name: 'Threshold Off', x: timestamps, y: activeRun.series.map((point) => point.threshold_off), line: { color: '#f59f00', width: 1.5, dash: 'dot' } },
-      ];
+      ], continuity);
     }
     if (activeRun.config.algorithm === 'rolling_sigma') {
-      return [
+      return withContinuity([
         { type: 'scatter', mode: 'lines', name: 'Raw error', x: timestamps, y: activeRun.series.map((point) => point.score), line: { color: '#228be6', width: 1.5 } },
         { type: 'scatter', mode: 'lines', name: 'Rolling mean', x: timestamps, y: activeRun.series.map((point) => point.baseline), line: { color: '#868e96', width: 1.5 } },
         { type: 'scatter', mode: 'lines', name: `Mean + ${activeRun.config.sigma_threshold}σ`, x: timestamps, y: activeRun.series.map((point) => point.high_threshold), line: { color: '#fa5252', width: 1.5, dash: 'dash' } },
-      ];
+      ], continuity);
     }
     const data: Data[] = [
       { type: 'scatter', mode: 'lines', name: 'Raw error', x: timestamps, y: activeRun.series.map((point) => point.score), line: { color: '#868e96', width: 1 } },
@@ -1349,28 +1358,29 @@ export function AnomalyDetectionPage({ active }: { active: boolean }) {
         });
       }
     }
-    return data;
+    return withContinuity(data, continuity);
   }, [activeRun]);
 
   const diagnosticData = useMemo<Data[]>(() => {
     if (!activeRun) return [];
+    const continuity = activeRun.series.map((point) => point.continuity_segment ?? 0);
     if (activeRun.config.algorithm === 'simple_threshold') {
-      return [{
+      return withContinuity([{
         type: 'scatter',
         mode: 'lines',
         name: 'Threshold candidate',
         x: activeRun.series.map((point) => point.timestamp),
         y: activeRun.series.map((point) => Number(point.candidate)),
         line: { color: '#e8590c', width: 1.5, shape: 'hv' },
-      }];
+      }], continuity);
     }
     if (activeRun.config.algorithm === 'event_threshold') {
       const candidatePoints = activeRun.series.filter((point) => point.candidate);
-      return [
+      return withContinuity([
         { type: 'scatter', mode: 'lines', name: 'Candidates in last N samples', x: activeRun.series.map((point) => point.timestamp), y: activeRun.series.map((point) => point.persistence_count), line: { color: '#7950f2', width: 1.5 } },
         { type: 'scatter', mode: 'lines', name: `Required K = ${activeRun.config.persistence_k}`, x: activeRun.series.map((point) => point.timestamp), y: activeRun.series.map(() => activeRun.config.persistence_k), line: { color: '#fa5252', width: 1.2, dash: 'dash' } },
         { type: 'scatter', mode: 'markers', name: 'Above-threshold sample', x: candidatePoints.map((point) => point.timestamp), y: candidatePoints.map((point) => point.persistence_count), marker: { color: '#f59f00', size: 5 } },
-      ];
+      ], continuity);
     }
     const data: Data[] = [
       { type: 'scatter', mode: 'lines', name: activeRun.config.algorithm === 'rolling_sigma' ? 'Standard deviations above mean' : 'Robust z-score', x: activeRun.series.map((point) => point.timestamp), y: activeRun.series.map((point) => point.robust_z), line: { color: '#7950f2', width: 1.5 } },
@@ -1381,7 +1391,7 @@ export function AnomalyDetectionPage({ active }: { active: boolean }) {
     if (activeRun.config.algorithm === 'robust_cusum') {
       data.push({ type: 'scatter', mode: 'lines', name: 'CUSUM', x: activeRun.series.map((point) => point.timestamp), y: activeRun.series.map((point) => point.cusum), yaxis: 'y2', line: { color: '#0ca678', width: 1.5 } });
     }
-    return data;
+    return withContinuity(data, continuity);
   }, [activeRun]);
 
   useEffect(() => {

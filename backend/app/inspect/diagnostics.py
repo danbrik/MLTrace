@@ -11,6 +11,7 @@ import csv
 import json
 import threading
 from collections import deque
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -19,6 +20,7 @@ import numpy as np
 from PIL import Image, ImageDraw
 
 from app import models
+from app.continuity import continuity_segments, source_group
 from app.inspect.contrast import to_intensity_16scale
 from app.preprocessing.pipeline import encode_absolute_image_data_url
 from app.video import add_timestamp_watermark, finalize_browser_mp4
@@ -193,25 +195,46 @@ def _plot_preview(example_rgb: np.ndarray, rows: list[dict[str, Any]], specs: li
     chart = (60, top_height + 35, width - 30, top_height + plot_height + 15)
     draw.rectangle(chart, outline=(210, 210, 210))
     if rows:
+        timestamps = [datetime.fromisoformat(str(row["timestamp"])) for row in rows]
+        row_segments = continuity_segments(
+            timestamps,
+            [source_group(str(row.get("frame_b") or row.get("frame_a") or "")) for row in rows],
+        )
         x_count = max(1, len(rows) - 1)
         all_values = []
         for spec in specs:
             key = value_prefix if spec["key"] == "total" else spec["key"]
-            all_values.extend(float(row.get(key, 0.0)) for row in rows if row.get(key) is not None)
+            all_values.extend(
+                float(row[key])
+                for row in rows
+                if isinstance(row.get(key), (int, float)) and np.isfinite(row[key])
+            )
         vmax = max(all_values) if all_values else 1.0
         vmin = min(all_values) if all_values else 0.0
         if vmax == vmin:
             vmax = vmin + 1.0
         for spec in specs:
             key = value_prefix if spec["key"] == "total" else spec["key"]
-            points = []
+            points: list[tuple[float, float]] = []
+
+            def draw_points() -> None:
+                if len(points) >= 2:
+                    draw.line(points, fill=spec["color"], width=2)
+
             for index, row in enumerate(rows):
-                value = float(row.get(key, 0.0) or 0.0)
+                raw_value = row.get(key)
+                if not isinstance(raw_value, (int, float)) or not np.isfinite(raw_value):
+                    draw_points()
+                    points = []
+                    continue
+                if index > 0 and row_segments[index] != row_segments[index - 1]:
+                    draw_points()
+                    points = []
+                value = float(raw_value)
                 x = chart[0] + (chart[2] - chart[0]) * index / x_count
                 y = chart[3] - (chart[3] - chart[1]) * (value - vmin) / (vmax - vmin)
                 points.append((x, y))
-            if len(points) >= 2:
-                draw.line(points, fill=spec["color"], width=2)
+            draw_points()
             label = "Total" if spec["key"] == "total" else spec["label"]
             draw.text((chart[0] + 8, chart[1] + 16 * specs.index(spec)), label, fill=spec["color"])
     draw.text((60, top_height + plot_height + 30), f"{len(rows)} temporal samples · {value_prefix}", fill=(80, 80, 80))

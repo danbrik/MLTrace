@@ -680,6 +680,7 @@ export type TestingRunResult = {
   result_metadata: Record<string, unknown> | null;
   width: number;
   height: number;
+  continuity_segment?: number;
 };
 
 export type TestingRunResults = {
@@ -794,6 +795,7 @@ export type AnomalyDetectionEvent = {
 
 export type AnomalyDetectionSeriesPoint = {
   timestamp: string;
+  continuity_segment?: number;
   score: number;
   smoothed: number;
   baseline: number | null;
@@ -1238,6 +1240,7 @@ export type BaselineSeriesPoint = {
   raw: number | null;
   signal: number | null;
   z: number | null;
+  continuity_segment?: number;
 };
 
 export type BaselineAnomalyEvent = {

@@ -51,6 +51,7 @@ import { DateTime24Input } from '../components/DateTime24Input';
 import { StepCard } from '../components/StepCard';
 import { PlotlyChart } from '../components/PlotlyChart';
 import { usePendingIds } from '../hooks/usePendingIds';
+import { withLineGapPolicy } from '../lib/plotGaps';
 import type { InspectArtifactRun, InspectCsvData, InspectPreview, InspectRun, PreprocessingPipeline, RoiDefinition, TemporalDynamicsResult, TrainingDataset } from '../types';
 
 type InspectAnalysisMode = 'preprocessed_video' | 'contrast_enhanced' | 'energy' | 'optical_flow' | 'temporal_dynamics';
@@ -363,7 +364,7 @@ function ArtifactViewer({ artifact }: { artifact: InspectArtifactRun | null }) {
 }
 
 function TemporalDynamicsResults({ result }: { result: TemporalDynamicsResult }) {
-  const lagRows = result.lag_statistics.filter((row) => row.mean != null);
+  const lagRows = result.lag_statistics;
   const lagX = lagRows.map((row) => row.lag_seconds);
   const correlationLabel = result.estimated_correlation_length_seconds == null
     ? 'Not reached or not estimable in the analyzed range'
@@ -427,7 +428,7 @@ function TemporalDynamicsResults({ result }: { result: TemporalDynamicsResult })
         <Stack gap="sm">
           <Text fw={700}>Frame-to-frame motion signal</Text>
           <PlotlyChart
-            data={motionSegments.map(({ segmentId, rows }, index) => ({ type: 'scatter' as const, mode: 'lines' as const, x: rows.map((row) => row.timestamp), y: rows.map((row) => row.difference), name: index === 0 ? 'Frame difference' : `Segment ${segmentId + 1}`, showlegend: index === 0 }))}
+            data={motionSegments.map(({ segmentId, rows }, index) => withLineGapPolicy({ type: 'scatter' as const, mode: 'lines' as const, x: rows.map((row) => row.timestamp), y: rows.map((row) => row.difference), name: index === 0 ? 'Frame difference' : `Segment ${segmentId + 1}`, showlegend: index === 0 }, { continuity: rows.map((row) => row.segment_id) }))}
             layout={{ xaxis: { title: { text: 'Time' } }, yaxis: { title: { text: 'Frame-to-frame image difference (MAE)' } }, hovermode: 'x unified' }}
             height={360}
           />

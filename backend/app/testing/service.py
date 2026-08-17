@@ -16,6 +16,7 @@ from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session, selectinload
 
 from app import models
+from app.continuity import continuity_segments, source_group
 from app.database import data_dir
 from app.metrics.aggregation import aggregate_score, normalize_aggregation
 from app.metrics.ssim import ssim_distance_map_np, ssim_settings_from_config
@@ -990,7 +991,7 @@ def _serialize_testing_run(run: models.TestingRun) -> TestingRunRead:
     )
 
 
-def _serialize_result(result: models.TestingRunResult) -> TestingRunResultRead:
+def _serialize_result(result: models.TestingRunResult, continuity_segment: int = 0) -> TestingRunResultRead:
     return TestingRunResultRead(
         id=result.id,
         position=result.position,
@@ -1003,6 +1004,7 @@ def _serialize_result(result: models.TestingRunResult) -> TestingRunResultRead:
         result_metadata=result.result_metadata,
         width=result.width,
         height=result.height,
+        continuity_segment=continuity_segment,
     )
 
 
@@ -1047,9 +1049,37 @@ def get_testing_run_results(
         decimated = True
 
     rows = db.scalars(query).all()
+    if decimated:
+        continuity_rows = db.execute(
+            select(
+                models.TestingRunResult.position,
+                models.TestingRunResult.timestamp,
+                models.TestingRunResult.image_path,
+            )
+            .where(models.TestingRunResult.testing_run_id == run_id)
+            .order_by(models.TestingRunResult.position)
+        ).all()
+        continuity_ids = continuity_segments(
+            [row.timestamp for row in continuity_rows],
+            [source_group(row.image_path) for row in continuity_rows],
+        )
+        continuity_by_position = {
+            row.position: segment for row, segment in zip(continuity_rows, continuity_ids, strict=True)
+        }
+    else:
+        continuity_ids = continuity_segments(
+            [row.timestamp for row in rows],
+            [source_group(row.image_path) for row in rows],
+        )
+        continuity_by_position = {
+            row.position: segment for row, segment in zip(rows, continuity_ids, strict=True)
+        }
     return TestingRunResultsResponse(
         testing_run=_serialize_testing_run(run),
-        results=[_serialize_result(result) for result in rows],
+        results=[
+            _serialize_result(result, continuity_by_position.get(result.position, 0))
+            for result in rows
+        ],
         total=total,
         decimated=decimated,
     )
