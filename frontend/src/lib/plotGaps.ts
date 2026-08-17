@@ -81,8 +81,9 @@ function inferredTimeBreaks(x: unknown[]): Set<number> {
   const deltas = times.slice(1).map((value, index) => value - times[index]).filter((value) => value > 0);
   const typical = median(deltas);
   if (typical === null) return new Set();
+  const gapThreshold = Math.max(15_000, typical * 5);
   return new Set(times.flatMap((value, index) => (
-    index > 0 && value - times[index - 1] > typical * 1.5 ? [index] : []
+    index > 0 && value - times[index - 1] > gapThreshold ? [index] : []
   )));
 }
 
@@ -94,7 +95,7 @@ function lineBreaks(x: unknown[], policy: PlotGapPolicy | undefined): Set<number
   }
   if (policy?.discreteStep && policy.discreteStep > 0 && x.every((value) => typeof value === 'number' && Number.isFinite(value))) {
     return new Set((x as number[]).flatMap((value, index) => (
-      index > 0 && value - (x[index - 1] as number) > policy.discreteStep! * 1.5 ? [index] : []
+      index > 0 && value - (x[index - 1] as number) > policy.discreteStep! * 5 ? [index] : []
     )));
   }
   return inferredTimeBreaks(x);

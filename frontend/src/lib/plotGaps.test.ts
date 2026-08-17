@@ -37,37 +37,53 @@ describe('preparePlotData', () => {
     expect(result).not.toHaveProperty('mltraceGapPolicy');
   });
 
-  it('keeps exactly 1.5 times the typical time step connected', () => {
+  it('keeps a single missing point and exactly fifteen seconds connected for fast cadence', () => {
     const result = prepared(line(
       [
         '2026-01-01T00:00:00.000Z',
         '2026-01-01T00:00:01.000Z',
-        '2026-01-01T00:00:02.500Z',
-        '2026-01-01T00:00:03.500Z',
-        '2026-01-01T00:00:04.500Z',
+        '2026-01-01T00:00:03.000Z',
+        '2026-01-01T00:00:18.000Z',
+        '2026-01-01T00:00:19.000Z',
+        '2026-01-01T00:00:20.000Z',
       ],
-      [0, 1, 2, 3, 4],
+      [0, 1, 2, 3, 4, 5],
     ));
-    expect(result.y).toEqual([0, 1, 2, 3, 4]);
+    expect(result.y).toEqual([0, 1, 2, 3, 4, 5]);
   });
 
-  it('breaks above 1.5 times the typical time step', () => {
+  it('breaks above fifteen seconds for fast cadence', () => {
     const result = prepared(line(
       [
         '2026-01-01T00:00:00Z',
         '2026-01-01T00:00:01Z',
-        '2026-01-01T00:00:03Z',
-        '2026-01-01T00:00:04Z',
-        '2026-01-01T00:00:05Z',
+        '2026-01-01T00:00:17Z',
+        '2026-01-01T00:00:18Z',
+        '2026-01-01T00:00:19Z',
       ],
       [0, 1, 2, 3, 4],
     ));
     expect(result.y).toEqual([0, 1, null, 2, 3, 4]);
   });
 
-  it('breaks explicitly discrete numeric axes when a step is missing', () => {
-    const result = prepared(withLineGapPolicy(line([0, 1, 3, 4], [10, 11, 13, 14]), { discreteStep: 1 }));
-    expect(result.y).toEqual([10, 11, null, 13, 14]);
+  it('uses the same strict five-step boundary for slower time cadence', () => {
+    const exact = prepared(line(
+      ['2026-01-01T00:00:00Z', '2026-01-01T00:00:10Z', '2026-01-01T00:01:00Z', '2026-01-01T00:01:10Z', '2026-01-01T00:01:20Z'],
+      [0, 1, 2, 3, 4],
+    ));
+    const above = prepared(line(
+      ['2026-01-01T00:00:00Z', '2026-01-01T00:00:10Z', '2026-01-01T00:01:01Z', '2026-01-01T00:01:11Z', '2026-01-01T00:01:21Z'],
+      [0, 1, 2, 3, 4],
+    ));
+    expect(exact.y).toEqual([0, 1, 2, 3, 4]);
+    expect(above.y).toEqual([0, 1, null, 2, 3, 4]);
+  });
+
+  it('breaks explicitly discrete numeric axes only above five expected steps', () => {
+    const exact = prepared(withLineGapPolicy(line([0, 1, 6, 7], [10, 11, 16, 17]), { discreteStep: 1 }));
+    const above = prepared(withLineGapPolicy(line([0, 1, 7, 8], [10, 11, 17, 18]), { discreteStep: 1 }));
+    expect(exact.y).toEqual([10, 11, 16, 17]);
+    expect(above.y).toEqual([10, 11, null, 17, 18]);
   });
 
   it('leaves marker-only traces unchanged', () => {

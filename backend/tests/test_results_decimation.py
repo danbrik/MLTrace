@@ -83,7 +83,7 @@ def test_decimation_preserves_full_resolution_continuity_segments() -> None:
             models.TestingRunResult.position >= 500,
         ).all()
         for row in rows:
-            row.timestamp += timedelta(seconds=1)
+            row.timestamp += timedelta(seconds=16)
         db.commit()
 
         capped = get_testing_run_results(db, run_id, max_points=100)
