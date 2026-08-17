@@ -132,11 +132,19 @@ export function preparePlotData(data: Data[]): Data[] {
       connectgaps: false,
     };
     ['text', 'hovertext', 'ids', 'customdata'].forEach((key) => {
-      prepared[key] = expandAlignedArray(plotlyTrace[key], x.length, breakBefore);
+      if (plotlyTrace[key] !== undefined) {
+        prepared[key] = expandAlignedArray(plotlyTrace[key], x.length, breakBefore);
+      }
     });
-    prepared.marker = expandNestedArrays(plotlyTrace.marker, x.length, breakBefore, ['size', 'color', 'symbol', 'opacity']);
-    prepared.error_x = expandNestedArrays(plotlyTrace.error_x, x.length, breakBefore, ['array', 'arrayminus']);
-    prepared.error_y = expandNestedArrays(plotlyTrace.error_y, x.length, breakBefore, ['array', 'arrayminus']);
+    if (plotlyTrace.marker !== undefined) {
+      prepared.marker = expandNestedArrays(plotlyTrace.marker, x.length, breakBefore, ['size', 'color', 'symbol', 'opacity']);
+    }
+    if (plotlyTrace.error_x !== undefined) {
+      prepared.error_x = expandNestedArrays(plotlyTrace.error_x, x.length, breakBefore, ['array', 'arrayminus']);
+    }
+    if (plotlyTrace.error_y !== undefined) {
+      prepared.error_y = expandNestedArrays(plotlyTrace.error_y, x.length, breakBefore, ['array', 'arrayminus']);
+    }
     return prepared as Data;
   });
 }

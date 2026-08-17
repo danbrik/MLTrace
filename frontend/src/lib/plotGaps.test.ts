@@ -15,6 +15,10 @@ describe('preparePlotData', () => {
     const result = prepared(line([0, 1, 2, 3], [1, null, Number.NaN, Number.POSITIVE_INFINITY]));
     expect(result.y).toEqual([1, null, null, null]);
     expect(result.connectgaps).toBe(false);
+    expect(result).not.toHaveProperty('marker');
+    expect(result).not.toHaveProperty('error_x');
+    expect(result).not.toHaveProperty('error_y');
+    expect(result).not.toHaveProperty('customdata');
   });
 
   it('breaks when a continuity segment changes and keeps point metadata aligned', () => {
