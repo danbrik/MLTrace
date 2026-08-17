@@ -48,6 +48,13 @@ def _fast_config(**overrides) -> AnomalyDetectionConfig:
     return AnomalyDetectionConfig(**values)
 
 
+def test_absolute_detection_gate_config_rejects_negative_values() -> None:
+    with pytest.raises(ValueError):
+        _fast_config(minimum_score_for_detection=-0.1)
+    with pytest.raises(ValueError):
+        _fast_config(minimum_delta_for_detection=-0.1)
+
+
 def _event_config(**overrides) -> AnomalyDetectionConfig:
     values = {
         "algorithm": "event_threshold",
@@ -149,6 +156,107 @@ def test_robust_zscore_can_confirm_after_consecutive_samples() -> None:
 
     assert len(output.events) == 1
     assert output.events[0].confirmed_at == output.events[0].warning_start + timedelta(minutes=2)
+
+
+def test_robust_zscore_requires_minimum_smoothed_score() -> None:
+    output = detect(
+        _points([1.0] * 12 + [3.0] * 4),
+        _fast_config(
+            algorithm="robust_zscore",
+            smoothing_half_life_minutes=1e-6,
+            minimum_score_for_detection=3.1,
+            confirmation_mode="samples",
+            confirmation_samples=1,
+        ),
+    )
+
+    assert max(point.robust_z or 0.0 for point in output.series) > 5
+    assert output.events == []
+
+
+def test_robust_zscore_requires_optional_minimum_delta() -> None:
+    output = detect(
+        _points([1.0] * 12 + [3.0] * 4),
+        _fast_config(
+            algorithm="robust_zscore",
+            smoothing_half_life_minutes=1e-6,
+            minimum_delta_for_detection=2.1,
+            confirmation_mode="samples",
+            confirmation_samples=1,
+        ),
+    )
+
+    assert max(point.robust_z or 0.0 for point in output.series) > 5
+    assert output.events == []
+
+
+def test_robust_zscore_absolute_gates_are_inclusive() -> None:
+    output = detect(
+        _points([1.0] * 12 + [3.0]),
+        _fast_config(
+            algorithm="robust_zscore",
+            smoothing_half_life_minutes=1e-6,
+            minimum_score_for_detection=3.0,
+            minimum_delta_for_detection=2.0,
+            confirmation_mode="samples",
+            confirmation_samples=1,
+        ),
+    )
+
+    assert len(output.events) == 1
+    assert output.events[0].confirmed_at is not None
+
+
+def test_robust_zscore_neutral_gates_preserve_previous_behavior() -> None:
+    points = _points([1.0] * 12 + [3.0] * 4 + [1.0] * 4)
+    implicit = detect(points, _fast_config(algorithm="robust_zscore"))
+    explicit = detect(points, _fast_config(
+        algorithm="robust_zscore",
+        minimum_score_for_detection=0.0,
+        minimum_delta_for_detection=None,
+    ))
+
+    assert [point.model_dump() for point in implicit.series] == [
+        point.model_dump() for point in explicit.series
+    ]
+    assert [event.__dict__ for event in implicit.events] == [event.__dict__ for event in explicit.events]
+
+
+def test_robust_zscore_gate_loss_resets_confirmation_without_recovery() -> None:
+    output = detect(
+        _points([1.0] * 12 + [3.0, 2.0, 3.0, 3.0]),
+        _fast_config(
+            algorithm="robust_zscore",
+            smoothing_half_life_minutes=1e-6,
+            minimum_score_for_detection=2.5,
+            confirmation_mode="samples",
+            confirmation_samples=2,
+        ),
+    )
+
+    assert len(output.events) == 1
+    event = output.events[0]
+    assert event.confirmed_at == event.warning_start + timedelta(minutes=3)
+    failed_gate_point = output.series[-3]
+    assert failed_gate_point.state == "warning"
+    assert failed_gate_point.robust_z is not None and failed_gate_point.robust_z > 5
+    assert failed_gate_point.baseline == 1.0
+
+
+def test_robust_cusum_ignores_robust_zscore_absolute_gates() -> None:
+    points = _points([1.0] * 12 + [3.0] * 4 + [1.0] * 4)
+    normal = detect(points, _fast_config(confirmation_mode="samples", confirmation_samples=1))
+    gated = detect(points, _fast_config(
+        minimum_score_for_detection=1_000_000.0,
+        minimum_delta_for_detection=1_000_000.0,
+        confirmation_mode="samples",
+        confirmation_samples=1,
+    ))
+
+    assert [point.model_dump() for point in normal.series] == [
+        point.model_dump() for point in gated.series
+    ]
+    assert [event.__dict__ for event in normal.events] == [event.__dict__ for event in gated.events]
 
 
 def test_sustained_shift_confirms_and_frozen_baseline_does_not_follow() -> None:
@@ -470,6 +578,41 @@ def _seed_testing_run(
     return run
 
 
+def test_saved_robust_zscore_v3_run_uses_neutral_absolute_gate_defaults() -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:", poolclass=StaticPool)
+    SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+    Base.metadata.create_all(engine)
+    with SessionLocal() as db:
+        testing_run = _seed_testing_run(db)
+        created = anomaly_service.create_run(db, AnomalyDetectionRunCreate(
+            name="Legacy robust z-score",
+            testing_run_id=testing_run.id,
+            start_timestamp=BASE,
+            end_timestamp=BASE + timedelta(minutes=79),
+            config=_fast_config(algorithm="robust_zscore"),
+        ))
+        stored = db.get(models.AnomalyDetectionRun, created.id)
+        assert stored is not None
+        legacy_config = dict(stored.config)
+        legacy_config.pop("minimum_score_for_detection")
+        legacy_config.pop("minimum_delta_for_detection")
+        stored.config = legacy_config
+        stored.algorithm_version = "robust_zscore_v3"
+        db.commit()
+
+        loaded = anomaly_service.get_run(db, created.id, max_points=None)
+
+    assert loaded is not None
+    assert loaded.algorithm_version == "robust_zscore_v3"
+    assert loaded.config.minimum_score_for_detection == 0.0
+    assert loaded.config.minimum_delta_for_detection is None
+    assert loaded.warning_count == created.warning_count
+    assert loaded.anomaly_count == created.anomaly_count
+    assert [point.model_dump() for point in loaded.series] == [
+        point.model_dump() for point in created.series
+    ]
+
+
 def test_quantile_preview_uses_only_selected_smoothed_validation_range() -> None:
     engine = create_engine("sqlite+pysqlite:///:memory:", poolclass=StaticPool)
     SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
@@ -560,6 +703,23 @@ def test_calibration_constant_signal_retains_floors_and_reports_low_confidence()
     assert result.confidence == "low"
     assert result.metrics.confirmed_event_count == 0
     assert any("MAD was zero" in warning for warning in result.warnings)
+
+
+def test_calibration_backtest_keeps_manual_absolute_gates_out_of_recommendation() -> None:
+    config = _fast_config(
+        algorithm="robust_zscore",
+        minimum_score_for_detection=2.5,
+        minimum_delta_for_detection=1.25,
+    )
+    calibrated = anomaly_service._calibration_config(config, {
+        "minimum_scale_relative": 0.002,
+        "minimum_scale_absolute": 0.01,
+        "warning_z": 4.0,
+        "high_z": 6.0,
+    })
+
+    assert calibrated.minimum_score_for_detection == 2.5
+    assert calibrated.minimum_delta_for_detection == 1.25
 
 
 def test_calibration_near_zero_signal_produces_finite_scale_recommendations() -> None:
@@ -872,7 +1032,7 @@ def test_anomaly_detection_api_crud_and_decimation(monkeypatch: pytest.MonkeyPat
                 "config": _fast_config(algorithm="robust_zscore").model_dump(),
             })
             assert zscore.status_code == 200, zscore.text
-            assert zscore.json()["algorithm_version"] == "robust_zscore_v3"
+            assert zscore.json()["algorithm_version"] == "robust_zscore_v4"
             assert zscore.json()["config"]["algorithm"] == "robust_zscore"
             assert all(point["cusum"] == 0 for point in zscore.json()["series"])
             assert client.delete(f"/api/anomaly-detection-runs/{zscore.json()['id']}").status_code == 204

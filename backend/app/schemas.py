@@ -1341,6 +1341,8 @@ class AnomalyDetectionConfig(BaseModel):
     minimum_warmup_points: int = Field(default=30, ge=3, le=100000)
     warning_z: float = Field(default=3.0, gt=0.0, le=1000.0)
     high_z: float = Field(default=5.0, gt=0.0, le=1000.0)
+    minimum_score_for_detection: float = Field(default=0.0, ge=0.0, le=1000000.0)
+    minimum_delta_for_detection: float | None = Field(default=None, ge=0.0, le=1000000.0)
     minimum_scale_relative: float = Field(default=1e-3, ge=0.0, le=1.0)
     minimum_scale_absolute: float = Field(default=1e-9, ge=0.0, le=1000000.0)
     cusum_drift: float = Field(default=1.0, ge=0.0, le=1000.0)

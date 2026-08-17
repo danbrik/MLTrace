@@ -82,6 +82,8 @@ const FAST_CONFIG: AnomalyDetectionConfig = {
   minimum_warmup_points: 30,
   warning_z: 3,
   high_z: 5,
+  minimum_score_for_detection: 0,
+  minimum_delta_for_detection: null,
   minimum_scale_relative: 1e-3,
   minimum_scale_absolute: 1e-9,
   cusum_drift: 1,
@@ -278,6 +280,21 @@ function scoreValue(result: TestingRunResult, series: AnomalyDetectionScoreSerie
 
 function numberValue(value: string | number, fallback: number): number {
   return typeof value === 'number' && Number.isFinite(value) ? value : fallback;
+}
+
+function pointDelta(point: AnomalyDetectionSeriesPoint): number | null {
+  return point.baseline === null ? null : point.smoothed - point.baseline;
+}
+
+function absoluteGatePassed(
+  point: AnomalyDetectionSeriesPoint,
+  config: AnomalyDetectionConfig,
+): boolean | null {
+  if (config.algorithm !== 'robust_zscore') return null;
+  const delta = pointDelta(point);
+  return point.smoothed >= config.minimum_score_for_detection
+    && (config.minimum_delta_for_detection === null
+      || (delta !== null && delta >= config.minimum_delta_for_detection));
 }
 
 function sameJson(left: unknown, right: unknown): boolean {
@@ -492,6 +509,8 @@ export function AnomalyDetectionPage({ active }: { active: boolean }) {
     baselineWindow: config.baseline_window_minutes,
     warmup: config.warmup_minutes,
     minimumWarmupPoints: config.minimum_warmup_points,
+    minimumScoreForDetection: config.minimum_score_for_detection,
+    minimumDeltaForDetection: config.minimum_delta_for_detection,
     gapMultiplier: config.gap_multiplier,
     minimumGapMinutes: config.minimum_gap_minutes,
   }), [
@@ -502,6 +521,8 @@ export function AnomalyDetectionPage({ active }: { active: boolean }) {
     config.baseline_window_minutes,
     config.gap_multiplier,
     config.minimum_gap_minutes,
+    config.minimum_delta_for_detection,
+    config.minimum_score_for_detection,
     config.minimum_warmup_points,
     config.smoothing_half_life_minutes,
     config.warmup_minutes,
@@ -1047,12 +1068,35 @@ export function AnomalyDetectionPage({ active }: { active: boolean }) {
         { type: 'scatter', mode: 'lines', name: `Mean + ${activeRun.config.sigma_threshold}σ`, x: timestamps, y: activeRun.series.map((point) => point.high_threshold), line: { color: '#fa5252', width: 1.5, dash: 'dash' } },
       ];
     }
-    return [
+    const data: Data[] = [
       { type: 'scatter', mode: 'lines', name: 'Raw error', x: timestamps, y: activeRun.series.map((point) => point.score), line: { color: '#868e96', width: 1 } },
       { type: 'scatter', mode: 'lines', name: 'EWMA', x: timestamps, y: activeRun.series.map((point) => point.smoothed), line: { color: '#228be6', width: 2 } },
       { type: 'scatter', mode: 'lines', name: 'Warning threshold', x: timestamps, y: activeRun.series.map((point) => point.warning_threshold), line: { color: '#fab005', width: 1.5, dash: 'dash' } },
       { type: 'scatter', mode: 'lines', name: 'High threshold', x: timestamps, y: activeRun.series.map((point) => point.high_threshold), line: { color: '#fa5252', width: 1.5, dash: 'dot' } },
     ];
+    if (activeRun.config.algorithm === 'robust_zscore') {
+      data.push({
+        type: 'scatter',
+        mode: 'lines',
+        name: 'Minimum EWMA score',
+        x: timestamps,
+        y: activeRun.series.map(() => activeRun.config.minimum_score_for_detection),
+        line: { color: '#15aabf', width: 1.5, dash: 'dashdot' },
+      });
+      if (activeRun.config.minimum_delta_for_detection !== null) {
+        data.push({
+          type: 'scatter',
+          mode: 'lines',
+          name: 'Baseline + minimum delta',
+          x: timestamps,
+          y: activeRun.series.map((point) => point.baseline === null
+            ? null
+            : point.baseline + (activeRun.config.minimum_delta_for_detection ?? 0)),
+          line: { color: '#845ef7', width: 1.5, dash: 'longdash' },
+        });
+      }
+    }
+    return data;
   }, [activeRun]);
 
   const diagnosticData = useMemo<Data[]>(() => {
@@ -1114,7 +1158,7 @@ export function AnomalyDetectionPage({ active }: { active: boolean }) {
 
   function downloadDiagnosticCsv() {
     if (!activeRun || displayedDiagnosticRows.length === 0) return;
-    const header = ['timestamp', 'error', 'median', 'mad', 'scale', 'robust_z', 'ewma', 'cusum_increment', 'cusum', 'state'];
+    const header = ['timestamp', 'error', 'median', 'mad', 'scale', 'robust_z', 'ewma', 'delta', 'absolute_gate_passed', 'cusum_increment', 'cusum', 'state'];
     const rows = displayedDiagnosticRows.map((point) => [
       point.timestamp,
       point.score,
@@ -1123,6 +1167,8 @@ export function AnomalyDetectionPage({ active }: { active: boolean }) {
       point.scale ?? '',
       point.robust_z ?? '',
       point.smoothed,
+      pointDelta(point) ?? '',
+      absoluteGatePassed(point, activeRun.config) ?? '',
       point.cusum_increment ?? '',
       point.cusum,
       point.state,
@@ -1588,20 +1634,47 @@ export function AnomalyDetectionPage({ active }: { active: boolean }) {
                   </Alert>
                 )}
                 <SimpleGrid cols={{ base: 1, sm: 2, lg: 4 }}>
-                {PARAMETER_DEFINITIONS
-                  .filter((parameter) => !parameter.algorithms || parameter.algorithms.includes(config.algorithm))
-                  .map((parameter) => (
+                  {config.algorithm === 'robust_zscore' && (
                     <NumberInput
-                      key={parameter.key}
-                      label={<InfoLabel label={parameter.label} description={parameter.description} />}
-                      min={parameter.key === 'persistence_n' ? config.persistence_k : parameter.min}
-                      decimalScale={parameter.decimalScale}
-                      max={parameter.key === 'persistence_k' ? config.persistence_n : parameter.key === 'threshold_off_factor' ? 1 : undefined}
-                      value={config[parameter.key]}
+                      label={<InfoLabel label="Minimum EWMA score for detection" description="A warning or confirmation candidate must also have an EWMA at or above this absolute score. Zero is neutral." />}
+                      min={0}
+                      decimalScale={12}
+                      value={config.minimum_score_for_detection}
                       disabled={running || thresholdCalculating}
-                      onChange={(value) => patchConfig(parameter.key, value)}
+                      onChange={(value) => patchConfig('minimum_score_for_detection', value)}
                     />
-                  ))}
+                  )}
+                  {config.algorithm === 'robust_zscore' && (
+                    <NumberInput
+                      label={<InfoLabel label="Minimum delta from baseline for detection" description="Optional absolute relevance filter. A warning or confirmation candidate must have EWMA − baseline at or above this value. Leave empty to disable it." />}
+                      min={0}
+                      decimalScale={12}
+                      value={config.minimum_delta_for_detection ?? ''}
+                      placeholder="Disabled"
+                      disabled={running || thresholdCalculating}
+                      onChange={(value) => {
+                        setPreset('custom');
+                        setConfig((current) => ({
+                          ...current,
+                          minimum_delta_for_detection: typeof value === 'number' && Number.isFinite(value) ? value : null,
+                        }));
+                      }}
+                    />
+                  )}
+                  {PARAMETER_DEFINITIONS
+                    .filter((parameter) => !parameter.algorithms || parameter.algorithms.includes(config.algorithm))
+                    .map((parameter) => (
+                      <NumberInput
+                        key={parameter.key}
+                        label={<InfoLabel label={parameter.label} description={parameter.description} />}
+                        min={parameter.key === 'persistence_n' ? config.persistence_k : parameter.min}
+                        decimalScale={parameter.decimalScale}
+                        max={parameter.key === 'persistence_k' ? config.persistence_n : parameter.key === 'threshold_off_factor' ? 1 : undefined}
+                        value={config[parameter.key]}
+                        disabled={running || thresholdCalculating}
+                        onChange={(value) => patchConfig(parameter.key, value)}
+                      />
+                    ))}
                 </SimpleGrid>
               </Stack>
             </Collapse>
@@ -1725,7 +1798,7 @@ export function AnomalyDetectionPage({ active }: { active: boolean }) {
                     )}
                     <ScrollArea h={360}>
                       <Table striped highlightOnHover withColumnBorders>
-                        <Table.Thead><Table.Tr><Table.Th>Timestamp</Table.Th><Table.Th>Error</Table.Th><Table.Th>Median</Table.Th><Table.Th>MAD</Table.Th><Table.Th>Scale</Table.Th><Table.Th>Robust Z</Table.Th><Table.Th>EWMA</Table.Th><Table.Th>CUSUM Δ</Table.Th><Table.Th>CUSUM</Table.Th><Table.Th>State</Table.Th></Table.Tr></Table.Thead>
+                        <Table.Thead><Table.Tr><Table.Th>Timestamp</Table.Th><Table.Th>Error</Table.Th><Table.Th>Median</Table.Th><Table.Th>MAD</Table.Th><Table.Th>Scale</Table.Th><Table.Th>Robust Z</Table.Th><Table.Th>EWMA</Table.Th><Table.Th>Delta</Table.Th><Table.Th>Absolute gate</Table.Th><Table.Th>CUSUM Δ</Table.Th><Table.Th>CUSUM</Table.Th><Table.Th>State</Table.Th></Table.Tr></Table.Thead>
                         <Table.Tbody>{displayedDiagnosticRows.map((point) => (
                           <Table.Tr key={point.timestamp}>
                             <Table.Td>{formatTimestamp(point.timestamp)}</Table.Td>
@@ -1735,6 +1808,12 @@ export function AnomalyDetectionPage({ active }: { active: boolean }) {
                             <Table.Td>{point.scale?.toPrecision(8) ?? '—'}</Table.Td>
                             <Table.Td>{point.robust_z?.toPrecision(8) ?? '—'}</Table.Td>
                             <Table.Td>{point.smoothed.toPrecision(8)}</Table.Td>
+                            <Table.Td>{pointDelta(point)?.toPrecision(8) ?? '—'}</Table.Td>
+                            <Table.Td>{absoluteGatePassed(point, activeRun.config) === null ? '—' : (
+                              <Badge color={absoluteGatePassed(point, activeRun.config) ? 'green' : 'gray'} variant="light">
+                                {absoluteGatePassed(point, activeRun.config) ? 'passed' : 'blocked'}
+                              </Badge>
+                            )}</Table.Td>
                             <Table.Td>{point.cusum_increment?.toPrecision(8) ?? '—'}</Table.Td>
                             <Table.Td>{point.cusum.toPrecision(8)}</Table.Td>
                             <Table.Td><Badge variant="light">{point.state}</Badge></Table.Td>

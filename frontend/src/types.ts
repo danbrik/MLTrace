@@ -701,6 +701,8 @@ export type AnomalyDetectionConfig = {
   minimum_warmup_points: number;
   warning_z: number;
   high_z: number;
+  minimum_score_for_detection: number;
+  minimum_delta_for_detection: number | null;
   minimum_scale_relative: number;
   minimum_scale_absolute: number;
   cusum_drift: number;

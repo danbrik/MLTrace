@@ -33,7 +33,7 @@ from app.schemas import (
 
 
 ALGORITHM_VERSIONS = {
-    "robust_zscore": "robust_zscore_v3",
+    "robust_zscore": "robust_zscore_v4",
     "robust_cusum": "robust_cusum_v3",
     "event_threshold": "event_threshold_v1",
     "rolling_sigma": "rolling_sigma_v2",
@@ -808,6 +808,17 @@ def _detect_robust(
         robust_z = (smoothed - baseline) / scale if ready and baseline is not None and scale is not None else None
         warning_threshold = baseline + config.warning_z * scale if ready and baseline is not None and scale is not None else None
         high_threshold = baseline + config.high_z * scale if ready and baseline is not None and scale is not None else None
+        delta = smoothed - baseline if baseline is not None else None
+        absolute_detection_relevant = (
+            config.algorithm != "robust_zscore"
+            or (
+                smoothed >= config.minimum_score_for_detection
+                and (
+                    config.minimum_delta_for_detection is None
+                    or (delta is not None and delta >= config.minimum_delta_for_detection)
+                )
+            )
+        )
 
         if ready and robust_z is not None:
             evidence_minutes = max(0.0, dt) / 60.0
@@ -820,7 +831,7 @@ def _detect_robust(
                 cusum_increment = 0.0
                 if config.algorithm != "robust_cusum":
                     cusum = 0.0
-            if state == "normal" and robust_z >= config.warning_z:
+            if state == "normal" and robust_z >= config.warning_z and absolute_detection_relevant:
                 state = "warning"
                 active = DetectionEvent(
                     warning_start=point.timestamp,
@@ -839,7 +850,7 @@ def _detect_robust(
                 high_evidence = robust_z >= config.high_z
                 if config.algorithm == "robust_cusum":
                     high_evidence = high_evidence or cusum >= config.cusum_threshold
-                if robust_z >= config.warning_z and high_evidence:
+                if absolute_detection_relevant and robust_z >= config.warning_z and high_evidence:
                     confirmation_started = confirmation_started or point.timestamp
                     confirmation_count += 1
                 else:
