@@ -2185,7 +2185,8 @@ class EvaluationSeparationLayoutInput(BaseModel):
     training_dataset_id: int
     name: str = Field(min_length=1, max_length=255)
     description: str | None = None
-    pairs: list[EvaluationSeparationPairInput] = Field(min_length=1)
+    # A layout may be emptied in the UI; only calculations require at least one pair.
+    pairs: list[EvaluationSeparationPairInput] = Field(default_factory=list)
 
 
 class EvaluationDriftExclusionInput(BaseModel):

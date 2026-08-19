@@ -142,3 +142,24 @@ def test_result_revision_marks_workspace_results_stale_without_raw_table_scan():
         assert client.get(f"/api/evaluation-workspaces/models/{training_id}/separation/results").json()[0]["stale"] is True
     finally:
         app.dependency_overrides.clear()
+
+
+def test_separation_layout_may_be_emptied_after_its_last_pair_is_removed():
+    client, _sessions, (_training_id, dataset_id, _run_id) = setup()
+    try:
+        created = client.post("/api/evaluation-workspaces/separation-layouts", json={
+            "training_dataset_id": dataset_id, "name": "Single pair",
+            "pairs": [{"pair_key": "only", "name": "Only", "normal_start": iso(0),
+                       "normal_end": iso(20), "anomaly_start": iso(70), "anomaly_end": iso(80)}],
+        })
+        assert created.status_code == 200, created.text
+        layout = created.json()
+
+        emptied = client.put(f"/api/evaluation-workspaces/separation-layouts/{layout['id']}", json={
+            "training_dataset_id": dataset_id, "name": "Single pair", "pairs": [],
+        })
+        assert emptied.status_code == 200, emptied.text
+        assert emptied.json()["pairs"] == []
+        assert emptied.json()["version"] == layout["version"] + 1
+    finally:
+        app.dependency_overrides.clear()
