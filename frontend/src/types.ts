@@ -641,6 +641,7 @@ export type TestingRun = {
   training_mode: string;
   artifact_kind: string;
   artifact_path: string;
+  artifact_signature?: string | null;
   roi_name: string | null;
   roi_geometry: Record<string, unknown> | null;
   inference_config: Record<string, unknown> | null;
@@ -689,6 +690,272 @@ export type TestingRunResults = {
   results: TestingRunResult[];
   total: number;
   decimated: boolean;
+};
+
+// -- Single-model evaluation -------------------------------------------------
+
+export type EvaluationStatus = 'draft' | 'finalized';
+export type EvaluationCalculationStatus = 'pending' | 'ready' | 'stale' | 'failed' | string;
+export type EvaluationLabelEventType = 'target' | 'exclusion';
+export type EvaluationScoreSeries = 'score' | 'full_mse' | 'roi_mse' | string;
+
+export type EvaluationTimeRange = {
+  start_timestamp: string;
+  end_timestamp: string;
+};
+
+export type EvaluationProfile = {
+  id: number;
+  name: string;
+  description?: string | null;
+  normal_window_duration_seconds: number;
+  normal_window_buffer_seconds: number;
+  drift_window_seconds: number;
+  false_alarm_horizon_seconds: number;
+  anticipation_seconds: number;
+  epsilon: number;
+  created_at: string;
+  updated_at: string;
+  is_update_locked?: boolean;
+  update_lock_reasons?: string[];
+};
+
+export type EvaluationProfilePayload = {
+  name: string;
+  description?: string | null;
+  normal_window_duration_seconds: number;
+  normal_window_buffer_seconds: number;
+  drift_window_seconds: number;
+  false_alarm_horizon_seconds: number;
+  anticipation_seconds: number;
+  epsilon: number;
+};
+
+export type EvaluationProfileSnapshot = Omit<EvaluationProfilePayload, 'name' | 'description'>;
+
+export type EvaluationLabelEvent = {
+  id?: number;
+  event_id: string;
+  type: EvaluationLabelEventType;
+  name?: string | null;
+  category?: string | null;
+  start_timestamp: string;
+  end_timestamp: string;
+  notes: string | null;
+};
+
+export type EvaluationLabelSet = {
+  id: number;
+  name: string;
+  training_dataset_id: number;
+  training_dataset_name?: string | null;
+  version: number;
+  events: EvaluationLabelEvent[];
+  categories: string[];
+  created_at: string;
+  updated_at: string;
+  is_update_locked?: boolean;
+  update_lock_reasons?: string[];
+};
+
+export type EvaluationLabelSetPayload = {
+  name: string;
+  training_dataset_id: number;
+  description?: string | null;
+  events: EvaluationLabelEvent[];
+};
+
+export type EvaluationLabelCsvPreview = {
+  valid: boolean;
+  events: EvaluationLabelEvent[];
+  errors: Array<{ row: number; message: string }>;
+};
+
+export type EvaluationScorePoint = {
+  result_id: number;
+  timestamp: string;
+  position: number;
+  value: number;
+  continuity_segment?: number;
+};
+
+export type EvaluationScorePreview = {
+  testing_run_id: number;
+  score_series: string;
+  points: EvaluationScorePoint[];
+  total: number;
+  decimated: boolean;
+  start_timestamp: string | null;
+  end_timestamp: string | null;
+};
+
+export type EvaluationNormalWindowOverride = {
+  start_timestamp: string;
+  end_timestamp: string;
+};
+
+export type EvaluationSeparationEventResult = {
+  event_id: string;
+  name?: string;
+  category?: string;
+  event_start: string;
+  event_end: string;
+  normal_start: string;
+  normal_end: string;
+  separation: number;
+  separation_p95?: number | null;
+  normal_median: number;
+  normal_mad: number;
+  event_point_count?: number;
+  normal_point_count?: number;
+  robust_scale?: number;
+};
+
+export type EvaluationSeparationResult = {
+  sep_median: number;
+  sep_min: number;
+  events: EvaluationSeparationEventResult[];
+  warnings: EvaluationMetricWarning[];
+};
+
+export type EvaluationDriftWindowResult = {
+  index: number;
+  start: string;
+  end: string;
+  normalized_drift: number | null;
+  wasserstein_1: number | null;
+  point_count: number;
+  status: string;
+  exclusion_reason?: string | null;
+};
+
+export type EvaluationDriftResult = {
+  d_mean: number;
+  d_max: number;
+  reference_iqr: number;
+  reference_point_count?: number;
+  valid_window_count?: number;
+  discarded_window_count?: number;
+  windows: EvaluationDriftWindowResult[];
+  warnings: EvaluationMetricWarning[];
+};
+
+export type EvaluationDetectionEventResult = {
+  event_id: string;
+  name?: string;
+  category?: string;
+  event_start: string;
+  event_end: string;
+  detection_window_start: string;
+  detection_window_end: string;
+  detected: boolean;
+  first_detection: string | null;
+  delay_seconds: number | null;
+};
+
+export type EvaluationDetectionOperatingPoint = {
+  quantile: number;
+  threshold: number;
+  event_recall: number;
+  median_delay_seconds: number | null;
+  frame_fpr: number;
+  far_t0: number;
+  detected_event_count: number;
+  event_count: number;
+  false_positive_frame_count: number;
+  normal_frame_count: number;
+  missed_event_count: number;
+  false_alarm_event_count: number;
+  normal_observation_seconds: number;
+  events: EvaluationDetectionEventResult[];
+  false_alarms?: Array<{
+    start?: string;
+    end?: string;
+    start_timestamp?: string;
+    end_timestamp?: string;
+    point_count?: number;
+  }>;
+};
+
+export type EvaluationDetectionResult = {
+  calibration_point_count: number;
+  standard_duration_seconds: number;
+  anticipation_seconds: number;
+  operating_points: EvaluationDetectionOperatingPoint[];
+  warnings: EvaluationMetricWarning[];
+};
+
+export type EvaluationMetricWarning = {
+  code: string;
+  message: string;
+  context?: Record<string, unknown>;
+};
+
+export type ModelEvaluation = {
+  id: number;
+  name: string;
+  status: EvaluationStatus;
+  evaluation_testing_run_id: number | null;
+  evaluation_start_timestamp: string | null;
+  evaluation_end_timestamp: string | null;
+  reference_testing_run_id: number | null;
+  reference_start_timestamp: string | null;
+  reference_end_timestamp: string | null;
+  calibration_testing_run_id: number | null;
+  calibration_start_timestamp: string | null;
+  calibration_end_timestamp: string | null;
+  score_series: EvaluationScoreSeries;
+  label_set_id: number | null;
+  profile_id: number | null;
+  selected_categories: string[];
+  normal_window_overrides: Record<string, EvaluationNormalWindowOverride>;
+  profile_overrides: Record<string, number>;
+  profile_snapshot: EvaluationProfileSnapshot | null;
+  label_snapshot: (EvaluationLabelSetPayload & { label_set_id?: number; version?: number }) | null;
+  source_snapshot: Record<string, unknown> | null;
+  config_signature?: string | null;
+  separation_status: EvaluationCalculationStatus;
+  drift_status: EvaluationCalculationStatus;
+  detection_status: EvaluationCalculationStatus;
+  separation_result: EvaluationSeparationResult | null;
+  separation_error: string | null;
+  drift_result: EvaluationDriftResult | null;
+  drift_error: string | null;
+  detection_result: EvaluationDetectionResult | null;
+  detection_error: string | null;
+  sep_median: number | null;
+  sep_min: number | null;
+  drift_mean: number | null;
+  drift_max: number | null;
+  event_recall: number | null;
+  median_delay_seconds: number | null;
+  frame_fpr: number | null;
+  false_alarm_rate_t0: number | null;
+  active_quantile: number;
+  warnings: Array<string | { stage?: string; warning?: string | EvaluationMetricWarning }>;
+  created_at: string;
+  updated_at: string;
+  finalized_at: string | null;
+};
+
+export type ModelEvaluationPayload = {
+  name: string;
+  evaluation_testing_run_id: number | null;
+  evaluation_start_timestamp: string | null;
+  evaluation_end_timestamp: string | null;
+  reference_testing_run_id: number | null;
+  reference_start_timestamp: string | null;
+  reference_end_timestamp: string | null;
+  calibration_testing_run_id: number | null;
+  calibration_start_timestamp: string | null;
+  calibration_end_timestamp: string | null;
+  score_series: EvaluationScoreSeries;
+  label_set_id: number | null;
+  profile_id: number | null;
+  selected_categories: string[];
+  normal_window_overrides: Record<string, EvaluationNormalWindowOverride>;
+  profile_overrides: Record<string, number>;
+  active_quantile: number;
 };
 
 export type AnomalyDetectionScoreSeries = 'score' | 'full_mse' | 'roi_mse';

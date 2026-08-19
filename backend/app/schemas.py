@@ -1101,6 +1101,7 @@ class TrainingRunRead(BaseModel):
     skipped_images: list[str] | None = None
     artifact_kind: str | None
     artifact_path: str | None
+    artifact_signature: str | None = None
     artifact_size_bytes: int | None
     checkpoint_at: datetime | None = None
     checkpoint_epoch: int | None = None
@@ -1311,6 +1312,7 @@ class TestingRunRead(BaseModel):
     training_mode: str
     artifact_kind: str
     artifact_path: str
+    artifact_signature: str | None = None
     roi_name: str | None
     roi_geometry: dict | None
     inference_config: dict | None = None
@@ -1923,6 +1925,239 @@ class ProjectRead(BaseModel):
     description: str
     created_at: datetime
     last_opened_at: datetime | None = None
+
+
+class EvaluationProfileCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=255)
+    description: str | None = None
+    normal_window_duration_seconds: float = Field(default=3600.0, gt=0.0)
+    normal_window_buffer_seconds: float = Field(default=0.0, ge=0.0)
+    drift_window_seconds: float = Field(default=3600.0, gt=0.0)
+    false_alarm_horizon_seconds: float = Field(default=3600.0, gt=0.0)
+    anticipation_seconds: float = Field(default=0.0, ge=0.0)
+    epsilon: float = Field(default=1e-12, gt=0.0)
+
+
+class EvaluationProfileRead(EvaluationProfileCreate):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    created_at: datetime
+    updated_at: datetime
+
+
+def _dataset_local_naive(value: datetime) -> datetime:
+    """Keep MLTrace wall-clock values while discarding any supplied UTC offset."""
+
+    return value.replace(tzinfo=None)
+
+
+class EvaluationLabelEventInput(BaseModel):
+    event_id: str | None = Field(default=None, min_length=1, max_length=64)
+    type: Literal["target", "exclusion"]
+    name: str | None = Field(default=None, max_length=255)
+    category: str | None = Field(default=None, max_length=128)
+    start_timestamp: datetime
+    end_timestamp: datetime
+    notes: str | None = None
+
+    @model_validator(mode="after")
+    def validate_interval(self):
+        self.start_timestamp = _dataset_local_naive(self.start_timestamp)
+        self.end_timestamp = _dataset_local_naive(self.end_timestamp)
+        if self.end_timestamp <= self.start_timestamp:
+            raise ValueError("Event end_timestamp must be after start_timestamp.")
+        if self.type == "target" and not (self.name or "").strip():
+            raise ValueError("Target events require a name.")
+        if self.type == "target" and not (self.category or "").strip():
+            raise ValueError("Target events require a category.")
+        return self
+
+
+class EvaluationLabelEventRead(EvaluationLabelEventInput):
+    model_config = ConfigDict(from_attributes=True)
+
+    event_id: str
+
+
+class EvaluationLabelSetCreate(BaseModel):
+    training_dataset_id: int
+    name: str = Field(min_length=1, max_length=255)
+    description: str | None = None
+    events: list[EvaluationLabelEventInput] = Field(default_factory=list)
+
+
+class EvaluationLabelSetRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    training_dataset_id: int
+    name: str
+    description: str | None
+    version: int
+    events: list[EvaluationLabelEventRead] = Field(default_factory=list)
+    categories: list[str] = Field(default_factory=list)
+    created_at: datetime
+    updated_at: datetime
+
+
+class EvaluationLabelCsvPreviewRequest(BaseModel):
+    training_dataset_id: int
+    csv_text: str = Field(min_length=1)
+
+
+class EvaluationLabelCsvImportRequest(EvaluationLabelCsvPreviewRequest):
+    mode: Literal["replace", "append"] = "replace"
+
+
+class EvaluationLabelCsvError(BaseModel):
+    row: int
+    message: str
+
+
+class EvaluationLabelCsvPreviewRead(BaseModel):
+    valid: bool
+    events: list[EvaluationLabelEventRead] = Field(default_factory=list)
+    errors: list[EvaluationLabelCsvError] = Field(default_factory=list)
+
+
+EvaluationScoreSeries = Literal["score", "full_mse", "roi_mse"]
+
+
+class ModelEvaluationCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=255)
+    evaluation_testing_run_id: int | None = None
+    reference_testing_run_id: int | None = None
+    calibration_testing_run_id: int | None = None
+    profile_id: int | None = None
+    label_set_id: int | None = None
+    score_series: EvaluationScoreSeries = "score"
+    evaluation_start_timestamp: datetime | None = None
+    evaluation_end_timestamp: datetime | None = None
+    reference_start_timestamp: datetime | None = None
+    reference_end_timestamp: datetime | None = None
+    calibration_start_timestamp: datetime | None = None
+    calibration_end_timestamp: datetime | None = None
+    selected_categories: list[str] = Field(default_factory=list)
+    normal_window_overrides: dict[str, dict[str, datetime]] = Field(default_factory=dict)
+    profile_overrides: dict[str, float] = Field(default_factory=dict)
+    active_quantile: Literal[0.99, 0.995, 0.999, 0.9995, 0.9999] = 0.999
+
+    @model_validator(mode="after")
+    def validate_ranges(self):
+        for role in ("evaluation", "reference", "calibration"):
+            start = getattr(self, f"{role}_start_timestamp")
+            end = getattr(self, f"{role}_end_timestamp")
+            if start is not None:
+                start = _dataset_local_naive(start)
+                setattr(self, f"{role}_start_timestamp", start)
+            if end is not None:
+                end = _dataset_local_naive(end)
+                setattr(self, f"{role}_end_timestamp", end)
+            if start is not None and end is not None and end <= start:
+                raise ValueError(f"{role}_end_timestamp must be after {role}_start_timestamp.")
+        return self
+
+
+class ModelEvaluationUpdate(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=255)
+    evaluation_testing_run_id: int | None = None
+    reference_testing_run_id: int | None = None
+    calibration_testing_run_id: int | None = None
+    profile_id: int | None = None
+    label_set_id: int | None = None
+    score_series: EvaluationScoreSeries | None = None
+    evaluation_start_timestamp: datetime | None = None
+    evaluation_end_timestamp: datetime | None = None
+    reference_start_timestamp: datetime | None = None
+    reference_end_timestamp: datetime | None = None
+    calibration_start_timestamp: datetime | None = None
+    calibration_end_timestamp: datetime | None = None
+    selected_categories: list[str] | None = None
+    normal_window_overrides: dict[str, dict[str, datetime]] | None = None
+    profile_overrides: dict[str, float] | None = None
+    active_quantile: Literal[0.99, 0.995, 0.999, 0.9995, 0.9999] | None = None
+
+    @model_validator(mode="after")
+    def reject_null_required_fields(self):
+        for field in ("name", "score_series", "active_quantile"):
+            if field in self.model_fields_set and getattr(self, field) is None:
+                raise ValueError(f"{field} may not be null.")
+        return self
+
+
+class ModelEvaluationDuplicateRequest(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=255)
+
+
+class ModelEvaluationRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    name: str
+    status: Literal["draft", "finalized"]
+    evaluation_testing_run_id: int | None
+    reference_testing_run_id: int | None
+    calibration_testing_run_id: int | None
+    profile_id: int | None
+    label_set_id: int | None
+    score_series: EvaluationScoreSeries
+    evaluation_start_timestamp: datetime | None
+    evaluation_end_timestamp: datetime | None
+    reference_start_timestamp: datetime | None
+    reference_end_timestamp: datetime | None
+    calibration_start_timestamp: datetime | None
+    calibration_end_timestamp: datetime | None
+    selected_categories: list[str] = Field(default_factory=list)
+    normal_window_overrides: dict = Field(default_factory=dict)
+    profile_overrides: dict = Field(default_factory=dict)
+    profile_snapshot: dict | None
+    label_snapshot: dict | None
+    source_snapshot: dict | None
+    config_signature: str | None
+    separation_status: Literal["not_calculated", "current", "stale", "error"]
+    separation_config_signature: str | None
+    separation_result: dict | None
+    separation_error: str | None
+    drift_status: Literal["not_calculated", "current", "stale", "error"]
+    drift_config_signature: str | None
+    drift_result: dict | None
+    drift_error: str | None
+    detection_status: Literal["not_calculated", "current", "stale", "error"]
+    detection_config_signature: str | None
+    detection_result: dict | None
+    detection_error: str | None
+    warnings: list = Field(default_factory=list)
+    sep_median: float | None
+    sep_min: float | None
+    drift_mean: float | None
+    drift_max: float | None
+    event_recall: float | None
+    median_delay_seconds: float | None
+    frame_fpr: float | None
+    false_alarm_rate_t0: float | None
+    active_quantile: float
+    finalized_at: datetime | None
+    created_at: datetime
+    updated_at: datetime
+
+
+class EvaluationScorePreviewPoint(BaseModel):
+    result_id: int
+    position: int
+    timestamp: datetime
+    value: float
+    continuity_segment: int
+
+
+class EvaluationScorePreviewRead(BaseModel):
+    testing_run_id: int
+    score_series: EvaluationScoreSeries
+    start_timestamp: datetime | None
+    end_timestamp: datetime | None
+    total: int
+    decimated: bool
+    points: list[EvaluationScorePreviewPoint]
 
 
 class ProjectGpuUsageRead(BaseModel):

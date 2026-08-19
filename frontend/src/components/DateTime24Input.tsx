@@ -18,7 +18,7 @@ function splitDateTime(value: string): { date: string; time: string } {
   return { date, time };
 }
 
-function normalizeTime(value: string): string | null {
+export function normalizeTime(value: string): string | null {
   const match = value.trim().match(/^(\d{2}):(\d{2})(?::(\d{2}))?$/);
   if (!match) return null;
   const hours = Number(match[1]);

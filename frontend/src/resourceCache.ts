@@ -15,7 +15,10 @@ export type ResourceKey =
   | 'analysisLayouts'
   | 'anomalyDetectionRuns'
   | 'optimizationStudies'
-  | 'rois';
+  | 'rois'
+  | 'evaluationProfiles'
+  | 'evaluationLabelSets'
+  | 'evaluations';
 
 type CacheEntry<T> = {
   value?: T;

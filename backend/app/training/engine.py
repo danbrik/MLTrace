@@ -26,6 +26,7 @@ from typing import NamedTuple
 import numpy as np
 
 from app import models
+from app.artifact_signatures import artifact_signature
 from app.database import SessionLocal, data_dir, is_sqlite_lock_error, retry_session_operation
 from app.logging_setup import log_device_diagnostics
 from app.metrics.ssim import ssim_loss_torch
@@ -1389,6 +1390,7 @@ def _write_worker_result(run: models.TrainingRun, status: str, started: float, e
         "artifact_kind": run.artifact_kind,
         "artifact_path": run.artifact_path,
         "artifact_size_bytes": run.artifact_size_bytes,
+        "artifact_signature": run.artifact_signature,
         "skipped_image_count": run.skipped_image_count,
         "skipped_images": run.skipped_images,
     }
@@ -1621,6 +1623,7 @@ def run_training(run_id: int, abort_event: threading.Event | None = None) -> Non
             run.image_count = count
             run.artifact_path = str(artifact_path)
             run.artifact_size_bytes = artifact_path.stat().st_size if artifact_path.exists() else None
+            run.artifact_signature = artifact_signature(artifact_path)
             # Metadata is written through short independent sessions, so the
             # long-lived worker object may not see the latest path.
             checkpoint_to_remove = str(artifact_dir / "checkpoint.pt")

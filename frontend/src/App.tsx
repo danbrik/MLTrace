@@ -5,6 +5,7 @@ import {
   BarChart3,
   BrainCircuit,
   CalendarClock,
+  ClipboardCheck,
   Database,
   Eye,
   FlaskConical,
@@ -24,6 +25,7 @@ import { AnomalyDetectionPage } from './pages/AnomalyDetectionPage';
 import { DataManagerPage } from './pages/DataManagerPage';
 import { DatasetsPage } from './pages/DatasetsPage';
 import { InspectPage } from './pages/InspectPage';
+import { EvaluationPage } from './pages/EvaluationPage';
 import { MethodsPage } from './pages/ModelsPage';
 import { OptimizationPage } from './pages/OptimizationPage';
 import { PreprocessingPipelinesPage } from './pages/PreprocessingPipelinesPage';
@@ -45,6 +47,7 @@ type Page =
   | 'inspect'
   | 'optimization'
   | 'analysis'
+  | 'evaluation'
   | 'anomaly-detection'
   | 'scheduler'
   | 'data-manager';
@@ -59,7 +62,7 @@ export function App() {
   const requestedPage = match?.[2] as Page | undefined;
   const page: Page = requestedPage && [
     'datasets', 'training-datasets', 'preprocessing', 'methods', 'training-pipelines', 'testing',
-    'inspect', 'optimization', 'analysis', 'anomaly-detection', 'scheduler', 'data-manager',
+    'inspect', 'optimization', 'analysis', 'evaluation', 'anomaly-detection', 'scheduler', 'data-manager',
   ].includes(requestedPage) ? requestedPage : 'datasets';
   const [project, setProject] = useState<Project | null>(null);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
@@ -108,6 +111,7 @@ export function App() {
     { id: 'inspect', label: 'Inspect Dataset', icon: <Eye size={18} /> },
     { id: 'optimization', label: 'Optimization', icon: <SlidersHorizontal size={18} /> },
     { id: 'analysis', label: 'Model Analysis', icon: <BarChart3 size={18} /> },
+    { id: 'evaluation', label: 'Evaluation', icon: <ClipboardCheck size={18} /> },
     { id: 'anomaly-detection', label: 'Anomaly Detection', icon: <Activity size={18} /> },
     { id: 'scheduler', label: 'Scheduler', icon: <CalendarClock size={18} /> },
     { id: 'data-manager', label: 'Data Manager', icon: <Archive size={18} /> },
@@ -211,6 +215,11 @@ export function App() {
         <Box display={page === 'analysis' ? 'block' : 'none'}>
           <PageErrorBoundary label="Analysis">
             <AnalysisPage active={page === 'analysis'} />
+          </PageErrorBoundary>
+        </Box>
+        <Box display={page === 'evaluation' ? 'block' : 'none'}>
+          <PageErrorBoundary label="Evaluation">
+            <EvaluationPage active={page === 'evaluation'} />
           </PageErrorBoundary>
         </Box>
         <Box display={page === 'anomaly-detection' ? 'block' : 'none'}>

@@ -101,6 +101,7 @@ def _reset_run_for_queue(
     run.artifact_kind = None
     run.artifact_path = None
     run.artifact_size_bytes = None
+    run.artifact_signature = None
     run.next_retry_at = None
     run.restart_mode = "checkpoint" if preserve_checkpoint else None
     if not preserve_checkpoint:
@@ -365,6 +366,7 @@ def serialize_training_run(db: Session, run: models.TrainingRun) -> TrainingRunR
         artifact_kind=run.artifact_kind,
         artifact_path=run.artifact_path,
         artifact_size_bytes=run.artifact_size_bytes,
+        artifact_signature=run.artifact_signature,
         checkpoint_at=run.checkpoint_at,
         checkpoint_epoch=run.checkpoint_epoch,
         checkpoint_phase=run.checkpoint_phase,

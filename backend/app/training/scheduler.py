@@ -521,7 +521,7 @@ class JobScheduler:
                 run.duration_seconds = payload.get("duration_seconds")
                 run.error_message = payload.get("error_message")
                 for field in (
-                    "image_count", "artifact_kind", "artifact_path", "artifact_size_bytes",
+                    "image_count", "artifact_kind", "artifact_path", "artifact_size_bytes", "artifact_signature",
                     "skipped_image_count", "skipped_images",
                 ):
                     if field in payload:

@@ -75,6 +75,29 @@ def _revision_for_model(db: Session, model, timestamp_column) -> str:
     return f"{int(count or 0)}:{newest.isoformat() if newest else 'none'}"
 
 
+def _evaluation_revision(db: Session) -> str:
+    result_count, latest_result_id, latest_result_at = db.execute(
+        select(
+            func.count(models.TestingRunResult.id),
+            func.max(models.TestingRunResult.id),
+            func.max(models.TestingRunResult.created_at),
+        )
+    ).one()
+    result_revision = (
+        f"{int(result_count or 0)}:{int(latest_result_id or 0)}:"
+        f"{latest_result_at.isoformat() if latest_result_at else 'none'}"
+    )
+    return "|".join(
+        (
+            _revision_for_model(
+                db, models.ModelEvaluation, models.ModelEvaluation.updated_at
+            ),
+            _revision_for_model(db, models.TestingRun, models.TestingRun.updated_at),
+            result_revision,
+        )
+    )
+
+
 def cache_revisions(db: Session) -> CacheRevisionsRead:
     revisions = {
         "datasets": _revision_for_model(db, models.Dataset, models.Dataset.updated_at),
@@ -88,6 +111,9 @@ def cache_revisions(db: Session) -> CacheRevisionsRead:
         "heatmapRanges": _revision_for_model(db, models.HeatmapRangeRun, models.HeatmapRangeRun.updated_at),
         "inspectRuns": _revision_for_model(db, models.InspectRun, models.InspectRun.updated_at),
         "analysisLayouts": _revision_for_model(db, models.AnalysisLayout, models.AnalysisLayout.updated_at),
+        "evaluationProfiles": _revision_for_model(db, models.EvaluationProfile, models.EvaluationProfile.updated_at),
+        "evaluationLabelSets": _revision_for_model(db, models.EvaluationLabelSet, models.EvaluationLabelSet.updated_at),
+        "evaluations": _evaluation_revision(db),
         "anomalyDetectionRuns": _revision_for_model(db, models.AnomalyDetectionRun, models.AnomalyDetectionRun.updated_at),
         "optimizationStudies": _revision_for_model(db, models.OptimizationStudy, models.OptimizationStudy.updated_at),
         "rois": _revision_for_model(db, models.RoiDefinition, models.RoiDefinition.updated_at),
@@ -125,6 +151,13 @@ def training_dataset_update_lock_reasons(db: Session, training_dataset_id: int) 
     ) or 0
     if referencing_testing_runs:
         reasons.append("Train/Test Dataset not editable, because already used in Testing Runs.")
+    referencing_label_sets = db.scalar(
+        select(func.count(models.EvaluationLabelSet.id)).where(
+            models.EvaluationLabelSet.training_dataset_id == training_dataset_id
+        )
+    ) or 0
+    if referencing_label_sets:
+        reasons.append("Train/Test Dataset not editable, because it has Evaluation label sets.")
     return reasons
 
 

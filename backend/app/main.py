@@ -5,7 +5,7 @@ import time
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, Response
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -87,6 +87,19 @@ from app.schemas import (
     ProjectCreate,
     ProjectRead,
     GpuSnapshotRead,
+    EvaluationLabelCsvImportRequest,
+    EvaluationLabelCsvPreviewRead,
+    EvaluationLabelCsvPreviewRequest,
+    EvaluationLabelEventInput,
+    EvaluationLabelSetCreate,
+    EvaluationLabelSetRead,
+    EvaluationProfileCreate,
+    EvaluationProfileRead,
+    EvaluationScorePreviewRead,
+    ModelEvaluationCreate,
+    ModelEvaluationDuplicateRequest,
+    ModelEvaluationRead,
+    ModelEvaluationUpdate,
     SchedulerJobWithProjectRead,
     SchedulerJobMoveRequest,
     SchedulerJobMoveResponse,
@@ -114,6 +127,7 @@ from app.schemas import (
     TrainingRunRead,
 )
 from app.anomaly_detection import service as anomaly_detection_service
+from app.evaluation import service as evaluation_service
 from app.analysis import service as analysis_service
 from app.analysis import baseline as baseline_analysis_service
 from app.heatmap import service as heatmap_service
@@ -176,9 +190,21 @@ logger = logging.getLogger("mltrace.api")
 
 def _value_error_status(exc: ValueError) -> int:
     message = str(exc).lower()
-    if "not editable" in message or "locked" in message or "already used" in message:
+    if (
+        "not editable" in message
+        or "locked" in message
+        or "already used" in message
+        or "immutable" in message
+        or "finalized" in message
+    ):
         return 409
     return 400
+
+
+def _evaluation_value_error_status(exc: ValueError) -> int:
+    if "already exists" in str(exc).lower():
+        return 409
+    return _value_error_status(exc)
 
 
 @asynccontextmanager
@@ -295,6 +321,345 @@ def create_app() -> FastAPI:
     @app.get("/api/cache/revisions", response_model=CacheRevisionsRead)
     def api_cache_revisions(db: Session = Depends(get_db)):
         return cache_revisions(db)
+
+    @app.get("/api/evaluation-profiles", response_model=list[EvaluationProfileRead])
+    def api_list_evaluation_profiles(db: Session = Depends(get_db)):
+        return evaluation_service.list_profiles(db)
+
+    @app.post("/api/evaluation-profiles", response_model=EvaluationProfileRead)
+    def api_create_evaluation_profile(
+        payload: EvaluationProfileCreate, db: Session = Depends(get_db)
+    ):
+        try:
+            return evaluation_service.create_profile(db, payload)
+        except ValueError as exc:
+            raise HTTPException(status_code=_evaluation_value_error_status(exc), detail=str(exc)) from exc
+
+    @app.get("/api/evaluation-profiles/{profile_id}", response_model=EvaluationProfileRead)
+    def api_get_evaluation_profile(profile_id: int, db: Session = Depends(get_db)):
+        row = evaluation_service.get_profile(db, profile_id)
+        if row is None:
+            raise HTTPException(status_code=404, detail="Evaluation profile not found.")
+        return row
+
+    @app.put("/api/evaluation-profiles/{profile_id}", response_model=EvaluationProfileRead)
+    def api_update_evaluation_profile(
+        profile_id: int,
+        payload: EvaluationProfileCreate,
+        db: Session = Depends(get_db),
+    ):
+        try:
+            row = evaluation_service.update_profile(db, profile_id, payload)
+        except ValueError as exc:
+            raise HTTPException(status_code=_evaluation_value_error_status(exc), detail=str(exc)) from exc
+        if row is None:
+            raise HTTPException(status_code=404, detail="Evaluation profile not found.")
+        return row
+
+    @app.delete("/api/evaluation-profiles/{profile_id}", status_code=204)
+    def api_delete_evaluation_profile(profile_id: int, db: Session = Depends(get_db)):
+        try:
+            deleted = evaluation_service.delete_profile(db, profile_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        if not deleted:
+            raise HTTPException(status_code=404, detail="Evaluation profile not found.")
+        return None
+
+    # Static CSV path must be registered before the dynamic label-set id route.
+    @app.post(
+        "/api/evaluation-label-sets/csv-preview",
+        response_model=EvaluationLabelCsvPreviewRead,
+    )
+    def api_preview_evaluation_label_csv(
+        payload: EvaluationLabelCsvPreviewRequest,
+        db: Session = Depends(get_db),
+    ):
+        return evaluation_service.preview_label_csv(db, payload)
+
+    @app.get("/api/evaluation-label-sets", response_model=list[EvaluationLabelSetRead])
+    def api_list_evaluation_label_sets(
+        training_dataset_id: int | None = None,
+        db: Session = Depends(get_db),
+    ):
+        return evaluation_service.list_label_sets(
+            db, training_dataset_id=training_dataset_id
+        )
+
+    @app.post("/api/evaluation-label-sets", response_model=EvaluationLabelSetRead)
+    def api_create_evaluation_label_set(
+        payload: EvaluationLabelSetCreate, db: Session = Depends(get_db)
+    ):
+        try:
+            return evaluation_service.create_label_set(db, payload)
+        except ValueError as exc:
+            raise HTTPException(status_code=_evaluation_value_error_status(exc), detail=str(exc)) from exc
+
+    @app.get("/api/evaluation-label-sets/{label_set_id}", response_model=EvaluationLabelSetRead)
+    def api_get_evaluation_label_set(label_set_id: int, db: Session = Depends(get_db)):
+        row = evaluation_service.get_label_set(db, label_set_id)
+        if row is None:
+            raise HTTPException(status_code=404, detail="Evaluation label set not found.")
+        return row
+
+    @app.put("/api/evaluation-label-sets/{label_set_id}", response_model=EvaluationLabelSetRead)
+    def api_update_evaluation_label_set(
+        label_set_id: int,
+        payload: EvaluationLabelSetCreate,
+        db: Session = Depends(get_db),
+    ):
+        try:
+            row = evaluation_service.update_label_set(db, label_set_id, payload)
+        except ValueError as exc:
+            raise HTTPException(status_code=_evaluation_value_error_status(exc), detail=str(exc)) from exc
+        if row is None:
+            raise HTTPException(status_code=404, detail="Evaluation label set not found.")
+        return row
+
+    @app.delete("/api/evaluation-label-sets/{label_set_id}", status_code=204)
+    def api_delete_evaluation_label_set(label_set_id: int, db: Session = Depends(get_db)):
+        try:
+            deleted = evaluation_service.delete_label_set(db, label_set_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        if not deleted:
+            raise HTTPException(status_code=404, detail="Evaluation label set not found.")
+        return None
+
+    @app.post(
+        "/api/evaluation-label-sets/{label_set_id}/events",
+        response_model=EvaluationLabelSetRead,
+    )
+    def api_add_evaluation_label_event(
+        label_set_id: int,
+        payload: EvaluationLabelEventInput,
+        db: Session = Depends(get_db),
+    ):
+        try:
+            row = evaluation_service.add_label_event(db, label_set_id, payload)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        if row is None:
+            raise HTTPException(status_code=404, detail="Evaluation label set not found.")
+        return row
+
+    @app.put(
+        "/api/evaluation-label-sets/{label_set_id}/events/{event_id}",
+        response_model=EvaluationLabelSetRead,
+    )
+    def api_update_evaluation_label_event(
+        label_set_id: int,
+        event_id: str,
+        payload: EvaluationLabelEventInput,
+        db: Session = Depends(get_db),
+    ):
+        try:
+            row = evaluation_service.update_label_event(db, label_set_id, event_id, payload)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="Evaluation label event not found.") from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        if row is None:
+            raise HTTPException(status_code=404, detail="Evaluation label set not found.")
+        return row
+
+    @app.delete(
+        "/api/evaluation-label-sets/{label_set_id}/events/{event_id}", status_code=204
+    )
+    def api_delete_evaluation_label_event(
+        label_set_id: int, event_id: str, db: Session = Depends(get_db)
+    ):
+        if not evaluation_service.delete_label_event(db, label_set_id, event_id):
+            raise HTTPException(status_code=404, detail="Evaluation label event not found.")
+        return None
+
+    @app.post(
+        "/api/evaluation-label-sets/{label_set_id}/csv-import",
+        response_model=EvaluationLabelSetRead,
+    )
+    def api_import_evaluation_label_csv(
+        label_set_id: int,
+        payload: EvaluationLabelCsvImportRequest,
+        db: Session = Depends(get_db),
+    ):
+        try:
+            row = evaluation_service.import_label_csv(db, label_set_id, payload)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        if row is None:
+            raise HTTPException(status_code=404, detail="Evaluation label set not found.")
+        return row
+
+    @app.get("/api/evaluation-label-sets/{label_set_id}/csv-export")
+    def api_export_evaluation_label_csv(label_set_id: int, db: Session = Depends(get_db)):
+        content = evaluation_service.export_label_csv(db, label_set_id)
+        if content is None:
+            raise HTTPException(status_code=404, detail="Evaluation label set not found.")
+        return Response(
+            content=content,
+            media_type="text/csv; charset=utf-8",
+            headers={
+                "Content-Disposition": f'attachment; filename="evaluation-label-set-{label_set_id}.csv"'
+            },
+        )
+
+    @app.get("/api/evaluations", response_model=list[ModelEvaluationRead])
+    def api_list_evaluations(
+        status: str | None = None,
+        stale: bool | None = None,
+        category: str | None = None,
+        score_series: str | None = None,
+        created_from: datetime | None = None,
+        created_to: datetime | None = None,
+        search: str | None = None,
+        db: Session = Depends(get_db),
+    ):
+        return evaluation_service.list_evaluations(
+            db,
+            status=status,
+            stale=stale,
+            category=category,
+            score_series=score_series,
+            created_from=created_from,
+            created_to=created_to,
+            search=search,
+        )
+
+    @app.post("/api/evaluations", response_model=ModelEvaluationRead)
+    def api_create_evaluation(payload: ModelEvaluationCreate, db: Session = Depends(get_db)):
+        try:
+            return evaluation_service.create_evaluation(db, payload)
+        except ValueError as exc:
+            raise HTTPException(status_code=_value_error_status(exc), detail=str(exc)) from exc
+
+    @app.get("/api/evaluations/{evaluation_id}", response_model=ModelEvaluationRead)
+    def api_get_evaluation(evaluation_id: int, db: Session = Depends(get_db)):
+        row = evaluation_service.get_evaluation(db, evaluation_id)
+        if row is None:
+            raise HTTPException(status_code=404, detail="Evaluation not found.")
+        return row
+
+    @app.patch("/api/evaluations/{evaluation_id}", response_model=ModelEvaluationRead)
+    def api_update_evaluation(
+        evaluation_id: int,
+        payload: ModelEvaluationUpdate,
+        db: Session = Depends(get_db),
+    ):
+        try:
+            row = evaluation_service.update_evaluation(db, evaluation_id, payload)
+        except ValueError as exc:
+            raise HTTPException(status_code=_value_error_status(exc), detail=str(exc)) from exc
+        if row is None:
+            raise HTTPException(status_code=404, detail="Evaluation not found.")
+        return row
+
+    @app.delete("/api/evaluations/{evaluation_id}", status_code=204)
+    def api_delete_evaluation(evaluation_id: int, db: Session = Depends(get_db)):
+        if not evaluation_service.delete_evaluation(db, evaluation_id):
+            raise HTTPException(status_code=404, detail="Evaluation not found.")
+        return None
+
+    @app.post(
+        "/api/evaluations/{evaluation_id}/calculate/separation",
+        response_model=ModelEvaluationRead,
+    )
+    def api_calculate_evaluation_separation(
+        evaluation_id: int, db: Session = Depends(get_db)
+    ):
+        try:
+            row = evaluation_service.calculate_separation(db, evaluation_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=_value_error_status(exc), detail=str(exc)) from exc
+        if row is None:
+            raise HTTPException(status_code=404, detail="Evaluation not found.")
+        return row
+
+    @app.post(
+        "/api/evaluations/{evaluation_id}/calculate/drift",
+        response_model=ModelEvaluationRead,
+    )
+    def api_calculate_evaluation_drift(
+        evaluation_id: int, db: Session = Depends(get_db)
+    ):
+        try:
+            row = evaluation_service.calculate_drift(db, evaluation_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=_value_error_status(exc), detail=str(exc)) from exc
+        if row is None:
+            raise HTTPException(status_code=404, detail="Evaluation not found.")
+        return row
+
+    @app.post(
+        "/api/evaluations/{evaluation_id}/calculate/detection",
+        response_model=ModelEvaluationRead,
+    )
+    def api_calculate_evaluation_detection(
+        evaluation_id: int, db: Session = Depends(get_db)
+    ):
+        try:
+            row = evaluation_service.calculate_detection(db, evaluation_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=_value_error_status(exc), detail=str(exc)) from exc
+        if row is None:
+            raise HTTPException(status_code=404, detail="Evaluation not found.")
+        return row
+
+    @app.post(
+        "/api/evaluations/{evaluation_id}/finalize",
+        response_model=ModelEvaluationRead,
+    )
+    def api_finalize_evaluation(evaluation_id: int, db: Session = Depends(get_db)):
+        try:
+            row = evaluation_service.finalize_evaluation(db, evaluation_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=_value_error_status(exc), detail=str(exc)) from exc
+        if row is None:
+            raise HTTPException(status_code=404, detail="Evaluation not found.")
+        return row
+
+    @app.post(
+        "/api/evaluations/{evaluation_id}/duplicate",
+        response_model=ModelEvaluationRead,
+    )
+    def api_duplicate_evaluation(
+        evaluation_id: int,
+        payload: ModelEvaluationDuplicateRequest | None = None,
+        db: Session = Depends(get_db),
+    ):
+        try:
+            row = evaluation_service.duplicate_evaluation(db, evaluation_id, payload)
+        except ValueError as exc:
+            raise HTTPException(status_code=_value_error_status(exc), detail=str(exc)) from exc
+        if row is None:
+            raise HTTPException(status_code=404, detail="Evaluation not found.")
+        return row
+
+    @app.get(
+        "/api/testing-runs/{run_id}/evaluation-score-preview",
+        response_model=EvaluationScorePreviewRead,
+    )
+    def api_evaluation_score_preview(
+        run_id: int,
+        score_series: str = "score",
+        start_timestamp: datetime | None = None,
+        end_timestamp: datetime | None = None,
+        max_points: int = Query(default=8000, ge=100, le=20000),
+        db: Session = Depends(get_db),
+    ):
+        try:
+            row = evaluation_service.score_preview(
+                db,
+                run_id,
+                score_series=score_series,
+                start_timestamp=start_timestamp,
+                end_timestamp=end_timestamp,
+                max_points=max_points,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        if row is None:
+            raise HTTPException(status_code=404, detail="Testing run not found.")
+        return row
 
     @app.get("/api/analysis/layouts", response_model=list[AnalysisLayoutRead])
     def api_list_analysis_layouts(db: Session = Depends(get_db)):

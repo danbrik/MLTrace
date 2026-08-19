@@ -13,6 +13,12 @@ import type {
   CacheRevisions,
   Dataset,
   DatasetConnectionTest,
+  EvaluationLabelCsvPreview,
+  EvaluationLabelSet,
+  EvaluationLabelSetPayload,
+  EvaluationProfile,
+  EvaluationProfilePayload,
+  EvaluationScorePreview,
   AnalysisLayout,
   BaselineAnalysisMethod,
   BaselineAnalysisRegion,
@@ -33,6 +39,8 @@ import type {
   MethodTorchCheckResponse,
   MethodDefinition,
   MethodValidationResponse,
+  ModelEvaluation,
+  ModelEvaluationPayload,
   Project,
   GpuSnapshot,
   SchedulerJobWithProject,
@@ -721,6 +729,184 @@ export function bulkEnqueueTestingRuns(payload: {
 export function getTestingRunResults(runId: number, maxPoints?: number): Promise<TestingRunResults> {
   const query = maxPoints ? `?max_points=${maxPoints}` : '';
   return request<TestingRunResults>(`/api/testing-runs/${runId}/results${query}`);
+}
+
+// -- Single-model evaluation -------------------------------------------------
+
+export function listEvaluationProfiles(): Promise<EvaluationProfile[]> {
+  return cachedList<EvaluationProfile[]>('evaluationProfiles', '/api/evaluation-profiles', REFERENCE_TTL_MS);
+}
+
+export function getEvaluationProfile(profileId: number): Promise<EvaluationProfile> {
+  return request<EvaluationProfile>(`/api/evaluation-profiles/${profileId}`);
+}
+
+export function createEvaluationProfile(payload: EvaluationProfilePayload): Promise<EvaluationProfile> {
+  return request<EvaluationProfile>('/api/evaluation-profiles', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  }).then((profile) => {
+    invalidate(['evaluationProfiles', 'evaluations']);
+    return profile;
+  });
+}
+
+export function updateEvaluationProfile(profileId: number, payload: EvaluationProfilePayload): Promise<EvaluationProfile> {
+  return request<EvaluationProfile>(`/api/evaluation-profiles/${profileId}`, {
+    method: 'PUT',
+    body: JSON.stringify(payload),
+  }).then((profile) => {
+    invalidate(['evaluationProfiles', 'evaluations']);
+    return profile;
+  });
+}
+
+export async function deleteEvaluationProfile(profileId: number): Promise<void> {
+  await request<void>(`/api/evaluation-profiles/${profileId}`, { method: 'DELETE' });
+  invalidate(['evaluationProfiles', 'evaluations']);
+}
+
+export function listEvaluationLabelSets(): Promise<EvaluationLabelSet[]> {
+  return cachedList<EvaluationLabelSet[]>('evaluationLabelSets', '/api/evaluation-label-sets', REFERENCE_TTL_MS);
+}
+
+export function getEvaluationLabelSet(labelSetId: number): Promise<EvaluationLabelSet> {
+  return request<EvaluationLabelSet>(`/api/evaluation-label-sets/${labelSetId}`);
+}
+
+export function createEvaluationLabelSet(payload: EvaluationLabelSetPayload): Promise<EvaluationLabelSet> {
+  return request<EvaluationLabelSet>('/api/evaluation-label-sets', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  }).then((labelSet) => {
+    invalidate(['evaluationLabelSets', 'evaluations']);
+    return labelSet;
+  });
+}
+
+export function updateEvaluationLabelSet(labelSetId: number, payload: EvaluationLabelSetPayload): Promise<EvaluationLabelSet> {
+  return request<EvaluationLabelSet>(`/api/evaluation-label-sets/${labelSetId}`, {
+    method: 'PUT',
+    body: JSON.stringify(payload),
+  }).then((labelSet) => {
+    invalidate(['evaluationLabelSets', 'evaluations']);
+    return labelSet;
+  });
+}
+
+export async function deleteEvaluationLabelSet(labelSetId: number): Promise<void> {
+  await request<void>(`/api/evaluation-label-sets/${labelSetId}`, { method: 'DELETE' });
+  invalidate(['evaluationLabelSets', 'evaluations']);
+}
+
+export function previewEvaluationLabelCsv(payload: {
+  csv_text: string;
+  training_dataset_id: number;
+}): Promise<EvaluationLabelCsvPreview> {
+  return request<EvaluationLabelCsvPreview>('/api/evaluation-label-sets/csv-preview', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
+}
+
+export function evaluationLabelSetCsvUrl(labelSetId: number): string {
+  return projectMediaUrl(`/api/evaluation-label-sets/${labelSetId}/csv-export`);
+}
+
+export function importEvaluationLabelCsv(labelSetId: number, payload: {
+  training_dataset_id: number;
+  csv_text: string;
+  mode: 'replace' | 'append';
+}): Promise<EvaluationLabelSet> {
+  return request<EvaluationLabelSet>(`/api/evaluation-label-sets/${labelSetId}/csv-import`, {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  }).then((labelSet) => {
+    invalidate(['evaluationLabelSets', 'evaluations']);
+    return labelSet;
+  });
+}
+
+export function getEvaluationScorePreview(
+  runId: number,
+  options: {
+    score_series: string;
+    start_timestamp?: string | null;
+    end_timestamp?: string | null;
+    max_points?: number;
+  },
+): Promise<EvaluationScorePreview> {
+  const query = new URLSearchParams({ score_series: options.score_series });
+  if (options.start_timestamp) query.set('start_timestamp', options.start_timestamp);
+  if (options.end_timestamp) query.set('end_timestamp', options.end_timestamp);
+  if (options.max_points) query.set('max_points', String(options.max_points));
+  return request<EvaluationScorePreview>(`/api/testing-runs/${runId}/evaluation-score-preview?${query.toString()}`);
+}
+
+export function listModelEvaluations(): Promise<ModelEvaluation[]> {
+  return cachedList<ModelEvaluation[]>('evaluations', '/api/evaluations', RUN_TTL_MS);
+}
+
+export function getModelEvaluation(evaluationId: number): Promise<ModelEvaluation> {
+  return request<ModelEvaluation>(`/api/evaluations/${evaluationId}`);
+}
+
+export function createModelEvaluation(payload: ModelEvaluationPayload): Promise<ModelEvaluation> {
+  return request<ModelEvaluation>('/api/evaluations', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  }).then((evaluation) => {
+    invalidate(['evaluations']);
+    return evaluation;
+  });
+}
+
+export function updateModelEvaluation(evaluationId: number, payload: Partial<ModelEvaluationPayload>): Promise<ModelEvaluation> {
+  return request<ModelEvaluation>(`/api/evaluations/${evaluationId}`, {
+    method: 'PATCH',
+    body: JSON.stringify(payload),
+  }).then((evaluation) => {
+    invalidate(['evaluations']);
+    return evaluation;
+  });
+}
+
+export async function deleteModelEvaluation(evaluationId: number): Promise<void> {
+  await request<void>(`/api/evaluations/${evaluationId}`, { method: 'DELETE' });
+  invalidate(['evaluations']);
+}
+
+export function calculateModelEvaluation(
+  evaluationId: number,
+  stage: 'separation' | 'drift' | 'detection',
+): Promise<ModelEvaluation> {
+  return request<ModelEvaluation>(`/api/evaluations/${evaluationId}/calculate/${stage}`, {
+    method: 'POST',
+    body: JSON.stringify({}),
+  }, 120_000).then((evaluation) => {
+    invalidate(['evaluations']);
+    return evaluation;
+  });
+}
+
+export function finalizeModelEvaluation(evaluationId: number): Promise<ModelEvaluation> {
+  return request<ModelEvaluation>(`/api/evaluations/${evaluationId}/finalize`, {
+    method: 'POST',
+    body: JSON.stringify({}),
+  }).then((evaluation) => {
+    invalidate(['evaluations']);
+    return evaluation;
+  });
+}
+
+export function duplicateModelEvaluation(evaluationId: number): Promise<ModelEvaluation> {
+  return request<ModelEvaluation>(`/api/evaluations/${evaluationId}/duplicate`, {
+    method: 'POST',
+    body: JSON.stringify({}),
+  }).then((evaluation) => {
+    invalidate(['evaluations']);
+    return evaluation;
+  });
 }
 
 export function getTestingRunResultImage(runId: number, resultId: number): Promise<TestingRunResultImage> {

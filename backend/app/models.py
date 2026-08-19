@@ -324,6 +324,9 @@ class TrainingRun(Base):
     # Artifact (model weights or mean image) written to disk.
     artifact_kind: Mapped[str | None] = mapped_column(String(64))
     artifact_path: Mapped[str | None] = mapped_column(Text)
+    # Stable digest of the completed artifact.  Evaluation uses this rather
+    # than display names to ensure all score sources belong to the same model.
+    artifact_signature: Mapped[str | None] = mapped_column(String(64))
     artifact_size_bytes: Mapped[int | None] = mapped_column(BigInteger)
 
     # Single durable resume checkpoint for long gradient trainings.
@@ -480,6 +483,7 @@ class TestingRun(Base):
     training_mode: Mapped[str] = mapped_column(String(64), nullable=False)
     artifact_kind: Mapped[str] = mapped_column(String(64), nullable=False)
     artifact_path: Mapped[str] = mapped_column(Text, nullable=False)
+    artifact_signature: Mapped[str | None] = mapped_column(String(64))
     roi_name: Mapped[str | None] = mapped_column(String(255))
     roi_geometry: Mapped[dict | None] = mapped_column(json_type())
     inference_config: Mapped[dict | None] = mapped_column(json_type())
@@ -919,6 +923,169 @@ class OptimizationTrial(Base):
     anomaly_testing_run: Mapped[TestingRun | None] = relationship(foreign_keys=[anomaly_testing_run_id])
     normal_holdout_testing_run: Mapped[TestingRun | None] = relationship(foreign_keys=[normal_holdout_testing_run_id])
     anomaly_holdout_testing_run: Mapped[TestingRun | None] = relationship(foreign_keys=[anomaly_holdout_testing_run_id])
+
+
+class EvaluationProfile(Base):
+    """Reusable defaults for the three independent evaluation stages."""
+
+    __tablename__ = "evaluation_profiles"
+    __table_args__ = (UniqueConstraint("name", name="uq_evaluation_profile_name"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    description: Mapped[str | None] = mapped_column(Text)
+    normal_window_duration_seconds: Mapped[float] = mapped_column(Float, nullable=False, default=3600.0)
+    normal_window_buffer_seconds: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    drift_window_seconds: Mapped[float] = mapped_column(Float, nullable=False, default=3600.0)
+    false_alarm_horizon_seconds: Mapped[float] = mapped_column(Float, nullable=False, default=3600.0)
+    anticipation_seconds: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    epsilon: Mapped[float] = mapped_column(Float, nullable=False, default=1e-12)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=False), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=False), server_default=func.now(), onupdate=func.now()
+    )
+
+
+class EvaluationLabelSet(Base):
+    """Versioned ground-truth intervals bound to one inference dataset."""
+
+    __tablename__ = "evaluation_label_sets"
+    __table_args__ = (
+        UniqueConstraint("training_dataset_id", "name", name="uq_evaluation_label_set_dataset_name"),
+        Index("ix_evaluation_label_sets_dataset", "training_dataset_id"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    training_dataset_id: Mapped[int] = mapped_column(
+        ForeignKey("training_datasets.id", ondelete="RESTRICT"), nullable=False
+    )
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    description: Mapped[str | None] = mapped_column(Text)
+    version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=False), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=False), server_default=func.now(), onupdate=func.now()
+    )
+
+    training_dataset: Mapped[TrainingDataset] = relationship()
+    events: Mapped[list["EvaluationLabelEvent"]] = relationship(
+        back_populates="label_set",
+        cascade="all, delete-orphan",
+        order_by="EvaluationLabelEvent.start_timestamp",
+    )
+
+
+class EvaluationLabelEvent(Base):
+    __tablename__ = "evaluation_label_events"
+    __table_args__ = (
+        UniqueConstraint("label_set_id", "event_id", name="uq_evaluation_label_event_key"),
+        Index("ix_evaluation_label_events_set_range", "label_set_id", "start_timestamp", "end_timestamp"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    label_set_id: Mapped[int] = mapped_column(
+        ForeignKey("evaluation_label_sets.id", ondelete="CASCADE"), nullable=False
+    )
+    event_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    type: Mapped[str] = mapped_column(String(16), nullable=False)
+    name: Mapped[str | None] = mapped_column(String(255))
+    category: Mapped[str | None] = mapped_column(String(128))
+    start_timestamp: Mapped[datetime] = mapped_column(DateTime(timezone=False), nullable=False)
+    end_timestamp: Mapped[datetime] = mapped_column(DateTime(timezone=False), nullable=False)
+    notes: Mapped[str | None] = mapped_column(Text)
+
+    label_set: Mapped[EvaluationLabelSet] = relationship(back_populates="events")
+
+
+class ModelEvaluation(Base):
+    """A mutable single-model evaluation draft or immutable final snapshot."""
+
+    __tablename__ = "model_evaluations"
+    __table_args__ = (
+        Index("ix_model_evaluations_status", "status"),
+        Index("ix_model_evaluations_created_at", "created_at"),
+        Index("ix_model_evaluations_evaluation_run", "evaluation_testing_run_id"),
+        Index("ix_model_evaluations_reference_run", "reference_testing_run_id"),
+        Index("ix_model_evaluations_calibration_run", "calibration_testing_run_id"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="draft")
+
+    evaluation_testing_run_id: Mapped[int | None] = mapped_column(
+        ForeignKey("testing_runs.id", ondelete="RESTRICT")
+    )
+    reference_testing_run_id: Mapped[int | None] = mapped_column(
+        ForeignKey("testing_runs.id", ondelete="RESTRICT")
+    )
+    calibration_testing_run_id: Mapped[int | None] = mapped_column(
+        ForeignKey("testing_runs.id", ondelete="RESTRICT")
+    )
+    profile_id: Mapped[int | None] = mapped_column(
+        ForeignKey("evaluation_profiles.id", ondelete="RESTRICT")
+    )
+    label_set_id: Mapped[int | None] = mapped_column(
+        ForeignKey("evaluation_label_sets.id", ondelete="RESTRICT")
+    )
+    score_series: Mapped[str] = mapped_column(String(32), nullable=False, default="score")
+
+    evaluation_start_timestamp: Mapped[datetime | None] = mapped_column(DateTime(timezone=False))
+    evaluation_end_timestamp: Mapped[datetime | None] = mapped_column(DateTime(timezone=False))
+    reference_start_timestamp: Mapped[datetime | None] = mapped_column(DateTime(timezone=False))
+    reference_end_timestamp: Mapped[datetime | None] = mapped_column(DateTime(timezone=False))
+    calibration_start_timestamp: Mapped[datetime | None] = mapped_column(DateTime(timezone=False))
+    calibration_end_timestamp: Mapped[datetime | None] = mapped_column(DateTime(timezone=False))
+
+    selected_categories: Mapped[list | None] = mapped_column(json_type())
+    normal_window_overrides: Mapped[dict | None] = mapped_column(json_type())
+    profile_overrides: Mapped[dict | None] = mapped_column(json_type())
+    profile_snapshot: Mapped[dict | None] = mapped_column(json_type())
+    label_snapshot: Mapped[dict | None] = mapped_column(json_type())
+    source_snapshot: Mapped[dict | None] = mapped_column(json_type())
+    config_signature: Mapped[str | None] = mapped_column(String(64))
+
+    separation_status: Mapped[str] = mapped_column(String(24), nullable=False, default="not_calculated")
+    separation_config_signature: Mapped[str | None] = mapped_column(String(64))
+    separation_result: Mapped[dict | None] = mapped_column(json_type())
+    separation_error: Mapped[str | None] = mapped_column(Text)
+    drift_status: Mapped[str] = mapped_column(String(24), nullable=False, default="not_calculated")
+    drift_config_signature: Mapped[str | None] = mapped_column(String(64))
+    drift_result: Mapped[dict | None] = mapped_column(json_type())
+    drift_error: Mapped[str | None] = mapped_column(Text)
+    detection_status: Mapped[str] = mapped_column(String(24), nullable=False, default="not_calculated")
+    detection_config_signature: Mapped[str | None] = mapped_column(String(64))
+    detection_result: Mapped[dict | None] = mapped_column(json_type())
+    detection_error: Mapped[str | None] = mapped_column(Text)
+    warnings: Mapped[list | None] = mapped_column(json_type())
+
+    sep_median: Mapped[float | None] = mapped_column(Float)
+    sep_min: Mapped[float | None] = mapped_column(Float)
+    drift_mean: Mapped[float | None] = mapped_column(Float)
+    drift_max: Mapped[float | None] = mapped_column(Float)
+    event_recall: Mapped[float | None] = mapped_column(Float)
+    median_delay_seconds: Mapped[float | None] = mapped_column(Float)
+    frame_fpr: Mapped[float | None] = mapped_column(Float)
+    false_alarm_rate_t0: Mapped[float | None] = mapped_column(Float)
+    active_quantile: Mapped[float] = mapped_column(Float, nullable=False, default=0.999)
+
+    finalized_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=False))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=False), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=False), server_default=func.now(), onupdate=func.now()
+    )
+
+    evaluation_testing_run: Mapped[TestingRun | None] = relationship(
+        foreign_keys=[evaluation_testing_run_id]
+    )
+    reference_testing_run: Mapped[TestingRun | None] = relationship(
+        foreign_keys=[reference_testing_run_id]
+    )
+    calibration_testing_run: Mapped[TestingRun | None] = relationship(
+        foreign_keys=[calibration_testing_run_id]
+    )
+    profile: Mapped[EvaluationProfile | None] = relationship()
+    label_set: Mapped[EvaluationLabelSet | None] = relationship()
 
 
 ModelConfiguration = MethodConfiguration

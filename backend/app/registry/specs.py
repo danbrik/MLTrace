@@ -128,6 +128,10 @@ def _training_dataset_dependents(db: Session, td_id: int) -> list[Dependent]:
         | (models.OptimizationStudy.anomaly_holdout_dataset_id == td_id)
     )
     out += _named(db, "optimization_study", models.OptimizationStudy, models.OptimizationStudy.id, lambda r: r.name, study_where)
+    out += _named(
+        db, "evaluation_label_set", models.EvaluationLabelSet, models.EvaluationLabelSet.id,
+        lambda r: r.name, models.EvaluationLabelSet.training_dataset_id == td_id,
+    )
     return out
 
 
@@ -181,7 +185,29 @@ def _testing_run_dependents(db: Session, ts_id: int) -> list[Dependent]:
         lambda r: f"Heatmap video #{r.id} · {r.testing_run_name}",
         models.HeatmapRangeRun.testing_run_id == ts_id,
     )
+    evaluations = db.scalars(
+        select(models.ModelEvaluation).where(
+            (models.ModelEvaluation.evaluation_testing_run_id == ts_id)
+            | (models.ModelEvaluation.reference_testing_run_id == ts_id)
+            | (models.ModelEvaluation.calibration_testing_run_id == ts_id)
+        ).distinct()
+    ).all()
+    out += [Dependent("model_evaluation", row.id, row.name) for row in evaluations]
     return out
+
+
+def _evaluation_profile_dependents(db: Session, profile_id: int) -> list[Dependent]:
+    return _named(
+        db, "model_evaluation", models.ModelEvaluation, models.ModelEvaluation.id,
+        lambda row: row.name, models.ModelEvaluation.profile_id == profile_id,
+    )
+
+
+def _evaluation_label_set_dependents(db: Session, label_set_id: int) -> list[Dependent]:
+    return _named(
+        db, "model_evaluation", models.ModelEvaluation, models.ModelEvaluation.id,
+        lambda row: row.name, models.ModelEvaluation.label_set_id == label_set_id,
+    )
 
 
 # -- artifact resolvers --------------------------------------------------------
@@ -293,6 +319,33 @@ def _delete_optimization_study(db: Session, entity_id: int) -> bool:
     from app.optimization.service import delete_study
 
     return delete_study(db, entity_id)
+
+
+def _delete_evaluation_profile(db: Session, entity_id: int) -> bool:
+    row = db.get(models.EvaluationProfile, entity_id)
+    if row is None:
+        return False
+    db.delete(row)
+    db.commit()
+    return True
+
+
+def _delete_evaluation_label_set(db: Session, entity_id: int) -> bool:
+    row = db.get(models.EvaluationLabelSet, entity_id)
+    if row is None:
+        return False
+    db.delete(row)
+    db.commit()
+    return True
+
+
+def _delete_model_evaluation(db: Session, entity_id: int) -> bool:
+    row = db.get(models.ModelEvaluation, entity_id)
+    if row is None:
+        return False
+    db.delete(row)
+    db.commit()
+    return True
 
 
 # -- specs -----------------------------------------------------------------------
@@ -509,6 +562,49 @@ ENTITY_SPECS: dict[str, EntitySpec] = {
         filters=[_CREATED_FILTER],
         deleter=_delete_analysis_layout,
     ),
+    "evaluation_profile": EntitySpec(
+        key="evaluation_profile",
+        label="Evaluation Profiles",
+        model=models.EvaluationProfile,
+        name_of=lambda row: row.name,
+        list_fields=[
+            "id", "name", "normal_window_duration_seconds", "drift_window_seconds",
+            "false_alarm_horizon_seconds", "anticipation_seconds", "created_at", "updated_at",
+        ],
+        search_fields=["name", "description"],
+        filters=[_USAGE_FILTER, _CREATED_FILTER],
+        dependents=_evaluation_profile_dependents,
+        deleter=_delete_evaluation_profile,
+    ),
+    "evaluation_label_set": EntitySpec(
+        key="evaluation_label_set",
+        label="Evaluation Label Sets",
+        model=models.EvaluationLabelSet,
+        name_of=lambda row: row.name,
+        list_fields=["id", "name", "training_dataset_id", "version", "created_at", "updated_at"],
+        search_fields=["name", "description"],
+        filters=[_USAGE_FILTER, _CREATED_FILTER],
+        dependents=_evaluation_label_set_dependents,
+        deleter=_delete_evaluation_label_set,
+    ),
+    "model_evaluation": EntitySpec(
+        key="model_evaluation",
+        label="Model Evaluations",
+        model=models.ModelEvaluation,
+        name_of=lambda row: row.name,
+        list_fields=[
+            "id", "name", "status", "score_series", "sep_median", "sep_min",
+            "drift_mean", "drift_max", "event_recall", "median_delay_seconds",
+            "frame_fpr", "false_alarm_rate_t0", "created_at", "finalized_at",
+        ],
+        search_fields=["name", "score_series"],
+        filters=[_STATUS_FILTER, _CREATED_FILTER],
+        deleter=_delete_model_evaluation,
+        detail_exclude=frozenset({
+            "separation_result", "drift_result", "detection_result", "label_snapshot",
+            "source_snapshot",
+        }),
+    ),
     "optimization_study": EntitySpec(
         key="optimization_study",
         label="Optimization Studies",
@@ -527,6 +623,7 @@ ENTITY_SPECS: dict[str, EntitySpec] = {
 
 # Bottom-up deletion order for cascades: children before their parents.
 DELETE_ORDER: list[str] = [
+    "model_evaluation",
     "heatmap",
     "heatmap_range",
     "testing_run",
@@ -535,6 +632,8 @@ DELETE_ORDER: list[str] = [
     "training_run",
     "training_pipeline",
     "analysis_layout",
+    "evaluation_label_set",
+    "evaluation_profile",
     "roi",
     "method_configuration",
     "preprocessing_pipeline",

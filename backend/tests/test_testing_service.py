@@ -10,6 +10,7 @@ from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
 from app import models
+from app.artifact_signatures import artifact_signature
 from app.database import Base
 from app.schemas import (
     AnalysisImageComparisonRequest,
@@ -274,6 +275,8 @@ def test_analysis_image_comparison_supports_input_and_reconstruction_modes(tmp_p
             TestingRunCreatePayload(training_run_id=training_run_id, training_dataset_id=test_set_id),
         )
         assert testing_run.model_training_dataset_names == ["Test Set"]
+        assert testing_run.artifact_signature == artifact_signature(tmp_path / "mean.npy")
+        assert db.get(models.TrainingRun, training_run_id).artifact_signature == testing_run.artifact_signature
         root = tmp_path / "test_images"
         timestamps = [datetime(2026, 4, 1, 12, 0, index * 10) for index in range(3)]
         rows = []
@@ -661,6 +664,30 @@ def test_bulk_enqueue_creates_combinations_skips_duplicates_without_enumerating(
         assert second.created == []
         assert len(second.skipped) == 2
         assert {item.existing_testing_run_id for item in second.skipped} == {run.id for run in first.created}
+    finally:
+        db.close()
+
+
+def test_retrained_artifact_allows_new_inference_generation(tmp_path: Path) -> None:
+    db = make_db()
+    try:
+        training_run_id, test_set_id = seed_finished_mean_image_run(db, tmp_path)
+        payload = TestingRunCreatePayload(
+            training_run_id=training_run_id,
+            training_dataset_id=test_set_id,
+        )
+        first = testing_service.enqueue_testing_run(db, payload, wake_scheduler=False)
+
+        training_run = db.get(models.TrainingRun, training_run_id)
+        artifact = Path(training_run.artifact_path)
+        np.save(artifact, np.full((6, 8), 101, dtype=np.uint8))
+        training_run.artifact_signature = None
+        db.commit()
+
+        second = testing_service.enqueue_testing_run(db, payload, wake_scheduler=False)
+
+        assert second.id != first.id
+        assert second.artifact_signature != first.artifact_signature
     finally:
         db.close()
 

@@ -46,6 +46,7 @@ def _used_ids(db: Session, entity_type: str) -> set[int]:
             m.TrainingPipelineDataset.training_dataset_id,
             m.TestingRun.training_dataset_id,
             m.InspectRun.training_dataset_id,
+            m.EvaluationLabelSet.training_dataset_id,
             m.OptimizationStudy.normal_train_dataset_id,
             m.OptimizationStudy.normal_validation_dataset_id,
             m.OptimizationStudy.anomaly_validation_dataset_id,
@@ -60,7 +61,15 @@ def _used_ids(db: Session, entity_type: str) -> set[int]:
         "method_configuration": [m.TrainingPipeline.method_configuration_id],
         "training_pipeline": [m.TrainingRun.training_pipeline_id],
         "training_run": [m.TestingRun.training_run_id],
-        "testing_run": [m.HeatmapRun.testing_run_id, m.HeatmapRangeRun.testing_run_id],
+        "testing_run": [
+            m.HeatmapRun.testing_run_id,
+            m.HeatmapRangeRun.testing_run_id,
+            m.ModelEvaluation.evaluation_testing_run_id,
+            m.ModelEvaluation.reference_testing_run_id,
+            m.ModelEvaluation.calibration_testing_run_id,
+        ],
+        "evaluation_profile": [m.ModelEvaluation.profile_id],
+        "evaluation_label_set": [m.ModelEvaluation.label_set_id],
     }.get(entity_type, [])
     used: set[int] = set()
     for column in columns:

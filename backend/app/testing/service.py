@@ -16,6 +16,7 @@ from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session, selectinload
 
 from app import models
+from app.artifact_signatures import artifact_signature
 from app.continuity import continuity_segments, source_group
 from app.database import data_dir
 from app.metrics.aggregation import aggregate_score, normalize_aggregation
@@ -985,6 +986,7 @@ def _serialize_testing_run(run: models.TestingRun) -> TestingRunRead:
         training_mode=run.training_mode,
         artifact_kind=run.artifact_kind,
         artifact_path=run.artifact_path,
+        artifact_signature=run.artifact_signature,
         roi_name=run.roi_name,
         roi_geometry=run.roi_geometry,
         inference_config=run.inference_config,
@@ -1731,6 +1733,15 @@ def delete_testing_run(db: Session, run_id: int) -> bool:
         return False
     if run.status == "running":
         raise ValueError("Abort the testing run before removing it.")
+    evaluation_references = db.scalar(
+        select(func.count(models.ModelEvaluation.id)).where(
+            (models.ModelEvaluation.evaluation_testing_run_id == run_id)
+            | (models.ModelEvaluation.reference_testing_run_id == run_id)
+            | (models.ModelEvaluation.calibration_testing_run_id == run_id)
+        )
+    ) or 0
+    if evaluation_references:
+        raise ValueError("Inference run is used by saved Evaluations. Delete those Evaluations first.")
     from app.anomaly_detection.service import delete_runs_for_testing_run
 
     delete_runs_for_testing_run(db, run.id)
@@ -1786,6 +1797,7 @@ def _find_duplicate_testing_run(
     training_dataset_id: int,
     roi_id: int | None,
     inference_config: dict | None,
+    artifact_signature_value: str | None,
 ) -> models.TestingRun | None:
     query = select(models.TestingRun).where(
         models.TestingRun.training_run_id == training_run_id,
@@ -1796,7 +1808,10 @@ def _find_duplicate_testing_run(
     )
     target_config = inference_config or None
     for run in db.scalars(query).all():
-        if (run.inference_config or None) == target_config:
+        if (
+            (run.inference_config or None) == target_config
+            and run.artifact_signature == artifact_signature_value
+        ):
             return run
     return None
 
@@ -1858,6 +1873,8 @@ def enqueue_testing_run(db: Session, payload: TestingRunCreate, *, wake_schedule
         raise ValueError("Testing requires a finished training run.")
     if not training_run.artifact_path or not training_run.artifact_kind:
         raise ValueError("Training run has no artifact to test.")
+    if not training_run.artifact_signature:
+        training_run.artifact_signature = artifact_signature(training_run.artifact_path)
 
     training_dataset = _load_training_dataset(db, payload.training_dataset_id)
     if training_dataset is None:
@@ -1875,6 +1892,7 @@ def enqueue_testing_run(db: Session, payload: TestingRunCreate, *, wake_schedule
         training_dataset.id,
         roi.id if roi else None,
         inference_config,
+        training_run.artifact_signature,
     )
     if existing is not None:
         raise TestingConflict(existing)
@@ -1899,6 +1917,7 @@ def enqueue_testing_run(db: Session, payload: TestingRunCreate, *, wake_schedule
         training_mode=configuration.training_mode,
         artifact_kind=training_run.artifact_kind,
         artifact_path=training_run.artifact_path,
+        artifact_signature=training_run.artifact_signature,
         roi_name=roi.name if roi else None,
         roi_geometry=_roi_geometry(roi),
         expected_image_count=expected_image_count,
@@ -1930,6 +1949,8 @@ def _validate_testable_training_run(training_run: models.TrainingRun) -> None:
         raise ValueError(f"Testing requires a finished training run: {training_run.id}")
     if not training_run.artifact_path or not training_run.artifact_kind:
         raise ValueError(f"Training run has no artifact to test: {training_run.id}")
+    if not training_run.artifact_signature:
+        training_run.artifact_signature = artifact_signature(training_run.artifact_path)
 
 
 def bulk_enqueue_testing_runs(
@@ -2007,6 +2028,7 @@ def bulk_enqueue_testing_runs(
                 dataset.id,
                 roi.id if roi else None,
                 inference_config,
+                training_run.artifact_signature,
             )
             if existing is not None:
                 skipped.append(
@@ -2039,6 +2061,7 @@ def bulk_enqueue_testing_runs(
                 training_mode=configuration.training_mode,
                 artifact_kind=training_run.artifact_kind,
                 artifact_path=training_run.artifact_path,
+                artifact_signature=training_run.artifact_signature,
                 roi_name=roi.name if roi else None,
                 roi_geometry=_roi_geometry(roi),
                 expected_image_count=_estimated_training_dataset_count(dataset),
@@ -2154,18 +2177,50 @@ def abort_testing_run(db: Session, run_id: int) -> TestingRunRead | None:
     return _serialize_testing_run(run)
 
 
+def _assert_testing_run_not_finalized_evaluation_source(db: Session, run_id: int) -> None:
+    finalized_evaluations = db.scalar(
+        select(func.count(models.ModelEvaluation.id)).where(
+            models.ModelEvaluation.status == "finalized",
+            (
+                (models.ModelEvaluation.evaluation_testing_run_id == run_id)
+                | (models.ModelEvaluation.reference_testing_run_id == run_id)
+                | (models.ModelEvaluation.calibration_testing_run_id == run_id)
+            ),
+        )
+    ) or 0
+    if finalized_evaluations:
+        raise ValueError(
+            "Inference run belongs to a finalized Evaluation and cannot be overwritten. "
+            "Create a new inference run for the current model artifact instead."
+        )
+
+
 def restart_testing_run(db: Session, run_id: int) -> TestingRunRead | None:
     run = db.get(models.TestingRun, run_id)
     if run is None:
         return None
     if run.status in ("queued", "running"):
         raise ValueError("Run is already queued or running.")
+    _assert_testing_run_not_finalized_evaluation_source(db, run_id)
     # Clear prior results/CSV and re-queue the same row (one history per config).
     from app.anomaly_detection.service import delete_runs_for_testing_run
 
     delete_runs_for_testing_run(db, run.id)
     db.execute(delete(models.TestingRunResult).where(models.TestingRunResult.testing_run_id == run.id))
     shutil.rmtree(_testing_run_dir(run.id), ignore_errors=True)
+    # Legacy/test fixtures may no longer have the relationship available even
+    # though the inference row still carries a complete artifact snapshot.
+    # Preserve that snapshot instead of dereferencing a missing parent.
+    training_run = run.training_run
+    current_artifact_path = (
+        training_run.artifact_path if training_run and training_run.artifact_path else run.artifact_path
+    )
+    current_artifact_kind = (
+        training_run.artifact_kind if training_run and training_run.artifact_kind else run.artifact_kind
+    )
+    run.artifact_path = current_artifact_path
+    run.artifact_kind = current_artifact_kind
+    run.artifact_signature = artifact_signature(current_artifact_path) or run.artifact_signature
     _reset_testing_run_for_queue(db, run)
     db.commit()
     db.refresh(run)
@@ -2179,6 +2234,7 @@ def restart_testing_run_from_checkpoint(db: Session, run_id: int) -> TestingRunR
         return None
     if run.status not in {"failed", "aborted"}:
         raise ValueError("Only failed or aborted inference runs can restart from a checkpoint.")
+    _assert_testing_run_not_finalized_evaluation_source(db, run_id)
 
     _, state = validate_testing_checkpoint(db, run)
     from app.anomaly_detection.service import delete_runs_for_testing_run
