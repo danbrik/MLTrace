@@ -1313,6 +1313,7 @@ class TestingRunRead(BaseModel):
     artifact_kind: str
     artifact_path: str
     artifact_signature: str | None = None
+    result_revision: int = 0
     roi_name: str | None
     roi_geometry: dict | None
     inference_config: dict | None = None
@@ -2158,6 +2159,100 @@ class EvaluationScorePreviewRead(BaseModel):
     total: int
     decimated: bool
     points: list[EvaluationScorePreviewPoint]
+
+
+# Model-centred evaluation workspace (migration 0047).
+class EvaluationSeparationPairInput(BaseModel):
+    pair_key: str = Field(min_length=1, max_length=64)
+    name: str = Field(min_length=1, max_length=255)
+    normal_start: datetime
+    normal_end: datetime
+    anomaly_start: datetime
+    anomaly_end: datetime
+
+    @model_validator(mode="after")
+    def validate_ranges(self):
+        for field in ("normal_start", "normal_end", "anomaly_start", "anomaly_end"):
+            setattr(self, field, _dataset_local_naive(getattr(self, field)))
+        if self.normal_end <= self.normal_start:
+            raise ValueError("Normal range end must be after start.")
+        if self.anomaly_end < self.anomaly_start:
+            raise ValueError("Anomaly range end must not be before start.")
+        return self
+
+
+class EvaluationSeparationLayoutInput(BaseModel):
+    training_dataset_id: int
+    name: str = Field(min_length=1, max_length=255)
+    description: str | None = None
+    pairs: list[EvaluationSeparationPairInput] = Field(min_length=1)
+
+
+class EvaluationDriftExclusionInput(BaseModel):
+    exclusion_key: str = Field(min_length=1, max_length=64)
+    name: str = Field(min_length=1, max_length=255)
+    start_timestamp: datetime
+    end_timestamp: datetime
+
+    @model_validator(mode="after")
+    def validate_range(self):
+        self.start_timestamp = _dataset_local_naive(self.start_timestamp)
+        self.end_timestamp = _dataset_local_naive(self.end_timestamp)
+        if self.end_timestamp < self.start_timestamp:
+            raise ValueError("Exclusion end must not be before start.")
+        return self
+
+
+class EvaluationDriftBucketInput(BaseModel):
+    bucket_key: str = Field(min_length=1, max_length=64)
+    start_timestamp: datetime
+    end_timestamp: datetime
+    decision: Literal["include", "drop_bucket", "filter_points"] = "include"
+
+
+class EvaluationDriftLayoutInput(BaseModel):
+    training_dataset_id: int
+    name: str = Field(min_length=1, max_length=255)
+    description: str | None = None
+    reference_start: datetime
+    reference_end: datetime
+    analysis_start: datetime
+    analysis_end: datetime
+    bucket_seconds: float = Field(gt=0)
+    reference_exclusion_action: Literal["filter_points", "drop_reference"] = "filter_points"
+    exclusions: list[EvaluationDriftExclusionInput] = Field(default_factory=list)
+    buckets: list[EvaluationDriftBucketInput] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def validate_ranges(self):
+        for field in ("reference_start", "reference_end", "analysis_start", "analysis_end"):
+            setattr(self, field, _dataset_local_naive(getattr(self, field)))
+        if self.reference_end <= self.reference_start or self.analysis_end <= self.analysis_start:
+            raise ValueError("Reference and analysis ranges require end after start.")
+        return self
+
+
+class EvaluationSeparationCalculateRequest(BaseModel):
+    testing_run_id: int
+    layout_id: int
+    pair_keys: list[str] = Field(min_length=1)
+    score_series: EvaluationScoreSeries = "score"
+
+
+class EvaluationDriftPreviewRequest(BaseModel):
+    testing_run_id: int
+    score_series: EvaluationScoreSeries = "score"
+    layout: EvaluationDriftLayoutInput
+
+
+class EvaluationDriftCalculateRequest(BaseModel):
+    testing_run_id: int
+    layout_id: int
+    score_series: EvaluationScoreSeries = "score"
+
+
+class EvaluationIncludeUpdate(BaseModel):
+    included: bool
 
 
 class ProjectGpuUsageRead(BaseModel):

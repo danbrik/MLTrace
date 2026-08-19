@@ -96,6 +96,12 @@ from app.schemas import (
     EvaluationProfileCreate,
     EvaluationProfileRead,
     EvaluationScorePreviewRead,
+    EvaluationSeparationLayoutInput,
+    EvaluationDriftLayoutInput,
+    EvaluationSeparationCalculateRequest,
+    EvaluationDriftPreviewRequest,
+    EvaluationDriftCalculateRequest,
+    EvaluationIncludeUpdate,
     ModelEvaluationCreate,
     ModelEvaluationDuplicateRequest,
     ModelEvaluationRead,
@@ -128,6 +134,7 @@ from app.schemas import (
 )
 from app.anomaly_detection import service as anomaly_detection_service
 from app.evaluation import service as evaluation_service
+from app.evaluation import workspace_service as evaluation_workspace_service
 from app.analysis import service as analysis_service
 from app.analysis import baseline as baseline_analysis_service
 from app.heatmap import service as heatmap_service
@@ -660,6 +667,158 @@ def create_app() -> FastAPI:
         if row is None:
             raise HTTPException(status_code=404, detail="Testing run not found.")
         return row
+
+    # Model-centred evaluation workspace.  The legacy /api/evaluations routes
+    # above remain available for persisted 0046 drafts and snapshots.
+    @app.get("/api/evaluation-workspaces/models")
+    def api_list_evaluation_workspace_models(db: Session = Depends(get_db)):
+        return evaluation_workspace_service.list_models(db)
+
+    @app.get("/api/evaluation-workspaces/models/{training_run_id}")
+    def api_get_evaluation_workspace(training_run_id: int, db: Session = Depends(get_db)):
+        try:
+            return evaluation_workspace_service.get_summary(db, training_run_id)
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.get("/api/evaluation-workspaces/models/{training_run_id}/testing-runs", response_model=list[TestingRunRead])
+    def api_list_evaluation_testing_runs(training_run_id: int, db: Session = Depends(get_db)):
+        try:
+            return evaluation_workspace_service.available_testing_runs(db, training_run_id)
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.get("/api/evaluation-workspaces/separation-layouts")
+    def api_list_separation_layouts(training_dataset_id: int, db: Session = Depends(get_db)):
+        return evaluation_workspace_service.list_separation_layouts(db, training_dataset_id)
+
+    @app.post("/api/evaluation-workspaces/separation-layouts")
+    def api_create_separation_layout(payload: EvaluationSeparationLayoutInput, db: Session = Depends(get_db)):
+        try:
+            return evaluation_workspace_service.save_separation_layout(db, payload)
+        except ValueError as exc:
+            raise HTTPException(status_code=409 if "overlap" in str(exc).lower() else 400, detail=str(exc)) from exc
+
+    @app.put("/api/evaluation-workspaces/separation-layouts/{layout_id}")
+    def api_update_separation_layout(layout_id: int, payload: EvaluationSeparationLayoutInput, db: Session = Depends(get_db)):
+        try:
+            return evaluation_workspace_service.save_separation_layout(db, payload, layout_id)
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=409 if "overlap" in str(exc).lower() else 400, detail=str(exc)) from exc
+
+    @app.delete("/api/evaluation-workspaces/separation-layouts/{layout_id}", status_code=204)
+    def api_delete_separation_layout(layout_id: int, db: Session = Depends(get_db)):
+        if not evaluation_workspace_service.delete_separation_layout(db, layout_id):
+            raise HTTPException(status_code=404, detail="Separation layout not found.")
+
+    @app.post("/api/evaluation-workspaces/models/{training_run_id}/separation/calculate")
+    def api_calculate_workspace_separation(training_run_id: int, payload: EvaluationSeparationCalculateRequest, db: Session = Depends(get_db)):
+        try:
+            return evaluation_workspace_service.calculate_separation(db, training_run_id, payload)
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.get("/api/evaluation-workspaces/models/{training_run_id}/separation/results")
+    def api_list_workspace_separation_results(training_run_id: int, db: Session = Depends(get_db)):
+        try:
+            return evaluation_workspace_service.list_separation_results(db, training_run_id)
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.patch("/api/evaluation-workspaces/models/{training_run_id}/separation/results/{result_id}")
+    def api_update_workspace_separation_result(training_run_id: int, result_id: int, payload: EvaluationIncludeUpdate, db: Session = Depends(get_db)):
+        try:
+            return evaluation_workspace_service.update_separation_result(db, training_run_id, result_id, payload.included)
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.delete("/api/evaluation-workspaces/models/{training_run_id}/separation/results/{result_id}")
+    def api_delete_workspace_separation_result(training_run_id: int, result_id: int, db: Session = Depends(get_db)):
+        try:
+            return evaluation_workspace_service.delete_separation_result(db, training_run_id, result_id)
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.get("/api/evaluation-workspaces/drift-layouts")
+    def api_list_drift_layouts(training_dataset_id: int, db: Session = Depends(get_db)):
+        return evaluation_workspace_service.list_drift_layouts(db, training_dataset_id)
+
+    @app.post("/api/evaluation-workspaces/drift-layouts")
+    def api_create_drift_layout(payload: EvaluationDriftLayoutInput, db: Session = Depends(get_db)):
+        try:
+            return evaluation_workspace_service.save_drift_layout(db, payload)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.put("/api/evaluation-workspaces/drift-layouts/{layout_id}")
+    def api_update_drift_layout(layout_id: int, payload: EvaluationDriftLayoutInput, db: Session = Depends(get_db)):
+        try:
+            return evaluation_workspace_service.save_drift_layout(db, payload, layout_id)
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.delete("/api/evaluation-workspaces/drift-layouts/{layout_id}", status_code=204)
+    def api_delete_drift_layout(layout_id: int, db: Session = Depends(get_db)):
+        if not evaluation_workspace_service.delete_drift_layout(db, layout_id):
+            raise HTTPException(status_code=404, detail="Drift layout not found.")
+
+    @app.post("/api/evaluation-workspaces/models/{training_run_id}/drift/preview")
+    def api_preview_workspace_drift(training_run_id: int, payload: EvaluationDriftPreviewRequest, db: Session = Depends(get_db)):
+        try:
+            return evaluation_workspace_service.preview_drift(db, training_run_id, payload)
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.post("/api/evaluation-workspaces/models/{training_run_id}/drift/calculate")
+    def api_calculate_workspace_drift(training_run_id: int, payload: EvaluationDriftCalculateRequest, db: Session = Depends(get_db)):
+        try:
+            return evaluation_workspace_service.calculate_drift(db, training_run_id, payload)
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.get("/api/evaluation-workspaces/models/{training_run_id}/drift/calculations")
+    def api_list_workspace_drift(training_run_id: int, db: Session = Depends(get_db)):
+        try:
+            return evaluation_workspace_service.list_drift_calculations(db, training_run_id)
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.post("/api/evaluation-workspaces/models/{training_run_id}/drift/calculations/{calculation_id}/activate")
+    def api_activate_workspace_drift(training_run_id: int, calculation_id: int, db: Session = Depends(get_db)):
+        try:
+            return evaluation_workspace_service.activate_drift(db, training_run_id, calculation_id)
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.delete("/api/evaluation-workspaces/models/{training_run_id}/drift/calculations/{calculation_id}")
+    def api_delete_workspace_drift(training_run_id: int, calculation_id: int, db: Session = Depends(get_db)):
+        try:
+            return evaluation_workspace_service.delete_drift_calculation(db, training_run_id, calculation_id)
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.patch("/api/evaluation-workspaces/models/{training_run_id}/drift/buckets/{result_id}")
+    def api_update_workspace_drift_bucket(training_run_id: int, result_id: int, payload: EvaluationIncludeUpdate, db: Session = Depends(get_db)):
+        try:
+            return evaluation_workspace_service.update_drift_bucket(db, training_run_id, result_id, payload.included)
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
 
     @app.get("/api/analysis/layouts", response_model=list[AnalysisLayoutRead])
     def api_list_analysis_layouts(db: Session = Depends(get_db)):

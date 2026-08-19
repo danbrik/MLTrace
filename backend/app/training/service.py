@@ -266,6 +266,11 @@ def delete_training_run(db: Session, run_id: int) -> bool:
     testing_run_id = db.scalar(select(models.TestingRun.id).where(models.TestingRun.training_run_id == run_id))
     if testing_run_id is not None:
         raise RunConflict("Delete testing runs for this training run before removing it.")
+    workspace_id = db.scalar(select(models.EvaluationModelWorkspace.id).where(
+        models.EvaluationModelWorkspace.training_run_id == run_id
+    ))
+    if workspace_id is not None:
+        raise RunConflict("Delete the model evaluation workspace before removing this training run.")
     shutil.rmtree(_run_dir(run.id), ignore_errors=True)
     db.delete(run)
     db.commit()

@@ -484,6 +484,9 @@ class TestingRun(Base):
     artifact_kind: Mapped[str] = mapped_column(String(64), nullable=False)
     artifact_path: Mapped[str] = mapped_column(Text, nullable=False)
     artifact_signature: Mapped[str | None] = mapped_column(String(64))
+    # Monotone generation of the persisted score rows.  Evaluation snapshots
+    # use this instead of scanning the (potentially very large) result table.
+    result_revision: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     roi_name: Mapped[str | None] = mapped_column(String(255))
     roi_geometry: Mapped[dict | None] = mapped_column(json_type())
     inference_config: Mapped[dict | None] = mapped_column(json_type())
@@ -1086,6 +1089,187 @@ class ModelEvaluation(Base):
     )
     profile: Mapped[EvaluationProfile | None] = relationship()
     label_set: Mapped[EvaluationLabelSet | None] = relationship()
+
+
+class EvaluationModelWorkspace(Base):
+    """Model/artifact-scoped aggregate shown by the new evaluation UI."""
+
+    __tablename__ = "evaluation_model_workspaces"
+    __table_args__ = (
+        UniqueConstraint("training_run_id", "artifact_signature", name="uq_evaluation_workspace_artifact"),
+        Index("ix_evaluation_workspaces_training_run", "training_run_id"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    training_run_id: Mapped[int] = mapped_column(ForeignKey("training_runs.id", ondelete="RESTRICT"), nullable=False)
+    artifact_signature: Mapped[str] = mapped_column(String(64), nullable=False)
+    sep_median: Mapped[float | None] = mapped_column(Float)
+    sep_min: Mapped[float | None] = mapped_column(Float)
+    drift_mean: Mapped[float | None] = mapped_column(Float)
+    drift_max: Mapped[float | None] = mapped_column(Float)
+    active_drift_calculation_id: Mapped[int | None] = mapped_column(Integer)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=False), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=False), server_default=func.now(), onupdate=func.now())
+
+
+class EvaluationSeparationLayout(Base):
+    __tablename__ = "evaluation_separation_layouts"
+    __table_args__ = (
+        UniqueConstraint("training_dataset_id", "name", name="uq_eval_sep_layout_dataset_name"),
+        Index("ix_eval_sep_layouts_dataset", "training_dataset_id"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    training_dataset_id: Mapped[int] = mapped_column(ForeignKey("training_datasets.id", ondelete="RESTRICT"), nullable=False)
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    description: Mapped[str | None] = mapped_column(Text)
+    version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=False), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=False), server_default=func.now(), onupdate=func.now())
+    pairs: Mapped[list["EvaluationSeparationPair"]] = relationship(back_populates="layout", cascade="all, delete-orphan", order_by="EvaluationSeparationPair.position")
+
+
+class EvaluationSeparationPair(Base):
+    __tablename__ = "evaluation_separation_pairs"
+    __table_args__ = (UniqueConstraint("layout_id", "pair_key", name="uq_eval_sep_pair_key"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    layout_id: Mapped[int] = mapped_column(ForeignKey("evaluation_separation_layouts.id", ondelete="CASCADE"), nullable=False)
+    pair_key: Mapped[str] = mapped_column(String(64), nullable=False)
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    normal_start: Mapped[datetime] = mapped_column(DateTime(timezone=False), nullable=False)
+    normal_end: Mapped[datetime] = mapped_column(DateTime(timezone=False), nullable=False)
+    anomaly_start: Mapped[datetime] = mapped_column(DateTime(timezone=False), nullable=False)
+    anomaly_end: Mapped[datetime] = mapped_column(DateTime(timezone=False), nullable=False)
+    position: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    layout: Mapped[EvaluationSeparationLayout] = relationship(back_populates="pairs")
+
+
+class EvaluationDriftLayout(Base):
+    __tablename__ = "evaluation_drift_layouts"
+    __table_args__ = (
+        UniqueConstraint("training_dataset_id", "name", name="uq_eval_drift_layout_dataset_name"),
+        Index("ix_eval_drift_layouts_dataset", "training_dataset_id"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    training_dataset_id: Mapped[int] = mapped_column(ForeignKey("training_datasets.id", ondelete="RESTRICT"), nullable=False)
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    description: Mapped[str | None] = mapped_column(Text)
+    version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    reference_start: Mapped[datetime] = mapped_column(DateTime(timezone=False), nullable=False)
+    reference_end: Mapped[datetime] = mapped_column(DateTime(timezone=False), nullable=False)
+    analysis_start: Mapped[datetime] = mapped_column(DateTime(timezone=False), nullable=False)
+    analysis_end: Mapped[datetime] = mapped_column(DateTime(timezone=False), nullable=False)
+    bucket_seconds: Mapped[float] = mapped_column(Float, nullable=False)
+    reference_exclusion_action: Mapped[str] = mapped_column(String(24), nullable=False, default="filter_points")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=False), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=False), server_default=func.now(), onupdate=func.now())
+    exclusions: Mapped[list["EvaluationDriftExclusion"]] = relationship(back_populates="layout", cascade="all, delete-orphan", order_by="EvaluationDriftExclusion.start_timestamp")
+    buckets: Mapped[list["EvaluationDriftBucket"]] = relationship(back_populates="layout", cascade="all, delete-orphan", order_by="EvaluationDriftBucket.position")
+
+
+class EvaluationDriftExclusion(Base):
+    __tablename__ = "evaluation_drift_exclusions"
+    __table_args__ = (UniqueConstraint("layout_id", "exclusion_key", name="uq_eval_drift_exclusion_key"),)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    layout_id: Mapped[int] = mapped_column(ForeignKey("evaluation_drift_layouts.id", ondelete="CASCADE"), nullable=False)
+    exclusion_key: Mapped[str] = mapped_column(String(64), nullable=False)
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    start_timestamp: Mapped[datetime] = mapped_column(DateTime(timezone=False), nullable=False)
+    end_timestamp: Mapped[datetime] = mapped_column(DateTime(timezone=False), nullable=False)
+    layout: Mapped[EvaluationDriftLayout] = relationship(back_populates="exclusions")
+
+
+class EvaluationDriftBucket(Base):
+    __tablename__ = "evaluation_drift_buckets"
+    __table_args__ = (UniqueConstraint("layout_id", "bucket_key", name="uq_eval_drift_bucket_key"),)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    layout_id: Mapped[int] = mapped_column(ForeignKey("evaluation_drift_layouts.id", ondelete="CASCADE"), nullable=False)
+    bucket_key: Mapped[str] = mapped_column(String(64), nullable=False)
+    start_timestamp: Mapped[datetime] = mapped_column(DateTime(timezone=False), nullable=False)
+    end_timestamp: Mapped[datetime] = mapped_column(DateTime(timezone=False), nullable=False)
+    position: Mapped[int] = mapped_column(Integer, nullable=False)
+    decision: Mapped[str] = mapped_column(String(24), nullable=False, default="include")
+    layout: Mapped[EvaluationDriftLayout] = relationship(back_populates="buckets")
+
+
+class EvaluationSeparationCalculation(Base):
+    __tablename__ = "evaluation_separation_calculations"
+    __table_args__ = (Index("ix_eval_sep_calcs_workspace", "workspace_id"),)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    workspace_id: Mapped[int] = mapped_column(ForeignKey("evaluation_model_workspaces.id", ondelete="CASCADE"), nullable=False)
+    testing_run_id: Mapped[int] = mapped_column(ForeignKey("testing_runs.id", ondelete="RESTRICT"), nullable=False)
+    layout_id: Mapped[int | None] = mapped_column(ForeignKey("evaluation_separation_layouts.id", ondelete="SET NULL"))
+    layout_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    layout_snapshot: Mapped[dict] = mapped_column(json_type(), nullable=False)
+    score_series: Mapped[str] = mapped_column(String(64), nullable=False)
+    artifact_signature: Mapped[str] = mapped_column(String(64), nullable=False)
+    source_result_revision: Mapped[int] = mapped_column(Integer, nullable=False)
+    stale: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=False), server_default=func.now())
+    results: Mapped[list["EvaluationSeparationResult"]] = relationship(cascade="all, delete-orphan")
+
+
+class EvaluationSeparationResult(Base):
+    __tablename__ = "evaluation_separation_results"
+    __table_args__ = (UniqueConstraint("calculation_id", "pair_key", name="uq_eval_sep_result_pair"),)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    calculation_id: Mapped[int] = mapped_column(ForeignKey("evaluation_separation_calculations.id", ondelete="CASCADE"), nullable=False)
+    pair_key: Mapped[str] = mapped_column(String(64), nullable=False)
+    pair_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    normal_start: Mapped[datetime] = mapped_column(DateTime(timezone=False), nullable=False)
+    normal_end: Mapped[datetime] = mapped_column(DateTime(timezone=False), nullable=False)
+    anomaly_start: Mapped[datetime] = mapped_column(DateTime(timezone=False), nullable=False)
+    anomaly_end: Mapped[datetime] = mapped_column(DateTime(timezone=False), nullable=False)
+    normal_median: Mapped[float] = mapped_column(Float, nullable=False)
+    normal_mad: Mapped[float] = mapped_column(Float, nullable=False)
+    robust_scale: Mapped[float] = mapped_column(Float, nullable=False)
+    normal_point_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    anomaly_point_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    separation: Mapped[float] = mapped_column(Float, nullable=False)
+    separation_p95: Mapped[float | None] = mapped_column(Float)
+    included: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+
+
+class EvaluationDriftCalculation(Base):
+    __tablename__ = "evaluation_drift_calculations"
+    __table_args__ = (Index("ix_eval_drift_calcs_workspace", "workspace_id"),)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    workspace_id: Mapped[int] = mapped_column(ForeignKey("evaluation_model_workspaces.id", ondelete="CASCADE"), nullable=False)
+    testing_run_id: Mapped[int] = mapped_column(ForeignKey("testing_runs.id", ondelete="RESTRICT"), nullable=False)
+    layout_id: Mapped[int | None] = mapped_column(ForeignKey("evaluation_drift_layouts.id", ondelete="SET NULL"))
+    layout_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    layout_snapshot: Mapped[dict] = mapped_column(json_type(), nullable=False)
+    score_series: Mapped[str] = mapped_column(String(64), nullable=False)
+    artifact_signature: Mapped[str] = mapped_column(String(64), nullable=False)
+    source_result_revision: Mapped[int] = mapped_column(Integer, nullable=False)
+    reference_iqr: Mapped[float] = mapped_column(Float, nullable=False)
+    reference_point_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    drift_mean: Mapped[float | None] = mapped_column(Float)
+    drift_max: Mapped[float | None] = mapped_column(Float)
+    stale: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=False), server_default=func.now())
+    results: Mapped[list["EvaluationDriftBucketResult"]] = relationship(cascade="all, delete-orphan")
+
+
+class EvaluationDriftBucketResult(Base):
+    __tablename__ = "evaluation_drift_bucket_results"
+    __table_args__ = (UniqueConstraint("calculation_id", "bucket_key", name="uq_eval_drift_result_bucket"),)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    calculation_id: Mapped[int] = mapped_column(ForeignKey("evaluation_drift_calculations.id", ondelete="CASCADE"), nullable=False)
+    bucket_key: Mapped[str] = mapped_column(String(64), nullable=False)
+    start_timestamp: Mapped[datetime] = mapped_column(DateTime(timezone=False), nullable=False)
+    end_timestamp: Mapped[datetime] = mapped_column(DateTime(timezone=False), nullable=False)
+    original_point_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    used_point_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    exclusion_overlap: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False)
+    reason: Mapped[str | None] = mapped_column(Text)
+    wasserstein_1: Mapped[float | None] = mapped_column(Float)
+    normalized_drift: Mapped[float | None] = mapped_column(Float)
+    included: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
 
 
 ModelConfiguration = MethodConfiguration

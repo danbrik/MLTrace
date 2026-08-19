@@ -91,12 +91,14 @@ def _write_checkpoint_prefix(db, writer, run_id: int, result_count: int) -> None
 def _restore_checkpoint(db, run: models.TestingRun, context) -> dict:
     _, state = validate_testing_checkpoint(db, run, context)
     result_count = int(state["result_count"])
-    db.execute(
+    deleted = db.execute(
         delete(models.TestingRunResult).where(
             models.TestingRunResult.testing_run_id == run.id,
             models.TestingRunResult.position >= result_count,
         )
     )
+    if deleted.rowcount:
+        run.result_revision += 1
     run.image_count = result_count
     db.commit()
     return state
@@ -456,6 +458,8 @@ def run_testing(run_id: int, abort_event: threading.Event | None = None) -> None
                                 score_min = combined if score_min is None else min(score_min, combined)
                                 score_max = combined if score_max is None else max(score_max, combined)
                             db.bulk_insert_mappings(models.TestingRunResult, mappings)
+                            if mappings:
+                                run.result_revision += 1
                             _commit_stae_progress(end)
                             if (start // _INFER_BATCH) % 20 == 0:
                                 rate = count / max(1e-6, time.perf_counter() - started)
@@ -599,6 +603,8 @@ def run_testing(run_id: int, abort_event: threading.Event | None = None) -> None
                                 roi_sum += roi_mse
                                 roi_count += 1
                         db.bulk_insert_mappings(models.TestingRunResult, mappings)
+                        if mappings:
+                            run.result_revision += 1
                         _commit_image_progress(end)
                         if (start // _INFER_BATCH) % 20 == 0:
                             rate = count / max(1e-6, time.perf_counter() - started)

@@ -1742,6 +1742,19 @@ def delete_testing_run(db: Session, run_id: int) -> bool:
     ) or 0
     if evaluation_references:
         raise ValueError("Inference run is used by saved Evaluations. Delete those Evaluations first.")
+    workspace_calculations = (
+        db.scalar(select(func.count(models.EvaluationSeparationCalculation.id)).where(
+            models.EvaluationSeparationCalculation.testing_run_id == run_id
+        )) or 0
+    ) + (
+        db.scalar(select(func.count(models.EvaluationDriftCalculation.id)).where(
+            models.EvaluationDriftCalculation.testing_run_id == run_id
+        )) or 0
+    )
+    if workspace_calculations:
+        raise ValueError(
+            "Inference run is used by model evaluation calculations. Delete those calculations first."
+        )
     from app.anomaly_detection.service import delete_runs_for_testing_run
 
     delete_runs_for_testing_run(db, run.id)
@@ -2143,6 +2156,8 @@ def create_testing_run(db: Session, payload: TestingRunCreate) -> TestingRunRead
             roi_scores.append(roi_mse)
 
     db.flush()
+    if rows:
+        run.result_revision += 1
     results_path = _write_results_csv(run, rows)
     run.status = "finished"
     run.ended_at = _utcnow()
@@ -2196,7 +2211,7 @@ def _assert_testing_run_not_finalized_evaluation_source(db: Session, run_id: int
 
 
 def restart_testing_run(db: Session, run_id: int) -> TestingRunRead | None:
-    run = db.get(models.TestingRun, run_id)
+    run = db.execute(select(models.TestingRun).where(models.TestingRun.id == run_id).with_for_update()).scalar_one_or_none()
     if run is None:
         return None
     if run.status in ("queued", "running"):
@@ -2207,6 +2222,7 @@ def restart_testing_run(db: Session, run_id: int) -> TestingRunRead | None:
 
     delete_runs_for_testing_run(db, run.id)
     db.execute(delete(models.TestingRunResult).where(models.TestingRunResult.testing_run_id == run.id))
+    run.result_revision += 1
     shutil.rmtree(_testing_run_dir(run.id), ignore_errors=True)
     # Legacy/test fixtures may no longer have the relationship available even
     # though the inference row still carries a complete artifact snapshot.
@@ -2229,7 +2245,7 @@ def restart_testing_run(db: Session, run_id: int) -> TestingRunRead | None:
 
 
 def restart_testing_run_from_checkpoint(db: Session, run_id: int) -> TestingRunRead | None:
-    run = db.get(models.TestingRun, run_id)
+    run = db.execute(select(models.TestingRun).where(models.TestingRun.id == run_id).with_for_update()).scalar_one_or_none()
     if run is None:
         return None
     if run.status not in {"failed", "aborted"}:
@@ -2240,6 +2256,9 @@ def restart_testing_run_from_checkpoint(db: Session, run_id: int) -> TestingRunR
     from app.anomaly_detection.service import delete_runs_for_testing_run
 
     delete_runs_for_testing_run(db, run.id)
+    # A resume starts a new source generation even when the checkpoint prefix
+    # remains byte-for-byte identical; later batches may replace its suffix.
+    run.result_revision += 1
     _reset_testing_run_for_queue(db, run, preserve_checkpoint=True)
     run.restart_mode = "checkpoint"
     run.image_count = int(state["result_count"])

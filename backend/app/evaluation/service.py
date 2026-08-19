@@ -630,13 +630,6 @@ def _json_value(value: Any) -> Any:
 def _source_row_snapshot(db: Session, run: models.TestingRun | None) -> dict | None:
     if run is None:
         return None
-    result_count, latest_result_id, latest_result_at = db.execute(
-        select(
-            func.count(models.TestingRunResult.id),
-            func.max(models.TestingRunResult.id),
-            func.max(models.TestingRunResult.created_at),
-        ).where(models.TestingRunResult.testing_run_id == run.id)
-    ).one()
     return {
         "id": run.id,
         "name": run.name,
@@ -652,9 +645,8 @@ def _source_row_snapshot(db: Session, run: models.TestingRun | None) -> dict | N
         "roi_geometry": run.roi_geometry,
         "inference_config": run.inference_config,
         "run_updated_at": run.updated_at.isoformat() if run.updated_at else None,
-        "result_count": int(result_count or 0),
-        "latest_result_id": latest_result_id,
-        "latest_result_at": latest_result_at.isoformat() if latest_result_at else None,
+        "result_count": int(run.image_count or run.checkpoint_result_count or 0),
+        "result_revision": int(run.result_revision or 0),
     }
 
 

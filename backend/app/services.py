@@ -76,23 +76,24 @@ def _revision_for_model(db: Session, model, timestamp_column) -> str:
 
 
 def _evaluation_revision(db: Session) -> str:
-    result_count, latest_result_id, latest_result_at = db.execute(
+    run_count, newest_run, result_generation = db.execute(
         select(
-            func.count(models.TestingRunResult.id),
-            func.max(models.TestingRunResult.id),
-            func.max(models.TestingRunResult.created_at),
+            func.count(models.TestingRun.id),
+            func.max(models.TestingRun.updated_at),
+            func.sum(models.TestingRun.result_revision),
         )
     ).one()
-    result_revision = (
-        f"{int(result_count or 0)}:{int(latest_result_id or 0)}:"
-        f"{latest_result_at.isoformat() if latest_result_at else 'none'}"
-    )
+    # Never aggregate the raw score table here: cache revisions are polled by
+    # the UI and must stay O(number of inference runs), not O(number of frames).
+    result_revision = f"{int(run_count or 0)}:{newest_run.isoformat() if newest_run else 'none'}:{int(result_generation or 0)}"
     return "|".join(
         (
             _revision_for_model(
                 db, models.ModelEvaluation, models.ModelEvaluation.updated_at
             ),
-            _revision_for_model(db, models.TestingRun, models.TestingRun.updated_at),
+            _revision_for_model(db, models.EvaluationModelWorkspace, models.EvaluationModelWorkspace.updated_at),
+            _revision_for_model(db, models.EvaluationSeparationLayout, models.EvaluationSeparationLayout.updated_at),
+            _revision_for_model(db, models.EvaluationDriftLayout, models.EvaluationDriftLayout.updated_at),
             result_revision,
         )
     )

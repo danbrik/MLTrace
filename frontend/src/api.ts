@@ -19,6 +19,14 @@ import type {
   EvaluationProfile,
   EvaluationProfilePayload,
   EvaluationScorePreview,
+  EvaluationWorkspaceModel,
+  EvaluationSeparationLayout,
+  EvaluationSeparationPair,
+  EvaluationWorkspaceSeparationResult,
+  EvaluationDriftLayout,
+  EvaluationDriftLayoutPayload,
+  EvaluationDriftPreview,
+  EvaluationDriftCalculation,
   AnalysisLayout,
   BaselineAnalysisMethod,
   BaselineAnalysisRegion,
@@ -841,6 +849,70 @@ export function getEvaluationScorePreview(
   if (options.end_timestamp) query.set('end_timestamp', options.end_timestamp);
   if (options.max_points) query.set('max_points', String(options.max_points));
   return request<EvaluationScorePreview>(`/api/testing-runs/${runId}/evaluation-score-preview?${query.toString()}`);
+}
+
+// -- Model-centred A/B evaluation workspace ---------------------------------
+
+export function listEvaluationWorkspaceModels(): Promise<EvaluationWorkspaceModel[]> {
+  return request<EvaluationWorkspaceModel[]>('/api/evaluation-workspaces/models');
+}
+export function getEvaluationWorkspace(trainingRunId: number): Promise<EvaluationWorkspaceModel> {
+  return request<EvaluationWorkspaceModel>(`/api/evaluation-workspaces/models/${trainingRunId}`);
+}
+export function listEvaluationWorkspaceRuns(trainingRunId: number): Promise<TestingRun[]> {
+  return request<TestingRun[]>(`/api/evaluation-workspaces/models/${trainingRunId}/testing-runs`);
+}
+export function listSeparationLayouts(datasetId: number): Promise<EvaluationSeparationLayout[]> {
+  return request<EvaluationSeparationLayout[]>(`/api/evaluation-workspaces/separation-layouts?training_dataset_id=${datasetId}`);
+}
+export function saveSeparationLayout(payload: { training_dataset_id: number; name: string; description?: string | null; pairs: EvaluationSeparationPair[] }, id?: number): Promise<EvaluationSeparationLayout> {
+  return request<EvaluationSeparationLayout>(id ? `/api/evaluation-workspaces/separation-layouts/${id}` : '/api/evaluation-workspaces/separation-layouts', {
+    method: id ? 'PUT' : 'POST', body: JSON.stringify(payload),
+  });
+}
+export function deleteSeparationLayout(id: number): Promise<void> {
+  return request<void>(`/api/evaluation-workspaces/separation-layouts/${id}`, { method: 'DELETE' });
+}
+export function calculateWorkspaceSeparation(trainingRunId: number, payload: { testing_run_id: number; layout_id: number; pair_keys: string[]; score_series: string }): Promise<EvaluationWorkspaceModel> {
+  return request<EvaluationWorkspaceModel>(`/api/evaluation-workspaces/models/${trainingRunId}/separation/calculate`, { method: 'POST', body: JSON.stringify(payload) });
+}
+export function listWorkspaceSeparationResults(trainingRunId: number): Promise<EvaluationWorkspaceSeparationResult[]> {
+  return request<EvaluationWorkspaceSeparationResult[]>(`/api/evaluation-workspaces/models/${trainingRunId}/separation/results`);
+}
+export function setWorkspaceSeparationIncluded(trainingRunId: number, resultId: number, included: boolean): Promise<EvaluationWorkspaceModel> {
+  return request<EvaluationWorkspaceModel>(`/api/evaluation-workspaces/models/${trainingRunId}/separation/results/${resultId}`, { method: 'PATCH', body: JSON.stringify({ included }) });
+}
+export function deleteWorkspaceSeparationResult(trainingRunId: number, resultId: number): Promise<EvaluationWorkspaceModel> {
+  return request<EvaluationWorkspaceModel>(`/api/evaluation-workspaces/models/${trainingRunId}/separation/results/${resultId}`, { method: 'DELETE' });
+}
+export function listDriftLayouts(datasetId: number): Promise<EvaluationDriftLayout[]> {
+  return request<EvaluationDriftLayout[]>(`/api/evaluation-workspaces/drift-layouts?training_dataset_id=${datasetId}`);
+}
+export function saveDriftLayout(payload: EvaluationDriftLayoutPayload, id?: number): Promise<EvaluationDriftLayout> {
+  return request<EvaluationDriftLayout>(id ? `/api/evaluation-workspaces/drift-layouts/${id}` : '/api/evaluation-workspaces/drift-layouts', {
+    method: id ? 'PUT' : 'POST', body: JSON.stringify(payload),
+  });
+}
+export function deleteDriftLayout(id: number): Promise<void> {
+  return request<void>(`/api/evaluation-workspaces/drift-layouts/${id}`, { method: 'DELETE' });
+}
+export function previewWorkspaceDrift(trainingRunId: number, testingRunId: number, scoreSeries: string, layout: EvaluationDriftLayoutPayload): Promise<EvaluationDriftPreview> {
+  return request<EvaluationDriftPreview>(`/api/evaluation-workspaces/models/${trainingRunId}/drift/preview`, { method: 'POST', body: JSON.stringify({ testing_run_id: testingRunId, score_series: scoreSeries, layout }) });
+}
+export function calculateWorkspaceDrift(trainingRunId: number, testingRunId: number, layoutId: number, scoreSeries: string): Promise<EvaluationWorkspaceModel> {
+  return request<EvaluationWorkspaceModel>(`/api/evaluation-workspaces/models/${trainingRunId}/drift/calculate`, { method: 'POST', body: JSON.stringify({ testing_run_id: testingRunId, layout_id: layoutId, score_series: scoreSeries }) });
+}
+export function listWorkspaceDriftCalculations(trainingRunId: number): Promise<EvaluationDriftCalculation[]> {
+  return request<EvaluationDriftCalculation[]>(`/api/evaluation-workspaces/models/${trainingRunId}/drift/calculations`);
+}
+export function activateWorkspaceDrift(trainingRunId: number, calculationId: number): Promise<EvaluationWorkspaceModel> {
+  return request<EvaluationWorkspaceModel>(`/api/evaluation-workspaces/models/${trainingRunId}/drift/calculations/${calculationId}/activate`, { method: 'POST' });
+}
+export function deleteWorkspaceDriftCalculation(trainingRunId: number, calculationId: number): Promise<EvaluationWorkspaceModel> {
+  return request<EvaluationWorkspaceModel>(`/api/evaluation-workspaces/models/${trainingRunId}/drift/calculations/${calculationId}`, { method: 'DELETE' });
+}
+export function setWorkspaceDriftBucketIncluded(trainingRunId: number, resultId: number, included: boolean): Promise<EvaluationWorkspaceModel> {
+  return request<EvaluationWorkspaceModel>(`/api/evaluation-workspaces/models/${trainingRunId}/drift/buckets/${resultId}`, { method: 'PATCH', body: JSON.stringify({ included }) });
 }
 
 export function listModelEvaluations(): Promise<ModelEvaluation[]> {

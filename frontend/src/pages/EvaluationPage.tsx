@@ -1,640 +1,90 @@
-import {
-  Alert,
-  Badge,
-  Button,
-  Collapse,
-  Group,
-  Loader,
-  MultiSelect,
-  NumberInput,
-  Paper,
-  ScrollArea,
-  SegmentedControl,
-  Select,
-  SimpleGrid,
-  Stack,
-  Table,
-  Text,
-  TextInput,
-  Title,
-} from '@mantine/core';
+import { Alert, Badge, Button, Checkbox, Collapse, Group, Loader, NumberInput, Paper, ScrollArea, SegmentedControl, Select, SimpleGrid, Stack, Table, Text, TextInput, Title } from '@mantine/core';
 import { notifications } from '@mantine/notifications';
-import {
-  ArrowLeft,
-  Calculator,
-  CheckCircle2,
-  ChevronDown,
-  ChevronRight,
-  Copy,
-  Download,
-  FileCheck2,
-  Filter,
-  Plus,
-  RefreshCw,
-  Save,
-  Settings2,
-  Trash2,
-} from 'lucide-react';
+import { ArrowLeft, Calculator, ChevronDown, ChevronRight, Plus, RefreshCw, Save, Trash2 } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useState } from 'react';
+import type { Shape } from 'plotly.js';
+import { activateWorkspaceDrift, calculateWorkspaceDrift, calculateWorkspaceSeparation, deleteDriftLayout, deleteSeparationLayout, deleteWorkspaceDriftCalculation, deleteWorkspaceSeparationResult, getEvaluationScorePreview, getEvaluationWorkspace, listDriftLayouts, listEvaluationWorkspaceModels, listEvaluationWorkspaceRuns, listSeparationLayouts, listWorkspaceDriftCalculations, listWorkspaceSeparationResults, previewWorkspaceDrift, saveDriftLayout, saveSeparationLayout, setWorkspaceDriftBucketIncluded, setWorkspaceSeparationIncluded } from '../api';
+import { DateTime24Input } from '../components/DateTime24Input';
+import { PlotlyChart, type PlotlyChartSelection } from '../components/PlotlyChart';
+import { normalizeHorizontalSelection } from '../evaluation/workspaceHelpers';
+import type { EvaluationDriftCalculation, EvaluationDriftLayout, EvaluationDriftLayoutPayload, EvaluationDriftPreview, EvaluationScorePreview, EvaluationSeparationLayout, EvaluationSeparationPair, EvaluationWorkspaceModel, EvaluationWorkspaceSeparationResult, TestingRun } from '../types';
 
-import {
-  calculateModelEvaluation,
-  createModelEvaluation,
-  deleteModelEvaluation,
-  duplicateModelEvaluation,
-  evaluationLabelSetCsvUrl,
-  finalizeModelEvaluation,
-  getEvaluationScorePreview,
-  getModelEvaluation,
-  listEvaluationLabelSets,
-  listEvaluationProfiles,
-  listModelEvaluations,
-  listTestingRuns,
-  listTrainingDatasets,
-  updateModelEvaluation,
-} from '../api';
-import { StepCard, STEP_COLORS } from '../components/StepCard';
-import { EvaluationProfileManager, EvaluationLabelSetManager } from '../evaluation/EvaluationResourceManagers';
-import { EvaluationResults } from '../evaluation/EvaluationResults';
-import { EvaluationRunPicker } from '../evaluation/EvaluationRunPicker';
-import { EvaluationTimeline } from '../evaluation/EvaluationTimeline';
-import { projectEvaluationDraft, projectedCalculationStatus } from '../evaluation/draftFreshness';
-import {
-  calculationStatusColor,
-  calculationStatusLabel,
-  canFinalizeEvaluation,
-  DEFAULT_EVALUATION_QUANTILE,
-  rangesOverlap,
-  scoreSeriesForRun,
-  statusIsStale,
-} from '../evaluation/helpers';
-import type {
-  EvaluationLabelEvent,
-  EvaluationLabelSet,
-  EvaluationNormalWindowOverride,
-  EvaluationProfile,
-  EvaluationScorePreview,
-  EvaluationTimeRange,
-  ModelEvaluation,
-  ModelEvaluationPayload,
-  TestingRun,
-  TrainingDataset,
-} from '../types';
+type View = 'overview' | 'separation' | 'drift';
+const msg = (error: unknown) => error instanceof Error ? error.message : 'Unknown error';
+const fail = (title: string, error: unknown) => notifications.show({ color: 'red', title, message: msg(error) });
+const metric = (value: number | null | undefined) => value == null || !Number.isFinite(value) ? 'N/A' : value.toLocaleString(undefined, { maximumFractionDigits: 5 });
+const key = (prefix: string) => `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+const range = normalizeHorizontalSelection;
+const scores = (run: TestingRun | null) => [{ value: 'score', label: 'Configured anomaly score' }, { value: 'full_mse', label: 'Full-frame MSE' }, ...(run?.roi_mse_mean != null ? [{ value: 'roi_mse', label: 'ROI score' }] : [])];
 
-const EVALUATION_PREVIEW_POINTS = 8000;
-
-type EvaluationView = 'drafts' | 'finalized';
-type SourceRole = 'evaluation' | 'reference' | 'calibration';
-type SavedStaleFilter = 'all' | 'current' | 'stale';
-type ProfileOverrideField = 'normal_window_duration_seconds' | 'normal_window_buffer_seconds' | 'drift_window_seconds' | 'false_alarm_horizon_seconds' | 'anticipation_seconds' | 'epsilon';
-
-function notifyError(title: string, error: unknown) {
-  notifications.show({ color: 'red', title, message: error instanceof Error ? error.message : 'Unknown error' });
+function Summary({ model }: { model: EvaluationWorkspaceModel }) {
+  return <Paper withBorder p="md"><Group justify="space-between" mb="sm"><div><Text fw={700}>{model.name}</Text><Text size="xs" c="dimmed">Artifact {model.artifact_signature.slice(0, 12)}…</Text></div><Badge>{model.method_type}</Badge></Group><Table striped withTableBorder><Table.Thead><Table.Tr><Table.Th>Sep_median</Table.Th><Table.Th>Sep_min</Table.Th><Table.Th>D_mean</Table.Th><Table.Th>D_max</Table.Th><Table.Th>Included A rows</Table.Th><Table.Th>Active B run</Table.Th></Table.Tr></Table.Thead><Table.Tbody><Table.Tr><Table.Td>{metric(model.sep_median)}</Table.Td><Table.Td>{metric(model.sep_min)}</Table.Td><Table.Td>{metric(model.d_mean)}</Table.Td><Table.Td>{metric(model.d_max)}</Table.Td><Table.Td>{model.included_separation_results}</Table.Td><Table.Td>{model.active_drift_testing_run_id ? `#${model.active_drift_testing_run_id}` : 'N/A'}</Table.Td></Table.Tr></Table.Tbody></Table></Paper>;
 }
 
-function emptyDraft(): ModelEvaluationPayload {
-  return {
-    name: '',
-    evaluation_testing_run_id: null,
-    evaluation_start_timestamp: null,
-    evaluation_end_timestamp: null,
-    reference_testing_run_id: null,
-    reference_start_timestamp: null,
-    reference_end_timestamp: null,
-    calibration_testing_run_id: null,
-    calibration_start_timestamp: null,
-    calibration_end_timestamp: null,
-    score_series: 'score',
-    label_set_id: null,
-    profile_id: null,
-    selected_categories: [],
-    normal_window_overrides: {},
-    profile_overrides: {},
-    active_quantile: DEFAULT_EVALUATION_QUANTILE,
-  };
+function Source({ runs, runId, score, onRun, onScore }: { runs: TestingRun[]; runId: number | null; score: string; onRun: (id: number | null) => void; onScore: (value: string) => void }) {
+  const run = runs.find((item) => item.id === runId) ?? null;
+  return <SimpleGrid cols={{ base: 1, md: 2 }}><Select searchable clearable label="Finished inference run" data={runs.map((item) => ({ value: String(item.id), label: `#${item.id} · ${item.name}` }))} value={runId ? String(runId) : null} onChange={(value) => onRun(value ? Number(value) : null)} /><Select label="Score series" data={scores(run)} value={score} onChange={(value) => onScore(value ?? 'score')} /></SimpleGrid>;
 }
 
-function payloadFromEvaluation(evaluation: ModelEvaluation): ModelEvaluationPayload {
-  return {
-    name: evaluation.name,
-    evaluation_testing_run_id: evaluation.evaluation_testing_run_id,
-    evaluation_start_timestamp: evaluation.evaluation_start_timestamp,
-    evaluation_end_timestamp: evaluation.evaluation_end_timestamp,
-    reference_testing_run_id: evaluation.reference_testing_run_id,
-    reference_start_timestamp: evaluation.reference_start_timestamp,
-    reference_end_timestamp: evaluation.reference_end_timestamp,
-    calibration_testing_run_id: evaluation.calibration_testing_run_id,
-    calibration_start_timestamp: evaluation.calibration_start_timestamp,
-    calibration_end_timestamp: evaluation.calibration_end_timestamp,
-    score_series: evaluation.score_series,
-    label_set_id: evaluation.label_set_id,
-    profile_id: evaluation.profile_id,
-    selected_categories: evaluation.selected_categories ?? [],
-    normal_window_overrides: evaluation.normal_window_overrides ?? {},
-    profile_overrides: evaluation.profile_overrides ?? {},
-    active_quantile: evaluation.active_quantile ?? DEFAULT_EVALUATION_QUANTILE,
-  };
+function ScorePlot({ preview, shapes, onSelect }: { preview: EvaluationScorePreview | null; shapes: Shape[]; onSelect: (selection: PlotlyChartSelection) => void }) {
+  if (!preview) return <Alert color="gray">Select a finished inference run to load its score plot.</Alert>;
+  return <Stack gap="xs">{preview.decimated && <Badge variant="light" w="fit-content">Preview {preview.points.length.toLocaleString()} / {preview.total.toLocaleString()} points</Badge>}<PlotlyChart data={[{ type: 'scattergl', mode: 'lines', x: preview.points.map((p) => p.timestamp), y: preview.points.map((p) => p.value), line: { width: 1.2 } }]} layout={{ dragmode: 'select', hovermode: 'x unified', shapes, uirevision: `${preview.testing_run_id}:${preview.score_series}`, showlegend: false, xaxis: { type: 'date', rangeslider: { visible: true, thickness: .1 }, title: { text: 'Dataset-local time' } }, yaxis: { title: { text: 'Anomaly score' } } }} config={{ scrollZoom: true, modeBarButtonsToAdd: ['select2d'] }} height={430} onSelected={onSelect} /><Text size="xs" c="dimmed">Zoom, pan and the range slider only change the view. Drag horizontally to apply the selected range tool.</Text></Stack>;
 }
 
-function roleRunId(draft: ModelEvaluationPayload, role: SourceRole): number | null {
-  return draft[`${role}_testing_run_id`];
+function Separation({ model, runs, onSummary }: { model: EvaluationWorkspaceModel; runs: TestingRun[]; onSummary: (value: EvaluationWorkspaceModel) => void }) {
+  const [runId, setRunId] = useState<number | null>(null), [score, setScore] = useState('score');
+  const [preview, setPreview] = useState<EvaluationScorePreview | null>(null), [layouts, setLayouts] = useState<EvaluationSeparationLayout[]>([]);
+  const [layoutId, setLayoutId] = useState<number | null>(null), [layoutName, setLayoutName] = useState('');
+  const [pairs, setPairs] = useState<EvaluationSeparationPair[]>([]), [pairKey, setPairKey] = useState<string | null>(null), [selected, setSelected] = useState<string[]>([]);
+  const [tool, setTool] = useState<'normal' | 'anomaly'>('normal'), [results, setResults] = useState<EvaluationWorkspaceSeparationResult[]>([]), [busy, setBusy] = useState(false);
+  const run = runs.find((item) => item.id === runId) ?? null, pair = pairs.find((item) => item.pair_key === pairKey) ?? null;
+  const persistedLayout = layouts.find((item) => item.id === layoutId) ?? null;
+  const layoutDirty = !persistedLayout || persistedLayout.name !== layoutName || JSON.stringify(persistedLayout.pairs) !== JSON.stringify(pairs);
+  const reload = useCallback(async () => setResults(await listWorkspaceSeparationResults(model.training_run_id)), [model.training_run_id]);
+  useEffect(() => { void reload(); }, [reload]);
+  useEffect(() => { if (!run) { setPreview(null); setLayouts([]); return; } void Promise.all([getEvaluationScorePreview(run.id, { score_series: score, max_points: 8000 }), listSeparationLayouts(run.training_dataset_id)]).then(([plot, rows]) => { setPreview(plot); setLayouts(rows); }).catch((e) => fail('Could not load A workspace', e)); }, [run, score]);
+  const update = (values: Partial<EvaluationSeparationPair>) => pairKey && setPairs((items) => items.map((item) => item.pair_key === pairKey ? { ...item, ...values } : item));
+  const shapes = useMemo<Shape[]>(() => pairs.flatMap((item) => [{ type: 'rect', xref: 'x', yref: 'paper', x0: item.normal_start, x1: item.normal_end, y0: 0, y1: 1, fillcolor: 'rgba(34,139,230,.13)', line: { color: '#228be6' }, layer: 'below' } as Shape, { type: 'rect', xref: 'x', yref: 'paper', x0: item.anomaly_start, x1: item.anomaly_end, y0: 0, y1: 1, fillcolor: 'rgba(250,82,82,.14)', line: { color: '#fa5252' }, layer: 'below' } as Shape]).filter((item) => Boolean(item.x0 && item.x1)), [pairs]);
+  function choose(value: string | null) { const row = layouts.find((item) => item.id === Number(value)); setLayoutId(row?.id ?? null); setLayoutName(row?.name ?? ''); setPairs(row?.pairs ?? []); setPairKey(row?.pairs[0]?.pair_key ?? null); setSelected(row?.pairs.map((item) => item.pair_key) ?? []); }
+  function add() { const id = key('pair'), item = { pair_key: id, name: `Pair ${pairs.length + 1}`, normal_start: '', normal_end: '', anomaly_start: '', anomaly_end: '' }; setPairs((rows) => [...rows, item]); setPairKey(id); setSelected((rows) => [...rows, id]); }
+  async function save() { if (!run) return; setBusy(true); try { const row = await saveSeparationLayout({ training_dataset_id: run.training_dataset_id, name: layoutName, pairs }, layoutId ?? undefined); setLayoutId(row.id); setLayouts(await listSeparationLayouts(run.training_dataset_id)); notifications.show({ color: 'green', message: `Layout v${row.version} saved.` }); } catch (e) { fail('Could not save layout', e); } finally { setBusy(false); } }
+  async function calculate() { if (!runId || !layoutId) return; if (layoutDirty) { notifications.show({ color: 'orange', message: 'Save the visible A layout before calculating it.' }); return; } setBusy(true); try { onSummary(await calculateWorkspaceSeparation(model.training_run_id, { testing_run_id: runId, layout_id: layoutId, pair_keys: selected, score_series: score })); await reload(); } catch (e) { fail('A calculation failed', e); } finally { setBusy(false); } }
+  return <Stack gap="md"><Source runs={runs} runId={runId} score={score} onRun={(id) => { setRunId(id); setScore('score'); choose(null); }} onScore={setScore} /><Paper withBorder p="md"><Stack gap="sm"><Group justify="space-between"><Title order={4}>Dataset-wide A layout</Title><Button variant="light" leftSection={<Plus size={15} />} disabled={!run} onClick={add}>Add pair</Button></Group><SimpleGrid cols={{ base: 1, md: 2 }}><Select label="Saved layout" clearable searchable data={layouts.map((item) => ({ value: String(item.id), label: `${item.name} · v${item.version}` }))} value={layoutId ? String(layoutId) : null} onChange={choose} /><TextInput label="Layout name" value={layoutName} onChange={(e) => setLayoutName(e.currentTarget.value)} /></SimpleGrid>{pairs.length > 0 && <Select label="Pair to edit" data={pairs.map((item) => ({ value: item.pair_key, label: item.name }))} value={pairKey} onChange={setPairKey} />}{pair && <><TextInput label="Pair name" value={pair.name} onChange={(e) => update({ name: e.currentTarget.value })} /><SegmentedControl value={tool} onChange={(value) => setTool(value as 'normal' | 'anomaly')} data={[{ value: 'normal', label: 'Normalbereich wählen' }, { value: 'anomaly', label: 'Anomaliebereich wählen' }]} /><SimpleGrid cols={{ base: 1, md: 2, xl: 4 }}><DateTime24Input label="Normal start" value={pair.normal_start} onChange={(value) => update({ normal_start: value })} /><DateTime24Input label="Normal end (exclusive)" value={pair.normal_end} onChange={(value) => update({ normal_end: value })} /><DateTime24Input label="Anomaly start" value={pair.anomaly_start} onChange={(value) => update({ anomaly_start: value })} /><DateTime24Input label="Anomaly end (inclusive)" value={pair.anomaly_end} onChange={(value) => update({ anomaly_end: value })} /></SimpleGrid></>}<ScorePlot preview={preview} shapes={shapes} onSelect={(value) => { const r = range(value); update(tool === 'normal' ? { normal_start: r.start, normal_end: r.end } : { anomaly_start: r.start, anomaly_end: r.end }); }} /><ScrollArea><Table striped withTableBorder><Table.Thead><Table.Tr><Table.Th>Use</Table.Th><Table.Th>Name</Table.Th><Table.Th>Normal [start,end)</Table.Th><Table.Th>Anomaly [start,end]</Table.Th><Table.Th /></Table.Tr></Table.Thead><Table.Tbody>{pairs.map((item) => <Table.Tr key={item.pair_key}><Table.Td><Checkbox checked={selected.includes(item.pair_key)} onChange={(e) => setSelected((rows) => e.currentTarget.checked ? [...new Set([...rows, item.pair_key])] : rows.filter((id) => id !== item.pair_key))} /></Table.Td><Table.Td>{item.name}</Table.Td><Table.Td>{item.normal_start || '—'} → {item.normal_end || '—'}</Table.Td><Table.Td>{item.anomaly_start || '—'} → {item.anomaly_end || '—'}</Table.Td><Table.Td><Button size="compact-xs" color="red" variant="subtle" onClick={() => setPairs((rows) => rows.filter((row) => row.pair_key !== item.pair_key))}><Trash2 size={14} /></Button></Table.Td></Table.Tr>)}</Table.Tbody></Table></ScrollArea><Group justify="flex-end">{layoutId && <Button color="red" variant="subtle" onClick={() => void deleteSeparationLayout(layoutId).then(() => choose(null)).then(() => run && listSeparationLayouts(run.training_dataset_id).then(setLayouts))}>Delete layout</Button>}<Button variant="default" leftSection={<Save size={15} />} loading={busy} onClick={() => void save()}>Save layout</Button><Button leftSection={<Calculator size={15} />} loading={busy} disabled={!layoutId || !selected.length} onClick={() => void calculate()}>Calculate selected pairs</Button></Group></Stack></Paper><Paper withBorder p="md"><Title order={4} mb="sm">A results across inference runs</Title><ScrollArea><Table striped withTableBorder><Table.Thead><Table.Tr><Table.Th>Include</Table.Th><Table.Th>Run</Table.Th><Table.Th>Pair</Table.Th><Table.Th>Median</Table.Th><Table.Th>MAD</Table.Th><Table.Th>Scale</Table.Th><Table.Th>Sep_i</Table.Th><Table.Th>Sep95_i</Table.Th><Table.Th>Status</Table.Th><Table.Th /></Table.Tr></Table.Thead><Table.Tbody>{results.map((item) => <Table.Tr key={item.id}><Table.Td><Checkbox checked={item.included} disabled={item.stale} onChange={(e) => void setWorkspaceSeparationIncluded(model.training_run_id, item.id, e.currentTarget.checked).then(onSummary).then(reload)} /></Table.Td><Table.Td>#{item.testing_run_id}</Table.Td><Table.Td>{item.pair_name}</Table.Td><Table.Td>{metric(item.normal_median)}</Table.Td><Table.Td>{metric(item.normal_mad)}</Table.Td><Table.Td>{metric(item.robust_scale)}</Table.Td><Table.Td>{metric(item.separation)}</Table.Td><Table.Td>{metric(item.separation_p95)}</Table.Td><Table.Td><Badge color={item.stale ? 'orange' : 'green'}>{item.stale ? 'Stale' : 'Current'}</Badge></Table.Td><Table.Td><Button size="compact-xs" color="red" variant="subtle" onClick={() => void deleteWorkspaceSeparationResult(model.training_run_id, item.id).then(onSummary).then(reload)}><Trash2 size={14} /></Button></Table.Td></Table.Tr>)}{!results.length && <Table.Tr><Table.Td colSpan={10}><Text ta="center" c="dimmed">No A results yet.</Text></Table.Td></Table.Tr>}</Table.Tbody></Table></ScrollArea></Paper></Stack>;
 }
 
-function roleRange(draft: ModelEvaluationPayload, role: SourceRole): EvaluationTimeRange {
-  return {
-    start_timestamp: draft[`${role}_start_timestamp`] ?? '',
-    end_timestamp: draft[`${role}_end_timestamp`] ?? '',
-  };
-}
+const blankDrift = (dataset: number): EvaluationDriftLayoutPayload => ({ training_dataset_id: dataset, name: '', reference_start: '', reference_end: '', analysis_start: '', analysis_end: '', bucket_seconds: 86400, reference_exclusion_action: 'filter_points', exclusions: [], buckets: [] });
 
-function withRoleRun(draft: ModelEvaluationPayload, role: SourceRole, runId: number | null): ModelEvaluationPayload {
-  return {
-    ...draft,
-    [`${role}_testing_run_id`]: runId,
-    [`${role}_start_timestamp`]: null,
-    [`${role}_end_timestamp`]: null,
-  };
-}
+const driftPayload = (row: EvaluationDriftLayout): EvaluationDriftLayoutPayload => ({ training_dataset_id: row.training_dataset_id, name: row.name, description: row.description, reference_start: row.reference_start, reference_end: row.reference_end, analysis_start: row.analysis_start, analysis_end: row.analysis_end, bucket_seconds: row.bucket_seconds, reference_exclusion_action: row.reference_exclusion_action, exclusions: row.exclusions, buckets: row.buckets });
 
-function withRoleRange(draft: ModelEvaluationPayload, role: SourceRole, range: EvaluationTimeRange): ModelEvaluationPayload {
-  return {
-    ...draft,
-    [`${role}_start_timestamp`]: range.start_timestamp || null,
-    [`${role}_end_timestamp`]: range.end_timestamp || null,
-  };
-}
-
-function completeRole(draft: ModelEvaluationPayload, role: SourceRole): boolean {
-  return roleRunId(draft, role) != null
-    && Boolean(draft[`${role}_start_timestamp`])
-    && Boolean(draft[`${role}_end_timestamp`]);
-}
-
-function subtractSeconds(timestamp: string, seconds: number): string {
-  if (!timestamp) return '';
-  const parsed = new Date(`${timestamp.slice(0, 19)}Z`).getTime();
-  if (!Number.isFinite(parsed)) return '';
-  return new Date(parsed - seconds * 1000).toISOString().slice(0, 19);
-}
-
-function snapshotEvents(evaluation: ModelEvaluation | null): EvaluationLabelEvent[] {
-  return evaluation?.label_snapshot?.events ?? [];
-}
-
-function downloadLabelSnapshot(events: EvaluationLabelEvent[], name: string) {
-  const quote = (value: unknown) => `"${String(value ?? '').replaceAll('"', '""')}"`;
-  const header = ['event_id', 'type', 'name', 'category', 'start_timestamp', 'end_timestamp', 'notes'];
-  const rows = events.map((event) => [event.event_id, event.type, event.name, event.category, event.start_timestamp, event.end_timestamp, event.notes]);
-  const blob = new Blob([[header, ...rows].map((row) => row.map(quote).join(',')).join('\n')], { type: 'text/csv;charset=utf-8' });
-  const url = URL.createObjectURL(blob);
-  const anchor = document.createElement('a');
-  anchor.href = url;
-  anchor.download = `${name.trim().replace(/[^a-z0-9_-]+/gi, '-') || 'evaluation'}-ground-truth.csv`;
-  anchor.click();
-  URL.revokeObjectURL(url);
-}
-
-function EvaluationStatusBadge({ status }: { status: string }) {
-  return <Badge color={calculationStatusColor(status)} variant="light">{calculationStatusLabel(status)}</Badge>;
-}
-
-function StageAction({
-  stage,
-  label,
-  status,
-  error,
-  disabled,
-  calculating,
-  onCalculate,
-}: {
-  stage: 'separation' | 'drift' | 'detection';
-  label: string;
-  status: string;
-  error?: string | null;
-  disabled: boolean;
-  calculating: string | null;
-  onCalculate: (stage: 'separation' | 'drift' | 'detection') => void;
-}) {
-  return (
-    <Paper withBorder p="sm">
-      <Stack gap="xs">
-        <Group justify="space-between"><Text fw={600}>{label}</Text><EvaluationStatusBadge status={status} /></Group>
-        <Text size="xs" c="dimmed">Runs independently; an error here leaves other results available.</Text>
-        {error && <Alert color="red" p="xs">{error}</Alert>}
-        <Button
-          variant="light"
-          color={stage === 'separation' ? 'violet' : stage === 'drift' ? 'teal' : 'orange'}
-          leftSection={<Calculator size={15} />}
-          loading={calculating === stage}
-          disabled={disabled || Boolean(calculating)}
-          onClick={() => onCalculate(stage)}
-        >
-          {status === 'not_calculated' ? 'Calculate' : 'Recalculate'} {stage === 'separation' ? 'A' : stage === 'drift' ? 'B' : 'C'}
-        </Button>
-      </Stack>
-    </Paper>
-  );
+function Drift({ model, runs, onSummary }: { model: EvaluationWorkspaceModel; runs: TestingRun[]; onSummary: (value: EvaluationWorkspaceModel) => void }) {
+  const [runId, setRunId] = useState<number | null>(null), [score, setScore] = useState('score'), [preview, setPreview] = useState<EvaluationScorePreview | null>(null);
+  const [layouts, setLayouts] = useState<EvaluationDriftLayout[]>([]), [layoutId, setLayoutId] = useState<number | null>(null), [draft, setDraft] = useState<EvaluationDriftLayoutPayload>(blankDrift(0));
+  const [tool, setTool] = useState<'reference' | 'analysis' | 'exclusion'>('reference'), [buckets, setBuckets] = useState<EvaluationDriftPreview | null>(null), [history, setHistory] = useState<EvaluationDriftCalculation[]>([]), [removed, setRemoved] = useState(false), [busy, setBusy] = useState(false);
+  const run = runs.find((item) => item.id === runId) ?? null;
+  const persistedLayout = layouts.find((item) => item.id === layoutId) ?? null;
+  const layoutDirty = !persistedLayout || JSON.stringify(driftPayload(persistedLayout)) !== JSON.stringify(draft);
+  const reload = useCallback(async () => setHistory(await listWorkspaceDriftCalculations(model.training_run_id)), [model.training_run_id]);
+  useEffect(() => { void reload(); }, [reload]);
+  useEffect(() => { if (!run) { setPreview(null); setLayouts([]); return; } void Promise.all([getEvaluationScorePreview(run.id, { score_series: score, max_points: 8000 }), listDriftLayouts(run.training_dataset_id)]).then(([plot, rows]) => { setPreview(plot); setLayouts(rows); }).catch((e) => fail('Could not load B workspace', e)); }, [run, score]);
+  function choose(value: string | null) { const row = layouts.find((item) => item.id === Number(value)); setLayoutId(row?.id ?? null); setDraft(row ? driftPayload(row) : blankDrift(run?.training_dataset_id ?? 0)); setBuckets(null); }
+  const shapes = useMemo<Shape[]>(() => [{ type: 'rect', xref: 'x', yref: 'paper', x0: draft.reference_start, x1: draft.reference_end, y0: 0, y1: 1, fillcolor: 'rgba(64,192,87,.14)', line: { color: '#40c057' }, layer: 'below' } as Shape, { type: 'rect', xref: 'x', yref: 'paper', x0: draft.analysis_start, x1: draft.analysis_end, y0: 0, y1: 1, fillcolor: 'rgba(34,139,230,.08)', line: { color: '#228be6' }, layer: 'below' } as Shape, ...draft.exclusions.map((item) => ({ type: 'rect', xref: 'x', yref: 'paper', x0: item.start_timestamp, x1: item.end_timestamp, y0: 0, y1: 1, fillcolor: 'rgba(134,142,150,.28)', line: { color: '#868e96' }, layer: 'below' } as Shape))].filter((item) => Boolean(item.x0 && item.x1)), [draft]);
+  async function inspect(next = draft) { if (!runId) return; setBusy(true); try { setBuckets(await previewWorkspaceDrift(model.training_run_id, runId, score, next)); } catch (e) { fail('Bucket validation failed', e); } finally { setBusy(false); } }
+  function decide(id: string, decision: 'include' | 'drop_bucket' | 'filter_points') { const definitions = (buckets?.buckets ?? []).map((item) => ({ bucket_key: item.bucket_key, start_timestamp: item.start_timestamp, end_timestamp: item.end_timestamp, decision: item.bucket_key === id ? decision : item.decision })); const next = { ...draft, buckets: definitions }; setDraft(next); void inspect(next); }
+  async function save() { setBusy(true); try { const row = await saveDriftLayout(draft, layoutId ?? undefined); setLayoutId(row.id); setDraft(driftPayload(row)); if (run) setLayouts(await listDriftLayouts(run.training_dataset_id)); notifications.show({ color: 'green', message: `Layout v${row.version} saved.` }); } catch (e) { fail('Could not save layout', e); } finally { setBusy(false); } }
+  async function calculate() { if (!runId || !layoutId) return; if (layoutDirty) { notifications.show({ color: 'orange', message: 'Save the visible B layout before calculating it.' }); return; } setBusy(true); try { onSummary(await calculateWorkspaceDrift(model.training_run_id, runId, layoutId, score)); await reload(); } catch (e) { fail('B calculation failed', e); } finally { setBusy(false); } }
+  const shown = buckets?.buckets.filter((item) => item.status !== 'removed') ?? [], hidden = buckets?.buckets.filter((item) => item.status === 'removed') ?? [], active = history.find((item) => item.active) ?? null;
+  return <Stack gap="md"><Source runs={runs} runId={runId} score={score} onRun={(id) => { setRunId(id); setScore('score'); const row = runs.find((item) => item.id === id); setLayoutId(null); setDraft(blankDrift(row?.training_dataset_id ?? 0)); setBuckets(null); }} onScore={setScore} /><Paper withBorder p="md"><Stack gap="sm"><Group justify="space-between"><Title order={4}>Dataset-wide B layout</Title><Button variant="light" leftSection={<RefreshCw size={15} />} loading={busy} onClick={() => void inspect()}>Generate / validate buckets</Button></Group><SimpleGrid cols={{ base: 1, md: 2 }}><Select label="Saved layout" clearable searchable data={layouts.map((item) => ({ value: String(item.id), label: `${item.name} · v${item.version}` }))} value={layoutId ? String(layoutId) : null} onChange={choose} /><TextInput label="Layout name" value={draft.name} onChange={(e) => setDraft((value) => ({ ...value, name: e.currentTarget.value }))} /></SimpleGrid><SegmentedControl value={tool} onChange={(value) => setTool(value as typeof tool)} data={[{ value: 'reference', label: 'Reference range' }, { value: 'analysis', label: 'Analysis range' }, { value: 'exclusion', label: 'Add exclusion' }]} /><SimpleGrid cols={{ base: 1, md: 2, xl: 4 }}><DateTime24Input label="Reference start" value={draft.reference_start} onChange={(value) => setDraft((row) => ({ ...row, reference_start: value }))} /><DateTime24Input label="Reference end" value={draft.reference_end} onChange={(value) => setDraft((row) => ({ ...row, reference_end: value }))} /><DateTime24Input label="Analysis start" value={draft.analysis_start} onChange={(value) => setDraft((row) => ({ ...row, analysis_start: value }))} /><DateTime24Input label="Analysis end" value={draft.analysis_end} onChange={(value) => setDraft((row) => ({ ...row, analysis_end: value }))} /></SimpleGrid><SimpleGrid cols={{ base: 1, md: 2 }}><NumberInput label="Bucket duration L (hours)" min={.001} value={draft.bucket_seconds / 3600} onChange={(value) => setDraft((row) => ({ ...row, bucket_seconds: Math.max(Number(value) || .001, .001) * 3600 }))} /><Select label="Reference/exclusion conflict" value={draft.reference_exclusion_action} onChange={(value) => setDraft((row) => ({ ...row, reference_exclusion_action: (value ?? 'filter_points') as 'filter_points' | 'drop_reference' }))} data={[{ value: 'filter_points', label: 'Filter excluded reference points' }, { value: 'drop_reference', label: 'Remove reference (blocks calculation)' }]} /></SimpleGrid><ScorePlot preview={preview} shapes={shapes} onSelect={(selection) => { const r = range(selection); if (tool === 'reference') setDraft((row) => ({ ...row, reference_start: r.start, reference_end: r.end })); else if (tool === 'analysis') setDraft((row) => ({ ...row, analysis_start: r.start, analysis_end: r.end })); else setDraft((row) => ({ ...row, exclusions: [...row.exclusions, { exclusion_key: key('exclusion'), name: `Exclusion ${row.exclusions.length + 1}`, start_timestamp: r.start, end_timestamp: r.end }] })); }} />{draft.exclusions.map((item, index) => <SimpleGrid key={item.exclusion_key} cols={{ base: 1, md: 4 }}><TextInput label="Exclusion" value={item.name} onChange={(e) => setDraft((row) => ({ ...row, exclusions: row.exclusions.map((x, i) => i === index ? { ...x, name: e.currentTarget.value } : x) }))} /><DateTime24Input label="Start" value={item.start_timestamp} onChange={(value) => setDraft((row) => ({ ...row, exclusions: row.exclusions.map((x, i) => i === index ? { ...x, start_timestamp: value } : x) }))} /><DateTime24Input label="End (inclusive)" value={item.end_timestamp} onChange={(value) => setDraft((row) => ({ ...row, exclusions: row.exclusions.map((x, i) => i === index ? { ...x, end_timestamp: value } : x) }))} /><Button mt={25} color="red" variant="subtle" onClick={() => setDraft((row) => ({ ...row, exclusions: row.exclusions.filter((_, i) => i !== index) }))}>Remove</Button></SimpleGrid>)}{buckets && <><Paper withBorder p="sm"><Group justify="space-between"><Text fw={600}>Reference (not part of D_mean/D_max)</Text><Badge color={buckets.near_zero_iqr ? 'orange' : 'green'}>IQR {metric(buckets.reference_iqr)}</Badge></Group><Text size="sm">{draft.reference_start} → {draft.reference_end} · {buckets.reference_point_count}/{buckets.reference_original_point_count} points</Text></Paper><ScrollArea><Table striped withTableBorder><Table.Thead><Table.Tr><Table.Th>Bucket</Table.Th><Table.Th>Start</Table.Th><Table.Th>End</Table.Th><Table.Th>Used/original</Table.Th><Table.Th>Warning</Table.Th><Table.Th>Decision</Table.Th></Table.Tr></Table.Thead><Table.Tbody>{shown.map((item) => <Table.Tr key={item.bucket_key}><Table.Td>{item.bucket_key}</Table.Td><Table.Td>{item.start_timestamp}</Table.Td><Table.Td>{item.end_timestamp}</Table.Td><Table.Td>{item.used_point_count}/{item.original_point_count}</Table.Td><Table.Td><Badge color={item.status === 'ready' ? 'green' : item.status === 'conflict' ? 'orange' : 'gray'}>{item.reason ?? item.status}</Badge></Table.Td><Table.Td><Select size="xs" value={item.decision} disabled={['continuity gap', 'incomplete remainder', 'overlaps reference'].includes(item.reason ?? '')} data={[{ value: 'include', label: 'Include' }, { value: 'drop_bucket', label: 'Remove bucket' }, { value: 'filter_points', label: 'Filter excluded points' }]} onChange={(value) => decide(item.bucket_key, (value ?? 'include') as 'include' | 'drop_bucket' | 'filter_points')} /></Table.Td></Table.Tr>)}</Table.Tbody></Table></ScrollArea>{hidden.length > 0 && <><Button variant="subtle" color="gray" rightSection={removed ? <ChevronDown size={14} /> : <ChevronRight size={14} />} onClick={() => setRemoved((value) => !value)}>Removed buckets ({hidden.length})</Button><Collapse in={removed}>{hidden.map((item) => <Group key={item.bucket_key} justify="space-between" p="xs"><Text size="sm">{item.start_timestamp} → {item.end_timestamp}</Text><Button size="compact-xs" onClick={() => decide(item.bucket_key, 'include')}>Restore</Button></Group>)}</Collapse></>}</>}<Group justify="flex-end">{layoutId && <Button color="red" variant="subtle" onClick={() => void deleteDriftLayout(layoutId).then(() => choose(null)).then(() => run && listDriftLayouts(run.training_dataset_id).then(setLayouts))}>Delete layout</Button>}<Button variant="default" leftSection={<Save size={15} />} loading={busy} onClick={() => void save()}>Save layout</Button><Button leftSection={<Calculator size={15} />} loading={busy} disabled={!layoutId || !buckets || buckets.buckets.some((item) => item.status === 'conflict')} onClick={() => void calculate()}>Calculate Score Stability</Button></Group></Stack></Paper><Paper withBorder p="md"><Title order={4} mb="sm">B calculation history</Title>{active && <PlotlyChart data={[{ type: 'scatter', mode: 'lines+markers', x: active.buckets.filter((item) => item.included && item.normalized_drift != null).map((item) => item.start_timestamp), y: active.buckets.filter((item) => item.included && item.normalized_drift != null).map((item) => item.normalized_drift), name: 'D_k' }]} layout={{ xaxis: { type: 'date', title: { text: 'Bucket start' } }, yaxis: { title: { text: 'Normalized Wasserstein distance D_k' } } }} height={320} />}<ScrollArea><Table striped withTableBorder><Table.Thead><Table.Tr><Table.Th>Active</Table.Th><Table.Th>Run</Table.Th><Table.Th>Created</Table.Th><Table.Th>D_mean</Table.Th><Table.Th>D_max</Table.Th><Table.Th>IQR</Table.Th><Table.Th>Status</Table.Th><Table.Th /></Table.Tr></Table.Thead><Table.Tbody>{history.map((item) => <Table.Tr key={item.id}><Table.Td><Checkbox checked={item.active} disabled={item.stale} onChange={() => void activateWorkspaceDrift(model.training_run_id, item.id).then(onSummary).then(reload)} /></Table.Td><Table.Td>#{item.testing_run_id}</Table.Td><Table.Td>{item.created_at.replace('T', ' ')}</Table.Td><Table.Td>{metric(item.d_mean)}</Table.Td><Table.Td>{metric(item.d_max)}</Table.Td><Table.Td>{metric(item.reference_iqr)}</Table.Td><Table.Td><Badge color={item.stale ? 'orange' : item.active ? 'green' : 'gray'}>{item.stale ? 'Stale' : item.active ? 'Active' : 'History'}</Badge></Table.Td><Table.Td><Button size="compact-xs" color="red" variant="subtle" onClick={() => void deleteWorkspaceDriftCalculation(model.training_run_id, item.id).then(onSummary).then(reload)}><Trash2 size={14} /></Button></Table.Td></Table.Tr>)}{!history.length && <Table.Tr><Table.Td colSpan={8}><Text ta="center" c="dimmed">No B calculations yet.</Text></Table.Td></Table.Tr>}</Table.Tbody></Table></ScrollArea>{active && <><Title order={5} mt="md">Active calculation buckets</Title><ScrollArea><Table withTableBorder><Table.Thead><Table.Tr><Table.Th>Include</Table.Th><Table.Th>Bucket</Table.Th><Table.Th>Used/original</Table.Th><Table.Th>W₁</Table.Th><Table.Th>D_k</Table.Th><Table.Th>Reason</Table.Th></Table.Tr></Table.Thead><Table.Tbody>{active.buckets.map((item) => <Table.Tr key={item.id}><Table.Td><Checkbox checked={item.included} disabled={item.status !== 'ready' || active.stale} onChange={(e) => void setWorkspaceDriftBucketIncluded(model.training_run_id, item.id, e.currentTarget.checked).then(onSummary).then(reload)} /></Table.Td><Table.Td>{item.start_timestamp} → {item.end_timestamp}</Table.Td><Table.Td>{item.used_point_count}/{item.original_point_count}</Table.Td><Table.Td>{metric(item.wasserstein_1)}</Table.Td><Table.Td>{metric(item.normalized_drift)}</Table.Td><Table.Td>{item.reason ?? '—'}</Table.Td></Table.Tr>)}</Table.Tbody></Table></ScrollArea></>}</Paper></Stack>;
 }
 
 export function EvaluationPage({ active }: { active: boolean }) {
-  const [testingRuns, setTestingRuns] = useState<TestingRun[]>([]);
-  const [datasets, setDatasets] = useState<TrainingDataset[]>([]);
-  const [profiles, setProfiles] = useState<EvaluationProfile[]>([]);
-  const [labelSets, setLabelSets] = useState<EvaluationLabelSet[]>([]);
-  const [evaluations, setEvaluations] = useState<ModelEvaluation[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [view, setView] = useState<EvaluationView>('drafts');
-  const [selectedEvaluation, setSelectedEvaluation] = useState<ModelEvaluation | null>(null);
-  const [draft, setDraft] = useState<ModelEvaluationPayload>(emptyDraft);
-  const [creating, setCreating] = useState(false);
-  const [saving, setSaving] = useState(false);
-  const [calculating, setCalculating] = useState<string | null>(null);
-  const [previewRole, setPreviewRole] = useState<SourceRole>('evaluation');
-  const [previews, setPreviews] = useState<Partial<Record<SourceRole, EvaluationScorePreview>>>({});
-  const [previewLoading, setPreviewLoading] = useState(false);
-  const [previewError, setPreviewError] = useState<string | null>(null);
-  const [profileManagerOpen, setProfileManagerOpen] = useState(false);
-  const [labelManagerOpen, setLabelManagerOpen] = useState(false);
-  const [suggestedEvent, setSuggestedEvent] = useState<EvaluationLabelEvent | null>(null);
-  const [overridesOpen, setOverridesOpen] = useState(false);
-  const [profileOverridesOpen, setProfileOverridesOpen] = useState(false);
-  const [overrideEventId, setOverrideEventId] = useState<string | null>(null);
-  const [overrideRange, setOverrideRange] = useState<EvaluationTimeRange>({ start_timestamp: '', end_timestamp: '' });
-  const [savedFiltersOpen, setSavedFiltersOpen] = useState(false);
-  const [savedQuery, setSavedQuery] = useState('');
-  const [savedStale, setSavedStale] = useState<SavedStaleFilter>('all');
-  const [savedCategories, setSavedCategories] = useState<string[]>([]);
-  const [savedScores, setSavedScores] = useState<string[]>([]);
-  const [createdFrom, setCreatedFrom] = useState('');
-  const [createdTo, setCreatedTo] = useState('');
-
-  const refreshProfiles = useCallback(async () => setProfiles(await listEvaluationProfiles()), []);
-  const refreshLabelSets = useCallback(async () => setLabelSets(await listEvaluationLabelSets()), []);
-  const refreshEvaluations = useCallback(async () => setEvaluations(await listModelEvaluations()), []);
-
-  const refreshAll = useCallback(async () => {
-    setLoading(true);
-    try {
-      const [nextRuns, nextDatasets, nextProfiles, nextLabelSets, nextEvaluations] = await Promise.all([
-        listTestingRuns(), listTrainingDatasets(), listEvaluationProfiles(), listEvaluationLabelSets(), listModelEvaluations(),
-      ]);
-      setTestingRuns(nextRuns);
-      setDatasets(nextDatasets);
-      setProfiles(nextProfiles);
-      setLabelSets(nextLabelSets);
-      setEvaluations(nextEvaluations);
-    } catch (error) {
-      notifyError('Could not load evaluation workspace', error);
-    } finally {
-      setLoading(false);
-    }
-  }, []);
-
-  useEffect(() => {
-    if (active) void refreshAll();
-  }, [active, refreshAll]);
-
-  const evaluationRun = testingRuns.find((run) => run.id === draft.evaluation_testing_run_id) ?? null;
-  const selectedLabelSet = labelSets.find((labelSet) => labelSet.id === draft.label_set_id) ?? null;
-  const selectedProfile = profiles.find((profile) => profile.id === draft.profile_id) ?? null;
-  const readonly = selectedEvaluation?.status === 'finalized';
-  const draftProjection = useMemo(
-    () => projectEvaluationDraft(selectedEvaluation ? payloadFromEvaluation(selectedEvaluation) : null, draft),
-    [draft, selectedEvaluation],
-  );
-  const projectedEvaluation = useMemo(() => {
-    if (!selectedEvaluation || readonly || draftProjection.changedStages.size === 0) return selectedEvaluation;
-    return {
-      ...selectedEvaluation,
-      separation_status: projectedCalculationStatus(selectedEvaluation.separation_status, draftProjection.changedStages.has('separation')),
-      separation_error: draftProjection.changedStages.has('separation') ? null : selectedEvaluation.separation_error,
-      drift_status: projectedCalculationStatus(selectedEvaluation.drift_status, draftProjection.changedStages.has('drift')),
-      drift_error: draftProjection.changedStages.has('drift') ? null : selectedEvaluation.drift_error,
-      detection_status: projectedCalculationStatus(selectedEvaluation.detection_status, draftProjection.changedStages.has('detection')),
-      detection_error: draftProjection.changedStages.has('detection') ? null : selectedEvaluation.detection_error,
-    };
-  }, [draftProjection.changedStages, readonly, selectedEvaluation]);
-  const displayedProfile = readonly && selectedEvaluation?.profile_snapshot
-    ? { ...selectedEvaluation.profile_snapshot, ...selectedEvaluation.profile_overrides }
-    : selectedProfile;
-  const displayedEvents = selectedEvaluation?.status === 'finalized'
-    ? snapshotEvents(selectedEvaluation)
-    : selectedLabelSet?.events ?? snapshotEvents(selectedEvaluation);
-  const targetEvents = displayedEvents.filter((event) => event.type === 'target');
-  const currentRoleRunId = roleRunId(draft, previewRole);
-  const currentRoleRange = roleRange(draft, previewRole);
-  const currentPreview = previews[previewRole] ?? null;
-  const isEditorOpen = creating || selectedEvaluation !== null;
-
-  useEffect(() => {
-    let cancelled = false;
-    if (!active || currentRoleRunId == null) {
-      setPreviewError(null);
-      return undefined;
-    }
-    setPreviewLoading(true);
-    setPreviewError(null);
-    getEvaluationScorePreview(currentRoleRunId, { score_series: draft.score_series, max_points: EVALUATION_PREVIEW_POINTS })
-      .then((preview) => {
-        if (cancelled) return;
-        setPreviews((current) => ({ ...current, [previewRole]: preview }));
-        if (!currentRoleRange.start_timestamp && !currentRoleRange.end_timestamp && preview.start_timestamp && preview.end_timestamp && !readonly) {
-          setDraft((current) => withRoleRange(current, previewRole, { start_timestamp: preview.start_timestamp!, end_timestamp: preview.end_timestamp! }));
-        }
-      })
-      .catch((error) => { if (!cancelled) setPreviewError(error instanceof Error ? error.message : 'Could not load score preview'); })
-      .finally(() => { if (!cancelled) setPreviewLoading(false); });
-    return () => { cancelled = true; };
-  }, [active, currentRoleRange.end_timestamp, currentRoleRange.start_timestamp, currentRoleRunId, draft.score_series, previewRole, readonly]);
-
-  function openEvaluation(evaluation: ModelEvaluation) {
-    setSelectedEvaluation(evaluation);
-    setDraft(payloadFromEvaluation(evaluation));
-    setCreating(false);
-    setPreviewRole('evaluation');
-    setPreviews({});
-    setPreviewError(null);
-  }
-
-  function beginNew() {
-    setSelectedEvaluation(null);
-    setDraft(emptyDraft());
-    setCreating(true);
-    setPreviewRole('evaluation');
-    setPreviews({});
-  }
-
-  function closeEditor() {
-    setCreating(false);
-    setSelectedEvaluation(null);
-    setDraft(emptyDraft());
-    setPreviews({});
-  }
-
-  function replaceEvaluation(updated: ModelEvaluation, syncDraft = true) {
-    setSelectedEvaluation(updated);
-    if (syncDraft) setDraft(payloadFromEvaluation(updated));
-    setEvaluations((current) => {
-      const exists = current.some((evaluation) => evaluation.id === updated.id);
-      return exists ? current.map((evaluation) => evaluation.id === updated.id ? updated : evaluation) : [updated, ...current];
-    });
-  }
-
-  async function persistDraft(): Promise<ModelEvaluation | null> {
-    if (!draft.name.trim() || draft.evaluation_testing_run_id == null) {
-      notifications.show({ color: 'yellow', title: 'Complete step 1', message: 'Give the evaluation a name and select its evaluation inference run.' });
-      return null;
-    }
-    setSaving(true);
-    try {
-      const payload = { ...draft, name: draft.name.trim() };
-      const saved = selectedEvaluation
-        ? await updateModelEvaluation(selectedEvaluation.id, payload)
-        : await createModelEvaluation(payload);
-      replaceEvaluation(saved);
-      setCreating(false);
-      notifications.show({ color: 'green', title: 'Draft saved', message: saved.name });
-      return saved;
-    } catch (error) {
-      notifyError('Could not save evaluation draft', error);
-      return null;
-    } finally {
-      setSaving(false);
-    }
-  }
-
-  async function calculate(stage: 'separation' | 'drift' | 'detection') {
-    const saved = await persistDraft();
-    if (!saved) return;
-    setCalculating(stage);
-    try {
-      const calculated = await calculateModelEvaluation(saved.id, stage);
-      replaceEvaluation(calculated);
-      notifications.show({ color: 'green', title: `Step ${stage === 'separation' ? 'A' : stage === 'drift' ? 'B' : 'C'} calculated`, message: 'The other calculation steps were left unchanged.' });
-    } catch (error) {
-      notifyError(`Could not calculate ${stage}`, error);
-      try { replaceEvaluation(await getModelEvaluation(saved.id)); } catch { /* the original API error is more useful */ }
-    } finally {
-      setCalculating(null);
-    }
-  }
-
-  async function finalize() {
-    if (!selectedEvaluation) return;
-    const saved = await persistDraft();
-    if (!saved) return;
-    setSaving(true);
-    try {
-      const finalized = await finalizeModelEvaluation(saved.id);
-      replaceEvaluation(finalized);
-      setView('finalized');
-      notifications.show({ color: 'green', title: 'Evaluation finalized', message: 'The reproducible snapshot is now immutable.' });
-    } catch (error) {
-      notifyError('Could not finalize evaluation', error);
-    } finally {
-      setSaving(false);
-    }
-  }
-
-  async function duplicate(evaluation: ModelEvaluation) {
-    try {
-      const copy = await duplicateModelEvaluation(evaluation.id);
-      setView('drafts');
-      replaceEvaluation(copy);
-      notifications.show({ color: 'green', title: 'Draft duplicated', message: copy.name });
-    } catch (error) {
-      notifyError('Could not duplicate evaluation', error);
-    }
-  }
-
-  const savedCategoryOptions = useMemo(() => [...new Set(evaluations.flatMap((evaluation) => (
-    evaluation.selected_categories.length ? evaluation.selected_categories : snapshotEvents(evaluation).map((event) => event.category || 'Uncategorized')
-  )))].sort().map((value) => ({ value, label: value })), [evaluations]);
-  const savedScoreOptions = useMemo(() => [...new Set(evaluations.map((evaluation) => evaluation.score_series))].sort().map((value) => ({ value, label: value })), [evaluations]);
-  const filteredEvaluations = useMemo(() => evaluations.filter((evaluation) => {
-    if (evaluation.status !== (view === 'drafts' ? 'draft' : 'finalized')) return false;
-    if (savedQuery.trim() && !evaluation.name.toLowerCase().includes(savedQuery.trim().toLowerCase())) return false;
-    const stale = statusIsStale(evaluation.separation_status) || statusIsStale(evaluation.drift_status) || statusIsStale(evaluation.detection_status);
-    if (savedStale === 'stale' && !stale) return false;
-    if (savedStale === 'current' && stale) return false;
-    const categories = evaluation.selected_categories.length ? evaluation.selected_categories : snapshotEvents(evaluation).map((event) => event.category || 'Uncategorized');
-    if (savedCategories.length && !categories.some((category) => savedCategories.includes(category))) return false;
-    if (savedScores.length && !savedScores.includes(evaluation.score_series)) return false;
-    if (createdFrom && evaluation.created_at < createdFrom) return false;
-    if (createdTo && evaluation.created_at > `${createdTo}T23:59:59`) return false;
-    return true;
-  }), [createdFrom, createdTo, evaluations, savedCategories, savedQuery, savedScores, savedStale, view]);
-
-  const sameRunOverlap = useMemo(() => {
-    const roles: SourceRole[] = ['evaluation', 'reference', 'calibration'];
-    const overlaps: string[] = [];
-    roles.forEach((left, index) => roles.slice(index + 1).forEach((right) => {
-      if (roleRunId(draft, left) != null && roleRunId(draft, left) === roleRunId(draft, right)) {
-        const first = roleRange(draft, left); const second = roleRange(draft, right);
-        if (rangesOverlap(first.start_timestamp, first.end_timestamp, second.start_timestamp, second.end_timestamp)) overlaps.push(`${left} / ${right}`);
-      }
-    }));
-    return overlaps;
-  }, [draft]);
-
-  const aReady = completeRole(draft, 'evaluation') && draft.label_set_id != null && draft.profile_id != null;
-  const bReady = aReady && completeRole(draft, 'reference') && sameRunOverlap.length === 0;
-  const cReady = aReady && completeRole(draft, 'calibration') && sameRunOverlap.length === 0;
-
-  function selectEvaluationRun(runId: number | null) {
-    const previous = testingRuns.find((run) => run.id === draft.evaluation_testing_run_id);
-    const next = testingRuns.find((run) => run.id === runId);
-    setDraft((current) => ({
-      ...withRoleRun(withRoleRun(withRoleRun(current, 'evaluation', runId), 'reference', null), 'calibration', null),
-      score_series: 'score',
-      label_set_id: previous?.training_dataset_id === next?.training_dataset_id ? current.label_set_id : null,
-      selected_categories: previous?.training_dataset_id === next?.training_dataset_id ? current.selected_categories : [],
-      normal_window_overrides: {},
-    }));
-    setPreviews({});
-    setPreviewRole('evaluation');
-  }
-
-  function setRoleSource(role: 'reference' | 'calibration', runId: number | null) {
-    setDraft((current) => withRoleRun(current, role, runId));
-    setPreviews((current) => ({ ...current, [role]: undefined }));
-    setPreviewRole(role);
-  }
-
-  function addSuggestedEvent(type: 'target' | 'exclusion', range: EvaluationTimeRange) {
-    if (!selectedLabelSet) {
-      notifications.show({ color: 'yellow', title: 'Select or create a label set', message: 'Intervals belong to a reusable ground-truth set.' });
-    }
-    setSuggestedEvent({ event_id: crypto.randomUUID(), type, name: '', category: '', start_timestamp: range.start_timestamp, end_timestamp: range.end_timestamp, notes: '' });
-    setLabelManagerOpen(true);
-  }
-
-  function selectOverrideEvent(eventId: string | null) {
-    setOverrideEventId(eventId);
-    const existing = eventId ? draft.normal_window_overrides[eventId] : null;
-    const event = targetEvents.find((candidate) => candidate.event_id === eventId);
-    if (existing) {
-      setOverrideRange(existing);
-    } else if (event && selectedProfile) {
-      const buffer = draft.profile_overrides.normal_window_buffer_seconds ?? selectedProfile.normal_window_buffer_seconds;
-      const duration = draft.profile_overrides.normal_window_duration_seconds ?? selectedProfile.normal_window_duration_seconds;
-      const end = subtractSeconds(event.start_timestamp, buffer);
-      setOverrideRange({ start_timestamp: subtractSeconds(end, duration), end_timestamp: end });
-    } else {
-      setOverrideRange({ start_timestamp: '', end_timestamp: '' });
-    }
-  }
-
-  function setProfileOverride(field: ProfileOverrideField, value: string | number) {
-    setDraft((current) => {
-      const next = { ...current.profile_overrides };
-      if (typeof value === 'number' && Number.isFinite(value)) next[field] = value;
-      else delete next[field];
-      return { ...current, profile_overrides: next };
-    });
-  }
-
-  if (loading && evaluations.length === 0) return <Group justify="center" py="xl"><Loader /><Text>Loading evaluation workspace…</Text></Group>;
-
-  return (
-    <Stack gap="lg">
-      <Group justify="space-between" align="start">
-        <div><Title order={2}>Evaluation</Title><Text c="dimmed">Calculate eight reproducible principal metrics for one model artifact across event separation, drift and detection performance.</Text></div>
-        <Group>
-          <Button variant="default" leftSection={<Settings2 size={16} />} onClick={() => setProfileManagerOpen(true)}>Profiles</Button>
-          <Button variant="default" leftSection={<FileCheck2 size={16} />} onClick={() => setLabelManagerOpen(true)}>Ground truth</Button>
-          <Button variant="default" leftSection={<RefreshCw size={16} />} onClick={() => void refreshAll()}>Refresh</Button>
-          {!isEditorOpen && <Button leftSection={<Plus size={16} />} onClick={beginNew}>New evaluation</Button>}
-        </Group>
-      </Group>
-
-      {!isEditorOpen && (
-        <>
-          <Group justify="space-between">
-            <SegmentedControl value={view} onChange={(value) => setView(value as EvaluationView)} data={[{ value: 'drafts', label: 'Drafts & calculation' }, { value: 'finalized', label: 'Finalized evaluations' }]} />
-            <Group><Badge variant="light">{filteredEvaluations.length} evaluations</Badge><Button variant="default" size="compact-sm" leftSection={<Filter size={14} />} rightSection={savedFiltersOpen ? <ChevronDown size={13} /> : <ChevronRight size={13} />} onClick={() => setSavedFiltersOpen((current) => !current)}>Filters</Button></Group>
-          </Group>
-          <Collapse in={savedFiltersOpen}>
-            <Paper withBorder p="md"><Stack><SimpleGrid cols={{ base: 1, sm: 2, lg: 4 }}><TextInput label="Search" value={savedQuery} onChange={(event) => setSavedQuery(event.currentTarget.value)} placeholder="Evaluation name" /><Select label="Freshness" value={savedStale} onChange={(value) => setSavedStale((value ?? 'all') as SavedStaleFilter)} data={[{ value: 'all', label: 'All' }, { value: 'current', label: 'No stale stages' }, { value: 'stale', label: 'Contains stale stage' }]} /><MultiSelect label="Categories" data={savedCategoryOptions} value={savedCategories} onChange={setSavedCategories} searchable clearable /><MultiSelect label="Score series" data={savedScoreOptions} value={savedScores} onChange={setSavedScores} clearable /></SimpleGrid><SimpleGrid cols={{ base: 1, sm: 2 }}><TextInput type="date" label="Created from" value={createdFrom} onChange={(event) => setCreatedFrom(event.currentTarget.value)} /><TextInput type="date" label="Created to" value={createdTo} onChange={(event) => setCreatedTo(event.currentTarget.value)} /></SimpleGrid></Stack></Paper>
-          </Collapse>
-          <Paper withBorder>
-            <ScrollArea>
-              <Table striped highlightOnHover miw={980}>
-                <Table.Thead><Table.Tr><Table.Th>Name</Table.Th><Table.Th>Score</Table.Th><Table.Th>A · Separation</Table.Th><Table.Th>B · Drift</Table.Th><Table.Th>C · Detection</Table.Th><Table.Th>Updated</Table.Th><Table.Th /></Table.Tr></Table.Thead>
-                <Table.Tbody>
-                  {filteredEvaluations.map((evaluation) => <Table.Tr key={evaluation.id}><Table.Td><Text fw={600}>{evaluation.name}</Text><Text size="xs" c="dimmed">#{evaluation.id}{evaluation.status === 'finalized' && evaluation.finalized_at ? ` · finalized ${evaluation.finalized_at.replace('T', ' ')}` : ''}</Text></Table.Td><Table.Td><Badge variant="outline">{evaluation.score_series}</Badge></Table.Td><Table.Td><EvaluationStatusBadge status={evaluation.separation_status} /></Table.Td><Table.Td><EvaluationStatusBadge status={evaluation.drift_status} /></Table.Td><Table.Td><EvaluationStatusBadge status={evaluation.detection_status} /></Table.Td><Table.Td>{evaluation.updated_at.replace('T', ' ')}</Table.Td><Table.Td><Group justify="flex-end" gap="xs"><Button size="compact-xs" onClick={() => openEvaluation(evaluation)}>{evaluation.status === 'finalized' ? 'View' : 'Open'}</Button><Button size="compact-xs" variant="light" leftSection={<Copy size={12} />} onClick={() => void duplicate(evaluation)}>Duplicate</Button><Button size="compact-xs" variant="subtle" color="red" leftSection={<Trash2 size={12} />} onClick={async () => { if (!window.confirm(`Delete evaluation “${evaluation.name}”?`)) return; try { await deleteModelEvaluation(evaluation.id); await refreshEvaluations(); } catch (error) { notifyError('Could not delete evaluation', error); } }}>Delete</Button></Group></Table.Td></Table.Tr>)}
-                  {filteredEvaluations.length === 0 && <Table.Tr><Table.Td colSpan={7}><Text ta="center" c="dimmed" py="xl">No evaluations match this view and its filters.</Text></Table.Td></Table.Tr>}
-                </Table.Tbody>
-              </Table>
-            </ScrollArea>
-          </Paper>
-        </>
-      )}
-
-      {isEditorOpen && (
-        <>
-          <Group justify="space-between">
-            <Button variant="subtle" color="gray" leftSection={<ArrowLeft size={16} />} onClick={closeEditor}>Back to {view === 'drafts' ? 'drafts' : 'finalized evaluations'}</Button>
-            <Group>
-              {!readonly && draftProjection.dirty && <Badge color="yellow" variant="light">Unsaved changes</Badge>}
-              {selectedEvaluation && <Button variant="light" leftSection={<Copy size={15} />} onClick={() => void duplicate(selectedEvaluation)}>Duplicate</Button>}
-              {!readonly && <Button leftSection={<Save size={15} />} loading={saving} onClick={() => void persistDraft()}>Save draft</Button>}
-            </Group>
-          </Group>
-          {readonly && <Alert color="green" icon={<CheckCircle2 size={18} />} title="Immutable evaluation snapshot">This evaluation was finalized at {selectedEvaluation?.finalized_at?.replace('T', ' ') ?? 'an unknown time'}. Duplicate it to change inputs or recalculate metrics.</Alert>}
-          {!readonly && selectedEvaluation && draftProjection.dirty && <Alert color="yellow" title="Draft has unsaved changes">Affected calculated stages are shown as stale immediately. Save before finalizing; calculations always save the draft first.</Alert>}
-
-          <StepCard index={1} title="Name, model artifact and score" subtitle="Choose exactly one finished evaluation inference run and one stored score series." color={STEP_COLORS[0]} complete={Boolean(draft.name.trim() && draft.evaluation_testing_run_id)}>
-            <TextInput label="Evaluation name" value={draft.name} onChange={(event) => setDraft((current) => ({ ...current, name: event.currentTarget.value }))} disabled={readonly} required />
-            <EvaluationRunPicker runs={testingRuns} value={draft.evaluation_testing_run_id} onChange={selectEvaluationRun} label="Evaluation inference run" description="The selected model artifact defines which reference and calibration runs are compatible." disabled={readonly} />
-            <Select label="Score series" data={scoreSeriesForRun(evaluationRun)} value={draft.score_series} onChange={(value) => { setDraft((current) => ({ ...current, score_series: value ?? 'score' })); setPreviews({}); }} disabled={readonly || !evaluationRun} />
-            {evaluationRun && !evaluationRun.artifact_signature && <Alert color="yellow">This legacy inference run has no artifact signature. It can be inspected, but compatible reference/calibration sources cannot be proven and therefore are not offered.</Alert>}
-          </StepCard>
-
-          <StepCard index={2} title="Evaluation period" subtitle="Drag horizontally or enter dataset-local 24-hour timestamps. Zoom, pan and the range slider never alter calculation inputs." color={STEP_COLORS[1]} complete={completeRole(draft, 'evaluation')}>
-            <EvaluationTimeline preview={previews.evaluation ?? null} loading={previewRole === 'evaluation' && previewLoading} error={previewRole === 'evaluation' ? previewError : null} range={roleRange(draft, 'evaluation')} onRangeChange={(range) => setDraft((current) => withRoleRange(current, 'evaluation', range))} events={displayedEvents} onCreateEvent={addSuggestedEvent} disabled={readonly || !evaluationRun} />
-          </StepCard>
-
-          <StepCard index={3} title="Ground truth" subtitle="Use a reusable, versioned label set tied to the evaluation inference dataset." color={STEP_COLORS[2]} complete={Boolean(selectedLabelSet || selectedEvaluation?.label_snapshot)} action={!readonly && <Button size="compact-sm" variant="light" onClick={() => setLabelManagerOpen(true)}>Manage label sets</Button>}>
-            <Group align="end" grow>
-              {readonly ? <TextInput label="Label snapshot" value={`${selectedEvaluation?.label_snapshot?.name ?? 'Ground truth'} · v${selectedEvaluation?.label_snapshot?.version ?? '—'} · ${targetEvents.length} targets`} disabled /> : <Select label="Label set" placeholder="Select ground truth" data={labelSets.filter((set) => !evaluationRun || set.training_dataset_id === evaluationRun.training_dataset_id).map((set) => ({ value: String(set.id), label: `${set.name} · v${set.version} · ${set.events.filter((event) => event.type === 'target').length} targets` }))} value={draft.label_set_id == null ? null : String(draft.label_set_id)} onChange={(value) => { const id = value ? Number(value) : null; const set = labelSets.find((candidate) => candidate.id === id); setDraft((current) => ({ ...current, label_set_id: id, selected_categories: set?.categories ?? [], normal_window_overrides: {} })); }} searchable clearable disabled={!evaluationRun} />}
-              {readonly ? <Button variant="default" leftSection={<Download size={15} />} onClick={() => downloadLabelSnapshot(displayedEvents, selectedEvaluation?.name ?? 'evaluation')}>Export snapshot CSV</Button> : selectedLabelSet && <Button component="a" href={evaluationLabelSetCsvUrl(selectedLabelSet.id)} download variant="default" leftSection={<Download size={15} />}>Export CSV</Button>}
-            </Group>
-            {readonly ? <Paper withBorder p="xs"><Text size="xs" c="dimmed" mb={4}>Included target categories</Text><Group gap="xs">{(draft.selected_categories.length ? draft.selected_categories : [...new Set(targetEvents.map((event) => event.category || 'Uncategorized'))]).map((category) => <Badge key={category} variant="light">{category}</Badge>)}</Group></Paper> : selectedLabelSet && <MultiSelect label="Included target categories" description="Leave empty to use every target category." data={selectedLabelSet.categories.map((category) => ({ value: category, label: category }))} value={draft.selected_categories} onChange={(values) => setDraft((current) => ({ ...current, selected_categories: values, normal_window_overrides: {} }))} searchable clearable />}
-            <ScrollArea h={220}><Table striped withTableBorder><Table.Thead><Table.Tr><Table.Th>Type</Table.Th><Table.Th>Name</Table.Th><Table.Th>Category</Table.Th><Table.Th>Start</Table.Th><Table.Th>End (inclusive)</Table.Th></Table.Tr></Table.Thead><Table.Tbody>{displayedEvents.map((event) => <Table.Tr key={event.event_id}><Table.Td><Badge color={event.type === 'target' ? 'red' : 'gray'} variant="light">{event.type}</Badge></Table.Td><Table.Td>{event.name || '—'}</Table.Td><Table.Td>{event.category || '—'}</Table.Td><Table.Td>{event.start_timestamp.replace('T', ' ')}</Table.Td><Table.Td>{event.end_timestamp.replace('T', ' ')}</Table.Td></Table.Tr>)}{displayedEvents.length === 0 && <Table.Tr><Table.Td colSpan={5}><Text ta="center" c="dimmed">No ground-truth intervals selected.</Text></Table.Td></Table.Tr>}</Table.Tbody></Table></ScrollArea>
-          </StepCard>
-
-          <StepCard index={4} title="Normal reference and calibration roles" subtitle="Sources may reuse one compatible run, but all ranges on that run must be pairwise disjoint." color={STEP_COLORS[3]} complete={completeRole(draft, 'reference') && completeRole(draft, 'calibration') && sameRunOverlap.length === 0}>
-            <SimpleGrid cols={{ base: 1, lg: 2 }}>
-              <EvaluationRunPicker runs={testingRuns} value={draft.reference_testing_run_id} onChange={(value) => setRoleSource('reference', value)} compatibleWith={evaluationRun} label="Reference inference run" description="Only explicitly normal reference scores are used for drift." disabled={readonly || !evaluationRun} />
-              <EvaluationRunPicker runs={testingRuns} value={draft.calibration_testing_run_id} onChange={(value) => setRoleSource('calibration', value)} compatibleWith={evaluationRun} label="Calibration inference run" description="Only explicitly normal calibration scores define thresholds." disabled={readonly || !evaluationRun} />
-            </SimpleGrid>
-            <Group justify="space-between"><Text fw={600} size="sm">Edit role range</Text><SegmentedControl value={previewRole} onChange={(value) => setPreviewRole(value as SourceRole)} data={[{ value: 'evaluation', label: 'Evaluation' }, { value: 'reference', label: 'Reference' }, { value: 'calibration', label: 'Calibration' }]} /></Group>
-            <EvaluationTimeline preview={currentPreview} loading={previewLoading} error={previewError} range={currentRoleRange} onRangeChange={(range) => setDraft((current) => withRoleRange(current, previewRole, range))} events={previewRole === 'evaluation' ? displayedEvents : []} disabled={readonly || currentRoleRunId == null} title={`${previewRole[0].toUpperCase()}${previewRole.slice(1)} score timeline`} />
-            {sameRunOverlap.length > 0 && <Alert color="red">Overlapping ranges on the same inference run: {sameRunOverlap.join(', ')}. Role ranges are inclusive, so one range ending exactly where another starts still shares a frame.</Alert>}
-            <Text size="xs" c="dimmed">Training-data leakage, stored score completeness and compatibility are checked again by the server for every calculation.</Text>
-          </StepCard>
-
-          <StepCard index={5} title="Profile and independent calculations" subtitle="A, B and C can be calculated in any order. Only inputs used by a stage make that stage stale." color={STEP_COLORS[4]} complete={Boolean(projectedEvaluation && !draftProjection.dirty && canFinalizeEvaluation(projectedEvaluation))} action={!readonly && <Button size="compact-sm" variant="light" onClick={() => setProfileManagerOpen(true)}>Manage profiles</Button>}>
-            {readonly ? <TextInput label="Evaluation profile" description="Frozen values from the finalized snapshot are shown below." value={selectedProfile?.name ?? `Profile #${selectedEvaluation?.profile_id ?? 'snapshot'}`} disabled /> : <Select label="Evaluation profile" description="Profiles are reusable; finalization stores a snapshot." data={profiles.map((profile) => ({ value: String(profile.id), label: profile.name }))} value={draft.profile_id == null ? null : String(draft.profile_id)} onChange={(value) => setDraft((current) => ({ ...current, profile_id: value ? Number(value) : null }))} searchable clearable />}
-            {displayedProfile && <SimpleGrid cols={{ base: 2, md: 5 }}><Paper withBorder p="xs"><Text size="xs" c="dimmed">Normal window</Text><Text fw={600}>{displayedProfile.normal_window_duration_seconds}s</Text></Paper><Paper withBorder p="xs"><Text size="xs" c="dimmed">Normal buffer</Text><Text fw={600}>{displayedProfile.normal_window_buffer_seconds}s</Text></Paper><Paper withBorder p="xs"><Text size="xs" c="dimmed">Drift L</Text><Text fw={600}>{displayedProfile.drift_window_seconds}s</Text></Paper><Paper withBorder p="xs"><Text size="xs" c="dimmed">T₀</Text><Text fw={600}>{displayedProfile.false_alarm_horizon_seconds}s</Text></Paper><Paper withBorder p="xs"><Text size="xs" c="dimmed">Anticipation</Text><Text fw={600}>{displayedProfile.anticipation_seconds}s</Text></Paper></SimpleGrid>}
-            {!readonly && selectedProfile && <><Button variant="subtle" color="gray" size="compact-sm" rightSection={profileOverridesOpen ? <ChevronDown size={13} /> : <ChevronRight size={13} />} onClick={() => setProfileOverridesOpen((current) => !current)}>Local profile overrides ({Object.keys(draft.profile_overrides).length})</Button><Collapse in={profileOverridesOpen}><Stack gap="xs"><Text size="xs" c="dimmed">Leave a field empty to inherit the selected profile. Each override only makes its dependent calculation stage stale when the draft is saved.</Text><SimpleGrid cols={{ base: 1, sm: 2, lg: 3 }}><NumberInput label="A · Normal window L_N (s)" min={0.001} placeholder={String(selectedProfile.normal_window_duration_seconds)} value={draft.profile_overrides.normal_window_duration_seconds ?? ''} onChange={(value) => setProfileOverride('normal_window_duration_seconds', value)} /><NumberInput label="A · Normal buffer P (s)" min={0} placeholder={String(selectedProfile.normal_window_buffer_seconds)} value={draft.profile_overrides.normal_window_buffer_seconds ?? ''} onChange={(value) => setProfileOverride('normal_window_buffer_seconds', value)} /><NumberInput label="B · Drift window L (s)" min={0.001} placeholder={String(selectedProfile.drift_window_seconds)} value={draft.profile_overrides.drift_window_seconds ?? ''} onChange={(value) => setProfileOverride('drift_window_seconds', value)} /><NumberInput label="C · False-alarm T₀ (s)" min={0.001} placeholder={String(selectedProfile.false_alarm_horizon_seconds)} value={draft.profile_overrides.false_alarm_horizon_seconds ?? ''} onChange={(value) => setProfileOverride('false_alarm_horizon_seconds', value)} /><NumberInput label="C · Anticipation (s)" min={0} placeholder={String(selectedProfile.anticipation_seconds)} value={draft.profile_overrides.anticipation_seconds ?? ''} onChange={(value) => setProfileOverride('anticipation_seconds', value)} /><NumberInput label="A/B · Epsilon" min={Number.MIN_VALUE} placeholder={String(selectedProfile.epsilon)} value={draft.profile_overrides.epsilon ?? ''} onChange={(value) => setProfileOverride('epsilon', value)} /></SimpleGrid></Stack></Collapse></>}
-            {!readonly && targetEvents.length > 0 && <><Button variant="subtle" color="gray" size="compact-sm" rightSection={overridesOpen ? <ChevronDown size={13} /> : <ChevronRight size={13} />} onClick={() => setOverridesOpen((current) => !current)}>Per-event normal-window overrides ({Object.keys(draft.normal_window_overrides).length})</Button><Collapse in={overridesOpen}><Stack gap="xs"><Select label="Target event" data={targetEvents.map((event) => ({ value: event.event_id, label: `${event.name || event.event_id} · ${event.start_timestamp.replace('T', ' ')}` }))} value={overrideEventId} onChange={selectOverrideEvent} searchable clearable /><EvaluationTimeline preview={previews.evaluation ?? null} loading={false} range={overrideRange} onRangeChange={setOverrideRange} events={displayedEvents} disabled={!overrideEventId} title="Select this event’s normal window" selectionActionLabel="Use selection as normal window" /><Group justify="flex-end"><Button variant="default" size="compact-sm" disabled={!overrideEventId || !draft.normal_window_overrides[overrideEventId]} onClick={() => { if (!overrideEventId) return; setDraft((current) => { const next = { ...current.normal_window_overrides }; delete next[overrideEventId]; return { ...current, normal_window_overrides: next }; }); }}>Remove override</Button><Button size="compact-sm" disabled={!overrideEventId || !overrideRange.start_timestamp || !overrideRange.end_timestamp || overrideRange.start_timestamp >= overrideRange.end_timestamp} onClick={() => { if (!overrideEventId) return; setDraft((current) => ({ ...current, normal_window_overrides: { ...current.normal_window_overrides, [overrideEventId]: overrideRange } })); }}>Apply override</Button></Group></Stack></Collapse></>}
-            <SimpleGrid cols={{ base: 1, lg: 3 }}>
-              <StageAction stage="separation" label="A · Event separation" status={projectedEvaluation?.separation_status ?? 'not_calculated'} error={projectedEvaluation?.separation_error} disabled={readonly || !aReady} calculating={calculating} onCalculate={(stage) => void calculate(stage)} />
-              <StageAction stage="drift" label="B · Score stability" status={projectedEvaluation?.drift_status ?? 'not_calculated'} error={projectedEvaluation?.drift_error} disabled={readonly || !bReady} calculating={calculating} onCalculate={(stage) => void calculate(stage)} />
-              <StageAction stage="detection" label="C · Detection performance" status={projectedEvaluation?.detection_status ?? 'not_calculated'} error={projectedEvaluation?.detection_error} disabled={readonly || !cReady} calculating={calculating} onCalculate={(stage) => void calculate(stage)} />
-            </SimpleGrid>
-          </StepCard>
-
-          <StepCard index={6} title="Metrics, diagnostics and finalization" subtitle="Review all eight principal metrics. Detection cards follow the active fixed quantile." color={STEP_COLORS[5]} complete={selectedEvaluation?.status === 'finalized'} action={selectedEvaluation?.status === 'draft' && <Button color="green" leftSection={<FileCheck2 size={15} />} disabled={draftProjection.dirty || !projectedEvaluation || !canFinalizeEvaluation(projectedEvaluation)} loading={saving} onClick={() => void finalize()}>Finalize snapshot</Button>}>
-            {projectedEvaluation ? <EvaluationResults evaluation={projectedEvaluation} preview={previews.evaluation ?? null} events={displayedEvents} activeQuantile={draft.active_quantile} onActiveQuantileChange={(quantile) => setDraft((current) => ({ ...current, active_quantile: quantile }))} /> : <Alert color="blue">Save the draft, then calculate A, B and C independently to populate the eight metric cards and diagnostic plots.</Alert>}
-          </StepCard>
-        </>
-      )}
-
-      <EvaluationProfileManager opened={profileManagerOpen} onClose={() => setProfileManagerOpen(false)} profiles={profiles} onReload={async () => { await Promise.all([refreshProfiles(), refreshEvaluations()]); if (selectedEvaluation) replaceEvaluation(await getModelEvaluation(selectedEvaluation.id), false); }} onSelect={isEditorOpen && !readonly ? (profile) => { setDraft((current) => ({ ...current, profile_id: profile.id })); setProfileManagerOpen(false); } : undefined} />
-      <EvaluationLabelSetManager opened={labelManagerOpen} onClose={() => setLabelManagerOpen(false)} labelSets={labelSets} datasets={datasets} initialLabelSetId={draft.label_set_id} initialDatasetId={evaluationRun?.training_dataset_id ?? null} suggestedEvent={suggestedEvent} onSuggestedEventConsumed={() => setSuggestedEvent(null)} onReload={async () => { await Promise.all([refreshLabelSets(), refreshEvaluations()]); if (selectedEvaluation) replaceEvaluation(await getModelEvaluation(selectedEvaluation.id), false); }} onSelect={isEditorOpen && !readonly ? (labelSet) => { setDraft((current) => ({ ...current, label_set_id: labelSet.id, selected_categories: labelSet.categories, normal_window_overrides: {} })); setLabelManagerOpen(false); } : undefined} />
-    </Stack>
-  );
+  const [models, setModels] = useState<EvaluationWorkspaceModel[]>([]), [selectedId, setSelectedId] = useState<number | null>(null), [runs, setRuns] = useState<TestingRun[]>([]), [view, setView] = useState<View>('overview'), [loading, setLoading] = useState(false);
+  const [search, setSearch] = useState(''), [method, setMethod] = useState<string | null>(null), [preprocessing, setPreprocessing] = useState<string | null>(null);
+  const selected = models.find((item) => item.training_run_id === selectedId) ?? null;
+  const refresh = useCallback(async () => { setLoading(true); try { const rows = await listEvaluationWorkspaceModels(); setModels(rows); if (selectedId) { const summary = await getEvaluationWorkspace(selectedId); setModels((items) => items.map((item) => item.training_run_id === selectedId ? { ...item, ...summary } : item)); } } catch (e) { fail('Could not load evaluation models', e); } finally { setLoading(false); } }, [selectedId]);
+  useEffect(() => { if (active) void refresh(); }, [active, refresh]);
+  useEffect(() => { if (selectedId) void listEvaluationWorkspaceRuns(selectedId).then(setRuns).catch((e) => fail('Could not load inference runs', e)); else setRuns([]); }, [selectedId]);
+  const filtered = useMemo(() => models.filter((item) => (!search || `${item.name} ${item.method_type} ${item.training_dataset_names.join(' ')}`.toLowerCase().includes(search.toLowerCase())) && (!method || item.method_type === method) && (!preprocessing || item.preprocessing_pipeline_name === preprocessing)), [models, search, method, preprocessing]);
+  const merge = (summary: EvaluationWorkspaceModel) => setModels((items) => items.map((item) => item.training_run_id === summary.training_run_id ? { ...item, ...summary } : item));
+  if (!active) return null;
+  return <Stack gap="lg"><Group justify="space-between"><div><Title order={2}>Evaluation</Title><Text c="dimmed">Model-centred Event Separation and Score Stability.</Text></div><Button variant="default" leftSection={<RefreshCw size={15} />} loading={loading} onClick={() => void refresh()}>Refresh</Button></Group>{view !== 'overview' && selected ? <><Group><Button variant="subtle" leftSection={<ArrowLeft size={16} />} onClick={() => { setView('overview'); void refresh(); }}>Back to model overview</Button><Badge>{selected.name}</Badge></Group><Summary model={selected} />{view === 'separation' ? <Separation model={selected} runs={runs} onSummary={merge} /> : <Drift model={selected} runs={runs} onSummary={merge} />}</> : <><Paper withBorder p="md"><Stack gap="sm"><Title order={4}>1 · Select trained model artifact</Title><SimpleGrid cols={{ base: 1, md: 3 }}><TextInput label="Search" value={search} onChange={(e) => setSearch(e.currentTarget.value)} placeholder="Model, method or dataset" /><Select label="Method" clearable searchable value={method} onChange={setMethod} data={[...new Set(models.map((item) => item.method_type))]} /><Select label="Preprocessing" clearable searchable value={preprocessing} onChange={setPreprocessing} data={[...new Set(models.map((item) => item.preprocessing_pipeline_name))]} /></SimpleGrid>{loading && <Group><Loader size="sm" /><Text size="sm">Loading models…</Text></Group>}<ScrollArea><Table striped highlightOnHover withTableBorder><Table.Thead><Table.Tr><Table.Th>Select</Table.Th><Table.Th>Model</Table.Th><Table.Th>Method</Table.Th><Table.Th>Training datasets</Table.Th><Table.Th>Preprocessing</Table.Th><Table.Th>Artifact</Table.Th></Table.Tr></Table.Thead><Table.Tbody>{filtered.map((item) => <Table.Tr key={`${item.training_run_id}:${item.artifact_signature}`} bg={selectedId === item.training_run_id ? 'var(--mantine-color-blue-light)' : undefined} onClick={() => setSelectedId(item.training_run_id)} style={{ cursor: 'pointer' }}><Table.Td><Checkbox checked={selectedId === item.training_run_id} readOnly /></Table.Td><Table.Td>{item.name}</Table.Td><Table.Td>{item.method_type}</Table.Td><Table.Td>{item.training_dataset_names.join(', ') || '—'}</Table.Td><Table.Td>{item.preprocessing_pipeline_name}</Table.Td><Table.Td><Text ff="monospace" size="xs">{item.artifact_signature.slice(0, 12)}…</Text></Table.Td></Table.Tr>)}{!loading && !filtered.length && <Table.Tr><Table.Td colSpan={6}><Text ta="center" c="dimmed">No finished signed model artifacts match the filters.</Text></Table.Td></Table.Tr>}</Table.Tbody></Table></ScrollArea></Stack></Paper>{selected && <><Summary model={selected} /><SimpleGrid cols={{ base: 1, md: 2 }}><Paper withBorder p="lg"><Title order={4}>A · Event Separation</Title><Text c="dimmed" size="sm" my="sm">Pair normal and anomaly ranges, reuse dataset layouts and aggregate included results across runs.</Text><Button fullWidth onClick={() => setView('separation')}>Open Event Separation</Button></Paper><Paper withBorder p="lg"><Title order={4}>B · Score Stability</Title><Text c="dimmed" size="sm" my="sm">Define reference, fixed buckets and exclusions, then manage calculation history.</Text><Button fullWidth onClick={() => setView('drift')}>Open Score Stability</Button></Paper></SimpleGrid></>}</>}</Stack>;
 }

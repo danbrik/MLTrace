@@ -642,6 +642,7 @@ export type TestingRun = {
   artifact_kind: string;
   artifact_path: string;
   artifact_signature?: string | null;
+  result_revision?: number;
   roi_name: string | null;
   roi_geometry: Record<string, unknown> | null;
   inference_config: Record<string, unknown> | null;
@@ -702,6 +703,77 @@ export type EvaluationScoreSeries = 'score' | 'full_mse' | 'roi_mse' | string;
 export type EvaluationTimeRange = {
   start_timestamp: string;
   end_timestamp: string;
+};
+
+export type EvaluationWorkspaceModel = {
+  workspace_id: number;
+  training_run_id: number;
+  artifact_signature: string;
+  name: string;
+  method_type: string;
+  method_family: string;
+  preprocessing_pipeline_name: string;
+  training_dataset_names: string[];
+  ended_at: string | null;
+  sep_median: number | null;
+  sep_min: number | null;
+  d_mean: number | null;
+  d_max: number | null;
+  included_separation_results: number;
+  active_drift_calculation_id: number | null;
+  active_drift_testing_run_id: number | null;
+};
+
+export type EvaluationSeparationPair = {
+  pair_key: string; name: string;
+  normal_start: string; normal_end: string;
+  anomaly_start: string; anomaly_end: string;
+};
+
+export type EvaluationSeparationLayout = {
+  id: number; training_dataset_id: number; name: string; description: string | null;
+  version: number; pairs: EvaluationSeparationPair[]; created_at: string; updated_at: string;
+};
+
+export type EvaluationWorkspaceSeparationResult = {
+  id: number; calculation_id: number; testing_run_id: number; layout_version: number;
+  score_series: string; source_result_revision: number; stale: boolean;
+  pair_key: string; pair_name: string; normal_start: string; normal_end: string;
+  anomaly_start: string; anomaly_end: string; normal_median: number; normal_mad: number;
+  robust_scale: number; normal_point_count: number; anomaly_point_count: number;
+  separation: number; separation_p95: number | null; included: boolean;
+};
+
+export type EvaluationDriftExclusion = {
+  exclusion_key: string; name: string; start_timestamp: string; end_timestamp: string;
+};
+export type EvaluationDriftBucket = {
+  bucket_key: string; start_timestamp: string; end_timestamp: string;
+  decision: 'include' | 'drop_bucket' | 'filter_points';
+};
+export type EvaluationDriftLayoutPayload = {
+  training_dataset_id: number; name: string; description?: string | null;
+  reference_start: string; reference_end: string; analysis_start: string; analysis_end: string;
+  bucket_seconds: number; reference_exclusion_action: 'filter_points' | 'drop_reference';
+  exclusions: EvaluationDriftExclusion[]; buckets: EvaluationDriftBucket[];
+};
+export type EvaluationDriftLayout = EvaluationDriftLayoutPayload & {
+  id: number; version: number; created_at: string; updated_at: string;
+};
+export type EvaluationDriftPreviewBucket = EvaluationDriftBucket & {
+  original_point_count: number; used_point_count: number; exclusion_overlap: boolean;
+  status: string; reason: string | null; wasserstein_1: number | null; normalized_drift: number | null;
+};
+export type EvaluationDriftPreview = {
+  reference_point_count: number; reference_original_point_count: number; reference_iqr: number;
+  reference_exclusion_overlap: boolean; near_zero_iqr: boolean; buckets: EvaluationDriftPreviewBucket[];
+};
+export type EvaluationDriftCalculation = {
+  id: number; testing_run_id: number; layout_id: number | null; layout_version: number;
+  layout_snapshot: EvaluationDriftLayoutPayload; score_series: string; source_result_revision: number;
+  reference_iqr: number; reference_point_count: number; d_mean: number | null; d_max: number | null;
+  stale: boolean; active: boolean; created_at: string;
+  buckets: Array<EvaluationDriftPreviewBucket & { id: number; included: boolean }>;
 };
 
 export type EvaluationProfile = {

@@ -473,6 +473,9 @@ def test_evaluation_cache_revision_tracks_testing_runs_and_results() -> None:
                     height=8,
                 )
             )
+            source = db.get(models.TestingRun, evaluation_run)
+            assert source is not None
+            source.result_revision += 1
             db.commit()
         after_result = client.get("/api/cache/revisions").json()["revisions"]["evaluations"]
         assert after_result != after_run

@@ -132,6 +132,12 @@ def _training_dataset_dependents(db: Session, td_id: int) -> list[Dependent]:
         db, "evaluation_label_set", models.EvaluationLabelSet, models.EvaluationLabelSet.id,
         lambda r: r.name, models.EvaluationLabelSet.training_dataset_id == td_id,
     )
+    out += _named(db, "evaluation_separation_layout", models.EvaluationSeparationLayout,
+                  models.EvaluationSeparationLayout.id, lambda r: r.name,
+                  models.EvaluationSeparationLayout.training_dataset_id == td_id)
+    out += _named(db, "evaluation_drift_layout", models.EvaluationDriftLayout,
+                  models.EvaluationDriftLayout.id, lambda r: r.name,
+                  models.EvaluationDriftLayout.training_dataset_id == td_id)
     return out
 
 
@@ -168,10 +174,14 @@ def _training_pipeline_dependents(db: Session, tp_id: int) -> list[Dependent]:
 
 
 def _training_run_dependents(db: Session, tr_id: int) -> list[Dependent]:
-    return _named(
+    out = _named(
         db, "testing_run", models.TestingRun, models.TestingRun.id,
         lambda r: r.name, models.TestingRun.training_run_id == tr_id,
     )
+    out += _named(db, "evaluation_workspace", models.EvaluationModelWorkspace,
+                  models.EvaluationModelWorkspace.id, lambda r: f"Evaluation workspace #{r.id}",
+                  models.EvaluationModelWorkspace.training_run_id == tr_id)
+    return out
 
 
 def _testing_run_dependents(db: Session, ts_id: int) -> list[Dependent]:
@@ -193,7 +203,35 @@ def _testing_run_dependents(db: Session, ts_id: int) -> list[Dependent]:
         ).distinct()
     ).all()
     out += [Dependent("model_evaluation", row.id, row.name) for row in evaluations]
+    out += _named(db, "evaluation_separation_calculation", models.EvaluationSeparationCalculation,
+                  models.EvaluationSeparationCalculation.id, lambda r: f"A calculation #{r.id}",
+                  models.EvaluationSeparationCalculation.testing_run_id == ts_id)
+    out += _named(db, "evaluation_drift_calculation", models.EvaluationDriftCalculation,
+                  models.EvaluationDriftCalculation.id, lambda r: f"B calculation #{r.id}",
+                  models.EvaluationDriftCalculation.testing_run_id == ts_id)
     return out
+
+
+def _workspace_dependents(db: Session, workspace_id: int) -> list[Dependent]:
+    out = _named(db, "evaluation_separation_calculation", models.EvaluationSeparationCalculation,
+                 models.EvaluationSeparationCalculation.id, lambda r: f"A calculation #{r.id}",
+                 models.EvaluationSeparationCalculation.workspace_id == workspace_id)
+    out += _named(db, "evaluation_drift_calculation", models.EvaluationDriftCalculation,
+                  models.EvaluationDriftCalculation.id, lambda r: f"B calculation #{r.id}",
+                  models.EvaluationDriftCalculation.workspace_id == workspace_id)
+    return out
+
+
+def _separation_layout_dependents(db: Session, layout_id: int) -> list[Dependent]:
+    return _named(db, "evaluation_separation_calculation", models.EvaluationSeparationCalculation,
+                  models.EvaluationSeparationCalculation.id, lambda r: f"A calculation #{r.id}",
+                  models.EvaluationSeparationCalculation.layout_id == layout_id)
+
+
+def _drift_layout_dependents(db: Session, layout_id: int) -> list[Dependent]:
+    return _named(db, "evaluation_drift_calculation", models.EvaluationDriftCalculation,
+                  models.EvaluationDriftCalculation.id, lambda r: f"B calculation #{r.id}",
+                  models.EvaluationDriftCalculation.layout_id == layout_id)
 
 
 def _evaluation_profile_dependents(db: Session, profile_id: int) -> list[Dependent]:
@@ -345,6 +383,43 @@ def _delete_model_evaluation(db: Session, entity_id: int) -> bool:
         return False
     db.delete(row)
     db.commit()
+    return True
+
+
+def _delete_row(model):
+    def delete_one(db: Session, entity_id: int) -> bool:
+        row = db.get(model, entity_id)
+        if row is None:
+            return False
+        db.delete(row)
+        db.commit()
+        return True
+    return delete_one
+
+
+def _delete_separation_calculation(db: Session, entity_id: int) -> bool:
+    from app.evaluation import workspace_service
+    row = db.get(models.EvaluationSeparationCalculation, entity_id)
+    if row is None:
+        return False
+    workspace = db.get(models.EvaluationModelWorkspace, row.workspace_id)
+    db.delete(row)
+    db.flush()
+    if workspace is not None:
+        workspace_service._reaggregate(db, workspace)
+    db.commit()
+    return True
+
+
+def _delete_drift_calculation(db: Session, entity_id: int) -> bool:
+    from app.evaluation import workspace_service
+    row = db.get(models.EvaluationDriftCalculation, entity_id)
+    if row is None:
+        return False
+    workspace = db.get(models.EvaluationModelWorkspace, row.workspace_id)
+    if workspace is None:
+        db.delete(row); db.commit(); return True
+    workspace_service.delete_drift_calculation(db, workspace.training_run_id, entity_id)
     return True
 
 
@@ -605,6 +680,42 @@ ENTITY_SPECS: dict[str, EntitySpec] = {
             "source_snapshot",
         }),
     ),
+    "evaluation_workspace": EntitySpec(
+        key="evaluation_workspace", label="Evaluation Workspaces",
+        model=models.EvaluationModelWorkspace,
+        name_of=lambda row: f"Model workspace #{row.id}",
+        list_fields=["id", "training_run_id", "artifact_signature", "sep_median", "sep_min", "drift_mean", "drift_max", "updated_at"],
+        search_fields=["artifact_signature"], filters=[_USAGE_FILTER, _CREATED_FILTER],
+        dependents=_workspace_dependents, deleter=_delete_row(models.EvaluationModelWorkspace),
+    ),
+    "evaluation_separation_layout": EntitySpec(
+        key="evaluation_separation_layout", label="Event Separation Layouts",
+        model=models.EvaluationSeparationLayout, name_of=lambda row: row.name,
+        list_fields=["id", "name", "training_dataset_id", "version", "created_at", "updated_at"],
+        search_fields=["name", "description"], filters=[_USAGE_FILTER, _CREATED_FILTER],
+        dependents=_separation_layout_dependents, deleter=_delete_row(models.EvaluationSeparationLayout),
+    ),
+    "evaluation_drift_layout": EntitySpec(
+        key="evaluation_drift_layout", label="Score Stability Layouts",
+        model=models.EvaluationDriftLayout, name_of=lambda row: row.name,
+        list_fields=["id", "name", "training_dataset_id", "version", "bucket_seconds", "created_at", "updated_at"],
+        search_fields=["name", "description"], filters=[_USAGE_FILTER, _CREATED_FILTER],
+        dependents=_drift_layout_dependents, deleter=_delete_row(models.EvaluationDriftLayout),
+    ),
+    "evaluation_separation_calculation": EntitySpec(
+        key="evaluation_separation_calculation", label="Event Separation Calculations",
+        model=models.EvaluationSeparationCalculation, name_of=lambda row: f"A calculation #{row.id}",
+        list_fields=["id", "workspace_id", "testing_run_id", "layout_version", "score_series", "source_result_revision", "stale", "created_at"],
+        search_fields=["score_series", "artifact_signature"], filters=[_CREATED_FILTER],
+        deleter=_delete_separation_calculation, detail_exclude=frozenset({"layout_snapshot"}),
+    ),
+    "evaluation_drift_calculation": EntitySpec(
+        key="evaluation_drift_calculation", label="Score Stability Calculations",
+        model=models.EvaluationDriftCalculation, name_of=lambda row: f"B calculation #{row.id}",
+        list_fields=["id", "workspace_id", "testing_run_id", "layout_version", "score_series", "drift_mean", "drift_max", "active", "stale", "created_at"],
+        search_fields=["score_series", "artifact_signature"], filters=[_CREATED_FILTER],
+        deleter=_delete_drift_calculation, detail_exclude=frozenset({"layout_snapshot"}),
+    ),
     "optimization_study": EntitySpec(
         key="optimization_study",
         label="Optimization Studies",
@@ -623,15 +734,20 @@ ENTITY_SPECS: dict[str, EntitySpec] = {
 
 # Bottom-up deletion order for cascades: children before their parents.
 DELETE_ORDER: list[str] = [
+    "evaluation_separation_calculation",
+    "evaluation_drift_calculation",
     "model_evaluation",
     "heatmap",
     "heatmap_range",
     "testing_run",
     "inspect_run",
     "optimization_study",
+    "evaluation_workspace",
     "training_run",
     "training_pipeline",
     "analysis_layout",
+    "evaluation_separation_layout",
+    "evaluation_drift_layout",
     "evaluation_label_set",
     "evaluation_profile",
     "roi",
