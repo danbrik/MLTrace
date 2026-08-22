@@ -128,7 +128,7 @@ def test_drift_requires_conflict_decisions_and_keeps_activatable_history():
         app.dependency_overrides.clear()
 
 
-def test_result_revision_marks_workspace_results_stale_without_raw_table_scan():
+def test_result_revision_drops_workspace_results_without_raw_table_scan():
     client, sessions, (training_id, dataset_id, run_id) = setup()
     try:
         layout = client.post("/api/evaluation-workspaces/separation-layouts", json={
@@ -139,7 +139,7 @@ def test_result_revision_marks_workspace_results_stale_without_raw_table_scan():
             run = db.get(models.TestingRun, run_id); run.result_revision += 1; db.commit()
         summary = client.get(f"/api/evaluation-workspaces/models/{training_id}").json()
         assert summary["sep_median"] is None
-        assert client.get(f"/api/evaluation-workspaces/models/{training_id}/separation/results").json()[0]["stale"] is True
+        assert client.get(f"/api/evaluation-workspaces/models/{training_id}/separation/results").json() == []
     finally:
         app.dependency_overrides.clear()
 
@@ -161,5 +161,59 @@ def test_separation_layout_may_be_emptied_after_its_last_pair_is_removed():
         assert emptied.status_code == 200, emptied.text
         assert emptied.json()["pairs"] == []
         assert emptied.json()["version"] == layout["version"] + 1
+    finally:
+        app.dependency_overrides.clear()
+
+
+def test_overwriting_a_layout_drops_the_calculations_that_used_it():
+    client, _sessions, (training_id, dataset_id, run_id) = setup()
+    try:
+        layout = client.post("/api/evaluation-workspaces/separation-layouts", json={
+            "training_dataset_id": dataset_id, "name": "Overwrite me",
+            "pairs": [{"pair_key": "event", "name": "Fault", "normal_start": iso(0),
+                       "normal_end": iso(20), "anomaly_start": iso(70), "anomaly_end": iso(80)}],
+        }).json()
+        assert layout["calculation_count"] == 0
+        calculated = client.post(f"/api/evaluation-workspaces/models/{training_id}/separation/calculate", json={
+            "testing_run_id": run_id, "layout_id": layout["id"], "pair_keys": ["event"], "score_series": "score"})
+        assert calculated.status_code == 200, calculated.text
+        assert calculated.json()["sep_median"] is not None
+        listed = client.get(f"/api/evaluation-workspaces/separation-layouts?training_dataset_id={dataset_id}").json()
+        assert listed[0]["calculation_count"] == 1
+
+        overwritten = client.put(f"/api/evaluation-workspaces/separation-layouts/{layout['id']}", json={
+            "training_dataset_id": dataset_id, "name": "Overwrite me",
+            "pairs": [{"pair_key": "event", "name": "Fault", "normal_start": iso(0),
+                       "normal_end": iso(30), "anomaly_start": iso(70), "anomaly_end": iso(80)}],
+        })
+        assert overwritten.status_code == 200, overwritten.text
+        assert overwritten.json()["calculation_count"] == 0
+        assert client.get(f"/api/evaluation-workspaces/models/{training_id}/separation/results").json() == []
+        assert client.get(f"/api/evaluation-workspaces/models/{training_id}").json()["sep_median"] is None
+    finally:
+        app.dependency_overrides.clear()
+
+
+def test_overwriting_a_drift_layout_drops_its_calculation_history():
+    client, _sessions, (training_id, dataset_id, run_id) = setup()
+    try:
+        payload = {
+            "training_dataset_id": dataset_id, "name": "Stability",
+            "reference_start": iso(0), "reference_end": iso(20),
+            "analysis_start": iso(20), "analysis_end": iso(100), "bucket_seconds": 20,
+            "reference_exclusion_action": "filter_points", "exclusions": [], "buckets": [],
+        }
+        layout = client.post("/api/evaluation-workspaces/drift-layouts", json=payload).json()
+        calculated = client.post(f"/api/evaluation-workspaces/models/{training_id}/drift/calculate", json={
+            "testing_run_id": run_id, "layout_id": layout["id"], "score_series": "score"})
+        assert calculated.status_code == 200, calculated.text
+        assert len(client.get(f"/api/evaluation-workspaces/models/{training_id}/drift/calculations").json()) == 1
+
+        payload["analysis_end"] = iso(105)
+        overwritten = client.put(f"/api/evaluation-workspaces/drift-layouts/{layout['id']}", json=payload)
+        assert overwritten.status_code == 200, overwritten.text
+        assert overwritten.json()["calculation_count"] == 0
+        assert client.get(f"/api/evaluation-workspaces/models/{training_id}/drift/calculations").json() == []
+        assert client.get(f"/api/evaluation-workspaces/models/{training_id}").json()["d_mean"] is None
     finally:
         app.dependency_overrides.clear()

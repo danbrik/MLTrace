@@ -1,6 +1,6 @@
 import { Alert, Badge, Button, Center, Checkbox, Collapse, Group, Loader, MultiSelect, NumberInput, Paper, ScrollArea, SegmentedControl, Select, SimpleGrid, Stack, Table, Text, TextInput, Title } from '@mantine/core';
 import { notifications } from '@mantine/notifications';
-import { ArrowLeft, Calculator, ChevronDown, ChevronRight, Plus, RefreshCw, Save, Search, SlidersHorizontal, Trash2 } from 'lucide-react';
+import { ArrowLeft, Calculator, ChevronDown, ChevronRight, RefreshCw, Save, Search, SlidersHorizontal, Trash2 } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { Shape } from 'plotly.js';
 import { activateWorkspaceDrift, calculateWorkspaceDrift, calculateWorkspaceSeparation, deleteDriftLayout, deleteSeparationLayout, deleteWorkspaceDriftCalculation, deleteWorkspaceSeparationResult, getEvaluationScorePreview, getEvaluationWorkspace, listDriftLayouts, listEvaluationWorkspaceModels, listEvaluationWorkspaceRuns, listSeparationLayouts, listWorkspaceDriftCalculations, listWorkspaceSeparationResults, previewWorkspaceDrift, saveDriftLayout, saveSeparationLayout, setWorkspaceDriftBucketIncluded, setWorkspaceSeparationIncluded } from '../api';
@@ -10,6 +10,8 @@ import { StepCard } from '../components/StepCard';
 import { DEFAULT_TABLE_PAGE_SIZE, TablePagination } from '../components/TablePagination';
 import { facetOption } from '../testing/facetFilters';
 import { countModelFacetValues, modelMatchesFilters, type ModelFilterMetadata, type ModelFilterState } from '../testing/modelFilters';
+import { ConfirmDialog } from '../evaluation/ConfirmDialog';
+import { LayoutChooser, useUnsavedGuard, type LayoutStage } from '../evaluation/LayoutChooser';
 import { WorkspaceRunPicker } from '../evaluation/WorkspaceRunPicker';
 import { normalizeHorizontalSelection, normalizePairs, separationPairsEqual } from '../evaluation/workspaceHelpers';
 import type { EvaluationDriftCalculation, EvaluationDriftLayout, EvaluationDriftLayoutPayload, EvaluationDriftPreview, EvaluationScorePreview, EvaluationSeparationLayout, EvaluationSeparationPair, EvaluationWorkspaceModel, EvaluationWorkspaceSeparationResult, TestingRun } from '../types';
@@ -49,28 +51,204 @@ function useScorePlot(runId: number | null, score: string) {
   return { preview, clear, loading, load };
 }
 
+const blankPair = (): EvaluationSeparationPair => ({ pair_key: key('pair'), name: 'Event', normal_start: '', normal_end: '', anomaly_start: '', anomaly_end: '' });
+const pairComplete = (pair: EvaluationSeparationPair | null): boolean => Boolean(pair && pair.normal_start && pair.normal_end && pair.anomaly_start && pair.anomaly_end);
+const span = (start: string, end: string) => `${start ? start.replace('T', ' ') : '—'} → ${end ? end.replace('T', ' ') : '—'}`;
+
 function Separation({ model, runs, onSummary }: { model: EvaluationWorkspaceModel; runs: TestingRun[]; onSummary: (value: EvaluationWorkspaceModel) => void }) {
   const [runId, setRunId] = useState<number | null>(null), [score, setScore] = useState('score');
-  const [layouts, setLayouts] = useState<EvaluationSeparationLayout[]>([]);
+  const [layouts, setLayouts] = useState<EvaluationSeparationLayout[]>([]), [stage, setStage] = useState<LayoutStage>('choose');
   const [layoutId, setLayoutId] = useState<number | null>(null), [layoutName, setLayoutName] = useState('');
-  const [pairs, setPairs] = useState<EvaluationSeparationPair[]>([]), [pairKey, setPairKey] = useState<string | null>(null), [selected, setSelected] = useState<string[]>([]);
-  const [tool, setTool] = useState<'normal' | 'anomaly'>('normal'), [results, setResults] = useState<EvaluationWorkspaceSeparationResult[]>([]), [busy, setBusy] = useState(false);
+  const [pair, setPair] = useState<EvaluationSeparationPair | null>(null), [dropped, setDropped] = useState(0);
+  const [tool, setTool] = useState<'normal' | 'anomaly'>('normal'), [confirm, setConfirm] = useState<'overwrite' | 'delete' | null>(null);
+  const [results, setResults] = useState<EvaluationWorkspaceSeparationResult[]>([]), [busy, setBusy] = useState(false);
   const { preview, clear: clearPlot, loading: plotLoading, load: loadPlot } = useScorePlot(runId, score);
-  const run = runs.find((item) => item.id === runId) ?? null, pair = pairs.find((item) => item.pair_key === pairKey) ?? null;
-  const persistedLayout = layouts.find((item) => item.id === layoutId) ?? null;
-  const layoutDirty = !persistedLayout || persistedLayout.name !== layoutName || !separationPairsEqual(persistedLayout.pairs, pairs);
+  const run = runs.find((item) => item.id === runId) ?? null;
+  const persisted = layouts.find((item) => item.id === layoutId) ?? null;
+  const layoutDirty = stage === 'edit' && (!persisted || persisted.name !== layoutName || !separationPairsEqual(persisted.pairs, pair ? [pair] : []));
   const reload = useCallback(async () => setResults(await listWorkspaceSeparationResults(model.training_run_id)), [model.training_run_id]);
   useEffect(() => { void reload(); }, [reload]);
   useEffect(() => { if (!run) { setLayouts([]); return; } void listSeparationLayouts(run.training_dataset_id).then(setLayouts).catch((e) => fail('Could not load A layouts', e)); }, [run]);
-  const update = (values: Partial<EvaluationSeparationPair>) => pairKey && setPairs((items) => items.map((item) => item.pair_key === pairKey ? { ...item, ...values } : item));
-  const shapes = useMemo<Shape[]>(() => pairs.flatMap((item) => [{ type: 'rect', xref: 'x', yref: 'paper', x0: item.normal_start, x1: item.normal_end, y0: 0, y1: 1, fillcolor: 'rgba(34,139,230,.13)', line: { color: '#228be6' }, layer: 'below' } as Shape, { type: 'rect', xref: 'x', yref: 'paper', x0: item.anomaly_start, x1: item.anomaly_end, y0: 0, y1: 1, fillcolor: 'rgba(250,82,82,.14)', line: { color: '#fa5252' }, layer: 'below' } as Shape]).filter((item) => Boolean(item.x0 && item.x1)), [pairs]);
-  function adopt(row: EvaluationSeparationLayout) { setLayoutId(row.id); setLayoutName(row.name); setPairs(row.pairs); setPairKey((current) => row.pairs.some((item) => item.pair_key === current) ? current : row.pairs[0]?.pair_key ?? null); setSelected((current) => { const keys = row.pairs.map((item) => item.pair_key); const kept = keys.filter((item) => current.includes(item)); return kept.length ? kept : keys; }); }
-  function choose(value: string | null) { const row = layouts.find((item) => item.id === Number(value)); if (!row) { setLayoutId(null); setLayoutName(''); setPairs([]); setPairKey(null); setSelected([]); return; } setLayoutId(row.id); setLayoutName(row.name); setPairs(row.pairs); setPairKey(row.pairs[0]?.pair_key ?? null); setSelected(row.pairs.map((item) => item.pair_key)); }
-  function add() { const id = key('pair'), item = { pair_key: id, name: `Pair ${pairs.length + 1}`, normal_start: '', normal_end: '', anomaly_start: '', anomaly_end: '' }; setPairs((rows) => [...rows, item]); setPairKey(id); setSelected((rows) => [...rows, id]); }
-  function remove(target: string) { setPairs((rows) => { const next = rows.filter((row) => row.pair_key !== target); setPairKey((current) => current === target ? next[0]?.pair_key ?? null : current); return next; }); setSelected((rows) => rows.filter((id) => id !== target)); }
-  async function save() { if (!run) return; setBusy(true); try { const row = await saveSeparationLayout({ training_dataset_id: run.training_dataset_id, name: layoutName, pairs: normalizePairs(pairs) }, layoutId ?? undefined); adopt(row); setLayouts(await listSeparationLayouts(run.training_dataset_id)); notifications.show({ color: 'green', message: `Layout v${row.version} saved.` }); } catch (e) { fail('Could not save layout', e); } finally { setBusy(false); } }
-  async function calculate() { const keys = selected.filter((id) => pairs.some((item) => item.pair_key === id)); if (!runId || !layoutId || !keys.length) return; if (layoutDirty) { notifications.show({ color: 'orange', message: 'Save the visible A layout before calculating it.' }); return; } setBusy(true); try { onSummary(await calculateWorkspaceSeparation(model.training_run_id, { testing_run_id: runId, layout_id: layoutId, pair_keys: keys, score_series: score })); await reload(); } catch (e) { fail('A calculation failed', e); } finally { setBusy(false); } }
-  return <Stack gap="md"><StepCard index={1} title="Inference run" color="blue"><WorkspaceRunPicker runs={runs} runId={runId} score={score} loading={plotLoading} loaded={Boolean(preview)} onLoadPlot={() => void loadPlot()} onRun={(id) => { setRunId(id); setScore('score'); clearPlot(); choose(null); }} onScore={setScore} /></StepCard><StepCard index={2} title="Dataset-wide A layout" color="violet" action={<Button variant="light" leftSection={<Plus size={15} />} disabled={!run} onClick={add}>Add pair</Button>}><Stack gap="sm"><SimpleGrid cols={{ base: 1, md: 2 }}><Select label="Saved layout" clearable searchable data={layouts.map((item) => ({ value: String(item.id), label: `${item.name} · v${item.version}` }))} value={layoutId ? String(layoutId) : null} onChange={choose} /><TextInput label="Layout name" value={layoutName} onChange={(e) => setLayoutName(e.currentTarget.value)} /></SimpleGrid>{pairs.length > 0 && <Select label="Pair to edit" data={pairs.map((item) => ({ value: item.pair_key, label: item.name }))} value={pairKey} onChange={setPairKey} />}{pair && <><TextInput label="Pair name" value={pair.name} onChange={(e) => update({ name: e.currentTarget.value })} /><SegmentedControl value={tool} onChange={(value) => setTool(value as 'normal' | 'anomaly')} data={[{ value: 'normal', label: 'Normalbereich wählen' }, { value: 'anomaly', label: 'Anomaliebereich wählen' }]} /><SimpleGrid cols={{ base: 1, md: 2, xl: 4 }}><DateTime24Input label="Normal start" value={pair.normal_start} onChange={(value) => update({ normal_start: value })} /><DateTime24Input label="Normal end (exclusive)" value={pair.normal_end} onChange={(value) => update({ normal_end: value })} /><DateTime24Input label="Anomaly start" value={pair.anomaly_start} onChange={(value) => update({ anomaly_start: value })} /><DateTime24Input label="Anomaly end (inclusive)" value={pair.anomaly_end} onChange={(value) => update({ anomaly_end: value })} /></SimpleGrid></>}<ScorePlot preview={preview} shapes={shapes} loading={plotLoading} onSelect={(value) => { const r = range(value); update(tool === 'normal' ? { normal_start: r.start, normal_end: r.end } : { anomaly_start: r.start, anomaly_end: r.end }); }} /><ScrollArea><Table striped withTableBorder><Table.Thead><Table.Tr><Table.Th>Use</Table.Th><Table.Th>Name</Table.Th><Table.Th>Normal [start,end)</Table.Th><Table.Th>Anomaly [start,end]</Table.Th><Table.Th /></Table.Tr></Table.Thead><Table.Tbody>{pairs.map((item) => <Table.Tr key={item.pair_key}><Table.Td><Checkbox checked={selected.includes(item.pair_key)} onChange={(e) => setSelected((rows) => e.currentTarget.checked ? [...new Set([...rows, item.pair_key])] : rows.filter((id) => id !== item.pair_key))} /></Table.Td><Table.Td>{item.name}</Table.Td><Table.Td>{item.normal_start || '—'} → {item.normal_end || '—'}</Table.Td><Table.Td>{item.anomaly_start || '—'} → {item.anomaly_end || '—'}</Table.Td><Table.Td><Button size="compact-xs" color="red" variant="subtle" onClick={() => remove(item.pair_key)}><Trash2 size={14} /></Button></Table.Td></Table.Tr>)}{!pairs.length && <Table.Tr><Table.Td colSpan={5}><Text ta="center" c="dimmed">No pair in this layout. Add one, or save the empty layout.</Text></Table.Td></Table.Tr>}</Table.Tbody></Table></ScrollArea><Group justify="flex-end">{layoutId && <Button color="red" variant="subtle" onClick={() => void deleteSeparationLayout(layoutId).then(() => choose(null)).then(() => run && listSeparationLayouts(run.training_dataset_id).then(setLayouts))}>Delete layout</Button>}<Button variant="default" leftSection={<Save size={15} />} loading={busy} disabled={!run || !layoutName.trim()} onClick={() => void save()}>Save layout</Button><Button leftSection={<Calculator size={15} />} loading={busy} disabled={!layoutId || !selected.length} onClick={() => void calculate()}>Calculate selected pairs</Button></Group></Stack></StepCard><Paper withBorder p="md"><Title order={4} mb="sm">A results across inference runs</Title><ScrollArea><Table striped withTableBorder><Table.Thead><Table.Tr><Table.Th>Include</Table.Th><Table.Th>Run</Table.Th><Table.Th>Pair</Table.Th><Table.Th>Median</Table.Th><Table.Th>MAD</Table.Th><Table.Th>Scale</Table.Th><Table.Th>Sep_i</Table.Th><Table.Th>Sep95_i</Table.Th><Table.Th>Status</Table.Th><Table.Th /></Table.Tr></Table.Thead><Table.Tbody>{results.map((item) => <Table.Tr key={item.id}><Table.Td><Checkbox checked={item.included} disabled={item.stale} onChange={(e) => void setWorkspaceSeparationIncluded(model.training_run_id, item.id, e.currentTarget.checked).then(onSummary).then(reload)} /></Table.Td><Table.Td>#{item.testing_run_id}</Table.Td><Table.Td>{item.pair_name}</Table.Td><Table.Td>{metric(item.normal_median)}</Table.Td><Table.Td>{metric(item.normal_mad)}</Table.Td><Table.Td>{metric(item.robust_scale)}</Table.Td><Table.Td>{metric(item.separation)}</Table.Td><Table.Td>{metric(item.separation_p95)}</Table.Td><Table.Td><Badge color={item.stale ? 'orange' : 'green'}>{item.stale ? 'Stale' : 'Current'}</Badge></Table.Td><Table.Td><Button size="compact-xs" color="red" variant="subtle" onClick={() => void deleteWorkspaceSeparationResult(model.training_run_id, item.id).then(onSummary).then(reload)}><Trash2 size={14} /></Button></Table.Td></Table.Tr>)}{!results.length && <Table.Tr><Table.Td colSpan={10}><Text ta="center" c="dimmed">No A results yet.</Text></Table.Td></Table.Tr>}</Table.Tbody></Table></ScrollArea></Paper></Stack>;
+
+  const update = (values: Partial<EvaluationSeparationPair>) => setPair((item) => item ? { ...item, ...values } : item);
+  const shapes = useMemo<Shape[]>(() => (pair ? [
+    { type: 'rect', xref: 'x', yref: 'paper', x0: pair.normal_start, x1: pair.normal_end, y0: 0, y1: 1, fillcolor: 'rgba(34,139,230,.13)', line: { color: '#228be6' }, layer: 'below' } as Shape,
+    { type: 'rect', xref: 'x', yref: 'paper', x0: pair.anomaly_start, x1: pair.anomaly_end, y0: 0, y1: 1, fillcolor: 'rgba(250,82,82,.14)', line: { color: '#fa5252' }, layer: 'below' } as Shape,
+  ] : []).filter((item) => Boolean(item.x0 && item.x1)), [pair]);
+
+  function reset() { setStage('choose'); setLayoutId(null); setLayoutName(''); setPair(null); setDropped(0); setTool('normal'); }
+  function create() { setLayoutId(null); setLayoutName(''); setPair(blankPair()); setDropped(0); setTool('normal'); setStage('edit'); }
+  function adopt(row: EvaluationSeparationLayout) { setLayoutId(row.id); setLayoutName(row.name); setPair(row.pairs[0] ?? blankPair()); setDropped(Math.max(0, row.pairs.length - 1)); setStage('edit'); }
+
+  async function persist(): Promise<boolean> {
+    const name = layoutName.trim();
+    if (!run || !name || !pair || !pairComplete(pair)) return false;
+    setBusy(true);
+    try {
+      const row = await saveSeparationLayout({ training_dataset_id: run.training_dataset_id, name, pairs: normalizePairs([{ ...pair, name }]) }, layoutId ?? undefined);
+      adopt(row);
+      setLayouts(await listSeparationLayouts(run.training_dataset_id));
+      // Overwriting drops the calculations that used the previous definition.
+      await reload(); onSummary(await getEvaluationWorkspace(model.training_run_id));
+      notifications.show({ color: 'green', message: `Layout v${row.version} saved.` });
+      return true;
+    } catch (e) { fail('Could not save layout', e); return false; } finally { setBusy(false); }
+  }
+
+  const overwriteNote = persisted?.calculation_count ? `Saving deletes ${persisted.calculation_count} existing calculation${persisted.calculation_count === 1 ? '' : 's'} that used this layout.` : undefined;
+  const { guard, dialog } = useUnsavedGuard(layoutDirty, persist, overwriteNote);
+
+  function chooseRun(id: number | null) {
+    const next = id === null ? null : runs.find((item) => item.id === id) ?? null;
+    // A layout belongs to the inference dataset, so it survives a run switch inside it.
+    const keeps = next?.training_dataset_id === run?.training_dataset_id;
+    const apply = () => { setRunId(id); setScore('score'); clearPlot(); if (!keeps) reset(); };
+    if (keeps) apply(); else guard(apply);
+  }
+
+  async function calculate() {
+    if (!runId || !layoutId || !pair) return;
+    setBusy(true);
+    try {
+      onSummary(await calculateWorkspaceSeparation(model.training_run_id, { testing_run_id: runId, layout_id: layoutId, pair_keys: [pair.pair_key], score_series: score }));
+      await reload();
+    } catch (e) { fail('A calculation failed', e); } finally { setBusy(false); }
+  }
+
+  async function removeLayout() {
+    if (!layoutId || !run) return;
+    setBusy(true);
+    try { await deleteSeparationLayout(layoutId); reset(); setLayouts(await listSeparationLayouts(run.training_dataset_id)); }
+    catch (e) { fail('Could not delete layout', e); } finally { setBusy(false); setConfirm(null); }
+  }
+
+  const datasetOf = (result: EvaluationWorkspaceSeparationResult) => runs.find((item) => item.id === result.testing_run_id)?.training_dataset_name ?? `#${result.testing_run_id}`;
+
+  return (
+    <Stack gap="md">
+      {dialog}
+      <ConfirmDialog
+        opened={confirm === 'overwrite'}
+        title="Overwrite layout?"
+        message={overwriteNote ? `${overwriteNote} They are removed from the results table and from the aggregated Sep_median.` : 'The saved layout is replaced by the visible definition.'}
+        confirmLoading={busy}
+        onCancel={() => setConfirm(null)}
+        actions={[{ label: 'Overwrite', color: 'red', onClick: () => { setConfirm(null); void persist(); } }]}
+      />
+      <ConfirmDialog
+        opened={confirm === 'delete'}
+        title="Delete layout?"
+        message="The layout definition is removed. Calculations that already used it keep their stored snapshot and stay in the results table."
+        confirmLoading={busy}
+        onCancel={() => setConfirm(null)}
+        actions={[{ label: 'Delete', color: 'red', onClick: () => void removeLayout() }]}
+      />
+
+      <StepCard index={1} title="Inference run" color="blue">
+        <WorkspaceRunPicker
+          runs={runs} runId={runId} score={score} loading={plotLoading} loaded={Boolean(preview)}
+          onLoadPlot={() => void loadPlot()} onRun={chooseRun} onScore={setScore}
+        />
+      </StepCard>
+
+      <StepCard index={2} title="Dataset-wide A layout" color="violet">
+        <Stack gap="sm">
+          <LayoutChooser
+            stage={stage} layouts={layouts} layoutId={layoutId} kind="A" disabled={!run}
+            onStage={setStage}
+            onPick={(id) => { const row = layouts.find((item) => item.id === id); if (row) guard(() => adopt(row)); }}
+            onCreate={() => guard(create)}
+          />
+          {stage === 'edit' && pair && (
+            <>
+              {dropped > 0 && <Alert color="yellow">This layout still holds {dropped} additional pair{dropped === 1 ? '' : 's'} from an earlier version. Saving keeps only the range below.</Alert>}
+              <TextInput label="Layout name" value={layoutName} onChange={(e) => setLayoutName(e.currentTarget.value)} />
+              <SegmentedControl
+                value={tool} onChange={(value) => setTool(value as 'normal' | 'anomaly')}
+                data={[{ value: 'normal', label: 'Normalbereich wählen' }, { value: 'anomaly', label: 'Anomaliebereich wählen' }]}
+              />
+              <SimpleGrid cols={{ base: 1, md: 2, xl: 4 }}>
+                <DateTime24Input label="Normal start" value={pair.normal_start} onChange={(value) => update({ normal_start: value })} />
+                <DateTime24Input label="Normal end (exclusive)" value={pair.normal_end} onChange={(value) => update({ normal_end: value })} />
+                <DateTime24Input label="Anomaly start" value={pair.anomaly_start} onChange={(value) => update({ anomaly_start: value })} />
+                <DateTime24Input label="Anomaly end (inclusive)" value={pair.anomaly_end} onChange={(value) => update({ anomaly_end: value })} />
+              </SimpleGrid>
+            </>
+          )}
+          <ScorePlot
+            preview={preview} shapes={shapes} loading={plotLoading}
+            onSelect={(value) => {
+              if (stage !== 'edit') return;
+              const r = range(value);
+              update(tool === 'normal' ? { normal_start: r.start, normal_end: r.end } : { anomaly_start: r.start, anomaly_end: r.end });
+            }}
+          />
+          {stage === 'edit' && (
+            <Group justify="space-between" wrap="wrap">
+              <Text size="xs" c="dimmed">
+                {!pairComplete(pair) ? 'Drag both ranges in the plot to complete the layout.'
+                  : layoutDirty ? 'Save the layout to calculate it.'
+                  : 'Layout saved — ready to calculate.'}
+              </Text>
+              <Group justify="flex-end">
+                {layoutId && <Button color="red" variant="subtle" leftSection={<Trash2 size={15} />} onClick={() => setConfirm('delete')}>Delete layout</Button>}
+                <Button variant="default" leftSection={<Save size={15} />} loading={busy} disabled={!run || !layoutName.trim() || !pairComplete(pair)} onClick={() => layoutId ? setConfirm('overwrite') : void persist()}>Save layout</Button>
+                <Button leftSection={<Calculator size={15} />} loading={busy} disabled={!layoutId || layoutDirty} onClick={() => void calculate()}>Calculate separation</Button>
+              </Group>
+            </Group>
+          )}
+        </Stack>
+      </StepCard>
+
+      <Paper withBorder p="md">
+        <Title order={4} mb="sm">A results across inference runs</Title>
+        <ScrollArea>
+          <Table striped withTableBorder miw={900}>
+            <Table.Thead>
+              <Table.Tr>
+                <Table.Th>Include</Table.Th>
+                <Table.Th>Inference dataset</Table.Th>
+                <Table.Th>Normal [start,end)</Table.Th>
+                <Table.Th>Anomaly [start,end]</Table.Th>
+                <Table.Th>Median</Table.Th>
+                <Table.Th>MAD</Table.Th>
+                <Table.Th>Scale</Table.Th>
+                <Table.Th>Sep_i</Table.Th>
+                <Table.Th>Sep95_i</Table.Th>
+                <Table.Th />
+              </Table.Tr>
+            </Table.Thead>
+            <Table.Tbody>
+              {results.map((item) => (
+                <Table.Tr key={item.id}>
+                  <Table.Td>
+                    <Checkbox
+                      checked={item.included}
+                      onChange={(e) => void setWorkspaceSeparationIncluded(model.training_run_id, item.id, e.currentTarget.checked).then(onSummary).then(reload)}
+                    />
+                  </Table.Td>
+                  <Table.Td>{datasetOf(item)}</Table.Td>
+                  <Table.Td>{span(item.normal_start, item.normal_end)}</Table.Td>
+                  <Table.Td>{span(item.anomaly_start, item.anomaly_end)}</Table.Td>
+                  <Table.Td>{metric(item.normal_median)}</Table.Td>
+                  <Table.Td>{metric(item.normal_mad)}</Table.Td>
+                  <Table.Td>{metric(item.robust_scale)}</Table.Td>
+                  <Table.Td>{metric(item.separation)}</Table.Td>
+                  <Table.Td>{metric(item.separation_p95)}</Table.Td>
+                  <Table.Td>
+                    <Button size="compact-xs" color="red" variant="subtle" onClick={() => void deleteWorkspaceSeparationResult(model.training_run_id, item.id).then(onSummary).then(reload)}>
+                      <Trash2 size={14} />
+                    </Button>
+                  </Table.Td>
+                </Table.Tr>
+              ))}
+              {!results.length && <Table.Tr><Table.Td colSpan={10}><Text ta="center" c="dimmed">No A results yet.</Text></Table.Td></Table.Tr>}
+            </Table.Tbody>
+          </Table>
+        </ScrollArea>
+      </Paper>
+    </Stack>
+  );
 }
 
 const blankDrift = (dataset: number): EvaluationDriftLayoutPayload => ({ training_dataset_id: dataset, name: '', description: null, reference_start: '', reference_end: '', analysis_start: '', analysis_end: '', bucket_seconds: 86400, reference_exclusion_action: 'filter_points', exclusions: [], buckets: [] });
@@ -79,23 +257,160 @@ const driftPayload = (row: EvaluationDriftLayout): EvaluationDriftLayoutPayload 
 
 function Drift({ model, runs, onSummary }: { model: EvaluationWorkspaceModel; runs: TestingRun[]; onSummary: (value: EvaluationWorkspaceModel) => void }) {
   const [runId, setRunId] = useState<number | null>(null), [score, setScore] = useState('score');
-  const [layouts, setLayouts] = useState<EvaluationDriftLayout[]>([]), [layoutId, setLayoutId] = useState<number | null>(null), [draft, setDraft] = useState<EvaluationDriftLayoutPayload>(blankDrift(0));
-  const [tool, setTool] = useState<'reference' | 'analysis' | 'exclusion'>('reference'), [buckets, setBuckets] = useState<EvaluationDriftPreview | null>(null), [history, setHistory] = useState<EvaluationDriftCalculation[]>([]), [removed, setRemoved] = useState(false), [busy, setBusy] = useState(false);
+  const [layouts, setLayouts] = useState<EvaluationDriftLayout[]>([]), [stage, setStage] = useState<LayoutStage>('choose');
+  const [layoutId, setLayoutId] = useState<number | null>(null), [draft, setDraft] = useState<EvaluationDriftLayoutPayload>(blankDrift(0));
+  const [tool, setTool] = useState<'reference' | 'analysis' | 'exclusion'>('reference'), [buckets, setBuckets] = useState<EvaluationDriftPreview | null>(null);
+  const [history, setHistory] = useState<EvaluationDriftCalculation[]>([]), [removed, setRemoved] = useState(false), [busy, setBusy] = useState(false);
+  const [confirm, setConfirm] = useState<'overwrite' | 'delete' | null>(null);
   const { preview, clear: clearPlot, loading: plotLoading, load: loadPlot } = useScorePlot(runId, score);
   const run = runs.find((item) => item.id === runId) ?? null;
-  const persistedLayout = layouts.find((item) => item.id === layoutId) ?? null;
-  const layoutDirty = !persistedLayout || JSON.stringify(driftPayload(persistedLayout)) !== JSON.stringify(draft);
+  const persisted = layouts.find((item) => item.id === layoutId) ?? null;
+  const layoutDirty = stage === 'edit' && (!persisted || JSON.stringify(driftPayload(persisted)) !== JSON.stringify(draft));
   const reload = useCallback(async () => setHistory(await listWorkspaceDriftCalculations(model.training_run_id)), [model.training_run_id]);
   useEffect(() => { void reload(); }, [reload]);
   useEffect(() => { if (!run) { setLayouts([]); return; } void listDriftLayouts(run.training_dataset_id).then(setLayouts).catch((e) => fail('Could not load B layouts', e)); }, [run]);
-  function choose(value: string | null) { const row = layouts.find((item) => item.id === Number(value)); setLayoutId(row?.id ?? null); setDraft(row ? driftPayload(row) : blankDrift(run?.training_dataset_id ?? 0)); setBuckets(null); }
+
   const shapes = useMemo<Shape[]>(() => [{ type: 'rect', xref: 'x', yref: 'paper', x0: draft.reference_start, x1: draft.reference_end, y0: 0, y1: 1, fillcolor: 'rgba(64,192,87,.14)', line: { color: '#40c057' }, layer: 'below' } as Shape, { type: 'rect', xref: 'x', yref: 'paper', x0: draft.analysis_start, x1: draft.analysis_end, y0: 0, y1: 1, fillcolor: 'rgba(34,139,230,.08)', line: { color: '#228be6' }, layer: 'below' } as Shape, ...draft.exclusions.map((item) => ({ type: 'rect', xref: 'x', yref: 'paper', x0: item.start_timestamp, x1: item.end_timestamp, y0: 0, y1: 1, fillcolor: 'rgba(134,142,150,.28)', line: { color: '#868e96' }, layer: 'below' } as Shape))].filter((item) => Boolean(item.x0 && item.x1)), [draft]);
+
+  function reset() { setStage('choose'); setLayoutId(null); setDraft(blankDrift(run?.training_dataset_id ?? 0)); setBuckets(null); setTool('reference'); }
+  function create() { setLayoutId(null); setDraft(blankDrift(run?.training_dataset_id ?? 0)); setBuckets(null); setTool('reference'); setStage('edit'); }
+  function adopt(row: EvaluationDriftLayout) { setLayoutId(row.id); setDraft(driftPayload(row)); setBuckets(null); setStage('edit'); }
+
   async function inspect(next = draft) { if (!runId) return; setBusy(true); try { setBuckets(await previewWorkspaceDrift(model.training_run_id, runId, score, next)); } catch (e) { fail('Bucket validation failed', e); } finally { setBusy(false); } }
   function decide(id: string, decision: 'include' | 'drop_bucket' | 'filter_points') { const definitions = (buckets?.buckets ?? []).map((item) => ({ bucket_key: item.bucket_key, start_timestamp: item.start_timestamp, end_timestamp: item.end_timestamp, decision: item.bucket_key === id ? decision : item.decision })); const next = { ...draft, buckets: definitions }; setDraft(next); void inspect(next); }
-  async function save() { setBusy(true); try { const row = await saveDriftLayout(draft, layoutId ?? undefined); setLayoutId(row.id); setDraft(driftPayload(row)); if (run) setLayouts(await listDriftLayouts(run.training_dataset_id)); notifications.show({ color: 'green', message: `Layout v${row.version} saved.` }); } catch (e) { fail('Could not save layout', e); } finally { setBusy(false); } }
-  async function calculate() { if (!runId || !layoutId) return; if (layoutDirty) { notifications.show({ color: 'orange', message: 'Save the visible B layout before calculating it.' }); return; } setBusy(true); try { onSummary(await calculateWorkspaceDrift(model.training_run_id, runId, layoutId, score)); await reload(); } catch (e) { fail('B calculation failed', e); } finally { setBusy(false); } }
+
+  async function persist(): Promise<boolean> {
+    if (!run || !draft.name.trim()) return false;
+    setBusy(true);
+    try {
+      const row = await saveDriftLayout({ ...draft, name: draft.name.trim() }, layoutId ?? undefined);
+      adopt(row);
+      setLayouts(await listDriftLayouts(run.training_dataset_id));
+      // Overwriting drops the calculations that used the previous definition.
+      await reload(); onSummary(await getEvaluationWorkspace(model.training_run_id));
+      notifications.show({ color: 'green', message: `Layout v${row.version} saved.` });
+      return true;
+    } catch (e) { fail('Could not save layout', e); return false; } finally { setBusy(false); }
+  }
+
+  const overwriteNote = persisted?.calculation_count ? `Saving deletes ${persisted.calculation_count} existing calculation${persisted.calculation_count === 1 ? '' : 's'} that used this layout.` : undefined;
+  const { guard, dialog } = useUnsavedGuard(layoutDirty, persist, overwriteNote);
+
+  function chooseRun(id: number | null) {
+    const next = id === null ? null : runs.find((item) => item.id === id) ?? null;
+    const keeps = next?.training_dataset_id === run?.training_dataset_id;
+    const apply = () => { setRunId(id); setScore('score'); clearPlot(); setBuckets(null); if (!keeps) reset(); };
+    if (keeps) apply(); else guard(apply);
+  }
+
+  async function calculate() {
+    if (!runId || !layoutId) return;
+    setBusy(true);
+    try { onSummary(await calculateWorkspaceDrift(model.training_run_id, runId, layoutId, score)); await reload(); }
+    catch (e) { fail('B calculation failed', e); } finally { setBusy(false); }
+  }
+
+  async function removeLayout() {
+    if (!layoutId || !run) return;
+    setBusy(true);
+    try { await deleteDriftLayout(layoutId); reset(); setLayouts(await listDriftLayouts(run.training_dataset_id)); }
+    catch (e) { fail('Could not delete layout', e); } finally { setBusy(false); setConfirm(null); }
+  }
+
   const shown = buckets?.buckets.filter((item) => item.status !== 'removed') ?? [], hidden = buckets?.buckets.filter((item) => item.status === 'removed') ?? [], active = history.find((item) => item.active) ?? null;
-  return <Stack gap="md"><StepCard index={1} title="Inference run" color="blue"><WorkspaceRunPicker runs={runs} runId={runId} score={score} loading={plotLoading} loaded={Boolean(preview)} onLoadPlot={() => void loadPlot()} onRun={(id) => { setRunId(id); setScore('score'); clearPlot(); const row = runs.find((item) => item.id === id); setLayoutId(null); setDraft(blankDrift(row?.training_dataset_id ?? 0)); setBuckets(null); }} onScore={setScore} /></StepCard><StepCard index={2} title="Dataset-wide B layout" color="violet" action={<Button variant="light" leftSection={<RefreshCw size={15} />} loading={busy} disabled={!run} onClick={() => void inspect()}>Generate / validate buckets</Button>}><Stack gap="sm"><SimpleGrid cols={{ base: 1, md: 2 }}><Select label="Saved layout" clearable searchable data={layouts.map((item) => ({ value: String(item.id), label: `${item.name} · v${item.version}` }))} value={layoutId ? String(layoutId) : null} onChange={choose} /><TextInput label="Layout name" value={draft.name} onChange={(e) => setDraft((value) => ({ ...value, name: e.currentTarget.value }))} /></SimpleGrid><SegmentedControl value={tool} onChange={(value) => setTool(value as typeof tool)} data={[{ value: 'reference', label: 'Reference range' }, { value: 'analysis', label: 'Analysis range' }, { value: 'exclusion', label: 'Add exclusion' }]} /><SimpleGrid cols={{ base: 1, md: 2, xl: 4 }}><DateTime24Input label="Reference start" value={draft.reference_start} onChange={(value) => setDraft((row) => ({ ...row, reference_start: value }))} /><DateTime24Input label="Reference end" value={draft.reference_end} onChange={(value) => setDraft((row) => ({ ...row, reference_end: value }))} /><DateTime24Input label="Analysis start" value={draft.analysis_start} onChange={(value) => setDraft((row) => ({ ...row, analysis_start: value }))} /><DateTime24Input label="Analysis end" value={draft.analysis_end} onChange={(value) => setDraft((row) => ({ ...row, analysis_end: value }))} /></SimpleGrid><SimpleGrid cols={{ base: 1, md: 2 }}><NumberInput label="Bucket duration L (hours)" min={.001} value={draft.bucket_seconds / 3600} onChange={(value) => setDraft((row) => ({ ...row, bucket_seconds: Math.max(Number(value) || .001, .001) * 3600 }))} /><Select label="Reference/exclusion conflict" value={draft.reference_exclusion_action} onChange={(value) => setDraft((row) => ({ ...row, reference_exclusion_action: (value ?? 'filter_points') as 'filter_points' | 'drop_reference' }))} data={[{ value: 'filter_points', label: 'Filter excluded reference points' }, { value: 'drop_reference', label: 'Remove reference (blocks calculation)' }]} /></SimpleGrid><ScorePlot preview={preview} shapes={shapes} loading={plotLoading} onSelect={(selection) => { const r = range(selection); if (tool === 'reference') setDraft((row) => ({ ...row, reference_start: r.start, reference_end: r.end })); else if (tool === 'analysis') setDraft((row) => ({ ...row, analysis_start: r.start, analysis_end: r.end })); else setDraft((row) => ({ ...row, exclusions: [...row.exclusions, { exclusion_key: key('exclusion'), name: `Exclusion ${row.exclusions.length + 1}`, start_timestamp: r.start, end_timestamp: r.end }] })); }} />{draft.exclusions.map((item, index) => <SimpleGrid key={item.exclusion_key} cols={{ base: 1, md: 4 }}><TextInput label="Exclusion" value={item.name} onChange={(e) => setDraft((row) => ({ ...row, exclusions: row.exclusions.map((x, i) => i === index ? { ...x, name: e.currentTarget.value } : x) }))} /><DateTime24Input label="Start" value={item.start_timestamp} onChange={(value) => setDraft((row) => ({ ...row, exclusions: row.exclusions.map((x, i) => i === index ? { ...x, start_timestamp: value } : x) }))} /><DateTime24Input label="End (inclusive)" value={item.end_timestamp} onChange={(value) => setDraft((row) => ({ ...row, exclusions: row.exclusions.map((x, i) => i === index ? { ...x, end_timestamp: value } : x) }))} /><Button mt={25} color="red" variant="subtle" onClick={() => setDraft((row) => ({ ...row, exclusions: row.exclusions.filter((_, i) => i !== index) }))}>Remove</Button></SimpleGrid>)}{buckets && <><Paper withBorder p="sm"><Group justify="space-between"><Text fw={600}>Reference (not part of D_mean/D_max)</Text><Badge color={buckets.near_zero_iqr ? 'orange' : 'green'}>IQR {metric(buckets.reference_iqr)}</Badge></Group><Text size="sm">{draft.reference_start} → {draft.reference_end} · {buckets.reference_point_count}/{buckets.reference_original_point_count} points</Text></Paper><ScrollArea><Table striped withTableBorder><Table.Thead><Table.Tr><Table.Th>Bucket</Table.Th><Table.Th>Start</Table.Th><Table.Th>End</Table.Th><Table.Th>Used/original</Table.Th><Table.Th>Warning</Table.Th><Table.Th>Decision</Table.Th></Table.Tr></Table.Thead><Table.Tbody>{shown.map((item) => <Table.Tr key={item.bucket_key}><Table.Td>{item.bucket_key}</Table.Td><Table.Td>{item.start_timestamp}</Table.Td><Table.Td>{item.end_timestamp}</Table.Td><Table.Td>{item.used_point_count}/{item.original_point_count}</Table.Td><Table.Td><Badge color={item.status === 'ready' ? 'green' : item.status === 'conflict' ? 'orange' : 'gray'}>{item.reason ?? item.status}</Badge></Table.Td><Table.Td><Select size="xs" value={item.decision} disabled={['continuity gap', 'incomplete remainder', 'overlaps reference'].includes(item.reason ?? '')} data={[{ value: 'include', label: 'Include' }, { value: 'drop_bucket', label: 'Remove bucket' }, { value: 'filter_points', label: 'Filter excluded points' }]} onChange={(value) => decide(item.bucket_key, (value ?? 'include') as 'include' | 'drop_bucket' | 'filter_points')} /></Table.Td></Table.Tr>)}</Table.Tbody></Table></ScrollArea>{hidden.length > 0 && <><Button variant="subtle" color="gray" rightSection={removed ? <ChevronDown size={14} /> : <ChevronRight size={14} />} onClick={() => setRemoved((value) => !value)}>Removed buckets ({hidden.length})</Button><Collapse in={removed}>{hidden.map((item) => <Group key={item.bucket_key} justify="space-between" p="xs"><Text size="sm">{item.start_timestamp} → {item.end_timestamp}</Text><Button size="compact-xs" onClick={() => decide(item.bucket_key, 'include')}>Restore</Button></Group>)}</Collapse></>}</>}<Group justify="flex-end">{layoutId && <Button color="red" variant="subtle" onClick={() => void deleteDriftLayout(layoutId).then(() => choose(null)).then(() => run && listDriftLayouts(run.training_dataset_id).then(setLayouts))}>Delete layout</Button>}<Button variant="default" leftSection={<Save size={15} />} loading={busy} disabled={!run || !draft.name.trim()} onClick={() => void save()}>Save layout</Button><Button leftSection={<Calculator size={15} />} loading={busy} disabled={!layoutId || !buckets || buckets.buckets.some((item) => item.status === 'conflict')} onClick={() => void calculate()}>Calculate Score Stability</Button></Group></Stack></StepCard><Paper withBorder p="md"><Title order={4} mb="sm">B calculation history</Title>{active && <PlotlyChart data={[{ type: 'scatter', mode: 'lines+markers', x: active.buckets.filter((item) => item.included && item.normalized_drift != null).map((item) => item.start_timestamp), y: active.buckets.filter((item) => item.included && item.normalized_drift != null).map((item) => item.normalized_drift), name: 'D_k' }]} layout={{ xaxis: { type: 'date', title: { text: 'Bucket start' } }, yaxis: { title: { text: 'Normalized Wasserstein distance D_k' } } }} height={320} />}<ScrollArea><Table striped withTableBorder><Table.Thead><Table.Tr><Table.Th>Active</Table.Th><Table.Th>Run</Table.Th><Table.Th>Created</Table.Th><Table.Th>D_mean</Table.Th><Table.Th>D_max</Table.Th><Table.Th>IQR</Table.Th><Table.Th>Status</Table.Th><Table.Th /></Table.Tr></Table.Thead><Table.Tbody>{history.map((item) => <Table.Tr key={item.id}><Table.Td><Checkbox checked={item.active} disabled={item.stale} onChange={() => void activateWorkspaceDrift(model.training_run_id, item.id).then(onSummary).then(reload)} /></Table.Td><Table.Td>#{item.testing_run_id}</Table.Td><Table.Td>{item.created_at.replace('T', ' ')}</Table.Td><Table.Td>{metric(item.d_mean)}</Table.Td><Table.Td>{metric(item.d_max)}</Table.Td><Table.Td>{metric(item.reference_iqr)}</Table.Td><Table.Td><Badge color={item.stale ? 'orange' : item.active ? 'green' : 'gray'}>{item.stale ? 'Stale' : item.active ? 'Active' : 'History'}</Badge></Table.Td><Table.Td><Button size="compact-xs" color="red" variant="subtle" onClick={() => void deleteWorkspaceDriftCalculation(model.training_run_id, item.id).then(onSummary).then(reload)}><Trash2 size={14} /></Button></Table.Td></Table.Tr>)}{!history.length && <Table.Tr><Table.Td colSpan={8}><Text ta="center" c="dimmed">No B calculations yet.</Text></Table.Td></Table.Tr>}</Table.Tbody></Table></ScrollArea>{active && <><Title order={5} mt="md">Active calculation buckets</Title><ScrollArea><Table withTableBorder><Table.Thead><Table.Tr><Table.Th>Include</Table.Th><Table.Th>Bucket</Table.Th><Table.Th>Used/original</Table.Th><Table.Th>W₁</Table.Th><Table.Th>D_k</Table.Th><Table.Th>Reason</Table.Th></Table.Tr></Table.Thead><Table.Tbody>{active.buckets.map((item) => <Table.Tr key={item.id}><Table.Td><Checkbox checked={item.included} disabled={item.status !== 'ready' || active.stale} onChange={(e) => void setWorkspaceDriftBucketIncluded(model.training_run_id, item.id, e.currentTarget.checked).then(onSummary).then(reload)} /></Table.Td><Table.Td>{item.start_timestamp} → {item.end_timestamp}</Table.Td><Table.Td>{item.used_point_count}/{item.original_point_count}</Table.Td><Table.Td>{metric(item.wasserstein_1)}</Table.Td><Table.Td>{metric(item.normalized_drift)}</Table.Td><Table.Td>{item.reason ?? '—'}</Table.Td></Table.Tr>)}</Table.Tbody></Table></ScrollArea></>}</Paper></Stack>;
+  const datasetOf = (calculation: EvaluationDriftCalculation) => runs.find((item) => item.id === calculation.testing_run_id)?.training_dataset_name ?? `#${calculation.testing_run_id}`;
+
+  return (
+    <Stack gap="md">
+      {dialog}
+      <ConfirmDialog
+        opened={confirm === 'overwrite'}
+        title="Overwrite layout?"
+        message={overwriteNote ? `${overwriteNote} They are removed from the calculation history and from the aggregated D_mean/D_max.` : 'The saved layout is replaced by the visible definition.'}
+        confirmLoading={busy}
+        onCancel={() => setConfirm(null)}
+        actions={[{ label: 'Overwrite', color: 'red', onClick: () => { setConfirm(null); void persist(); } }]}
+      />
+      <ConfirmDialog
+        opened={confirm === 'delete'}
+        title="Delete layout?"
+        message="The layout definition is removed. Calculations that already used it keep their stored snapshot and stay in the history."
+        confirmLoading={busy}
+        onCancel={() => setConfirm(null)}
+        actions={[{ label: 'Delete', color: 'red', onClick: () => void removeLayout() }]}
+      />
+
+      <StepCard index={1} title="Inference run" color="blue">
+        <WorkspaceRunPicker
+          runs={runs} runId={runId} score={score} loading={plotLoading} loaded={Boolean(preview)}
+          onLoadPlot={() => void loadPlot()} onRun={chooseRun} onScore={setScore}
+        />
+      </StepCard>
+
+      <StepCard
+        index={2} title="Dataset-wide B layout" color="violet"
+        action={stage === 'edit' ? <Button variant="light" leftSection={<RefreshCw size={15} />} loading={busy} disabled={!run} onClick={() => void inspect()}>Generate / validate buckets</Button> : undefined}
+      >
+        <Stack gap="sm">
+          <LayoutChooser
+            stage={stage} layouts={layouts} layoutId={layoutId} kind="B" disabled={!run}
+            onStage={setStage}
+            onPick={(id) => { const row = layouts.find((item) => item.id === id); if (row) guard(() => adopt(row)); }}
+            onCreate={() => guard(create)}
+          />
+          {stage === 'edit' && (
+            <>
+              <TextInput label="Layout name" value={draft.name} onChange={(e) => { const name = e.currentTarget.value; setDraft((value) => ({ ...value, name })); }} />
+              <SegmentedControl value={tool} onChange={(value) => setTool(value as typeof tool)} data={[{ value: 'reference', label: 'Reference range' }, { value: 'analysis', label: 'Analysis range' }, { value: 'exclusion', label: 'Add exclusion' }]} />
+              <SimpleGrid cols={{ base: 1, md: 2, xl: 4 }}>
+                <DateTime24Input label="Reference start" value={draft.reference_start} onChange={(value) => setDraft((row) => ({ ...row, reference_start: value }))} />
+                <DateTime24Input label="Reference end" value={draft.reference_end} onChange={(value) => setDraft((row) => ({ ...row, reference_end: value }))} />
+                <DateTime24Input label="Analysis start" value={draft.analysis_start} onChange={(value) => setDraft((row) => ({ ...row, analysis_start: value }))} />
+                <DateTime24Input label="Analysis end" value={draft.analysis_end} onChange={(value) => setDraft((row) => ({ ...row, analysis_end: value }))} />
+              </SimpleGrid>
+              <SimpleGrid cols={{ base: 1, md: 2 }}>
+                <NumberInput label="Bucket duration L (hours)" min={.001} value={draft.bucket_seconds / 3600} onChange={(value) => setDraft((row) => ({ ...row, bucket_seconds: Math.max(Number(value) || .001, .001) * 3600 }))} />
+                <Select label="Reference/exclusion conflict" value={draft.reference_exclusion_action} onChange={(value) => setDraft((row) => ({ ...row, reference_exclusion_action: (value ?? 'filter_points') as 'filter_points' | 'drop_reference' }))} data={[{ value: 'filter_points', label: 'Filter excluded reference points' }, { value: 'drop_reference', label: 'Remove reference (blocks calculation)' }]} />
+              </SimpleGrid>
+            </>
+          )}
+          <ScorePlot
+            preview={preview} shapes={shapes} loading={plotLoading}
+            onSelect={(selection) => {
+              if (stage !== 'edit') return;
+              const r = range(selection);
+              if (tool === 'reference') setDraft((row) => ({ ...row, reference_start: r.start, reference_end: r.end }));
+              else if (tool === 'analysis') setDraft((row) => ({ ...row, analysis_start: r.start, analysis_end: r.end }));
+              else setDraft((row) => ({ ...row, exclusions: [...row.exclusions, { exclusion_key: key('exclusion'), name: `Exclusion ${row.exclusions.length + 1}`, start_timestamp: r.start, end_timestamp: r.end }] }));
+            }}
+          />
+          {stage === 'edit' && draft.exclusions.map((item, index) => <SimpleGrid key={item.exclusion_key} cols={{ base: 1, md: 4 }}><TextInput label="Exclusion" value={item.name} onChange={(e) => { const name = e.currentTarget.value; setDraft((row) => ({ ...row, exclusions: row.exclusions.map((x, i) => i === index ? { ...x, name } : x) })); }} /><DateTime24Input label="Start" value={item.start_timestamp} onChange={(value) => setDraft((row) => ({ ...row, exclusions: row.exclusions.map((x, i) => i === index ? { ...x, start_timestamp: value } : x) }))} /><DateTime24Input label="End (inclusive)" value={item.end_timestamp} onChange={(value) => setDraft((row) => ({ ...row, exclusions: row.exclusions.map((x, i) => i === index ? { ...x, end_timestamp: value } : x) }))} /><Button mt={25} color="red" variant="subtle" onClick={() => setDraft((row) => ({ ...row, exclusions: row.exclusions.filter((_, i) => i !== index) }))}>Remove</Button></SimpleGrid>)}
+          {stage === 'edit' && buckets && <><Paper withBorder p="sm"><Group justify="space-between"><Text fw={600}>Reference (not part of D_mean/D_max)</Text><Badge color={buckets.near_zero_iqr ? 'orange' : 'green'}>IQR {metric(buckets.reference_iqr)}</Badge></Group><Text size="sm">{draft.reference_start} → {draft.reference_end} · {buckets.reference_point_count}/{buckets.reference_original_point_count} points</Text></Paper><ScrollArea><Table striped withTableBorder><Table.Thead><Table.Tr><Table.Th>Bucket</Table.Th><Table.Th>Start</Table.Th><Table.Th>End</Table.Th><Table.Th>Used/original</Table.Th><Table.Th>Warning</Table.Th><Table.Th>Decision</Table.Th></Table.Tr></Table.Thead><Table.Tbody>{shown.map((item) => <Table.Tr key={item.bucket_key}><Table.Td>{item.bucket_key}</Table.Td><Table.Td>{item.start_timestamp}</Table.Td><Table.Td>{item.end_timestamp}</Table.Td><Table.Td>{item.used_point_count}/{item.original_point_count}</Table.Td><Table.Td><Badge color={item.status === 'ready' ? 'green' : item.status === 'conflict' ? 'orange' : 'gray'}>{item.reason ?? item.status}</Badge></Table.Td><Table.Td><Select size="xs" value={item.decision} disabled={['continuity gap', 'incomplete remainder', 'overlaps reference'].includes(item.reason ?? '')} data={[{ value: 'include', label: 'Include' }, { value: 'drop_bucket', label: 'Remove bucket' }, { value: 'filter_points', label: 'Filter excluded points' }]} onChange={(value) => decide(item.bucket_key, (value ?? 'include') as 'include' | 'drop_bucket' | 'filter_points')} /></Table.Td></Table.Tr>)}</Table.Tbody></Table></ScrollArea>{hidden.length > 0 && <><Button variant="subtle" color="gray" rightSection={removed ? <ChevronDown size={14} /> : <ChevronRight size={14} />} onClick={() => setRemoved((value) => !value)}>Removed buckets ({hidden.length})</Button><Collapse in={removed}>{hidden.map((item) => <Group key={item.bucket_key} justify="space-between" p="xs"><Text size="sm">{item.start_timestamp} → {item.end_timestamp}</Text><Button size="compact-xs" onClick={() => decide(item.bucket_key, 'include')}>Restore</Button></Group>)}</Collapse></>}</>}
+          {stage === 'edit' && (
+            <Group justify="space-between" wrap="wrap">
+              <Text size="xs" c="dimmed">
+                {!buckets ? 'Generate the buckets to check the layout before calculating.'
+                  : layoutDirty ? 'Save the layout to calculate it.'
+                  : 'Layout saved — ready to calculate.'}
+              </Text>
+              <Group justify="flex-end">
+                {layoutId && <Button color="red" variant="subtle" leftSection={<Trash2 size={15} />} onClick={() => setConfirm('delete')}>Delete layout</Button>}
+                <Button variant="default" leftSection={<Save size={15} />} loading={busy} disabled={!run || !draft.name.trim()} onClick={() => layoutId ? setConfirm('overwrite') : void persist()}>Save layout</Button>
+                <Button leftSection={<Calculator size={15} />} loading={busy} disabled={!layoutId || layoutDirty || !buckets || buckets.buckets.some((item) => item.status === 'conflict')} onClick={() => void calculate()}>Calculate Score Stability</Button>
+              </Group>
+            </Group>
+          )}
+        </Stack>
+      </StepCard>
+
+      <Paper withBorder p="md">
+        <Title order={4} mb="sm">B calculation history</Title>
+        {active && <PlotlyChart data={[{ type: 'scatter', mode: 'lines+markers', x: active.buckets.filter((item) => item.included && item.normalized_drift != null).map((item) => item.start_timestamp), y: active.buckets.filter((item) => item.included && item.normalized_drift != null).map((item) => item.normalized_drift), name: 'D_k' }]} layout={{ xaxis: { type: 'date', title: { text: 'Bucket start' } }, yaxis: { title: { text: 'Normalized Wasserstein distance D_k' } } }} height={320} />}
+        <ScrollArea><Table striped withTableBorder><Table.Thead><Table.Tr><Table.Th>Active</Table.Th><Table.Th>Inference dataset</Table.Th><Table.Th>Created</Table.Th><Table.Th>D_mean</Table.Th><Table.Th>D_max</Table.Th><Table.Th>IQR</Table.Th><Table.Th>Status</Table.Th><Table.Th /></Table.Tr></Table.Thead><Table.Tbody>{history.map((item) => <Table.Tr key={item.id}><Table.Td><Checkbox checked={item.active} disabled={item.stale} onChange={() => void activateWorkspaceDrift(model.training_run_id, item.id).then(onSummary).then(reload)} /></Table.Td><Table.Td>{datasetOf(item)}</Table.Td><Table.Td>{item.created_at.replace('T', ' ')}</Table.Td><Table.Td>{metric(item.d_mean)}</Table.Td><Table.Td>{metric(item.d_max)}</Table.Td><Table.Td>{metric(item.reference_iqr)}</Table.Td><Table.Td><Badge color={item.stale ? 'orange' : item.active ? 'green' : 'gray'}>{item.stale ? 'Stale' : item.active ? 'Active' : 'History'}</Badge></Table.Td><Table.Td><Button size="compact-xs" color="red" variant="subtle" onClick={() => void deleteWorkspaceDriftCalculation(model.training_run_id, item.id).then(onSummary).then(reload)}><Trash2 size={14} /></Button></Table.Td></Table.Tr>)}{!history.length && <Table.Tr><Table.Td colSpan={8}><Text ta="center" c="dimmed">No B calculations yet.</Text></Table.Td></Table.Tr>}</Table.Tbody></Table></ScrollArea>
+        {active && <><Title order={5} mt="md">Active calculation buckets</Title><ScrollArea><Table withTableBorder><Table.Thead><Table.Tr><Table.Th>Include</Table.Th><Table.Th>Bucket</Table.Th><Table.Th>Used/original</Table.Th><Table.Th>W₁</Table.Th><Table.Th>D_k</Table.Th><Table.Th>Reason</Table.Th></Table.Tr></Table.Thead><Table.Tbody>{active.buckets.map((item) => <Table.Tr key={item.id}><Table.Td><Checkbox checked={item.included} disabled={item.status !== 'ready' || active.stale} onChange={(e) => void setWorkspaceDriftBucketIncluded(model.training_run_id, item.id, e.currentTarget.checked).then(onSummary).then(reload)} /></Table.Td><Table.Td>{item.start_timestamp} → {item.end_timestamp}</Table.Td><Table.Td>{item.used_point_count}/{item.original_point_count}</Table.Td><Table.Td>{metric(item.wasserstein_1)}</Table.Td><Table.Td>{metric(item.normalized_drift)}</Table.Td><Table.Td>{item.reason ?? '—'}</Table.Td></Table.Tr>)}</Table.Tbody></Table></ScrollArea></>}
+      </Paper>
+    </Stack>
+  );
 }
 
 function modelMetadata(model: EvaluationWorkspaceModel): ModelFilterMetadata {

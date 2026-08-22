@@ -114,27 +114,58 @@ def _scores(
     ]
 
 
+def _outdated(db: Session, calculation) -> bool:
+    source = db.get(models.TestingRun, calculation.testing_run_id)
+    return source is None or source.result_revision != calculation.source_result_revision or source.status != "finished"
+
+
 def _mark_stale(db: Session, workspace: models.EvaluationModelWorkspace) -> None:
+    """A separation result only ever reflects the current layout and run, so an outdated
+    one is dropped instead of kept around; drift keeps its activatable history."""
     changed = False
     for calculation in db.scalars(select(models.EvaluationSeparationCalculation).where(
         models.EvaluationSeparationCalculation.workspace_id == workspace.id,
-        models.EvaluationSeparationCalculation.stale.is_(False),
     )).all():
-        source = db.get(models.TestingRun, calculation.testing_run_id)
-        if source is None or source.result_revision != calculation.source_result_revision or source.status != "finished":
-            calculation.stale = True
+        if _outdated(db, calculation):
+            db.delete(calculation)
             changed = True
     for calculation in db.scalars(select(models.EvaluationDriftCalculation).where(
         models.EvaluationDriftCalculation.workspace_id == workspace.id,
         models.EvaluationDriftCalculation.stale.is_(False),
     )).all():
-        source = db.get(models.TestingRun, calculation.testing_run_id)
-        if source is None or source.result_revision != calculation.source_result_revision or source.status != "finished":
+        if _outdated(db, calculation):
             calculation.stale = True
             calculation.active = False
             changed = True
     if changed:
+        db.flush()
         _reaggregate(db, workspace)
+
+
+def _drop_layout_calculations(db: Session, calculation_model, layout_id: int) -> None:
+    """Editing a layout invalidates every calculation that used it, in any workspace."""
+    rows = db.scalars(select(calculation_model).where(calculation_model.layout_id == layout_id)).all()
+    if not rows:
+        return
+    workspace_ids = {row.workspace_id for row in rows}
+    for row in rows:
+        db.delete(row)
+    db.flush()
+    for workspace in db.scalars(select(models.EvaluationModelWorkspace).where(
+        models.EvaluationModelWorkspace.id.in_(workspace_ids)
+    )).all():
+        _reaggregate(db, workspace)
+
+
+def _layout_calculation_counts(db: Session, calculation_model, layout_ids: list[int]) -> dict[int, int]:
+    if not layout_ids:
+        return {}
+    rows = db.execute(
+        select(calculation_model.layout_id, func.count(calculation_model.id))
+        .where(calculation_model.layout_id.in_(layout_ids))
+        .group_by(calculation_model.layout_id)
+    ).all()
+    return {layout_id: count for layout_id, count in rows}
 
 
 def _reaggregate(db: Session, workspace: models.EvaluationModelWorkspace) -> None:
@@ -143,7 +174,6 @@ def _reaggregate(db: Session, workspace: models.EvaluationModelWorkspace) -> Non
         .join(models.EvaluationSeparationCalculation)
         .where(
             models.EvaluationSeparationCalculation.workspace_id == workspace.id,
-            models.EvaluationSeparationCalculation.stale.is_(False),
             models.EvaluationSeparationResult.included.is_(True),
         )
     ))
@@ -169,7 +199,6 @@ def _summary(db: Session, workspace: models.EvaluationModelWorkspace) -> dict[st
         .join(models.EvaluationSeparationCalculation)
         .where(
             models.EvaluationSeparationCalculation.workspace_id == workspace.id,
-            models.EvaluationSeparationCalculation.stale.is_(False),
             models.EvaluationSeparationResult.included.is_(True),
         )
     ) or 0
@@ -258,7 +287,8 @@ def list_separation_layouts(db: Session, dataset_id: int) -> list[dict[str, Any]
     rows = db.scalars(select(models.EvaluationSeparationLayout).options(selectinload(models.EvaluationSeparationLayout.pairs)).where(
         models.EvaluationSeparationLayout.training_dataset_id == dataset_id
     ).order_by(models.EvaluationSeparationLayout.name)).all()
-    return [_sep_layout_dict(row) for row in rows]
+    counts = _layout_calculation_counts(db, models.EvaluationSeparationCalculation, [row.id for row in rows])
+    return [{**_sep_layout_dict(row), "calculation_count": counts.get(row.id, 0)} for row in rows]
 
 
 def save_separation_layout(db: Session, payload: schemas.EvaluationSeparationLayoutInput, layout_id: int | None = None) -> dict[str, Any]:
@@ -281,11 +311,14 @@ def save_separation_layout(db: Session, payload: schemas.EvaluationSeparationLay
     else:
         row.version += 1
     row.name, row.description = payload.name.strip(), payload.description
-    row.pairs.clear()
+    # The keys usually survive an edit, so the orphans must be gone before the
+    # replacements are inserted or the (layout_id, pair_key) constraint trips.
+    row.pairs.clear(); db.flush()
     for index, pair in enumerate(payload.pairs):
         row.pairs.append(models.EvaluationSeparationPair(position=index, **pair.model_dump()))
+    _drop_layout_calculations(db, models.EvaluationSeparationCalculation, row.id)
     db.commit(); db.refresh(row)
-    return _sep_layout_dict(row)
+    return {**_sep_layout_dict(row), "calculation_count": 0}
 
 
 def delete_separation_layout(db: Session, layout_id: int) -> bool:
@@ -354,7 +387,7 @@ def list_separation_results(db: Session, training_run_id: int) -> list[dict[str,
     db.commit()
     return [{"id": r.id, "calculation_id": c.id, "testing_run_id": c.testing_run_id,
              "layout_version": c.layout_version, "score_series": c.score_series,
-             "source_result_revision": c.source_result_revision, "stale": c.stale,
+             "source_result_revision": c.source_result_revision,
              "pair_key": r.pair_key, "pair_name": r.pair_name, "normal_start": r.normal_start,
              "normal_end": r.normal_end, "anomaly_start": r.anomaly_start, "anomaly_end": r.anomaly_end,
              "normal_median": r.normal_median, "normal_mad": r.normal_mad, "robust_scale": r.robust_scale,
@@ -411,7 +444,8 @@ def _generated_buckets(layout: schemas.EvaluationDriftLayoutInput) -> list[schem
 def list_drift_layouts(db: Session, dataset_id: int) -> list[dict[str, Any]]:
     rows = db.scalars(select(models.EvaluationDriftLayout).options(selectinload(models.EvaluationDriftLayout.exclusions), selectinload(models.EvaluationDriftLayout.buckets)).where(
         models.EvaluationDriftLayout.training_dataset_id == dataset_id).order_by(models.EvaluationDriftLayout.name)).all()
-    return [_drift_layout_dict(row) for row in rows]
+    counts = _layout_calculation_counts(db, models.EvaluationDriftCalculation, [row.id for row in rows])
+    return [{**_drift_layout_dict(row), "calculation_count": counts.get(row.id, 0)} for row in rows]
 
 
 def save_drift_layout(db: Session, payload: schemas.EvaluationDriftLayoutInput, layout_id: int | None = None) -> dict[str, Any]:
@@ -438,11 +472,12 @@ def save_drift_layout(db: Session, payload: schemas.EvaluationDriftLayoutInput, 
     row.reference_start, row.reference_end = payload.reference_start, payload.reference_end
     row.analysis_start, row.analysis_end, row.bucket_seconds = payload.analysis_start, payload.analysis_end, payload.bucket_seconds
     row.reference_exclusion_action = payload.reference_exclusion_action
-    row.exclusions.clear(); row.buckets.clear()
+    row.exclusions.clear(); row.buckets.clear(); db.flush()
     for exclusion in payload.exclusions: row.exclusions.append(models.EvaluationDriftExclusion(**exclusion.model_dump()))
     for index, bucket in enumerate(_generated_buckets(payload)):
         row.buckets.append(models.EvaluationDriftBucket(position=index, **bucket.model_dump()))
-    db.commit(); db.refresh(row); return _drift_layout_dict(row)
+    _drop_layout_calculations(db, models.EvaluationDriftCalculation, row.id)
+    db.commit(); db.refresh(row); return {**_drift_layout_dict(row), "calculation_count": 0}
 
 
 def delete_drift_layout(db: Session, layout_id: int) -> bool:

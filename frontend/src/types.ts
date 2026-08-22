@@ -732,12 +732,13 @@ export type EvaluationSeparationPair = {
 
 export type EvaluationSeparationLayout = {
   id: number; training_dataset_id: number; name: string; description: string | null;
-  version: number; pairs: EvaluationSeparationPair[]; created_at: string; updated_at: string;
+  version: number; pairs: EvaluationSeparationPair[]; calculation_count: number;
+  created_at: string; updated_at: string;
 };
 
 export type EvaluationWorkspaceSeparationResult = {
   id: number; calculation_id: number; testing_run_id: number; layout_version: number;
-  score_series: string; source_result_revision: number; stale: boolean;
+  score_series: string; source_result_revision: number;
   pair_key: string; pair_name: string; normal_start: string; normal_end: string;
   anomaly_start: string; anomaly_end: string; normal_median: number; normal_mad: number;
   robust_scale: number; normal_point_count: number; anomaly_point_count: number;
@@ -758,7 +759,7 @@ export type EvaluationDriftLayoutPayload = {
   exclusions: EvaluationDriftExclusion[]; buckets: EvaluationDriftBucket[];
 };
 export type EvaluationDriftLayout = EvaluationDriftLayoutPayload & {
-  id: number; version: number; created_at: string; updated_at: string;
+  id: number; version: number; calculation_count: number; created_at: string; updated_at: string;
 };
 export type EvaluationDriftPreviewBucket = EvaluationDriftBucket & {
   original_point_count: number; used_point_count: number; exclusion_overlap: boolean;
