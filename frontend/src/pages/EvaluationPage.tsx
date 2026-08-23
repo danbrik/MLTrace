@@ -15,9 +15,8 @@ import { LayoutChooser, useUnsavedGuard, type LayoutStage } from '../evaluation/
 import { WorkspaceRunPicker } from '../evaluation/WorkspaceRunPicker';
 import { buildDriftPlotSeries, SCORE_STABILITY_EXPLANATION_DEFAULT_OPEN, SCORE_STABILITY_HELP } from '../evaluation/stabilityPlot';
 import { normalizeHorizontalSelection, normalizePairs, separationPairsEqual } from '../evaluation/workspaceHelpers';
-import type { Config, Data, Layout, PlotRelayoutEvent } from '../lib/plotly';
+import type { Data } from '../lib/plotly';
 import { withLineGapPolicy } from '../lib/plotGaps';
-import { relayoutRange, useVisibleAutomaticYRanges, type TimeSeriesTraceValues } from '../lib/timeSeriesViewport';
 import type { EvaluationDriftCalculation, EvaluationDriftLayout, EvaluationDriftLayoutPayload, EvaluationDriftPreview, EvaluationScorePreview, EvaluationSeparationLayout, EvaluationSeparationPair, EvaluationWorkspaceModel, EvaluationWorkspaceSeparationResult, TestingRun } from '../types';
 
 type View = 'overview' | 'separation' | 'drift';
@@ -31,46 +30,6 @@ function Summary({ model }: { model: EvaluationWorkspaceModel }) {
   return <Paper withBorder p="md"><Group justify="space-between" mb="sm"><div><Text fw={700}>{model.name}</Text><Text size="xs" c="dimmed">Artifact {model.artifact_signature.slice(0, 12)}…</Text></div><Badge>{model.method_type}</Badge></Group><Table striped withTableBorder><Table.Thead><Table.Tr><Table.Th>Sep_median</Table.Th><Table.Th>Sep_min</Table.Th><Table.Th>D_mean</Table.Th><Table.Th>D_max</Table.Th><Table.Th>Included A rows</Table.Th><Table.Th>Active B run</Table.Th></Table.Tr></Table.Thead><Table.Tbody><Table.Tr><Table.Td>{metric(model.sep_median)}</Table.Td><Table.Td>{metric(model.sep_min)}</Table.Td><Table.Td>{metric(model.d_mean)}</Table.Td><Table.Td>{metric(model.d_max)}</Table.Td><Table.Td>{model.included_separation_results}</Table.Td><Table.Td>{model.active_drift_testing_run_id ? `#${model.active_drift_testing_run_id}` : 'N/A'}</Table.Td></Table.Tr></Table.Tbody></Table></Paper>;
 }
 
-function AutoRescaledTimeSeriesPlot({
-  data, layout, height, config, onSelected,
-}: {
-  data: Data[];
-  layout: Partial<Layout>;
-  height: number;
-  config?: Partial<Config>;
-  onSelected?: (selection: PlotlyChartSelection) => void;
-}) {
-  const traceValues = useMemo<TimeSeriesTraceValues[]>(() => data.map((trace) => {
-    const values = trace as unknown as {
-      x?: Array<string | number | Date | null>;
-      y?: Array<number | null>;
-      yaxis?: string;
-    };
-    return { x: values.x ?? [], y: values.y ?? [], yaxis: values.yaxis ?? 'y' };
-  }), [data]);
-  const { automaticYRanges, scheduleAutomaticYRanges } = useVisibleAutomaticYRanges(traceValues);
-  const yRange = automaticYRanges.y;
-  const handleRelayout = useCallback((event: PlotRelayoutEvent) => {
-    const xRange = relayoutRange(event, 'xaxis');
-    if (xRange !== undefined) scheduleAutomaticYRanges(xRange);
-  }, [scheduleAutomaticYRanges]);
-  const effectiveLayout = useMemo<Partial<Layout>>(() => ({
-    ...layout,
-    yaxis: {
-      ...layout.yaxis,
-      uirevision: `${String(layout.uirevision ?? 'evaluation')}:y:${yRange?.join(':') ?? 'empty'}`,
-      ...(yRange ? { range: yRange, autorange: false } : { autorange: true }),
-    },
-  }), [layout, yRange]);
-  const effectiveConfig = useMemo<Partial<Config>>(() => ({
-    ...config,
-    modeBarButtonsToAdd: [...new Set([...(config?.modeBarButtonsToAdd ?? []), 'autoScale2d' as const])],
-    modeBarButtonsToRemove: (config?.modeBarButtonsToRemove ?? ['lasso2d', 'select2d']).filter((button) => button !== 'autoScale2d'),
-  }), [config]);
-
-  return <PlotlyChart data={data} layout={effectiveLayout} config={effectiveConfig} height={height} onSelected={onSelected} onRelayout={handleRelayout} />;
-}
-
 function ScorePlot({ preview, shapes, loading, onSelect }: { preview: EvaluationScorePreview | null; shapes: Shape[]; loading: boolean; onSelect: (selection: PlotlyChartSelection) => void }) {
   if (loading) return <Paper withBorder p="xl"><Center><Group gap="sm"><Loader size="sm" /><Text size="sm">Loading score plot…</Text></Group></Center></Paper>;
   if (!preview) return <Alert color="gray">Select a finished inference run and press “Load score plot”.</Alert>;
@@ -80,7 +39,7 @@ function ScorePlot({ preview, shapes, loading, onSelect }: { preview: Evaluation
     y: preview.points.map((point) => point.value),
     line: { width: 1.2 }, connectgaps: false,
   } as Data, { continuity: preview.points.map((point) => point.continuity_segment ?? 0) });
-  return <Stack gap="xs">{preview.decimated && <Badge variant="light" w="fit-content">Preview {preview.points.length.toLocaleString()} / {preview.total.toLocaleString()} points</Badge>}<AutoRescaledTimeSeriesPlot key={`${preview.testing_run_id}:${preview.score_series}`} data={[scoreData]} layout={{ dragmode: 'select', hovermode: 'x unified', shapes, uirevision: `${preview.testing_run_id}:${preview.score_series}`, showlegend: false, xaxis: { type: 'date', rangeslider: { visible: true, thickness: .1 }, title: { text: 'Dataset-local time' } }, yaxis: { title: { text: 'Anomaly score' } } }} config={{ scrollZoom: true, modeBarButtonsToAdd: ['select2d'] }} height={430} onSelected={onSelect} /><Text size="xs" c="dimmed">Zoom, pan and the range slider only change the view. Drag horizontally to apply the selected range tool.</Text></Stack>;
+  return <Stack gap="xs">{preview.decimated && <Badge variant="light" w="fit-content">Preview {preview.points.length.toLocaleString()} / {preview.total.toLocaleString()} points</Badge>}<PlotlyChart key={`${preview.testing_run_id}:${preview.score_series}`} data={[scoreData]} layout={{ dragmode: 'select', hovermode: 'x unified', shapes, uirevision: `${preview.testing_run_id}:${preview.score_series}`, showlegend: false, xaxis: { type: 'date', rangeslider: { visible: true, thickness: .1 }, title: { text: 'Dataset-local time' } }, yaxis: { title: { text: 'Anomaly score' } } }} config={{ scrollZoom: true, modeBarButtonsToAdd: ['select2d'] }} height={430} onSelected={onSelect} rescaleYOnVisibleX /><Text size="xs" c="dimmed">Zoom, pan and the range slider only change the view. Drag horizontally to apply the selected range tool.</Text></Stack>;
 }
 
 /** Score preview loading shared by both methods: manual first load, automatic on a score series switch. */
@@ -488,7 +447,7 @@ function Drift({ model, runs, onSummary }: { model: EvaluationWorkspaceModel; ru
 
       <Paper withBorder p="md">
         <Title order={4} mb="sm">B calculation history</Title>
-        {active && <AutoRescaledTimeSeriesPlot key={`drift:${active.id}`} data={activePlotData} layout={{ uirevision: `drift:${active.id}`, hovermode: 'x unified', xaxis: { type: 'date', rangeslider: { visible: true, thickness: .1 }, title: { text: 'Bucket start' } }, yaxis: { title: { text: 'Normalized Wasserstein distance D_k' } } }} config={{ scrollZoom: true }} height={320} />}
+        {active && <PlotlyChart key={`drift:${active.id}`} data={activePlotData} layout={{ uirevision: `drift:${active.id}`, hovermode: 'x unified', xaxis: { type: 'date', rangeslider: { visible: true, thickness: .1 }, title: { text: 'Bucket start' } }, yaxis: { title: { text: 'Normalized Wasserstein distance D_k' } } }} config={{ scrollZoom: true }} height={320} rescaleYOnVisibleX />}
         <ScrollArea><Table striped withTableBorder><Table.Thead><Table.Tr><Table.Th>Active</Table.Th><Table.Th>Inference dataset</Table.Th><Table.Th>Created</Table.Th><Table.Th>D_mean</Table.Th><Table.Th>D_max</Table.Th><Table.Th>IQR</Table.Th><Table.Th>Status</Table.Th><Table.Th /></Table.Tr></Table.Thead><Table.Tbody>{history.map((item) => <Table.Tr key={item.id}><Table.Td><Checkbox checked={item.active} disabled={item.stale} onChange={() => void activateWorkspaceDrift(model.training_run_id, item.id).then(onSummary).then(reload)} /></Table.Td><Table.Td>{datasetOf(item)}</Table.Td><Table.Td>{item.created_at.replace('T', ' ')}</Table.Td><Table.Td>{metric(item.d_mean)}</Table.Td><Table.Td>{metric(item.d_max)}</Table.Td><Table.Td>{metric(item.reference_iqr)}</Table.Td><Table.Td><Badge color={item.stale ? 'orange' : item.active ? 'green' : 'gray'}>{item.stale ? 'Stale' : item.active ? 'Active' : 'History'}</Badge></Table.Td><Table.Td><Button size="compact-xs" color="red" variant="subtle" onClick={() => void deleteWorkspaceDriftCalculation(model.training_run_id, item.id).then(onSummary).then(reload)}><Trash2 size={14} /></Button></Table.Td></Table.Tr>)}{!history.length && <Table.Tr><Table.Td colSpan={8}><Text ta="center" c="dimmed">No B calculations yet.</Text></Table.Td></Table.Tr>}</Table.Tbody></Table></ScrollArea>
         {active && <><Title order={5} mt="md">Active calculation buckets</Title><ScrollArea><Table withTableBorder><Table.Thead><Table.Tr><Table.Th>Include</Table.Th><Table.Th>Bucket</Table.Th><Table.Th>Used/original</Table.Th><Table.Th>W₁</Table.Th><Table.Th>D_k</Table.Th><Table.Th>Reason</Table.Th></Table.Tr></Table.Thead><Table.Tbody>{active.buckets.map((item) => <Table.Tr key={item.id}><Table.Td><Checkbox checked={item.included} disabled={item.status !== 'ready' || active.stale} onChange={(e) => void setWorkspaceDriftBucketIncluded(model.training_run_id, item.id, e.currentTarget.checked).then(onSummary).then(reload)} /></Table.Td><Table.Td>{item.start_timestamp} → {item.end_timestamp}</Table.Td><Table.Td>{item.used_point_count}/{item.original_point_count}</Table.Td><Table.Td>{metric(item.wasserstein_1)}</Table.Td><Table.Td>{metric(item.normalized_drift)}</Table.Td><Table.Td>{item.reason ?? '—'}</Table.Td></Table.Tr>)}</Table.Tbody></Table></ScrollArea></>}
       </Paper>

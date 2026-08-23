@@ -1573,7 +1573,7 @@ export function AnomalyDetectionPage({ active }: { active: boolean }) {
                 <SegmentedControl fullWidth data={[{ value: 'full', label: 'Entire period' }, { value: 'selection', label: 'Select in plot' }]} value={rangeMode} onChange={(value) => { setRangeMode(value as 'full' | 'selection'); if (value === 'full') { setStart(fullStart); setEnd(fullEnd); } }} />
               </div>
             </SimpleGrid>
-            <PlotlyChart data={previewData} layout={previewLayout} height={360} onSelected={rangeMode === 'selection' ? selectRange : undefined} />
+            <PlotlyChart data={previewData} layout={previewLayout} height={360} onSelected={rangeMode === 'selection' ? selectRange : undefined} rescaleYOnVisibleX />
             <SimpleGrid cols={{ base: 1, md: 2 }}>
               <DateTime24Input label="Start" value={rangeMode === 'full' ? fullStart : start} min={fullStart} max={fullEnd} disabled={rangeMode === 'full'} onChange={setStart} />
               <DateTime24Input label="End" value={rangeMode === 'full' ? fullEnd : end} min={fullStart} max={fullEnd} disabled={rangeMode === 'full'} onChange={setEnd} />
@@ -1649,6 +1649,7 @@ export function AnomalyDetectionPage({ active }: { active: boolean }) {
                     layout={calibrationPreviewLayout}
                     height={280}
                     onSelected={selectCalibrationRange}
+                    rescaleYOnVisibleX
                   />
                   <SimpleGrid cols={{ base: 1, md: 2 }}>
                     <DateTime24Input
@@ -1802,6 +1803,7 @@ export function AnomalyDetectionPage({ active }: { active: boolean }) {
                             layout={simpleThresholdRangeLayout}
                             height={300}
                             onSelected={selectSimpleThresholdRange}
+                            rescaleYOnVisibleX
                           />
                           <SimpleGrid cols={{ base: 1, md: 3 }}>
                             <DateTime24Input label="Normal range start" value={simpleRangeStart} min={analysisStart} max={analysisEnd} disabled={running || thresholdCalculating} onChange={setSimpleRangeStart} />
@@ -1964,6 +1966,7 @@ export function AnomalyDetectionPage({ active }: { active: boolean }) {
                             layout={thresholdPreviewLayout}
                             height={280}
                             onSelected={thresholdRangeMode === 'selection' ? selectThresholdRange : undefined}
+                            rescaleYOnVisibleX
                           />
                           <SimpleGrid cols={{ base: 1, md: 2 }}>
                             <DateTime24Input label="Validation start" value={thresholdRangeMode === 'full' ? thresholdFullStart : thresholdStart} min={thresholdFullStart} max={thresholdFullEnd} disabled={thresholdRangeMode === 'full' || thresholdCalculating} onChange={setThresholdStart} />
@@ -2249,11 +2252,11 @@ export function AnomalyDetectionPage({ active }: { active: boolean }) {
               </Alert>
             )}
             {activeRun.decimated && <Alert color="blue">Plot reduced from {activeRun.total.toLocaleString()} points; event detection used the full series.</Alert>}
-            <PlotlyChart data={resultData} layout={{ hovermode: 'x unified', shapes: resultShapes, annotations: resultAnnotations, xaxis: { type: 'date', title: { text: 'Time' } }, yaxis: { title: { text: activeRun.score_series.replace('_', ' ').toUpperCase() } }, legend: { orientation: 'h' } }} height={480} />
+            <PlotlyChart data={resultData} layout={{ hovermode: 'x unified', shapes: resultShapes, annotations: resultAnnotations, xaxis: { type: 'date', title: { text: 'Time' } }, yaxis: { title: { text: activeRun.score_series.replace('_', ' ').toUpperCase() } }, legend: { orientation: 'h' } }} height={480} rescaleYOnVisibleX />
             <Button variant="subtle" justify="space-between" rightSection={detailsOpen ? <ChevronDown size={16} /> : <ChevronRight size={16} />} onClick={() => setDetailsOpen((value) => !value)}>Diagnostics</Button>
             <Collapse in={detailsOpen}>
               <Stack gap="md">
-                <PlotlyChart data={diagnosticData} layout={{ hovermode: 'x unified', xaxis: { type: 'date' }, yaxis: { title: { text: ['event_threshold', 'simple_threshold'].includes(activeRun.config.algorithm) ? 'Candidate count' : activeRun.config.algorithm === 'rolling_sigma' ? 'Standard deviations' : 'Robust z-score' } }, ...(activeRun.config.algorithm === 'robust_cusum' ? { yaxis2: { title: { text: 'CUSUM' }, overlaying: 'y', side: 'right' } } : {}), legend: { orientation: 'h' } }} height={300} />
+                <PlotlyChart data={diagnosticData} layout={{ hovermode: 'x unified', xaxis: { type: 'date' }, yaxis: { title: { text: ['event_threshold', 'simple_threshold'].includes(activeRun.config.algorithm) ? 'Candidate count' : activeRun.config.algorithm === 'rolling_sigma' ? 'Standard deviations' : 'Robust z-score' } }, ...(activeRun.config.algorithm === 'robust_cusum' ? { yaxis2: { title: { text: 'CUSUM' }, overlaying: 'y', side: 'right' } } : {}), legend: { orientation: 'h' } }} height={300} rescaleYOnVisibleX />
                 {ROBUST_ALGORITHMS.includes(activeRun.config.algorithm) && (
                   <Stack gap="sm">
                     <Group justify="space-between" align="flex-end" wrap="wrap">

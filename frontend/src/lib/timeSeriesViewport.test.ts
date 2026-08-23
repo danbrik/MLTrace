@@ -5,6 +5,7 @@ import {
   paddedAxisRange,
   relayoutRange,
   visibleAxisRanges,
+  visibleYRelayoutUpdate,
   type TimeSeriesTraceValues,
 } from './timeSeriesViewport';
 
@@ -35,6 +36,26 @@ describe('time-series viewport ranges', () => {
     const start = new Date('2026-01-01T01:30:00Z').getTime();
     const end = new Date('2026-01-01T02:30:00Z').getTime();
     expect(visibleAxisRanges(traces, [start, end])).toEqual({});
+    expect(visibleYRelayoutUpdate(traces, [start, end])).toEqual({});
+  });
+
+  it('builds independent Plotly relayout updates for every visible Y axis', () => {
+    const multiAxis: TimeSeriesTraceValues[] = [
+      ...traces,
+      {
+        x: ['2026-01-01T01:00:00Z', '2026-01-01T03:00:00Z'],
+        y: [100, 200],
+        yaxis: 'y2',
+      },
+    ];
+    const start = new Date('2026-01-01T00:30:00Z').getTime();
+    const end = new Date('2026-01-01T03:00:00Z').getTime();
+    expect(visibleYRelayoutUpdate(multiAxis, [start, end])).toEqual({
+      'yaxis.range': [9, 31],
+      'yaxis.autorange': false,
+      'yaxis2.range': [95, 205],
+      'yaxis2.autorange': false,
+    });
   });
 
   it('parses Plotly zoom, range-slider, and autorange relayout shapes', () => {
@@ -49,6 +70,7 @@ describe('time-series viewport ranges', () => {
       new Date('2026-01-01T02:00:00Z').getTime(),
     ]);
     expect(relayoutRange({ 'xaxis.autorange': true } as unknown as PlotRelayoutEvent, 'xaxis')).toBeNull();
+    expect(relayoutRange({ 'yaxis.range': [0, 1] } as unknown as PlotRelayoutEvent, 'xaxis')).toBeUndefined();
   });
 
   it('preserves the Analysis cadence helper while sharing the viewport code', () => {

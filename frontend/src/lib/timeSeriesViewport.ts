@@ -61,6 +61,23 @@ export function visibleAxisRanges(
   }));
 }
 
+function layoutAxisName(traceAxis: string): string {
+  return traceAxis === 'y' ? 'yaxis' : `yaxis${traceAxis.replace(/^y/, '')}`;
+}
+
+export function visibleYRelayoutUpdate(
+  traces: TimeSeriesTraceValues[],
+  xRange: TimeSeriesAxisRange | null,
+): Record<string, unknown> {
+  const update: Record<string, unknown> = {};
+  Object.entries(visibleAxisRanges(traces, xRange)).forEach(([traceAxis, range]) => {
+    const layoutAxis = layoutAxisName(traceAxis);
+    update[`${layoutAxis}.range`] = range;
+    update[`${layoutAxis}.autorange`] = false;
+  });
+  return update;
+}
+
 function rangesEqual(left: TimeSeriesAxisRange | undefined, right: TimeSeriesAxisRange): boolean {
   return left !== undefined && left[0] === right[0] && left[1] === right[1];
 }
