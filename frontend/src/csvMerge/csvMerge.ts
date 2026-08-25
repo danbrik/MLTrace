@@ -17,10 +17,12 @@ export type CsvParseOutcome = {
 
 export type CsvJoinType = 'left' | 'inner' | 'full';
 export type CsvDuplicatePolicy = 'block' | 'keep_first';
+export type CsvKeyComparison = 'exact' | 'timestamp';
 
 export type CsvKeyPair = {
   primary: string;
   secondary: string;
+  comparison: CsvKeyComparison;
 };
 
 export type CsvSecondaryColumn = {
@@ -51,6 +53,8 @@ export type CsvMergeValidation = {
   secondaryDiscardedDuplicateRows: number;
   primaryMissingKeys: number;
   secondaryMissingKeys: number;
+  primaryInvalidTimestampRows: number;
+  secondaryInvalidTimestampRows: number;
   matchedRows: number;
   unmatchedPrimaryRows: number;
   unmatchedSecondaryRows: number;
@@ -133,29 +137,148 @@ function columnIndex(document: CsvDocument, name: string): number {
   return document.headers.indexOf(name);
 }
 
-function compositeKey(row: CsvCell[], indexes: number[]): { key: string | null; label: string } {
-  const values = indexes.map((index) => row[index] ?? null);
-  if (values.some((value) => value === null || value === '')) return { key: null, label: values.map((value) => value ?? '').join(' | ') };
-  return { key: JSON.stringify(values), label: values.join(' | ') };
+type TimestampStyle = {
+  dateSeparator: '-' | '.';
+  dateTimeSeparator: ' ' | 'T';
+  includeTime: boolean;
+  includeSeconds: boolean;
+  fractionDigits: number;
+};
+
+export type ParsedCsvTimestamp = {
+  canonical: string;
+  year: number;
+  month: number;
+  day: number;
+  hour: number;
+  minute: number;
+  second: number;
+  fraction: string;
+  style: TimestampStyle;
+};
+
+const TIMESTAMP_PATTERN = /^(\d{4})([-.])(\d{2})\2(\d{2})(?:([ T])(\d{2}):(\d{2})(?::(\d{2})(?:\.(\d+))?)?)?$/;
+
+function pad(value: number, width = 2): string {
+  return String(value).padStart(width, '0');
+}
+
+function daysInMonth(year: number, month: number): number {
+  if (month === 2) return year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0) ? 29 : 28;
+  return [4, 6, 9, 11].includes(month) ? 30 : 31;
+}
+
+export function parseCsvTimestamp(value: string): ParsedCsvTimestamp | null {
+  const match = TIMESTAMP_PATTERN.exec(value);
+  if (!match) return null;
+  const [, yearText, dateSeparator, monthText, dayText, dateTimeSeparator, hourText, minuteText, secondText, fractionText] = match;
+  const year = Number(yearText);
+  const month = Number(monthText);
+  const day = Number(dayText);
+  const hour = hourText === undefined ? 0 : Number(hourText);
+  const minute = minuteText === undefined ? 0 : Number(minuteText);
+  const second = secondText === undefined ? 0 : Number(secondText);
+  if (month < 1 || month > 12 || day < 1 || day > daysInMonth(year, month)
+    || hour > 23 || minute > 59 || second > 59) return null;
+  const fraction = (fractionText ?? '').replace(/0+$/, '');
+  const canonical = `${pad(year, 4)}-${pad(month)}-${pad(day)}T${pad(hour)}:${pad(minute)}:${pad(second)}${fraction ? `.${fraction}` : ''}`;
+  return {
+    canonical,
+    year,
+    month,
+    day,
+    hour,
+    minute,
+    second,
+    fraction,
+    style: {
+      dateSeparator: dateSeparator as '-' | '.',
+      dateTimeSeparator: (dateTimeSeparator ?? ' ') as ' ' | 'T',
+      includeTime: hourText !== undefined,
+      includeSeconds: secondText !== undefined,
+      fractionDigits: fractionText?.length ?? 0,
+    },
+  };
+}
+
+function timestampStyleSignature(value: ParsedCsvTimestamp): string {
+  return `${value.style.dateSeparator}|${value.style.dateTimeSeparator}|${value.style.includeTime}|${value.style.includeSeconds}|${value.style.fractionDigits}`;
+}
+
+function sampledTimestampProfile(document: CsvDocument, column: string): { ratio: number; styles: Set<string> } {
+  const index = columnIndex(document, column);
+  const values: string[] = [];
+  for (const row of document.rows) {
+    const value = row[index];
+    if (value !== null && value !== '') values.push(value);
+    if (values.length === 100) break;
+  }
+  const parsed = values.map(parseCsvTimestamp).filter((value): value is ParsedCsvTimestamp => value !== null);
+  return {
+    ratio: values.length === 0 ? 0 : parsed.length / values.length,
+    styles: new Set(parsed.map(timestampStyleSignature)),
+  };
+}
+
+export function timestampNormalizationSuggested(
+  primary: CsvDocument,
+  secondary: CsvDocument,
+  pair: CsvKeyPair,
+): boolean {
+  if (pair.comparison !== 'exact') return false;
+  const primaryProfile = sampledTimestampProfile(primary, pair.primary);
+  const secondaryProfile = sampledTimestampProfile(secondary, pair.secondary);
+  if (primaryProfile.ratio < 0.8 || secondaryProfile.ratio < 0.8) return false;
+  return [...primaryProfile.styles].some((style) => !secondaryProfile.styles.has(style))
+    || [...secondaryProfile.styles].some((style) => !primaryProfile.styles.has(style));
+}
+
+type KeySide = 'primary' | 'secondary';
+type CompositeKey = { key: string | null; reason: 'valid' | 'missing' | 'invalid_timestamp' };
+
+function compositeKey(
+  row: CsvCell[],
+  document: CsvDocument,
+  pairs: CsvKeyPair[],
+  side: KeySide,
+): CompositeKey {
+  const values = pairs.map((pair) => row[columnIndex(document, pair[side])] ?? null);
+  if (values.some((value) => value === null || value === '')) return { key: null, reason: 'missing' };
+  const normalized: string[] = [];
+  for (let index = 0; index < pairs.length; index += 1) {
+    const value = values[index] as string;
+    if (pairs[index].comparison === 'exact') {
+      normalized.push(value);
+      continue;
+    }
+    const parsed = parseCsvTimestamp(value);
+    if (!parsed) return { key: null, reason: 'invalid_timestamp' };
+    normalized.push(parsed.canonical);
+  }
+  return { key: JSON.stringify(normalized), reason: 'valid' };
 }
 
 function keyIndex(
   document: CsvDocument,
-  indexes: number[],
+  pairs: CsvKeyPair[],
+  side: KeySide,
 ): {
   rowsByKey: Map<string, number>;
   duplicates: CsvDuplicateKey[];
   discardedDuplicateRows: number;
   retainedRowIndexes: number[];
   missing: number;
+  invalidTimestampRows: number;
 } {
   const allRows = new Map<string, number[]>();
   const retainedRowIndexes: number[] = [];
   let missing = 0;
+  let invalidTimestampRows = 0;
   document.rows.forEach((row, index) => {
-    const value = compositeKey(row, indexes);
+    const value = compositeKey(row, document, pairs, side);
     if (value.key === null) {
-      missing += 1;
+      if (value.reason === 'missing') missing += 1;
+      else invalidTimestampRows += 1;
       retainedRowIndexes.push(index);
       return;
     }
@@ -174,7 +297,50 @@ function keyIndex(
     discardedDuplicateRows: duplicates.reduce((total, item) => total + item.rows.length - 1, 0),
     retainedRowIndexes,
     missing,
+    invalidTimestampRows,
   };
+}
+
+function firstPrimaryTimestampStyles(primary: CsvDocument, pairs: CsvKeyPair[]): Map<string, TimestampStyle> {
+  const styles = new Map<string, TimestampStyle>();
+  pairs.filter((pair) => pair.comparison === 'timestamp').forEach((pair) => {
+    const index = columnIndex(primary, pair.primary);
+    for (const row of primary.rows) {
+      const value = row[index];
+      if (value === null) continue;
+      const parsed = parseCsvTimestamp(value);
+      if (parsed) {
+        styles.set(pair.secondary, parsed.style);
+        break;
+      }
+    }
+  });
+  return styles;
+}
+
+function formatTimestamp(value: string, style: TimestampStyle): string {
+  const parsed = parseCsvTimestamp(value);
+  if (!parsed) return value;
+  const fractionDigits = Math.max(style.fractionDigits, parsed.fraction.length);
+  const includeSeconds = style.includeSeconds || parsed.second !== 0 || fractionDigits > 0;
+  const date = `${pad(parsed.year, 4)}${style.dateSeparator}${pad(parsed.month)}${style.dateSeparator}${pad(parsed.day)}`;
+  const includeTime = style.includeTime || parsed.hour !== 0 || parsed.minute !== 0 || includeSeconds;
+  if (!includeTime) return date;
+  let time = `${pad(parsed.hour)}:${pad(parsed.minute)}`;
+  if (includeSeconds) time += `:${pad(parsed.second)}`;
+  if (fractionDigits > 0) time += `.${parsed.fraction.padEnd(fractionDigits, '0')}`;
+  return `${date}${style.dateTimeSeparator}${time}`;
+}
+
+function secondaryOutputValue(
+  row: CsvCell[],
+  document: CsvDocument,
+  source: string,
+  primaryStyles: Map<string, TimestampStyle>,
+): CsvCell {
+  const value = row[columnIndex(document, source)] ?? null;
+  const style = primaryStyles.get(source);
+  return value !== null && style ? formatTimestamp(value, style) : value;
 }
 
 function unique(values: string[]): boolean {
@@ -208,12 +374,13 @@ export function validateCsvMerge(
       errors: [...new Set(errors)], primaryDuplicateKeys: [], secondaryDuplicateKeys: [], primaryMissingKeys: 0,
       primaryDuplicateKeyCount: 0, secondaryDuplicateKeyCount: 0,
       primaryDiscardedDuplicateRows: 0, secondaryDiscardedDuplicateRows: 0,
+      primaryInvalidTimestampRows: 0, secondaryInvalidTimestampRows: 0,
       secondaryMissingKeys: 0, matchedRows: 0, unmatchedPrimaryRows: primary.rows.length,
       unmatchedSecondaryRows: secondary.rows.length, expectedRows: 0,
     };
   }
-  const primaryKeys = keyIndex(primary, primaryIndexes);
-  const secondaryKeys = keyIndex(secondary, secondaryIndexes);
+  const primaryKeys = keyIndex(primary, config.keyPairs, 'primary');
+  const secondaryKeys = keyIndex(secondary, config.keyPairs, 'secondary');
   if (config.duplicatePolicy === 'block' && primaryKeys.duplicates.length > 0) errors.push('The selected key is not unique in the primary CSV.');
   if (config.duplicatePolicy === 'block' && secondaryKeys.duplicates.length > 0) errors.push('The selected key is not unique in the secondary CSV.');
   const primaryRowIndexes = config.duplicatePolicy === 'keep_first'
@@ -226,7 +393,7 @@ export function validateCsvMerge(
   const matchedSecondary = new Set<number>();
   primaryRowIndexes.forEach((rowIndex) => {
     const row = primary.rows[rowIndex];
-    const value = compositeKey(row, primaryIndexes);
+    const value = compositeKey(row, primary, config.keyPairs, 'primary');
     if (value.key === null) return;
     const secondaryRow = secondaryKeys.rowsByKey.get(value.key);
     if (secondaryRow !== undefined) {
@@ -251,6 +418,8 @@ export function validateCsvMerge(
     secondaryDiscardedDuplicateRows: secondaryKeys.discardedDuplicateRows,
     primaryMissingKeys: primaryKeys.missing,
     secondaryMissingKeys: secondaryKeys.missing,
+    primaryInvalidTimestampRows: primaryKeys.invalidTimestampRows,
+    secondaryInvalidTimestampRows: secondaryKeys.invalidTimestampRows,
     matchedRows,
     unmatchedPrimaryRows,
     unmatchedSecondaryRows,
@@ -265,13 +434,11 @@ export function mergeCsvDocuments(
 ): CsvMergeResult {
   const validation = validateCsvMerge(primary, secondary, config);
   if (validation.errors.length > 0) throw new Error(validation.errors.join(' '));
-  const primaryKeyIndexes = config.keyPairs.map((pair) => columnIndex(primary, pair.primary));
-  const secondaryKeyIndexes = config.keyPairs.map((pair) => columnIndex(secondary, pair.secondary));
   const primaryOutputIndexes = config.primaryColumns.map((name) => columnIndex(primary, name));
-  const secondaryOutputIndexes = config.secondaryColumns.map((column) => columnIndex(secondary, column.source));
-  const primaryKeys = keyIndex(primary, primaryKeyIndexes);
-  const secondaryKeyDetails = keyIndex(secondary, secondaryKeyIndexes);
+  const primaryKeys = keyIndex(primary, config.keyPairs, 'primary');
+  const secondaryKeyDetails = keyIndex(secondary, config.keyPairs, 'secondary');
   const secondaryKeys = secondaryKeyDetails.rowsByKey;
+  const primaryTimestampStyles = firstPrimaryTimestampStyles(primary, config.keyPairs);
   const primaryRowIndexes = config.duplicatePolicy === 'keep_first'
     ? primaryKeys.retainedRowIndexes
     : primary.rows.map((_, index) => index);
@@ -283,14 +450,16 @@ export function mergeCsvDocuments(
 
   primaryRowIndexes.forEach((primaryIndex) => {
     const primaryRow = primary.rows[primaryIndex];
-    const value = compositeKey(primaryRow, primaryKeyIndexes);
+    const value = compositeKey(primaryRow, primary, config.keyPairs, 'primary');
     const secondaryIndex = value.key === null ? undefined : secondaryKeys.get(value.key);
     if (config.joinType === 'inner' && secondaryIndex === undefined) return;
     if (secondaryIndex !== undefined) matchedSecondary.add(secondaryIndex);
     const secondaryRow = secondaryIndex === undefined ? null : secondary.rows[secondaryIndex];
     rows.push([
       ...primaryOutputIndexes.map((index) => primaryRow[index] ?? null),
-      ...secondaryOutputIndexes.map((index) => secondaryRow?.[index] ?? null),
+      ...config.secondaryColumns.map((column) => secondaryRow
+        ? secondaryOutputValue(secondaryRow, secondary, column.source, primaryTimestampStyles)
+        : null),
     ]);
   });
 
@@ -301,11 +470,18 @@ export function mergeCsvDocuments(
       const primaryValues = primaryOutputIndexes.map((index) => {
         const primaryHeader = primary.headers[index];
         const mappingIndex = config.keyPairs.findIndex((pair) => pair.primary === primaryHeader);
-        return mappingIndex >= 0 ? secondaryRow[secondaryKeyIndexes[mappingIndex]] ?? null : null;
+        return mappingIndex >= 0
+          ? secondaryOutputValue(secondaryRow, secondary, config.keyPairs[mappingIndex].secondary, primaryTimestampStyles)
+          : null;
       });
       rows.push([
         ...primaryValues,
-        ...secondaryOutputIndexes.map((index) => secondaryRow[index] ?? null),
+        ...config.secondaryColumns.map((column) => secondaryOutputValue(
+          secondaryRow,
+          secondary,
+          column.source,
+          primaryTimestampStyles,
+        )),
       ]);
     });
   }

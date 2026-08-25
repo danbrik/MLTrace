@@ -4,7 +4,9 @@ import { tabularTableToCsv, tabularTableToParquet } from '../lib/tabularExport';
 import {
   csvMergeResultTable,
   mergeCsvDocuments,
+  parseCsvTimestamp,
   parseCsvText,
+  timestampNormalizationSuggested,
   validateCsvMerge,
   type CsvDocument,
   type CsvMergeConfig,
@@ -27,7 +29,7 @@ const secondary = document(['key', 'site_key', 'value'], [
 const config: CsvMergeConfig = {
   primaryColumns: ['id', 'keep'],
   secondaryColumns: [{ source: 'value', output: 'joined_value' }],
-  keyPairs: [{ primary: 'id', secondary: 'key' }, { primary: 'site', secondary: 'site_key' }],
+  keyPairs: [{ primary: 'id', secondary: 'key', comparison: 'exact' }, { primary: 'site', secondary: 'site_key', comparison: 'exact' }],
   joinType: 'left',
   duplicatePolicy: 'block',
 };
@@ -87,7 +89,7 @@ describe('CSV keyed merge', () => {
     const right = document(['key', 'value'], [['A', 'match']]);
     const result = mergeCsvDocuments(left, right, {
       primaryColumns: ['key'], secondaryColumns: [{ source: 'value', output: 'value' }],
-      keyPairs: [{ primary: 'key', secondary: 'key' }], joinType: 'left', duplicatePolicy: 'block',
+      keyPairs: [{ primary: 'key', secondary: 'key', comparison: 'exact' }], joinType: 'left', duplicatePolicy: 'block',
     });
     expect(result.rows).toEqual([['A', 'match'], [' A', null], ['a', null]]);
   });
@@ -97,7 +99,7 @@ describe('CSV keyed merge', () => {
     const validation = validateCsvMerge(duplicate, secondary, {
       primaryColumns: ['key'],
       secondaryColumns: [{ source: 'value', output: 'key' }],
-      keyPairs: [{ primary: 'key', secondary: 'key' }, { primary: 'key', secondary: 'site_key' }],
+      keyPairs: [{ primary: 'key', secondary: 'key', comparison: 'exact' }, { primary: 'key', secondary: 'site_key', comparison: 'exact' }],
       joinType: 'left',
       duplicatePolicy: 'block',
     });
@@ -127,7 +129,7 @@ describe('CSV keyed merge', () => {
     const duplicateConfig: CsvMergeConfig = {
       primaryColumns: ['key', 'group', 'primary_value'],
       secondaryColumns: [{ source: 'secondary_value', output: 'secondary_value' }],
-      keyPairs: [{ primary: 'key', secondary: 'key' }, { primary: 'group', secondary: 'group' }],
+      keyPairs: [{ primary: 'key', secondary: 'key', comparison: 'exact' }, { primary: 'group', secondary: 'group', comparison: 'exact' }],
       joinType: 'left',
       duplicatePolicy: 'keep_first',
     };
@@ -172,6 +174,122 @@ describe('CSV keyed merge', () => {
   it('requires an explicitly selected secondary output column', () => {
     const validation = validateCsvMerge(primary, secondary, { ...config, secondaryColumns: [] });
     expect(validation.errors).toContain('Select at least one secondary column to merge.');
+  });
+
+  it('normalizes supported dataset-local timestamps while exact comparison stays strict', () => {
+    const left = document(['time'], [
+      ['2025-09-16 00:09'],
+      ['2024-02-29T01:02:03.100'],
+      ['2025-10-01'],
+    ]);
+    const right = document(['time', 'value'], [
+      ['2025.09.16T00:09:00.000', 'first'],
+      ['2024.02.29 01:02:03.1', 'leap'],
+      ['2025.10.01', 'date only'],
+    ]);
+    const timestampConfig: CsvMergeConfig = {
+      primaryColumns: ['time'],
+      secondaryColumns: [{ source: 'value', output: 'value' }],
+      keyPairs: [{ primary: 'time', secondary: 'time', comparison: 'timestamp' }],
+      joinType: 'left',
+      duplicatePolicy: 'block',
+    };
+    expect(mergeCsvDocuments(left, right, timestampConfig).rows).toEqual([
+      ['2025-09-16 00:09', 'first'],
+      ['2024-02-29T01:02:03.100', 'leap'],
+      ['2025-10-01', 'date only'],
+    ]);
+    expect(validateCsvMerge(left, right, {
+      ...timestampConfig,
+      keyPairs: [{ primary: 'time', secondary: 'time', comparison: 'exact' }],
+    }).matchedRows).toBe(0);
+  });
+
+  it('rejects invalid calendar values and timezone suffixes without treating them as empty', () => {
+    expect(parseCsvTimestamp('2024-02-29 23:59:59')).not.toBeNull();
+    expect(parseCsvTimestamp('2024.02.29')).not.toBeNull();
+    expect(parseCsvTimestamp('2025-02-29 00:00:00')).toBeNull();
+    expect(parseCsvTimestamp('2025-13-01 00:00')).toBeNull();
+    expect(parseCsvTimestamp('2025-01-01 24:00')).toBeNull();
+    expect(parseCsvTimestamp('2025-01-01T00:00:00Z')).toBeNull();
+    expect(parseCsvTimestamp('2025-01-01T00:00:00+01:00')).toBeNull();
+
+    const left = document(['time'], [['2025-02-29 00:00'], [null], ['2025-01-01 00:00']]);
+    const right = document(['time', 'value'], [['2025.01.01 00:00:00', 'valid'], ['bad', 'invalid']]);
+    const validation = validateCsvMerge(left, right, {
+      primaryColumns: ['time'], secondaryColumns: [{ source: 'value', output: 'value' }],
+      keyPairs: [{ primary: 'time', secondary: 'time', comparison: 'timestamp' }],
+      joinType: 'left', duplicatePolicy: 'block',
+    });
+    expect(validation).toMatchObject({
+      matchedRows: 1,
+      primaryMissingKeys: 1,
+      primaryInvalidTimestampRows: 1,
+      secondaryMissingKeys: 0,
+      secondaryInvalidTimestampRows: 1,
+    });
+    expect(validation.errors).toEqual([]);
+  });
+
+  it('supports mixed exact and timestamp components and detects normalized duplicates', () => {
+    const left = document(['site', 'time', 'value'], [
+      ['A', '2025-09-16 00:09:00', 'first'],
+      ['A', '2025.09.16T00:09', 'later duplicate'],
+      ['B', '2025-09-16 00:09:00', 'other site'],
+    ]);
+    const right = document(['site', 'time', 'joined'], [
+      ['A', '2025.09.16 00:09:00.000', 'match A'],
+      ['B', '2025.09.16 00:09:00', 'match B'],
+    ]);
+    const mixedConfig: CsvMergeConfig = {
+      primaryColumns: ['site', 'time', 'value'],
+      secondaryColumns: [{ source: 'joined', output: 'joined' }],
+      keyPairs: [
+        { primary: 'site', secondary: 'site', comparison: 'exact' },
+        { primary: 'time', secondary: 'time', comparison: 'timestamp' },
+      ],
+      joinType: 'left', duplicatePolicy: 'block',
+    };
+    const blocked = validateCsvMerge(left, right, mixedConfig);
+    expect(blocked).toMatchObject({ primaryDuplicateKeyCount: 1, primaryDiscardedDuplicateRows: 1 });
+    expect(blocked.errors).toContain('The selected key is not unique in the primary CSV.');
+    const kept = mergeCsvDocuments(left, right, { ...mixedConfig, duplicatePolicy: 'keep_first' });
+    expect(kept.rows).toEqual([
+      ['A', '2025-09-16 00:09:00', 'first', 'match A'],
+      ['B', '2025-09-16 00:09:00', 'other site', 'match B'],
+    ]);
+    expect(kept.validation.matchedRows).toBe(2);
+  });
+
+  it('formats selected secondary timestamp keys like the primary without losing precision', () => {
+    const left = document(['time'], [['2025-09-16 00:09']]);
+    const right = document(['time', 'value'], [
+      ['2025.09.16T00:09:00.000', 'match'],
+      ['2025.09.16T00:10:02.1234', 'unmatched'],
+      ['invalid timestamp', 'invalid'],
+    ]);
+    const result = mergeCsvDocuments(left, right, {
+      primaryColumns: ['time'],
+      secondaryColumns: [{ source: 'time', output: 'secondary_time' }, { source: 'value', output: 'value' }],
+      keyPairs: [{ primary: 'time', secondary: 'time', comparison: 'timestamp' }],
+      joinType: 'full', duplicatePolicy: 'block',
+    });
+    expect(result.rows).toEqual([
+      ['2025-09-16 00:09', '2025-09-16 00:09', 'match'],
+      ['2025-09-16 00:10:02.1234', '2025-09-16 00:10:02.1234', 'unmatched'],
+      ['invalid timestamp', 'invalid timestamp', 'invalid'],
+    ]);
+  });
+
+  it('suggests timestamp normalization only for predominantly temporal columns with different styles', () => {
+    const left = document(['time'], [['2025-09-16 00:09:00'], ['2025-09-16 00:10:00']]);
+    const right = document(['time'], [['2025.09.16 00:09:00'], ['2025.09.16 00:10:00']]);
+    const exactPair = { primary: 'time', secondary: 'time', comparison: 'exact' as const };
+    expect(timestampNormalizationSuggested(left, right, exactPair)).toBe(true);
+    expect(timestampNormalizationSuggested(left, right, { ...exactPair, comparison: 'timestamp' })).toBe(false);
+    expect(timestampNormalizationSuggested(document(['key'], [['a'], ['b']]), document(['key'], [['a'], ['b']]), {
+      primary: 'key', secondary: 'key', comparison: 'exact',
+    })).toBe(false);
   });
 
   it('exports merged data losslessly as CSV and string-typed Parquet', async () => {

@@ -25,6 +25,7 @@ import {
   defaultMergedFileName,
   mergeCsvDocuments,
   parseCsvFile,
+  timestampNormalizationSuggested,
   validateCsvMerge,
   type CsvDocument,
   type CsvDuplicatePolicy,
@@ -257,6 +258,7 @@ export function CsvMergePage({ active }: { active: boolean }) {
       setKeyPairs(primary.headers.length && outcome.document.headers.length ? [{
         primary: common ?? primary.headers[0],
         secondary: common ?? outcome.document.headers[0],
+        comparison: 'exact',
       }] : []);
     }
   };
@@ -285,7 +287,11 @@ export function CsvMergePage({ active }: { active: boolean }) {
     const usedSecondary = new Set(keyPairs.map((pair) => pair.secondary));
     const primaryColumn = primary.headers.find((header) => !usedPrimary.has(header));
     const secondaryColumn = secondary.headers.find((header) => !usedSecondary.has(header));
-    if (primaryColumn && secondaryColumn) updateKeyPairs([...keyPairs, { primary: primaryColumn, secondary: secondaryColumn }]);
+    if (primaryColumn && secondaryColumn) updateKeyPairs([...keyPairs, {
+      primary: primaryColumn,
+      secondary: secondaryColumn,
+      comparison: 'exact',
+    }]);
   };
 
   const calculate = () => {
@@ -303,7 +309,7 @@ export function CsvMergePage({ active }: { active: boolean }) {
   return (
     <Stack gap="lg">
       <Group justify="space-between" align="flex-start">
-        <div><Title order={2}>CSV Merge</Title><Text c="dimmed">Join two local CSV files by one or more exact key columns. Files never leave your browser.</Text></div>
+        <div><Title order={2}>CSV Merge</Title><Text c="dimmed">Join two local CSV files using exact or timestamp-normalized key columns. Files never leave your browser.</Text></div>
         <Button variant="default" leftSection={<RotateCcw size={16} />} onClick={reset} disabled={!primaryFile && !secondaryFile}>Reset</Button>
       </Group>
 
@@ -326,14 +332,60 @@ export function CsvMergePage({ active }: { active: boolean }) {
         {secondary && <Stack gap="md"><FileSummary document={secondary} file={secondaryFile} /><Paper withBorder p="sm"><Text fw={600} size="sm" mb="xs">Columns to add</Text><Table.ScrollContainer minWidth={620}><Table withTableBorder withColumnBorders><Table.Thead><Table.Tr><Table.Th>Include</Table.Th><Table.Th>Source column</Table.Th><Table.Th>Output column name</Table.Th></Table.Tr></Table.Thead><Table.Tbody>{secondary.headers.map((header) => { const selection = secondaryColumns.find((column) => column.source === header); const conflict = selection && (selection.output.trim() === '' || outputNameCount(selection.output) > 1); return <Table.Tr key={header}><Table.Td><Checkbox aria-label={`Include ${header}`} checked={selectedSecondary.has(header)} onChange={(event) => toggleSecondaryColumn(header, event.currentTarget.checked)} /></Table.Td><Table.Td>{header}</Table.Td><Table.Td>{selection ? <TextInput size="xs" value={selection.output} error={conflict ? 'Enter a unique output name.' : undefined} onChange={(event) => updateSecondaryColumns(secondaryColumns.map((column) => column.source === header ? { ...column, output: event.currentTarget.value } : column))} /> : <Text size="xs" c="dimmed">Not selected</Text>}</Table.Td></Table.Tr>; })}</Table.Tbody></Table></Table.ScrollContainer></Paper><DataPreview headers={secondary.headers} rows={secondary.rows} label="Secondary data preview" /></Stack>}
       </StepCard>
 
-      <StepCard index={3} color={STEP_COLORS[2]} title="Configure the keyed join" subtitle="Key values are compared exactly. Empty keys remain unmatched; duplicate keys require a keep-first confirmation." complete={Boolean(validation && validation.errors.length === 0)}>
+      <StepCard index={3} color={STEP_COLORS[2]} title="Configure the keyed join" subtitle="Compare key columns as exact text or normalize dataset-local timestamps. Empty and invalid keys remain unmatched." complete={Boolean(validation && validation.errors.length === 0)}>
         {(!primary || !secondary) && <Alert color="gray">Load both CSV files to configure the merge.</Alert>}
-        {primary && secondary && <Stack gap="md"><Select label="Join type" value={joinType} allowDeselect={false} onChange={(value) => updateJoinType((value as CsvJoinType | null) ?? 'left')} data={[{ value: 'left', label: 'Left join · keep every primary row' }, { value: 'inner', label: 'Inner join · keep matching rows only' }, { value: 'full', label: 'Full outer join · keep every row from both files' }]} /><Table.ScrollContainer minWidth={650}><Table withTableBorder withColumnBorders><Table.Thead><Table.Tr><Table.Th>Primary key column</Table.Th><Table.Th>Secondary key column</Table.Th><Table.Th w={55} /></Table.Tr></Table.Thead><Table.Tbody>{keyPairs.map((pair, index) => <Table.Tr key={`${index}:${pair.primary}:${pair.secondary}`}><Table.Td><Select searchable value={pair.primary} onChange={(value) => value && updateKeyPairs(keyPairs.map((item, itemIndex) => itemIndex === index ? { ...item, primary: value } : item))} data={primary.headers.map((header) => ({ value: header, label: header, disabled: keyPairs.some((item, itemIndex) => itemIndex !== index && item.primary === header) }))} /></Table.Td><Table.Td><Select searchable value={pair.secondary} onChange={(value) => value && updateKeyPairs(keyPairs.map((item, itemIndex) => itemIndex === index ? { ...item, secondary: value } : item))} data={secondary.headers.map((header) => ({ value: header, label: header, disabled: keyPairs.some((item, itemIndex) => itemIndex !== index && item.secondary === header) }))} /></Table.Td><Table.Td><Button variant="subtle" color="red" size="compact-sm" aria-label="Remove key mapping" onClick={() => updateKeyPairs(keyPairs.filter((_, itemIndex) => itemIndex !== index))}><Trash2 size={15} /></Button></Table.Td></Table.Tr>)}</Table.Tbody></Table></Table.ScrollContainer><Button variant="light" leftSection={<Plus size={15} />} onClick={addKeyPair} disabled={keyPairs.length >= Math.min(primary.headers.length, secondary.headers.length)}>Add key column</Button></Stack>}
+        {primary && secondary && <Stack gap="md">
+          <Select label="Join type" value={joinType} allowDeselect={false} onChange={(value) => updateJoinType((value as CsvJoinType | null) ?? 'left')} data={[{ value: 'left', label: 'Left join · keep every primary row' }, { value: 'inner', label: 'Inner join · keep matching rows only' }, { value: 'full', label: 'Full outer join · keep every row from both files' }]} />
+          <Table.ScrollContainer minWidth={850}>
+            <Table withTableBorder withColumnBorders>
+              <Table.Thead><Table.Tr><Table.Th>Primary key column</Table.Th><Table.Th>Secondary key column</Table.Th><Table.Th>Comparison</Table.Th><Table.Th w={55} /></Table.Tr></Table.Thead>
+              <Table.Tbody>{keyPairs.map((pair, index) => {
+                const suggestTimestamp = timestampNormalizationSuggested(primary, secondary, pair);
+                return <Table.Tr key={`${index}:${pair.primary}:${pair.secondary}:${pair.comparison}`}>
+                  <Table.Td><Select searchable value={pair.primary} onChange={(value) => value && updateKeyPairs(keyPairs.map((item, itemIndex) => itemIndex === index ? { ...item, primary: value } : item))} data={primary.headers.map((header) => ({ value: header, label: header, disabled: keyPairs.some((item, itemIndex) => itemIndex !== index && item.primary === header) }))} /></Table.Td>
+                  <Table.Td><Select searchable value={pair.secondary} onChange={(value) => value && updateKeyPairs(keyPairs.map((item, itemIndex) => itemIndex === index ? { ...item, secondary: value } : item))} data={secondary.headers.map((header) => ({ value: header, label: header, disabled: keyPairs.some((item, itemIndex) => itemIndex !== index && item.secondary === header) }))} /></Table.Td>
+                  <Table.Td>
+                    <Stack gap={4}>
+                      <Select aria-label={`Comparison for ${pair.primary} and ${pair.secondary}`} value={pair.comparison} allowDeselect={false} onChange={(value) => updateKeyPairs(keyPairs.map((item, itemIndex) => itemIndex === index ? { ...item, comparison: value === 'timestamp' ? 'timestamp' : 'exact' } : item))} data={[{ value: 'exact', label: 'Exact text' }, { value: 'timestamp', label: 'Timestamp normalization' }]} />
+                      {suggestTimestamp && <Stack gap={3}>
+                        <Text size="xs" c="blue">Both columns look temporal, but their formats differ.</Text>
+                        <Button size="compact-xs" variant="light" color="blue" onClick={() => updateKeyPairs(keyPairs.map((item, itemIndex) => itemIndex === index ? { ...item, comparison: 'timestamp' } : item))}>Normalize timestamps</Button>
+                      </Stack>}
+                    </Stack>
+                  </Table.Td>
+                  <Table.Td><Button variant="subtle" color="red" size="compact-sm" aria-label="Remove key mapping" onClick={() => updateKeyPairs(keyPairs.filter((_, itemIndex) => itemIndex !== index))}><Trash2 size={15} /></Button></Table.Td>
+                </Table.Tr>;
+              })}</Table.Tbody>
+            </Table>
+          </Table.ScrollContainer>
+          <Button variant="light" leftSection={<Plus size={15} />} onClick={addKeyPair} disabled={keyPairs.length >= Math.min(primary.headers.length, secondary.headers.length)}>Add key column</Button>
+          {validation && (() => {
+            const effectivePrimaryRows = validation.matchedRows + validation.unmatchedPrimaryRows;
+            const matchPercent = effectivePrimaryRows === 0 ? 0 : (validation.matchedRows / effectivePrimaryRows) * 100;
+            const matchColor = validation.matchedRows === 0 ? 'red' : matchPercent < 50 ? 'yellow' : 'green';
+            return <Alert color={matchColor} title="Live key match">
+              <Stack gap="xs">
+                <Group justify="space-between"><Text fw={600}>Matched primary rows: {validation.matchedRows.toLocaleString()} / {effectivePrimaryRows.toLocaleString()}</Text><Badge color={matchColor}>{matchPercent.toFixed(1)}%</Badge></Group>
+                <SimpleGrid cols={{ base: 1, sm: 3 }}>
+                  <Text size="sm">Unmatched primary: <b>{validation.unmatchedPrimaryRows.toLocaleString()}</b></Text>
+                  <Text size="sm">Unmatched secondary: <b>{validation.unmatchedSecondaryRows.toLocaleString()}</b></Text>
+                  <Text size="sm">Expected result rows: <b>{validation.expectedRows.toLocaleString()}</b></Text>
+                </SimpleGrid>
+              </Stack>
+            </Alert>;
+          })()}
+        </Stack>}
       </StepCard>
 
       <StepCard index={4} color={STEP_COLORS[3]} title="Validate and merge" subtitle="The preview is paginated; validation and merge always use all rows." complete={Boolean(result)}>
         {!validation && <Alert color="gray">Complete the previous steps to validate the merge.</Alert>}
-        {validation && <Stack gap="md"><SimpleGrid cols={{ base: 2, md: 4 }}><Paper withBorder p="sm"><Text size="xs" c="dimmed">Matched primary rows</Text><Text fw={700}>{validation.matchedRows.toLocaleString()}</Text></Paper><Paper withBorder p="sm"><Text size="xs" c="dimmed">Unmatched primary</Text><Text fw={700}>{validation.unmatchedPrimaryRows.toLocaleString()}</Text></Paper><Paper withBorder p="sm"><Text size="xs" c="dimmed">Unmatched secondary</Text><Text fw={700}>{validation.unmatchedSecondaryRows.toLocaleString()}</Text></Paper><Paper withBorder p="sm"><Text size="xs" c="dimmed">Expected result rows</Text><Text fw={700}>{validation.expectedRows.toLocaleString()}</Text></Paper></SimpleGrid>{(validation.primaryMissingKeys > 0 || validation.secondaryMissingKeys > 0) && <Alert color="yellow" title="Empty keys remain unmatched">Primary: {validation.primaryMissingKeys.toLocaleString()} · Secondary: {validation.secondaryMissingKeys.toLocaleString()}</Alert>}<DuplicateSummary validation={validation} policy={duplicatePolicy} onKeepFirst={() => { setDuplicatePolicy('keep_first'); setResult(null); }} />{validation.errors.filter((error) => !error.includes('not unique')).map((error) => <Alert color="red" key={error}>{error}</Alert>)}<Button onClick={calculate} disabled={validation.errors.length > 0} leftSection={<FileSpreadsheet size={16} />}>Merge all rows</Button></Stack>}
+        {validation && <Stack gap="md">
+          {(validation.primaryMissingKeys > 0 || validation.secondaryMissingKeys > 0) && <Alert color="yellow" title="Empty keys remain unmatched">Primary: {validation.primaryMissingKeys.toLocaleString()} · Secondary: {validation.secondaryMissingKeys.toLocaleString()}</Alert>}
+          {(validation.primaryInvalidTimestampRows > 0 || validation.secondaryInvalidTimestampRows > 0) && <Alert color="yellow" title="Invalid timestamps remain unmatched">Primary: {validation.primaryInvalidTimestampRows.toLocaleString()} · Secondary: {validation.secondaryInvalidTimestampRows.toLocaleString()}. Original text values are preserved in the output.</Alert>}
+          <DuplicateSummary validation={validation} policy={duplicatePolicy} onKeepFirst={() => { setDuplicatePolicy('keep_first'); setResult(null); }} />
+          {validation.errors.filter((error) => !error.includes('not unique')).map((error) => <Alert color="red" key={error}>{error}</Alert>)}
+          <Button onClick={calculate} disabled={validation.errors.length > 0} leftSection={<FileSpreadsheet size={16} />}>Merge all rows</Button>
+        </Stack>}
       </StepCard>
 
       {result && primary && secondary && <StepCard index={5} color={STEP_COLORS[4]} title="Merged result" subtitle="Review the merged rows, then download the full result as CSV or Parquet." complete><Group justify="space-between"><Group><Badge color="green">{result.rows.length.toLocaleString()} rows</Badge><Badge color="green">{result.headers.length.toLocaleString()} columns</Badge>{result.validation.primaryDiscardedDuplicateRows > 0 && <Badge color="yellow">Primary duplicate rows ignored: {result.validation.primaryDiscardedDuplicateRows.toLocaleString()}</Badge>}{result.validation.secondaryDiscardedDuplicateRows > 0 && <Badge color="yellow">Secondary duplicate rows ignored: {result.validation.secondaryDiscardedDuplicateRows.toLocaleString()}</Badge>}</Group><Button leftSection={<Download size={16} />} onClick={() => setDownloadOpened(true)}>Download</Button></Group><DataPreview headers={result.headers} rows={result.rows} label="Merged data preview" /><DownloadDialog result={result} primaryName={primary.fileName} secondaryName={secondary.fileName} opened={downloadOpened} onClose={() => setDownloadOpened(false)} /></StepCard>}
