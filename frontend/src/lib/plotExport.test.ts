@@ -7,6 +7,7 @@ import {
   normalizedDownloadName,
   plotTableToCsv,
   plotTableToParquet,
+  resolvePlotExportTable,
 } from './plotExport';
 
 function trace(name: string, x: unknown[], y: unknown[]): Data {
@@ -76,5 +77,16 @@ describe('plot export', () => {
   it('normalizes unsafe names and replaces an existing export extension', () => {
     expect(normalizedDownloadName('daily/score.csv', 'parquet')).toBe('daily_score.parquet');
     expect(normalizedDownloadName('   ', 'csv')).toBe('plot-data.csv');
+  });
+
+  it('uses the full-resolution provider without silently falling back to displayed traces', async () => {
+    const displayed = [trace('Preview', ['2026-01-01T00:00:00'], [1])];
+    const full = buildPlotExportTable([trace('Full', [
+      '2026-01-01T00:00:00', '2026-01-01T00:01:00', '2026-01-01T00:02:00',
+    ], [1, 2, 3])]);
+    await expect(resolvePlotExportTable(displayed, async () => full)).resolves.toEqual(full);
+    await expect(resolvePlotExportTable(displayed, async () => { throw new Error('source changed'); }))
+      .rejects.toThrow('source changed');
+    await expect(resolvePlotExportTable(displayed)).resolves.toEqual(buildPlotExportTable(displayed));
   });
 });

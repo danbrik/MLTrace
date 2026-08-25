@@ -3,7 +3,7 @@ import { notifications } from '@mantine/notifications';
 import { ArrowLeft, Calculator, ChevronDown, ChevronRight, RefreshCw, Save, Search, SlidersHorizontal, Trash2 } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { Shape } from 'plotly.js';
-import { activateWorkspaceDrift, calculateWorkspaceDrift, calculateWorkspaceSeparation, deleteDriftLayout, deleteSeparationLayout, deleteWorkspaceDriftCalculation, deleteWorkspaceSeparationResult, getEvaluationScorePreview, getEvaluationWorkspace, listDriftLayouts, listEvaluationWorkspaceModels, listEvaluationWorkspaceRuns, listSeparationLayouts, listWorkspaceDriftCalculations, listWorkspaceSeparationResults, previewWorkspaceDrift, saveDriftLayout, saveSeparationLayout, setWorkspaceDriftBucketIncluded, setWorkspaceSeparationIncluded } from '../api';
+import { activateWorkspaceDrift, calculateWorkspaceDrift, calculateWorkspaceSeparation, deleteDriftLayout, deleteSeparationLayout, deleteWorkspaceDriftCalculation, deleteWorkspaceSeparationResult, getEvaluationScorePreview, getEvaluationWorkspace, getFullTestingRunPlotSeries, listDriftLayouts, listEvaluationWorkspaceModels, listEvaluationWorkspaceRuns, listSeparationLayouts, listWorkspaceDriftCalculations, listWorkspaceSeparationResults, previewWorkspaceDrift, saveDriftLayout, saveSeparationLayout, setWorkspaceDriftBucketIncluded, setWorkspaceSeparationIncluded } from '../api';
 import { DateTime24Input } from '../components/DateTime24Input';
 import { PlotlyChart, type PlotlyChartSelection } from '../components/PlotlyChart';
 import { StepCard } from '../components/StepCard';
@@ -16,6 +16,7 @@ import { WorkspaceRunPicker } from '../evaluation/WorkspaceRunPicker';
 import { buildDriftPlotSeries, SCORE_STABILITY_EXPLANATION_DEFAULT_OPEN, SCORE_STABILITY_HELP } from '../evaluation/stabilityPlot';
 import { normalizeHorizontalSelection, normalizePairs, separationPairsEqual } from '../evaluation/workspaceHelpers';
 import type { Data } from '../lib/plotly';
+import { buildPlotExportTable } from '../lib/plotExport';
 import { withLineGapPolicy } from '../lib/plotGaps';
 import type { EvaluationDriftCalculation, EvaluationDriftLayout, EvaluationDriftLayoutPayload, EvaluationDriftPreview, EvaluationScorePreview, EvaluationSeparationLayout, EvaluationSeparationPair, EvaluationWorkspaceModel, EvaluationWorkspaceSeparationResult, TestingRun } from '../types';
 
@@ -39,7 +40,19 @@ function ScorePlot({ preview, shapes, loading, onSelect }: { preview: Evaluation
     y: preview.points.map((point) => point.value),
     line: { width: 1.2 }, connectgaps: false,
   } as Data, { continuity: preview.points.map((point) => point.continuity_segment ?? 0) });
-  return <Stack gap="xs">{preview.decimated && <Badge variant="light" w="fit-content">Preview {preview.points.length.toLocaleString()} / {preview.total.toLocaleString()} points</Badge>}<PlotlyChart key={`${preview.testing_run_id}:${preview.score_series}`} data={[scoreData]} layout={{ dragmode: 'select', hovermode: 'x unified', shapes, uirevision: `${preview.testing_run_id}:${preview.score_series}`, showlegend: false, xaxis: { type: 'date', rangeslider: { visible: true, thickness: .1 }, title: { text: 'Dataset-local time' } }, yaxis: { title: { text: 'Anomaly score' } } }} config={{ scrollZoom: true, modeBarButtonsToAdd: ['select2d'] }} height={430} onSelected={onSelect} rescaleYOnVisibleX /><Text size="xs" c="dimmed">Zoom, pan and the range slider only change the view. Drag horizontally to apply the selected range tool.</Text></Stack>;
+  const fullResolutionExport = async () => {
+    const series = await getFullTestingRunPlotSeries(preview.testing_run_id, {
+      score_series: preview.score_series,
+      start_timestamp: preview.start_timestamp,
+      end_timestamp: preview.end_timestamp,
+    });
+    return buildPlotExportTable([{
+      type: 'scatter', mode: 'lines', name: preview.score_series,
+      x: series.points.map((point) => point.timestamp),
+      y: series.points.map((point) => point.value),
+    } as Data]);
+  };
+  return <Stack gap="xs">{preview.decimated && <Badge variant="light" w="fit-content">Preview {preview.points.length.toLocaleString()} / {preview.total.toLocaleString()} points</Badge>}<PlotlyChart key={`${preview.testing_run_id}:${preview.score_series}`} data={[scoreData]} layout={{ dragmode: 'select', hovermode: 'x unified', shapes, uirevision: `${preview.testing_run_id}:${preview.score_series}`, showlegend: false, xaxis: { type: 'date', rangeslider: { visible: true, thickness: .1 }, title: { text: 'Dataset-local time' } }, yaxis: { title: { text: 'Anomaly score' } } }} config={{ scrollZoom: true, modeBarButtonsToAdd: ['select2d'] }} height={430} onSelected={onSelect} rescaleYOnVisibleX fullResolutionExport={fullResolutionExport} /><Text size="xs" c="dimmed">Zoom, pan and the range slider only change the view. Drag horizontally to apply the selected range tool.</Text></Stack>;
 }
 
 /** Score preview loading shared by both methods: manual first load, automatic on a score series switch. */

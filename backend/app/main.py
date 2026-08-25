@@ -57,6 +57,7 @@ from app.schemas import (
     InspectRunRead,
     TemporalDynamicsRequest,
     TemporalDynamicsResponse,
+    TestingRunPlotSeriesPage,
     MethodConfigurationCreate,
     MethodConfigurationPayload,
     MethodConfigurationRead,
@@ -948,6 +949,17 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=404, detail="Anomaly detection run not found.")
         return run
 
+    @app.get("/api/anomaly-detection-runs/{run_id}/export-series")
+    def api_get_anomaly_detection_export_series(
+        run_id: int,
+        view: str = Query(default="result", pattern="^(result|diagnostic)$"),
+        db: Session = Depends(get_db),
+    ):
+        table = anomaly_detection_service.export_plot_table(db, run_id, view)
+        if table is None:
+            raise HTTPException(status_code=404, detail="Anomaly detection run not found.")
+        return table
+
     @app.get(
         "/api/anomaly-detection-runs/{run_id}/diagnostics",
         response_model=list[AnomalyDetectionSeriesPoint],
@@ -1557,6 +1569,38 @@ def create_app() -> FastAPI:
         run_id: int, max_points: int | None = None, db: Session = Depends(get_db)
     ):
         response = testing_service.get_testing_run_results(db, run_id, max_points=max_points)
+        if response is None:
+            raise HTTPException(status_code=404, detail="Testing run not found.")
+        return response
+
+    @app.get("/api/testing-runs/{run_id}/plot-series", response_model=TestingRunPlotSeriesPage)
+    def api_get_testing_run_plot_series(
+        run_id: int,
+        score_series: str = Query(default="score", min_length=1, max_length=64),
+        start_timestamp: datetime | None = None,
+        end_timestamp: datetime | None = None,
+        after_timestamp: datetime | None = None,
+        after_position: int | None = Query(default=None, ge=0),
+        expected_result_revision: int | None = Query(default=None, ge=0),
+        limit: int = Query(default=50_000, ge=100, le=50_000),
+        db: Session = Depends(get_db),
+    ):
+        try:
+            response = testing_service.get_testing_run_plot_series(
+                db,
+                run_id,
+                score_series=score_series,
+                start_timestamp=start_timestamp,
+                end_timestamp=end_timestamp,
+                after_timestamp=after_timestamp,
+                after_position=after_position,
+                expected_result_revision=expected_result_revision,
+                limit=limit,
+            )
+        except RuntimeError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
         if response is None:
             raise HTTPException(status_code=404, detail="Testing run not found.")
         return response

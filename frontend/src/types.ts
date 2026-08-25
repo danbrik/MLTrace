@@ -693,6 +693,22 @@ export type TestingRunResults = {
   decimated: boolean;
 };
 
+export type TestingRunPlotSeriesPoint = {
+  position: number;
+  timestamp: string;
+  value: number;
+};
+
+export type TestingRunPlotSeriesPage = {
+  testing_run_id: number;
+  score_series: string;
+  result_revision: number;
+  total: number;
+  points: TestingRunPlotSeriesPoint[];
+  next_timestamp: string | null;
+  next_position: number | null;
+};
+
 // -- Single-model evaluation -------------------------------------------------
 
 export type EvaluationStatus = 'draft' | 'finalized';

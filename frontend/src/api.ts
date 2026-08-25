@@ -74,6 +74,7 @@ import type {
   TestingRun,
   TestingRunBulkResponse,
   TestingRunResultImage,
+  TestingRunPlotSeriesPage,
   TestingRunResults,
   TrainingDataset,
   TrainingDatasetPreview,
@@ -86,6 +87,7 @@ import type {
   TrainingRunFilters,
 } from './types';
 import { cachedResource, invalidateAllResources, invalidateResources, setResourceRevision, type ResourceKey } from './resourceCache';
+import type { PlotExportTable } from './lib/plotExport';
 
 const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL ?? '').trim().replace(/\/+$/, '');
 const STATIC_TTL_MS = 24 * 60 * 60 * 1000;
@@ -739,6 +741,66 @@ export function getTestingRunResults(runId: number, maxPoints?: number): Promise
   return request<TestingRunResults>(`/api/testing-runs/${runId}/results${query}`);
 }
 
+export function getTestingRunPlotSeriesPage(runId: number, options: {
+  score_series: string;
+  start_timestamp?: string | null;
+  end_timestamp?: string | null;
+  after_timestamp?: string | null;
+  after_position?: number | null;
+  expected_result_revision?: number | null;
+  limit?: number;
+}): Promise<TestingRunPlotSeriesPage> {
+  const query = new URLSearchParams({
+    score_series: options.score_series,
+    limit: String(options.limit ?? 50_000),
+  });
+  if (options.start_timestamp) query.set('start_timestamp', options.start_timestamp);
+  if (options.end_timestamp) query.set('end_timestamp', options.end_timestamp);
+  if (options.after_timestamp) query.set('after_timestamp', options.after_timestamp);
+  if (options.after_position !== null && options.after_position !== undefined) query.set('after_position', String(options.after_position));
+  if (options.expected_result_revision !== null && options.expected_result_revision !== undefined) query.set('expected_result_revision', String(options.expected_result_revision));
+  return request<TestingRunPlotSeriesPage>(`/api/testing-runs/${runId}/plot-series?${query.toString()}`);
+}
+
+export async function getFullTestingRunPlotSeries(runId: number, options: {
+  score_series: string;
+  start_timestamp?: string | null;
+  end_timestamp?: string | null;
+}): Promise<TestingRunPlotSeriesPage> {
+  const points: TestingRunPlotSeriesPage['points'] = [];
+  let afterTimestamp: string | null = null;
+  let afterPosition: number | null = null;
+  let resultRevision: number | null = null;
+  let firstPage: TestingRunPlotSeriesPage | null = null;
+  do {
+    const page = await getTestingRunPlotSeriesPage(runId, {
+      ...options,
+      after_timestamp: afterTimestamp,
+      after_position: afterPosition,
+      expected_result_revision: resultRevision,
+    });
+    firstPage ??= page;
+    resultRevision ??= page.result_revision;
+    points.push(...page.points);
+    afterTimestamp = page.next_timestamp;
+    afterPosition = page.next_position;
+  } while (afterTimestamp !== null && afterPosition !== null);
+  return {
+    ...(firstPage ?? {
+      testing_run_id: runId,
+      score_series: options.score_series,
+      result_revision: resultRevision ?? 0,
+      total: 0,
+      points: [],
+      next_timestamp: null,
+      next_position: null,
+    }),
+    points,
+    next_timestamp: null,
+    next_position: null,
+  };
+}
+
 // -- Single-model evaluation -------------------------------------------------
 
 export function listEvaluationProfiles(): Promise<EvaluationProfile[]> {
@@ -1145,6 +1207,10 @@ export function getAnomalyDetectionRun(runId: number, maxPoints = 8000, progress
   const query = new URLSearchParams({ max_points: String(maxPoints) });
   if (progressToken) query.set('progress_token', progressToken);
   return request<AnomalyDetectionRun>(`/api/anomaly-detection-runs/${runId}?${query}`, undefined, 15 * 60_000);
+}
+
+export function getAnomalyDetectionExportSeries(runId: number, view: 'result' | 'diagnostic'): Promise<PlotExportTable> {
+  return request<PlotExportTable>(`/api/anomaly-detection-runs/${runId}/export-series?view=${view}`, undefined, 15 * 60_000);
 }
 
 export function getAnomalyDetectionDiagnostics(

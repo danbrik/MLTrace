@@ -29,6 +29,7 @@ import {
   timestampNormalizationPreview,
   validateCsvMerge,
   type CsvDocument,
+  type CsvAggregationMethod,
   type CsvDuplicatePolicy,
   type CsvJoinType,
   type CsvKeyPair,
@@ -197,6 +198,51 @@ function MatchedPairsPreview({ rows, pairs }: {
   );
 }
 
+function TimestampAggregationPreview({ validation, method }: {
+  validation: CsvMergeValidation;
+  method: CsvAggregationMethod;
+}) {
+  const rows = validation.aggregationPreview;
+  return (
+    <Paper withBorder p="sm">
+      <Stack gap="xs">
+        <div>
+          <Text fw={600} size="sm">First {Math.min(5, rows.length)} matched minute groups</Text>
+          <Text size="xs" c="dimmed">
+            Primary timestamps stay unchanged. All secondary samples within [primary timestamp, primary timestamp + 60 seconds) are used, regardless of cadence or second offset; the last column shows the {method} result.
+          </Text>
+        </div>
+        {rows.length === 0
+          ? <Text size="sm" c="dimmed">No minute groups match the current key configuration.</Text>
+          : <Table.ScrollContainer minWidth={950}>
+            <Table striped withTableBorder withColumnBorders>
+              <Table.Thead><Table.Tr>
+                <Table.Th>Primary row / timestamp</Table.Th>
+                <Table.Th>Secondary rows / timestamps</Table.Th>
+                <Table.Th>Raw secondary values</Table.Th>
+                <Table.Th>Aggregated values</Table.Th>
+              </Table.Tr></Table.Thead>
+              <Table.Tbody>{rows.map((row) => <Table.Tr key={row.primaryRowNumber}>
+                <Table.Td><Text size="xs">Row {row.primaryRowNumber}</Text><Text size="xs" ff="monospace">{row.primaryTimestamp}</Text></Table.Td>
+                <Table.Td><Stack gap={2}>{row.secondaryTimestamps.map((timestamp, index) => (
+                  <Text size="xs" ff="monospace" key={`${row.secondaryRowNumbers[index]}:${timestamp}`}>
+                    Row {row.secondaryRowNumbers[index]} · {timestamp}
+                  </Text>
+                ))}</Stack></Table.Td>
+                <Table.Td><Stack gap={4}>{row.rawValues.map((item) => (
+                  <Text size="xs" ff="monospace" key={item.column}><Text span c="dimmed">{item.column}: </Text>{item.values.map((value) => value ?? '—').join(' · ')}</Text>
+                ))}</Stack></Table.Td>
+                <Table.Td><Stack gap={4}>{row.aggregatedValues.map((item) => (
+                  <Text size="xs" ff="monospace" key={item.column}><Text span c="dimmed">{item.column}: </Text>{item.value ?? '—'}</Text>
+                ))}</Stack></Table.Td>
+              </Table.Tr>)}</Table.Tbody>
+            </Table>
+          </Table.ScrollContainer>}
+      </Stack>
+    </Paper>
+  );
+}
+
 function DownloadDialog({ result, primaryName, secondaryName, opened, onClose }: {
   result: CsvMergeResult;
   primaryName: string;
@@ -271,6 +317,7 @@ export function CsvMergePage({ active }: { active: boolean }) {
   const [keyPairs, setKeyPairs] = useState<CsvKeyPair[]>([]);
   const [joinType, setJoinType] = useState<CsvJoinType>('left');
   const [duplicatePolicy, setDuplicatePolicy] = useState<CsvDuplicatePolicy>('block');
+  const [aggregationMethod, setAggregationMethod] = useState<CsvAggregationMethod>('mean');
   const [result, setResult] = useState<CsvMergeResult | null>(null);
   const [downloadOpened, setDownloadOpened] = useState(false);
   const primaryLoadId = useRef(0);
@@ -284,6 +331,7 @@ export function CsvMergePage({ active }: { active: boolean }) {
     setSecondaryColumns([]);
     setKeyPairs([]);
     setDuplicatePolicy('block');
+    setAggregationMethod('mean');
     setResult(null);
     setSecondaryLoading(false);
   };
@@ -324,6 +372,7 @@ export function CsvMergePage({ active }: { active: boolean }) {
     setSecondaryColumns([]);
     setKeyPairs([]);
     setDuplicatePolicy('block');
+    setAggregationMethod('mean');
     setResult(null);
     setSecondaryLoading(false);
     if (!file || !primary) return;
@@ -347,7 +396,8 @@ export function CsvMergePage({ active }: { active: boolean }) {
   const updateSecondaryColumns = (columns: CsvSecondaryColumn[]) => { setSecondaryColumns(columns); setResult(null); };
   const updateKeyPairs = (pairs: CsvKeyPair[]) => { setKeyPairs(pairs); setDuplicatePolicy('block'); setResult(null); };
   const updateJoinType = (value: CsvJoinType) => { setJoinType(value); setResult(null); };
-  const config = useMemo(() => ({ primaryColumns, secondaryColumns, keyPairs, joinType, duplicatePolicy }), [duplicatePolicy, joinType, keyPairs, primaryColumns, secondaryColumns]);
+  const updateAggregationMethod = (value: CsvAggregationMethod) => { setAggregationMethod(value); setDuplicatePolicy('block'); setResult(null); };
+  const config = useMemo(() => ({ primaryColumns, secondaryColumns, keyPairs, joinType, duplicatePolicy, aggregationMethod }), [aggregationMethod, duplicatePolicy, joinType, keyPairs, primaryColumns, secondaryColumns]);
   const validation = useMemo(() => primary && secondary ? validateCsvMerge(primary, secondary, config) : null, [config, primary, secondary]);
   const selectedSecondary = new Set(secondaryColumns.map((column) => column.source));
   const outputNames = [...primaryColumns, ...secondaryColumns.map((column) => column.output)];
@@ -389,7 +439,7 @@ export function CsvMergePage({ active }: { active: boolean }) {
   return (
     <Stack gap="lg">
       <Group justify="space-between" align="flex-start">
-        <div><Title order={2}>CSV Merge</Title><Text c="dimmed">Join two local CSV files using exact or timestamp-normalized key columns. Files never leave your browser.</Text></div>
+        <div><Title order={2}>CSV Merge</Title><Text c="dimmed">Join two local CSV files using exact keys, normalized timestamps, or minute aggregation. Files never leave your browser.</Text></div>
         <Button variant="default" leftSection={<RotateCcw size={16} />} onClick={reset} disabled={!primaryFile && !secondaryFile}>Reset</Button>
       </Group>
 
@@ -412,7 +462,7 @@ export function CsvMergePage({ active }: { active: boolean }) {
         {secondary && <Stack gap="md"><FileSummary document={secondary} file={secondaryFile} /><Paper withBorder p="sm"><Text fw={600} size="sm" mb="xs">Columns to add</Text><Table.ScrollContainer minWidth={620}><Table withTableBorder withColumnBorders><Table.Thead><Table.Tr><Table.Th>Include</Table.Th><Table.Th>Source column</Table.Th><Table.Th>Output column name</Table.Th></Table.Tr></Table.Thead><Table.Tbody>{secondary.headers.map((header) => { const selection = secondaryColumns.find((column) => column.source === header); const conflict = selection && (selection.output.trim() === '' || outputNameCount(selection.output) > 1); return <Table.Tr key={header}><Table.Td><Checkbox aria-label={`Include ${header}`} checked={selectedSecondary.has(header)} onChange={(event) => toggleSecondaryColumn(header, event.currentTarget.checked)} /></Table.Td><Table.Td>{header}</Table.Td><Table.Td>{selection ? <TextInput size="xs" value={selection.output} error={conflict ? 'Enter a unique output name.' : undefined} onChange={(event) => updateSecondaryColumns(secondaryColumns.map((column) => column.source === header ? { ...column, output: event.currentTarget.value } : column))} /> : <Text size="xs" c="dimmed">Not selected</Text>}</Table.Td></Table.Tr>; })}</Table.Tbody></Table></Table.ScrollContainer></Paper><DataPreview headers={secondary.headers} rows={secondary.rows} label="Secondary data preview" /></Stack>}
       </StepCard>
 
-      <StepCard index={3} color={STEP_COLORS[2]} title="Configure the keyed join" subtitle="Compare key columns as exact text or normalize dataset-local timestamps. Empty and invalid keys remain unmatched." complete={Boolean(validation && validation.errors.length === 0)}>
+      <StepCard index={3} color={STEP_COLORS[2]} title="Configure the keyed join" subtitle="Compare exact values, normalize timestamp formats, or aggregate all samples within each primary [timestamp, timestamp + 60s) window." complete={Boolean(validation && validation.errors.length === 0)}>
         {(!primary || !secondary) && <Alert color="gray">Load both CSV files to configure the merge.</Alert>}
         {primary && secondary && <Stack gap="md">
           <Select label="Join type" value={joinType} allowDeselect={false} onChange={(value) => updateJoinType((value as CsvJoinType | null) ?? 'left')} data={[{ value: 'left', label: 'Left join · keep every primary row' }, { value: 'inner', label: 'Inner join · keep matching rows only' }, { value: 'full', label: 'Full outer join · keep every row from both files' }]} />
@@ -426,7 +476,10 @@ export function CsvMergePage({ active }: { active: boolean }) {
                   <Table.Td><Select searchable value={pair.secondary} onChange={(value) => value && updateKeyPairs(keyPairs.map((item, itemIndex) => itemIndex === index ? { ...item, secondary: value } : item))} data={secondary.headers.map((header) => ({ value: header, label: header, disabled: keyPairs.some((item, itemIndex) => itemIndex !== index && item.secondary === header) }))} /></Table.Td>
                   <Table.Td>
                     <Stack gap={4}>
-                      <Select aria-label={`Comparison for ${pair.primary} and ${pair.secondary}`} value={pair.comparison} allowDeselect={false} onChange={(value) => updateKeyPairs(keyPairs.map((item, itemIndex) => itemIndex === index ? { ...item, comparison: value === 'timestamp' ? 'timestamp' : 'exact' } : item))} data={[{ value: 'exact', label: 'Exact text' }, { value: 'timestamp', label: 'Timestamp normalization' }]} />
+                      <Select aria-label={`Comparison for ${pair.primary} and ${pair.secondary}`} value={pair.comparison} allowDeselect={false} onChange={(value) => updateKeyPairs(keyPairs.map((item, itemIndex) => itemIndex === index ? {
+                        ...item,
+                        comparison: value === 'timestamp' || value === 'timestamp_aggregation' ? value : 'exact',
+                      } : item))} data={[{ value: 'exact', label: 'Exact text' }, { value: 'timestamp', label: 'Timestamp normalization' }, { value: 'timestamp_aggregation', label: 'Timestamp aggregation · [primary, +60s)' }]} />
                       {suggestTimestamp && <Stack gap={3}>
                         <Text size="xs" c="blue">Both columns look temporal, but their formats differ.</Text>
                         <Button size="compact-xs" variant="light" color="blue" onClick={() => updateKeyPairs(keyPairs.map((item, itemIndex) => itemIndex === index ? { ...item, comparison: 'timestamp' } : item))}>Normalize timestamps</Button>
@@ -446,6 +499,14 @@ export function CsvMergePage({ active }: { active: boolean }) {
               pair={pair}
             />
           ))}
+          {keyPairs.some((pair) => pair.comparison === 'timestamp_aggregation') && <Select
+            label="Aggregation for all selected secondary columns"
+            description="One method is applied to every included secondary output column. Mean, min, and max require numeric non-empty values."
+            value={aggregationMethod}
+            allowDeselect={false}
+            onChange={(value) => updateAggregationMethod((value as CsvAggregationMethod | null) ?? 'mean')}
+            data={[{ value: 'mean', label: 'Mean' }, { value: 'min', label: 'Min' }, { value: 'max', label: 'Max' }, { value: 'first', label: 'First' }, { value: 'last', label: 'Last' }]}
+          />}
           <Button variant="light" leftSection={<Plus size={15} />} onClick={addKeyPair} disabled={keyPairs.length >= Math.min(primary.headers.length, secondary.headers.length)}>Add key column</Button>
           {validation && (() => {
             const effectivePrimaryRows = validation.matchedRows + validation.unmatchedPrimaryRows;
@@ -459,7 +520,15 @@ export function CsvMergePage({ active }: { active: boolean }) {
                   <Text size="sm">Unmatched secondary: <b>{validation.unmatchedSecondaryRows.toLocaleString()}</b></Text>
                   <Text size="sm">Expected result rows: <b>{validation.expectedRows.toLocaleString()}</b></Text>
                 </SimpleGrid>
-                <MatchedPairsPreview rows={validation.matchedPairPreview} pairs={keyPairs} />
+                {keyPairs.some((pair) => pair.comparison === 'timestamp_aggregation') ? <>
+                  <SimpleGrid cols={{ base: 1, sm: 4 }}>
+                    <Text size="sm">Used secondary rows: <b>{validation.aggregationUsedSecondaryRows.toLocaleString()}</b></Text>
+                    <Text size="sm">Samples / minute · min: <b>{validation.aggregationMinSamples?.toLocaleString() ?? 'N/A'}</b></Text>
+                    <Text size="sm">max: <b>{validation.aggregationMaxSamples?.toLocaleString() ?? 'N/A'}</b></Text>
+                    <Text size="sm">average: <b>{validation.aggregationAverageSamples?.toFixed(2) ?? 'N/A'}</b></Text>
+                  </SimpleGrid>
+                  <TimestampAggregationPreview validation={validation} method={aggregationMethod} />
+                </> : <MatchedPairsPreview rows={validation.matchedPairPreview} pairs={keyPairs} />}
               </Stack>
             </Alert>;
           })()}

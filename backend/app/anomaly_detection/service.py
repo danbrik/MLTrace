@@ -2025,6 +2025,73 @@ def get_run(
         raise
 
 
+def export_plot_table(db: Session, run_id: int, view: str) -> dict | None:
+    """Recompute a saved run without decimation and return its visible plot columns."""
+    run = get_run(db, run_id, max_points=None)
+    if run is None:
+        return None
+    if view not in {"result", "diagnostic"}:
+        raise ValueError("Anomaly plot export view must be 'result' or 'diagnostic'.")
+    points = run.series
+    timestamps = [point.timestamp.strftime("%Y.%m.%d %H:%M:%S") for point in points]
+    columns: list[dict] = [{"name": "timestamp", "values": timestamps}]
+
+    def add(name: str, values) -> None:
+        columns.append({"name": name, "values": list(values)})
+
+    algorithm = run.config.algorithm
+    if view == "result":
+        if algorithm == "simple_threshold":
+            add("Raw score", (point.score for point in points))
+            if run.config.simple_threshold_signal == "ewma":
+                add("EWMA", (point.smoothed for point in points))
+            add("Threshold", (point.threshold_on for point in points))
+        elif algorithm == "event_threshold":
+            label = (
+                "Raw score (smoothing disabled)"
+                if not run.config.event_smoothing_enabled
+                else "Rolling median" if run.config.event_smoothing_method == "median" else "Moving average"
+            )
+            add("Raw error", (point.score for point in points))
+            add(label, (point.smoothed for point in points))
+            add("Threshold On", (point.threshold_on for point in points))
+            add("Threshold Off", (point.threshold_off for point in points))
+        elif algorithm == "rolling_sigma":
+            add("Raw error", (point.score for point in points))
+            add("Rolling mean", (point.baseline for point in points))
+            add(f"Mean + {run.config.sigma_threshold}σ", (point.high_threshold for point in points))
+        else:
+            add("Raw error", (point.score for point in points))
+            add("EWMA", (point.smoothed for point in points))
+            add("Warning threshold", (point.warning_threshold for point in points))
+            add("High threshold", (point.high_threshold for point in points))
+            if algorithm == "robust_zscore":
+                add("Minimum EWMA score", (run.config.minimum_score_for_detection for _ in points))
+                if run.config.minimum_delta_for_detection is not None:
+                    add("Baseline + minimum delta", (
+                        None if point.baseline is None else point.baseline + run.config.minimum_delta_for_detection
+                        for point in points
+                    ))
+    elif algorithm == "simple_threshold":
+        add("Threshold candidate", (int(point.candidate) for point in points))
+    elif algorithm == "event_threshold":
+        add("Candidates in last N samples", (point.persistence_count for point in points))
+        add(f"Required K = {run.config.persistence_k}", (run.config.persistence_k for _ in points))
+        add("Above-threshold sample", (
+            point.persistence_count if point.candidate else None for point in points
+        ))
+    else:
+        add(
+            "Standard deviations above mean" if algorithm == "rolling_sigma" else "Robust z-score",
+            (point.robust_z for point in points),
+        )
+        if algorithm == "rolling_sigma":
+            add(f"Anomaly at {run.config.sigma_threshold}σ", (run.config.sigma_threshold for _ in points))
+        if algorithm == "robust_cusum":
+            add("CUSUM", (point.cusum for point in points))
+    return {"columns": columns, "rowCount": len(points), "seriesCount": max(0, len(columns) - 1)}
+
+
 def get_run_diagnostics(
     db: Session,
     run_id: int,

@@ -17,7 +17,8 @@ export type CsvParseOutcome = {
 
 export type CsvJoinType = 'left' | 'inner' | 'full';
 export type CsvDuplicatePolicy = 'block' | 'keep_first';
-export type CsvKeyComparison = 'exact' | 'timestamp';
+export type CsvKeyComparison = 'exact' | 'timestamp' | 'timestamp_aggregation';
+export type CsvAggregationMethod = 'mean' | 'min' | 'max' | 'first' | 'last';
 
 export type CsvKeyPair = {
   primary: string;
@@ -36,6 +37,7 @@ export type CsvMergeConfig = {
   keyPairs: CsvKeyPair[];
   joinType: CsvJoinType;
   duplicatePolicy: CsvDuplicatePolicy;
+  aggregationMethod?: CsvAggregationMethod;
 };
 
 export type CsvDuplicateKey = {
@@ -60,6 +62,12 @@ export type CsvMergeValidation = {
   unmatchedSecondaryRows: number;
   expectedRows: number;
   matchedPairPreview: CsvMatchedPairPreviewRow[];
+  aggregationUsedSecondaryRows: number;
+  aggregationMinSamples: number | null;
+  aggregationMaxSamples: number | null;
+  aggregationAverageSamples: number | null;
+  aggregationNumericIssues: CsvAggregationNumericIssue[];
+  aggregationPreview: CsvAggregationPreviewRow[];
 };
 
 export type CsvMergeResult = {
@@ -82,6 +90,20 @@ export type CsvMatchedPairPreviewRow = {
   primaryKeyValues: CsvCell[];
   secondaryRowNumber: number;
   secondaryKeyValues: CsvCell[];
+};
+
+export type CsvAggregationNumericIssue = {
+  column: string;
+  invalidValues: number;
+};
+
+export type CsvAggregationPreviewRow = {
+  primaryRowNumber: number;
+  primaryTimestamp: string;
+  secondaryRowNumbers: number[];
+  secondaryTimestamps: string[];
+  rawValues: Array<{ column: string; values: CsvCell[] }>;
+  aggregatedValues: Array<{ column: string; value: CsvCell }>;
 };
 
 function parseErrorMessage(error: ParseError): string {
@@ -320,7 +342,7 @@ function keyIndex(
 
 function firstPrimaryTimestampStyles(primary: CsvDocument, pairs: CsvKeyPair[]): Map<string, TimestampStyle> {
   const styles = new Map<string, TimestampStyle>();
-  pairs.filter((pair) => pair.comparison === 'timestamp').forEach((pair) => {
+  pairs.filter((pair) => pair.comparison !== 'exact').forEach((pair) => {
     const index = columnIndex(primary, pair.primary);
     for (const row of primary.rows) {
       const value = row[index];
@@ -392,13 +414,158 @@ function unique(values: string[]): boolean {
   return new Set(values).size === values.length;
 }
 
+const AGGREGATION_WINDOW_MS = 60_000;
+
+type AggregationMatchPlan = {
+  secondaryRowsByPrimary: Map<number, number[]>;
+  matchedSecondary: Set<number>;
+  overlappingPrimaryWindows: boolean;
+};
+
+function aggregationPair(config: CsvMergeConfig): CsvKeyPair | null {
+  return config.keyPairs.find((pair) => pair.comparison === 'timestamp_aggregation') ?? null;
+}
+
+function timestampMilliseconds(value: CsvCell): number | null {
+  if (value === null) return null;
+  const parsed = parseCsvTimestamp(value);
+  if (!parsed) return null;
+  const fraction = parsed.fraction ? Number(`0.${parsed.fraction}`) * 1000 : 0;
+  return Date.UTC(parsed.year, parsed.month - 1, parsed.day, parsed.hour, parsed.minute, parsed.second) + fraction;
+}
+
+function groupingKey(
+  row: CsvCell[],
+  document: CsvDocument,
+  pairs: CsvKeyPair[],
+  side: KeySide,
+): string | null {
+  const groupingPairs = pairs.filter((pair) => pair.comparison !== 'timestamp_aggregation');
+  if (groupingPairs.length === 0) return JSON.stringify([]);
+  return compositeKey(row, document, groupingPairs, side).key;
+}
+
+function buildAggregationMatchPlan(
+  primary: CsvDocument,
+  secondary: CsvDocument,
+  config: CsvMergeConfig,
+  primaryRowIndexes: number[],
+  secondaryRowIndexes: number[],
+): AggregationMatchPlan {
+  const pair = aggregationPair(config);
+  if (!pair) return { secondaryRowsByPrimary: new Map(), matchedSecondary: new Set(), overlappingPrimaryWindows: false };
+  const primaryTimeIndex = columnIndex(primary, pair.primary);
+  const secondaryTimeIndex = columnIndex(secondary, pair.secondary);
+  const anchorsByGroup = new Map<string, Array<{ rowIndex: number; start: number }>>();
+  primaryRowIndexes.forEach((rowIndex) => {
+    const row = primary.rows[rowIndex];
+    const group = groupingKey(row, primary, config.keyPairs, 'primary');
+    const start = timestampMilliseconds(row[primaryTimeIndex] ?? null);
+    if (group === null || start === null) return;
+    const anchors = anchorsByGroup.get(group) ?? [];
+    anchors.push({ rowIndex, start });
+    anchorsByGroup.set(group, anchors);
+  });
+  let overlappingPrimaryWindows = false;
+  anchorsByGroup.forEach((anchors) => {
+    anchors.sort((left, right) => left.start - right.start || left.rowIndex - right.rowIndex);
+    if (anchors.some((anchor, index) => index > 0 && anchor.start < anchors[index - 1].start + AGGREGATION_WINDOW_MS)) {
+      overlappingPrimaryWindows = true;
+    }
+  });
+  const secondaryRowsByPrimary = new Map<number, number[]>();
+  const matchedSecondary = new Set<number>();
+  secondaryRowIndexes.forEach((rowIndex) => {
+    const row = secondary.rows[rowIndex];
+    const group = groupingKey(row, secondary, config.keyPairs, 'secondary');
+    const timestamp = timestampMilliseconds(row[secondaryTimeIndex] ?? null);
+    if (group === null || timestamp === null) return;
+    const anchors = anchorsByGroup.get(group);
+    if (!anchors) return;
+    let low = 0;
+    let high = anchors.length - 1;
+    let candidate = -1;
+    while (low <= high) {
+      const middle = Math.floor((low + high) / 2);
+      if (anchors[middle].start <= timestamp) {
+        candidate = middle;
+        low = middle + 1;
+      } else {
+        high = middle - 1;
+      }
+    }
+    if (candidate < 0 || timestamp >= anchors[candidate].start + AGGREGATION_WINDOW_MS) return;
+    const primaryRowIndex = anchors[candidate].rowIndex;
+    const matches = secondaryRowsByPrimary.get(primaryRowIndex) ?? [];
+    matches.push(rowIndex);
+    secondaryRowsByPrimary.set(primaryRowIndex, matches);
+    matchedSecondary.add(rowIndex);
+  });
+  secondaryRowsByPrimary.forEach((rows) => rows.sort((left, right) => {
+    const leftTime = timestampMilliseconds(secondary.rows[left][secondaryTimeIndex] ?? null) ?? 0;
+    const rightTime = timestampMilliseconds(secondary.rows[right][secondaryTimeIndex] ?? null) ?? 0;
+    return leftTime - rightTime || left - right;
+  }));
+  return { secondaryRowsByPrimary, matchedSecondary, overlappingPrimaryWindows };
+}
+
+const NUMERIC_VALUE = /^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?$/;
+
+function numericValue(value: CsvCell): number | null {
+  if (value === null) return null;
+  const normalized = value.trim();
+  if (!NUMERIC_VALUE.test(normalized)) return Number.NaN;
+  const parsed = Number(normalized);
+  return Number.isFinite(parsed) ? parsed : Number.NaN;
+}
+
+function numericAggregationIssues(
+  secondary: CsvDocument,
+  config: CsvMergeConfig,
+): CsvAggregationNumericIssue[] {
+  if (!aggregationPair(config) || !['mean', 'min', 'max'].includes(config.aggregationMethod ?? 'mean')) return [];
+  return config.secondaryColumns.flatMap((column) => {
+    const index = columnIndex(secondary, column.source);
+    const invalidValues = secondary.rows.reduce((count, row) => {
+      const value = numericValue(row[index] ?? null);
+      return count + (value !== null && Number.isNaN(value) ? 1 : 0);
+    }, 0);
+    return invalidValues > 0 ? [{ column: column.source, invalidValues }] : [];
+  });
+}
+
+function aggregateSecondaryValue(
+  rowIndexes: number[],
+  secondary: CsvDocument,
+  source: string,
+  method: CsvAggregationMethod,
+  primaryStyles: Map<string, TimestampStyle>,
+): CsvCell {
+  if (rowIndexes.length === 0) return null;
+  if (method === 'first' || method === 'last') {
+    const rowIndex = method === 'first' ? rowIndexes[0] : rowIndexes[rowIndexes.length - 1];
+    return secondaryOutputValue(secondary.rows[rowIndex], secondary, source, primaryStyles);
+  }
+  const column = columnIndex(secondary, source);
+  const values = rowIndexes
+    .map((rowIndex) => numericValue(secondary.rows[rowIndex][column] ?? null))
+    .filter((value): value is number => value !== null && !Number.isNaN(value));
+  if (values.length === 0) return null;
+  const result = method === 'mean'
+    ? values.reduce((total, value) => total + value, 0) / values.length
+    : method === 'min' ? Math.min(...values) : Math.max(...values);
+  return Number.isFinite(result) ? String(result) : null;
+}
+
 export function validateCsvMerge(
   primary: CsvDocument,
   secondary: CsvDocument,
   config: CsvMergeConfig,
 ): CsvMergeValidation {
   const errors: string[] = [];
+  const aggregationPairs = config.keyPairs.filter((pair) => pair.comparison === 'timestamp_aggregation');
   if (config.keyPairs.length === 0) errors.push('Add at least one key-column mapping.');
+  if (aggregationPairs.length > 1) errors.push('Configure only one Timestamp aggregation key.');
   if (!unique(config.keyPairs.map((pair) => pair.primary))) errors.push('Each primary key column may only be used once.');
   if (!unique(config.keyPairs.map((pair) => pair.secondary))) errors.push('Each secondary key column may only be used once.');
   if (config.primaryColumns.some((name) => !primary.headers.includes(name))) errors.push('A selected primary output column no longer exists.');
@@ -422,6 +589,8 @@ export function validateCsvMerge(
       primaryInvalidTimestampRows: 0, secondaryInvalidTimestampRows: 0,
       secondaryMissingKeys: 0, matchedRows: 0, unmatchedPrimaryRows: primary.rows.length,
       unmatchedSecondaryRows: secondary.rows.length, expectedRows: 0, matchedPairPreview: [],
+      aggregationUsedSecondaryRows: 0, aggregationMinSamples: null, aggregationMaxSamples: null,
+      aggregationAverageSamples: null, aggregationNumericIssues: [], aggregationPreview: [],
     };
   }
   const primaryKeys = keyIndex(primary, config.keyPairs, 'primary');
@@ -434,23 +603,67 @@ export function validateCsvMerge(
   const secondaryRowIndexes = config.duplicatePolicy === 'keep_first'
     ? secondaryKeys.retainedRowIndexes
     : secondary.rows.map((_, index) => index);
+  const activeAggregationPair = aggregationPair(config);
+  const matchPlan = activeAggregationPair
+    ? buildAggregationMatchPlan(primary, secondary, config, primaryRowIndexes, secondaryRowIndexes)
+    : null;
+  if (matchPlan?.overlappingPrimaryWindows) {
+    errors.push('Primary Timestamp aggregation windows overlap for the same compound key.');
+  }
+  const aggregationNumericIssues = numericAggregationIssues(secondary, config);
+  aggregationNumericIssues.forEach((issue) => {
+    const method = config.aggregationMethod ?? 'mean';
+    errors.push(`Column "${issue.column}" contains ${issue.invalidValues} non-numeric value${issue.invalidValues === 1 ? '' : 's'} and cannot use ${method} aggregation.`);
+  });
   let matchedRows = 0;
   const matchedSecondary = new Set<number>();
   const matchedPairRows: CsvMatchedPairPreviewRow[] = [];
+  const aggregationPreview: CsvAggregationPreviewRow[] = [];
+  const primaryStyles = firstPrimaryTimestampStyles(primary, config.keyPairs);
   primaryRowIndexes.forEach((rowIndex) => {
     const row = primary.rows[rowIndex];
-    const value = compositeKey(row, primary, config.keyPairs, 'primary');
-    if (value.key === null) return;
-    const secondaryRow = secondaryKeys.rowsByKey.get(value.key);
-    if (secondaryRow !== undefined) {
+    const secondaryRows = matchPlan
+      ? matchPlan.secondaryRowsByPrimary.get(rowIndex) ?? []
+      : (() => {
+        const value = compositeKey(row, primary, config.keyPairs, 'primary');
+        const secondaryRow = value.key === null ? undefined : secondaryKeys.rowsByKey.get(value.key);
+        return secondaryRow === undefined ? [] : [secondaryRow];
+      })();
+    if (secondaryRows.length > 0) {
       matchedRows += 1;
-      matchedSecondary.add(secondaryRow);
+      secondaryRows.forEach((secondaryRow) => matchedSecondary.add(secondaryRow));
       if (matchedPairRows.length < 5) {
+        const secondaryRow = secondaryRows[0];
         matchedPairRows.push({
           primaryRowNumber: rowIndex + 1,
           primaryKeyValues: config.keyPairs.map((pair) => row[columnIndex(primary, pair.primary)] ?? null),
           secondaryRowNumber: secondaryRow + 1,
           secondaryKeyValues: config.keyPairs.map((pair) => secondary.rows[secondaryRow][columnIndex(secondary, pair.secondary)] ?? null),
+        });
+      }
+      if (activeAggregationPair && aggregationPreview.length < 5) {
+        const primaryTimestamp = row[columnIndex(primary, activeAggregationPair.primary)] as string;
+        aggregationPreview.push({
+          primaryRowNumber: rowIndex + 1,
+          primaryTimestamp,
+          secondaryRowNumbers: secondaryRows.map((secondaryRow) => secondaryRow + 1),
+          secondaryTimestamps: secondaryRows.map((secondaryRow) => (
+            secondary.rows[secondaryRow][columnIndex(secondary, activeAggregationPair.secondary)] as string
+          )),
+          rawValues: config.secondaryColumns.map((column) => ({
+            column: column.source,
+            values: secondaryRows.map((secondaryRow) => secondary.rows[secondaryRow][columnIndex(secondary, column.source)] ?? null),
+          })),
+          aggregatedValues: config.secondaryColumns.map((column) => ({
+            column: column.source,
+            value: aggregateSecondaryValue(
+              secondaryRows,
+              secondary,
+              column.source,
+              config.aggregationMethod ?? 'mean',
+              primaryStyles,
+            ),
+          })),
         });
       }
     }
@@ -462,6 +675,7 @@ export function validateCsvMerge(
     : config.joinType === 'full'
       ? primaryRowIndexes.length + unmatchedSecondaryRows
       : primaryRowIndexes.length;
+  const sampleCounts = matchPlan ? [...matchPlan.secondaryRowsByPrimary.values()].map((rows) => rows.length) : [];
   return {
     errors: [...new Set(errors)],
     primaryDuplicateKeys: primaryKeys.duplicates,
@@ -479,6 +693,14 @@ export function validateCsvMerge(
     unmatchedSecondaryRows,
     expectedRows,
     matchedPairPreview: matchedPairRows,
+    aggregationUsedSecondaryRows: matchPlan?.matchedSecondary.size ?? 0,
+    aggregationMinSamples: sampleCounts.length > 0 ? Math.min(...sampleCounts) : null,
+    aggregationMaxSamples: sampleCounts.length > 0 ? Math.max(...sampleCounts) : null,
+    aggregationAverageSamples: sampleCounts.length > 0
+      ? sampleCounts.reduce((total, count) => total + count, 0) / sampleCounts.length
+      : null,
+    aggregationNumericIssues,
+    aggregationPreview,
   };
 }
 
@@ -500,21 +722,36 @@ export function mergeCsvDocuments(
   const secondaryRowIndexes = config.duplicatePolicy === 'keep_first'
     ? secondaryKeyDetails.retainedRowIndexes
     : secondary.rows.map((_, index) => index);
+  const matchPlan = aggregationPair(config)
+    ? buildAggregationMatchPlan(primary, secondary, config, primaryRowIndexes, secondaryRowIndexes)
+    : null;
   const matchedSecondary = new Set<number>();
   const rows: CsvCell[][] = [];
 
   primaryRowIndexes.forEach((primaryIndex) => {
     const primaryRow = primary.rows[primaryIndex];
-    const value = compositeKey(primaryRow, primary, config.keyPairs, 'primary');
-    const secondaryIndex = value.key === null ? undefined : secondaryKeys.get(value.key);
-    if (config.joinType === 'inner' && secondaryIndex === undefined) return;
-    if (secondaryIndex !== undefined) matchedSecondary.add(secondaryIndex);
-    const secondaryRow = secondaryIndex === undefined ? null : secondary.rows[secondaryIndex];
+    const secondaryRowIndexesForPrimary = matchPlan
+      ? matchPlan.secondaryRowsByPrimary.get(primaryIndex) ?? []
+      : (() => {
+        const value = compositeKey(primaryRow, primary, config.keyPairs, 'primary');
+        const secondaryIndex = value.key === null ? undefined : secondaryKeys.get(value.key);
+        return secondaryIndex === undefined ? [] : [secondaryIndex];
+      })();
+    if (config.joinType === 'inner' && secondaryRowIndexesForPrimary.length === 0) return;
+    secondaryRowIndexesForPrimary.forEach((secondaryIndex) => matchedSecondary.add(secondaryIndex));
     rows.push([
       ...primaryOutputIndexes.map((index) => primaryRow[index] ?? null),
-      ...config.secondaryColumns.map((column) => secondaryRow
-        ? secondaryOutputValue(secondaryRow, secondary, column.source, primaryTimestampStyles)
-        : null),
+      ...config.secondaryColumns.map((column) => matchPlan
+        ? aggregateSecondaryValue(
+          secondaryRowIndexesForPrimary,
+          secondary,
+          column.source,
+          config.aggregationMethod ?? 'mean',
+          primaryTimestampStyles,
+        )
+        : secondaryRowIndexesForPrimary.length > 0
+          ? secondaryOutputValue(secondary.rows[secondaryRowIndexesForPrimary[0]], secondary, column.source, primaryTimestampStyles)
+          : null),
     ]);
   });
 

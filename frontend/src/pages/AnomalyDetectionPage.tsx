@@ -31,9 +31,11 @@ import {
   createAnomalyDetectionRun,
   deleteAnomalyDetectionRun,
   getAnomalyDetectionDiagnostics,
+  getAnomalyDetectionExportSeries,
   getAnomalyDetectionProgress,
   getAnomalyDetectionRun,
   getTestingRunResults,
+  getFullTestingRunPlotSeries,
   listAnomalyDetectionRuns,
   listTestingRuns,
   previewAnomalyDetectionCalibration,
@@ -44,6 +46,7 @@ import { DateTime24Input } from '../components/DateTime24Input';
 import { PlotlyChart, type PlotlyChartSelection } from '../components/PlotlyChart';
 import { DEFAULT_TABLE_PAGE_SIZE, TablePagination } from '../components/TablePagination';
 import type { Data, Layout } from '../lib/plotly';
+import { buildPlotExportTable } from '../lib/plotExport';
 import { withLineGapPolicy } from '../lib/plotGaps';
 import {
   countFacetValues,
@@ -943,6 +946,24 @@ export function AnomalyDetectionPage({ active }: { active: boolean }) {
     showlegend: false,
   }), [scoreSeries]);
 
+  const fullInferenceExport = useCallback(async (
+    runId: number,
+    rangeStart: string | null | undefined,
+    rangeEnd: string | null | undefined,
+    name: string,
+  ) => {
+    const series = await getFullTestingRunPlotSeries(runId, {
+      score_series: scoreSeries,
+      start_timestamp: rangeStart || null,
+      end_timestamp: rangeEnd || null,
+    });
+    return buildPlotExportTable([{
+      type: 'scatter', mode: 'lines', name,
+      x: series.points.map((point) => point.timestamp),
+      y: series.points.map((point) => point.value),
+    } as Data]);
+  }, [scoreSeries]);
+
   const selectRange = useCallback((selection: PlotlyChartSelection) => {
     const left = new Date(selection.start);
     const right = new Date(selection.end);
@@ -1573,7 +1594,7 @@ export function AnomalyDetectionPage({ active }: { active: boolean }) {
                 <SegmentedControl fullWidth data={[{ value: 'full', label: 'Entire period' }, { value: 'selection', label: 'Select in plot' }]} value={rangeMode} onChange={(value) => { setRangeMode(value as 'full' | 'selection'); if (value === 'full') { setStart(fullStart); setEnd(fullEnd); } }} />
               </div>
             </SimpleGrid>
-            <PlotlyChart data={previewData} layout={previewLayout} height={360} onSelected={rangeMode === 'selection' ? selectRange : undefined} rescaleYOnVisibleX />
+            <PlotlyChart data={previewData} layout={previewLayout} height={360} onSelected={rangeMode === 'selection' ? selectRange : undefined} rescaleYOnVisibleX fullResolutionExport={() => fullInferenceExport(Number(testingRunId), rangeMode === 'full' ? fullStart : start, rangeMode === 'full' ? fullEnd : end, scoreSeries.replace('_', ' ').toUpperCase())} />
             <SimpleGrid cols={{ base: 1, md: 2 }}>
               <DateTime24Input label="Start" value={rangeMode === 'full' ? fullStart : start} min={fullStart} max={fullEnd} disabled={rangeMode === 'full'} onChange={setStart} />
               <DateTime24Input label="End" value={rangeMode === 'full' ? fullEnd : end} min={fullStart} max={fullEnd} disabled={rangeMode === 'full'} onChange={setEnd} />
@@ -1650,6 +1671,7 @@ export function AnomalyDetectionPage({ active }: { active: boolean }) {
                     height={280}
                     onSelected={selectCalibrationRange}
                     rescaleYOnVisibleX
+                    fullResolutionExport={() => fullInferenceExport(Number(testingRunId), calibrationStart || fullStart, calibrationEnd || fullEnd, 'Healthy calibration score')}
                   />
                   <SimpleGrid cols={{ base: 1, md: 2 }}>
                     <DateTime24Input
@@ -1804,6 +1826,7 @@ export function AnomalyDetectionPage({ active }: { active: boolean }) {
                             height={300}
                             onSelected={selectSimpleThresholdRange}
                             rescaleYOnVisibleX
+                            fullResolutionExport={() => fullInferenceExport(Number(testingRunId), analysisStart || fullStart, analysisEnd || fullEnd, scoreSeries.replace('_', ' ').toUpperCase())}
                           />
                           <SimpleGrid cols={{ base: 1, md: 3 }}>
                             <DateTime24Input label="Normal range start" value={simpleRangeStart} min={analysisStart} max={analysisEnd} disabled={running || thresholdCalculating} onChange={setSimpleRangeStart} />
@@ -1967,6 +1990,7 @@ export function AnomalyDetectionPage({ active }: { active: boolean }) {
                             height={280}
                             onSelected={thresholdRangeMode === 'selection' ? selectThresholdRange : undefined}
                             rescaleYOnVisibleX
+                            fullResolutionExport={() => fullInferenceExport(Number(thresholdTestingRunId), thresholdRangeMode === 'full' ? thresholdFullStart : thresholdStart, thresholdRangeMode === 'full' ? thresholdFullEnd : thresholdEnd, 'Validation score')}
                           />
                           <SimpleGrid cols={{ base: 1, md: 2 }}>
                             <DateTime24Input label="Validation start" value={thresholdRangeMode === 'full' ? thresholdFullStart : thresholdStart} min={thresholdFullStart} max={thresholdFullEnd} disabled={thresholdRangeMode === 'full' || thresholdCalculating} onChange={setThresholdStart} />
@@ -2252,11 +2276,11 @@ export function AnomalyDetectionPage({ active }: { active: boolean }) {
               </Alert>
             )}
             {activeRun.decimated && <Alert color="blue">Plot reduced from {activeRun.total.toLocaleString()} points; event detection used the full series.</Alert>}
-            <PlotlyChart data={resultData} layout={{ hovermode: 'x unified', shapes: resultShapes, annotations: resultAnnotations, xaxis: { type: 'date', title: { text: 'Time' } }, yaxis: { title: { text: activeRun.score_series.replace('_', ' ').toUpperCase() } }, legend: { orientation: 'h' } }} height={480} rescaleYOnVisibleX />
+            <PlotlyChart data={resultData} layout={{ hovermode: 'x unified', shapes: resultShapes, annotations: resultAnnotations, xaxis: { type: 'date', title: { text: 'Time' } }, yaxis: { title: { text: activeRun.score_series.replace('_', ' ').toUpperCase() } }, legend: { orientation: 'h' } }} height={480} rescaleYOnVisibleX fullResolutionExport={() => getAnomalyDetectionExportSeries(activeRun.id, 'result')} />
             <Button variant="subtle" justify="space-between" rightSection={detailsOpen ? <ChevronDown size={16} /> : <ChevronRight size={16} />} onClick={() => setDetailsOpen((value) => !value)}>Diagnostics</Button>
             <Collapse in={detailsOpen}>
               <Stack gap="md">
-                <PlotlyChart data={diagnosticData} layout={{ hovermode: 'x unified', xaxis: { type: 'date' }, yaxis: { title: { text: ['event_threshold', 'simple_threshold'].includes(activeRun.config.algorithm) ? 'Candidate count' : activeRun.config.algorithm === 'rolling_sigma' ? 'Standard deviations' : 'Robust z-score' } }, ...(activeRun.config.algorithm === 'robust_cusum' ? { yaxis2: { title: { text: 'CUSUM' }, overlaying: 'y', side: 'right' } } : {}), legend: { orientation: 'h' } }} height={300} rescaleYOnVisibleX />
+                <PlotlyChart data={diagnosticData} layout={{ hovermode: 'x unified', xaxis: { type: 'date' }, yaxis: { title: { text: ['event_threshold', 'simple_threshold'].includes(activeRun.config.algorithm) ? 'Candidate count' : activeRun.config.algorithm === 'rolling_sigma' ? 'Standard deviations' : 'Robust z-score' } }, ...(activeRun.config.algorithm === 'robust_cusum' ? { yaxis2: { title: { text: 'CUSUM' }, overlaying: 'y', side: 'right' } } : {}), legend: { orientation: 'h' } }} height={300} rescaleYOnVisibleX fullResolutionExport={() => getAnomalyDetectionExportSeries(activeRun.id, 'diagnostic')} />
                 {ROBUST_ALGORITHMS.includes(activeRun.config.algorithm) && (
                   <Stack gap="sm">
                     <Group justify="space-between" align="flex-end" wrap="wrap">

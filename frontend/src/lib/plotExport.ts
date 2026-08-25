@@ -163,6 +163,13 @@ export function buildPlotExportTable(data: Data[]): PlotExportTable {
   return { columns, rowCount: rows.length, seriesCount: series.length };
 }
 
+export async function resolvePlotExportTable(
+  data: Data[],
+  fullResolutionExport?: () => Promise<PlotExportTable>,
+): Promise<PlotExportTable> {
+  return fullResolutionExport ? fullResolutionExport() : buildPlotExportTable(data);
+}
+
 export function plotTableToCsv(table: PlotExportTable): string {
   return tabularTableToCsv(table);
 }

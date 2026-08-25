@@ -41,6 +41,7 @@ import {
   getAnalysisLayout,
   getHeatmap,
   getHeatmapRange,
+  getFullTestingRunPlotSeries,
   getTestingRunResults,
   heatmapRangeVideoUrl,
   listAnalysisLayouts,
@@ -59,6 +60,7 @@ import { PlotlyChart, type PlotlyChartClick, type PlotlyChartDoubleClick, type P
 import { StepCard } from '../components/StepCard';
 import { DEFAULT_TABLE_PAGE_SIZE, TablePagination } from '../components/TablePagination';
 import type { Data, Layout, PlotRelayoutEvent } from '../lib/plotly';
+import { buildPlotExportTable } from '../lib/plotExport';
 import { withLineGapPolicy } from '../lib/plotGaps';
 import {
   medianPositiveTimeDelta,
@@ -1394,6 +1396,47 @@ function TimeSeriesPlot({
   }), [traces]);
   const { automaticYRanges, scheduleAutomaticYRanges } = useVisibleAutomaticYRanges(traceValues);
 
+  const fullResolutionExport = useCallback(async () => {
+    const sources = plotSources(plot);
+    const fullGroups = await Promise.all(sources.map(async (source, groupIndex) => {
+      const configured = plot.traces?.find((trace) => Number(trace.testingRunId) === Number(source.testingRunId));
+      const visible = results.find((result) => result.testingRunId === Number(source.testingRunId));
+      const series = await getFullTestingRunPlotSeries(Number(source.testingRunId), {
+        score_series: plot.scoreSeries,
+        start_timestamp: source.start || null,
+        end_timestamp: source.end || null,
+      });
+      return {
+        name: configured?.legendLabel ?? visible?.testingRunName ?? `Testing run #${source.testingRunId}`,
+        color: configured?.color ?? TRACE_COLORS[groupIndex % TRACE_COLORS.length],
+        points: series.points,
+      };
+    }));
+    const exportTraces: Data[] = [];
+    fullGroups.forEach((group) => {
+      const x = group.points.map((point) => point.timestamp);
+      const rawValues = group.points.map((point) => point.value);
+      const stageOutputs = new Map<AnalyticsKind | 'input', Array<number | null>>();
+      stageOutputs.set('input', analyticsConfigs.length === 0 ? movingAverage(rawValues, plot.movingAverage).map(finiteOrNull) : rawValues.map(finiteOrNull));
+      let currentValues = rawValues;
+      analyticsConfigs.forEach((analytics) => {
+        const output = computeAnalyticsSeries(analytics, currentValues, x);
+        stageOutputs.set(analytics.kind, output);
+        currentValues = output.map((value) => value === null ? Number.NaN : value);
+      });
+      displayPanels.forEach((panel, panelIndex) => {
+        exportTraces.push({
+          type: 'scatter', mode: 'lines',
+          name: panelIndex === 0 ? group.name : `${group.name} · ${analyticsDefinition(panel.kind).label}`,
+          x,
+          y: panel.kind === 'raw' ? stageOutputs.get('input') ?? [] : stageOutputs.get(panel.kind) ?? [],
+          line: { color: group.color },
+        } as Data);
+      });
+    });
+    return buildPlotExportTable(exportTraces);
+  }, [analyticsConfigs, displayPanels, plot, results]);
+
   const handleRelayout = useCallback((event: PlotRelayoutEvent) => {
     const nextXRange = relayoutRange(event, 'xaxis');
     if (nextXRange !== undefined) scheduleAutomaticYRanges(nextXRange);
@@ -1539,6 +1582,7 @@ function TimeSeriesPlot({
         onSelected={selectionActive ? onRangeSelected : undefined}
         onRelayout={handleRelayout}
         onDoubleClick={handleDoubleClick}
+        fullResolutionExport={fullResolutionExport}
         height={analyticsConfigs.length > 0 ? Math.max(520, displayPanels.length * (plot.panelHeightPx || 260)) : (plot.panelHeightPx || 420)}
       />
       <Group gap="xs">
@@ -2099,16 +2143,17 @@ function legacyRegionEvents(
 }
 
 function BaselineRegionResultPlot({
-  plotId,
+  plot,
   definition,
   result,
   colorByThreshold,
 }: {
-  plotId: string;
+  plot: AnalysisPlot;
   definition: BaselineAnalysisRegion;
   result: BaselineNormalizationResult;
   colorByThreshold: Map<number, string>;
 }) {
+  const plotId = plot.id;
   const [manualYRange, setManualYRange] = useState<TimeSeriesAxisRange | null>(null);
   const regionTraces = result.traces.flatMap((trace) => {
     const region = trace.regions.find((item) => item.region_id === definition.id);
@@ -2165,6 +2210,45 @@ function BaselineRegionResultPlot({
     setManualYRange(null);
     return true;
   };
+  const fullResolutionExport = useCallback(async () => {
+    const analytics = plot.timeseriesAnalytics ?? [];
+    const stageIndex = plot.baselineAnalysis?.stageIndex ?? -1;
+    const exportTraces = await Promise.all(regionTraces.map(async ({ trace }) => {
+      const source = plotSources(plot).find((item) => Number(item.testingRunId) === trace.testing_run_id);
+      const series = await getFullTestingRunPlotSeries(trace.testing_run_id, {
+        score_series: plot.scoreSeries,
+        start_timestamp: source?.start || null,
+        end_timestamp: source?.end || null,
+      });
+      const x = series.points.map((point) => point.timestamp);
+      const raw = series.points.map((point) => point.value);
+      let signal: Array<number | null> = analytics.length === 0
+        ? movingAverage(raw, plot.movingAverage).map(finiteOrNull)
+        : raw.map(finiteOrNull);
+      if (stageIndex >= 0) {
+        let current = raw;
+        analytics.slice(0, stageIndex + 1).forEach((config) => {
+          signal = computeAnalyticsSeries(config, current, x);
+          current = signal.map((value) => value === null ? Number.NaN : value);
+        });
+      }
+      const startMs = new Date(regionStart).getTime();
+      const endMs = new Date(regionEnd).getTime();
+      const selected = x.map((timestamp, index) => ({ timestamp, value: signal[index] }))
+        .filter((point) => {
+          const time = new Date(point.timestamp).getTime();
+          return time >= startMs && time <= endMs;
+        });
+      return {
+        type: 'scatter', mode: 'lines', name: trace.label,
+        x: selected.map((point) => point.timestamp),
+        y: selected.map((point) => point.value === null || !Number.isFinite(point.value)
+          ? null
+          : (point.value - trace.baseline.center) / trace.baseline.scale),
+      } as Data;
+    }));
+    return buildPlotExportTable(exportTraces);
+  }, [plot, regionEnd, regionStart, regionTraces]);
   return (
     <Paper withBorder p="sm" radius="sm">
       <Stack gap="xs">
@@ -2192,6 +2276,7 @@ function BaselineRegionResultPlot({
             }}
             onRelayout={handleResultRelayout}
             onDoubleClick={handleResultDoubleClick}
+            fullResolutionExport={fullResolutionExport}
             height={300}
           />
         )}
@@ -2223,7 +2308,7 @@ function BaselineAnalysisResultPanel({ plot }: { plot: AnalysisPlot }) {
             <Badge variant="light" color="cyan">Y: drag axis · double-click axis for auto</Badge>
           </Group>
           {analysis.analysisRegions.map((definition) => (
-            <BaselineRegionResultPlot key={definition.id} plotId={plot.id} definition={definition} result={result} colorByThreshold={colorByThreshold} />
+            <BaselineRegionResultPlot key={definition.id} plot={plot} definition={definition} result={result} colorByThreshold={colorByThreshold} />
           ))}
           <Text fw={600}>Baseline statistics</Text>
           <ScrollArea>

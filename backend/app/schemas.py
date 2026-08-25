@@ -1339,6 +1339,22 @@ class TestingRunResultsResponse(BaseModel):
     decimated: bool = False
 
 
+class TestingRunPlotSeriesPoint(BaseModel):
+    position: int
+    timestamp: datetime
+    value: float
+
+
+class TestingRunPlotSeriesPage(BaseModel):
+    testing_run_id: int
+    score_series: str
+    result_revision: int
+    total: int
+    points: list[TestingRunPlotSeriesPoint]
+    next_timestamp: datetime | None = None
+    next_position: int | None = None
+
+
 class AnomalyDetectionTimeRange(BaseModel):
     start_timestamp: datetime
     end_timestamp: datetime

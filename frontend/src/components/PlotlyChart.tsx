@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Alert, Button, Group, Modal, Select, Stack, Text, TextInput, useMantineColorScheme } from '@mantine/core';
 import Plotly, { type Data, type Layout, type Config, type PlotlyHTMLElement, type PlotMouseEvent, type PlotSelectionEvent, type PlotRelayoutEvent } from '../lib/plotly';
-import { buildPlotExportTable, normalizedDownloadName, plotTableToCsv, plotTableToParquet } from '../lib/plotExport';
+import { buildPlotExportTable, normalizedDownloadName, plotTableToCsv, plotTableToParquet, resolvePlotExportTable, type PlotExportTable } from '../lib/plotExport';
 import { preparePlotData } from '../lib/plotGaps';
 import { withSeparatedRangeSliderLegend } from '../lib/plotLayout';
 import { relayoutRange, visibleYRelayoutUpdate, type TimeSeriesAxisRange, type TimeSeriesTraceValues } from '../lib/timeSeriesViewport';
@@ -38,6 +38,8 @@ type PlotlyChartProps = {
   rescaleYOnVisibleX?: boolean;
   /** Return true to consume the double-click before Plotly applies its global reset. */
   onDoubleClick?: (event: PlotlyChartDoubleClick) => boolean;
+  /** Load the complete tabular source on download instead of exporting displayed traces. */
+  fullResolutionExport?: () => Promise<PlotExportTable>;
 };
 
 const BASE_CONFIG: Partial<Config> = {
@@ -52,7 +54,7 @@ const BASE_CONFIG: Partial<Config> = {
  * Duenner Wrapper um Plotly.react: responsiv via ResizeObserver, raeumt beim
  * Unmount mit Plotly.purge auf. Kein react-plotly.js (React-19-Kompatibilitaet).
  */
-export function PlotlyChart({ data, layout, config, height = 400, className, onClick, onSelected, onRelayout, rescaleYOnVisibleX = false, onDoubleClick }: PlotlyChartProps) {
+export function PlotlyChart({ data, layout, config, height = 400, className, onClick, onSelected, onRelayout, rescaleYOnVisibleX = false, onDoubleClick, fullResolutionExport }: PlotlyChartProps) {
   const ref = useRef<HTMLDivElement | null>(null);
   const rescaleFrameRef = useRef<number | null>(null);
   const pendingXRangeRef = useRef<TimeSeriesAxisRange | null>(null);
@@ -62,6 +64,7 @@ export function PlotlyChart({ data, layout, config, height = 400, className, onC
   const [exportName, setExportName] = useState('plot-data');
   const [exporting, setExporting] = useState(false);
   const [exportError, setExportError] = useState<string | null>(null);
+  const [loadedExportTable, setLoadedExportTable] = useState<PlotExportTable | null>(null);
   const { colorScheme } = useMantineColorScheme();
   const dark = colorScheme === 'dark';
   const preparedData = useMemo(() => preparePlotData(data), [data]);
@@ -75,6 +78,7 @@ export function PlotlyChart({ data, layout, config, height = 400, className, onC
   const openExport = useCallback(() => {
     setExportName(defaultExportName);
     setExportError(null);
+    setLoadedExportTable(null);
     setExportOpened(true);
   }, [defaultExportName]);
   const traceValues = useMemo<TimeSeriesTraceValues[]>(() => preparedData.flatMap((trace) => {
@@ -230,14 +234,17 @@ export function PlotlyChart({ data, layout, config, height = 400, className, onC
   }, []);
 
   const download = async () => {
-    if (exportTable.columns.length === 0) return;
+    if (!fullResolutionExport && exportTable.columns.length === 0) return;
     setExporting(true);
     setExportError(null);
     try {
+      const table = await resolvePlotExportTable(data, fullResolutionExport);
+      if (table.columns.length === 0) throw new Error('The full-resolution source contains no exportable data.');
+      setLoadedExportTable(table);
       const filename = normalizedDownloadName(exportName, exportFormat);
       const blob = exportFormat === 'csv'
-        ? new Blob([plotTableToCsv(exportTable)], { type: 'text/csv;charset=utf-8' })
-        : new Blob([await plotTableToParquet(exportTable)], { type: 'application/vnd.apache.parquet' });
+        ? new Blob([plotTableToCsv(table)], { type: 'text/csv;charset=utf-8' })
+        : new Blob([await plotTableToParquet(table)], { type: 'application/vnd.apache.parquet' });
       const url = URL.createObjectURL(blob);
       const anchor = document.createElement('a');
       anchor.href = url;
@@ -265,9 +272,10 @@ export function PlotlyChart({ data, layout, config, height = 400, className, onC
       <Modal opened={exportOpened} onClose={() => !exporting && setExportOpened(false)} title="Download plot data" centered>
         <Stack gap="md">
           <Text size="sm" c="dimmed">
+            {fullResolutionExport ? 'Full inference resolution is loaded from the stored inference results. ' : ''}
             Every graph is exported as a separate column. Time-series rows use dataset-local timestamps in YYYY.MM.DD hh:mm:ss format.
           </Text>
-          {exportTable.columns.length === 0 && (
+          {!fullResolutionExport && exportTable.columns.length === 0 && (
             <Alert color="yellow" title="No tabular plot data">
               This visualization has no exportable X/Y or heatmap values.
             </Alert>
@@ -282,11 +290,13 @@ export function PlotlyChart({ data, layout, config, height = 400, className, onC
             onChange={(value) => setExportFormat(value === 'parquet' ? 'parquet' : 'csv')}
           />
           <Text size="xs" c="dimmed">
-            {exportTable.rowCount.toLocaleString()} rows · {exportTable.seriesCount.toLocaleString()} graph columns
+            {fullResolutionExport && !loadedExportTable
+              ? 'The complete row count is determined when downloading.'
+              : `${(loadedExportTable ?? exportTable).rowCount.toLocaleString()} rows · ${(loadedExportTable ?? exportTable).seriesCount.toLocaleString()} graph columns`}
           </Text>
           <Group justify="flex-end">
             <Button variant="default" onClick={() => setExportOpened(false)} disabled={exporting}>Cancel</Button>
-            <Button onClick={() => void download()} loading={exporting} disabled={exportTable.columns.length === 0}>Download</Button>
+            <Button onClick={() => void download()} loading={exporting} disabled={!fullResolutionExport && exportTable.columns.length === 0}>Download</Button>
           </Group>
         </Stack>
       </Modal>

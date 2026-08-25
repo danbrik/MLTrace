@@ -337,6 +337,221 @@ describe('CSV keyed merge', () => {
     })).toBe(false);
   });
 
+  it('aggregates every secondary sample in the primary half-open minute window', () => {
+    const left = document(['site', 'time'], [
+      ['A', '2025-09-16 00:09:00'],
+      ['A', '2025-09-16 00:10:00'],
+      ['B', '2025-09-16 00:09:00'],
+    ]);
+    const right = document(['site', 'time', 'value'], [
+      ['A', '2025.09.16 00:09:45', '16'],
+      ['A', '2025.09.16 00:09:00', '10'],
+      ['A', '2025.09.16 00:09:30', '14'],
+      ['A', '2025.09.16 00:09:15', '12'],
+      ['A', '2025.09.16 00:10:00', '20'],
+      ['A', '2025.09.16 00:10:15', '22'],
+      ['B', '2025.09.16 00:09:15', '100'],
+      ['A', '2025.09.16 00:08:45', '8'],
+    ]);
+    const aggregateConfig: CsvMergeConfig = {
+      primaryColumns: ['site', 'time'],
+      secondaryColumns: [{ source: 'value', output: 'value_mean' }],
+      keyPairs: [
+        { primary: 'site', secondary: 'site', comparison: 'exact' },
+        { primary: 'time', secondary: 'time', comparison: 'timestamp_aggregation' },
+      ],
+      aggregationMethod: 'mean', joinType: 'left', duplicatePolicy: 'block',
+    };
+    const result = mergeCsvDocuments(left, right, aggregateConfig);
+    expect(result.rows).toEqual([
+      ['A', '2025-09-16 00:09:00', '13'],
+      ['A', '2025-09-16 00:10:00', '21'],
+      ['B', '2025-09-16 00:09:00', '100'],
+    ]);
+    expect(result.validation).toMatchObject({
+      matchedRows: 3,
+      unmatchedPrimaryRows: 0,
+      unmatchedSecondaryRows: 1,
+      aggregationUsedSecondaryRows: 7,
+      aggregationMinSamples: 1,
+      aggregationMaxSamples: 4,
+      aggregationAverageSamples: 7 / 3,
+    });
+    expect(result.validation.aggregationPreview[0]).toEqual({
+      primaryRowNumber: 1,
+      primaryTimestamp: '2025-09-16 00:09:00',
+      secondaryRowNumbers: [2, 4, 3, 1],
+      secondaryTimestamps: [
+        '2025.09.16 00:09:00',
+        '2025.09.16 00:09:15',
+        '2025.09.16 00:09:30',
+        '2025.09.16 00:09:45',
+      ],
+      rawValues: [{ column: 'value', values: ['10', '12', '14', '16'] }],
+      aggregatedValues: [{ column: 'value', value: '13' }],
+    });
+  });
+
+  it('accepts an offset 15-second cadence without requiring fixed second positions', () => {
+    const left = document(['time'], [['2025-09-16 00:09:00']]);
+    const right = document(['time', 'value'], [
+      ['2025-09-16 00:09:03', '1'],
+      ['2025-09-16 00:09:18', '2'],
+      ['2025-09-16 00:09:33', '3'],
+      ['2025-09-16 00:09:48', '4'],
+    ]);
+    const result = mergeCsvDocuments(left, right, {
+      primaryColumns: ['time'], secondaryColumns: [{ source: 'value', output: 'value_mean' }],
+      keyPairs: [{ primary: 'time', secondary: 'time', comparison: 'timestamp_aggregation' }],
+      joinType: 'left', duplicatePolicy: 'block', aggregationMethod: 'mean',
+    });
+    expect(result.rows).toEqual([['2025-09-16 00:09:00', '2.5']]);
+    expect(result.validation).toMatchObject({
+      aggregationUsedSecondaryRows: 4,
+      aggregationMinSamples: 4,
+      aggregationMaxSamples: 4,
+      aggregationAverageSamples: 4,
+    });
+  });
+
+  it('aggregates a 5-second cadence and reports all twelve samples in the minute', () => {
+    const left = document(['time'], [['2025-09-16 00:09:00']]);
+    const right = document(['time', 'value'], Array.from({ length: 12 }, (_, index) => [
+      `2025-09-16 00:09:${String(index * 5).padStart(2, '0')}`,
+      String(index + 1),
+    ]));
+    const result = mergeCsvDocuments(left, right, {
+      primaryColumns: ['time'], secondaryColumns: [{ source: 'value', output: 'value_mean' }],
+      keyPairs: [{ primary: 'time', secondary: 'time', comparison: 'timestamp_aggregation' }],
+      joinType: 'left', duplicatePolicy: 'block', aggregationMethod: 'mean',
+    });
+    expect(result.rows).toEqual([['2025-09-16 00:09:00', '6.5']]);
+    expect(result.validation).toMatchObject({
+      aggregationUsedSecondaryRows: 12,
+      aggregationMinSamples: 12,
+      aggregationMaxSamples: 12,
+      aggregationAverageSamples: 12,
+    });
+  });
+
+  it('uses irregular available samples and assigns the exclusive boundary only to the next window', () => {
+    const left = document(['time'], [
+      ['2025-09-16 00:09:00'],
+      ['2025-09-16 00:10:00'],
+      ['2025-09-16 00:11:00'],
+    ]);
+    const right = document(['time', 'value'], [
+      ['2025-09-16 00:09:07', '2'],
+      ['2025-09-16 00:09:41', '4'],
+      ['2025-09-16 00:10:00', '10'],
+      ['2025-09-16 00:10:52', '20'],
+    ]);
+    const result = mergeCsvDocuments(left, right, {
+      primaryColumns: ['time'], secondaryColumns: [{ source: 'value', output: 'value_mean' }],
+      keyPairs: [{ primary: 'time', secondary: 'time', comparison: 'timestamp_aggregation' }],
+      joinType: 'left', duplicatePolicy: 'block', aggregationMethod: 'mean',
+    });
+    expect(result.rows).toEqual([
+      ['2025-09-16 00:09:00', '3'],
+      ['2025-09-16 00:10:00', '15'],
+      ['2025-09-16 00:11:00', null],
+    ]);
+    expect(result.validation).toMatchObject({
+      matchedRows: 2,
+      unmatchedPrimaryRows: 1,
+      aggregationUsedSecondaryRows: 4,
+      aggregationMinSamples: 2,
+      aggregationMaxSamples: 2,
+      aggregationAverageSamples: 2,
+    });
+    expect(result.validation.aggregationPreview[0].secondaryTimestamps).not.toContain('2025-09-16 00:10:00');
+    expect(result.validation.aggregationPreview[1].secondaryTimestamps).toContain('2025-09-16 00:10:00');
+  });
+
+  it('supports one global mean, min, max, first, or last aggregation method', () => {
+    const left = document(['time'], [['2025-09-16 00:09:00']]);
+    const right = document(['time', 'value'], [
+      ['2025-09-16 00:09:45', '16'],
+      ['2025-09-16 00:09:00', '10'],
+      ['2025-09-16 00:09:30', '14'],
+      ['2025-09-16 00:09:15', '12'],
+    ]);
+    const aggregateConfig: CsvMergeConfig = {
+      primaryColumns: ['time'], secondaryColumns: [{ source: 'value', output: 'value' }],
+      keyPairs: [{ primary: 'time', secondary: 'time', comparison: 'timestamp_aggregation' }],
+      joinType: 'left', duplicatePolicy: 'block', aggregationMethod: 'mean',
+    };
+    expect(mergeCsvDocuments(left, right, aggregateConfig).rows[0][1]).toBe('13');
+    expect(mergeCsvDocuments(left, right, { ...aggregateConfig, aggregationMethod: 'min' }).rows[0][1]).toBe('10');
+    expect(mergeCsvDocuments(left, right, { ...aggregateConfig, aggregationMethod: 'max' }).rows[0][1]).toBe('16');
+    expect(mergeCsvDocuments(left, right, { ...aggregateConfig, aggregationMethod: 'first' }).rows[0][1]).toBe('10');
+    expect(mergeCsvDocuments(left, right, { ...aggregateConfig, aggregationMethod: 'last' }).rows[0][1]).toBe('16');
+  });
+
+  it('ignores empty numeric cells but blocks non-numeric selected columns with counts', () => {
+    const left = document(['time'], [['2025-09-16 00:09:00'], ['2025-09-16 00:10:00']]);
+    const right = document(['time', 'value'], [
+      ['2025-09-16 00:09:00', null],
+      ['2025-09-16 00:09:15', '2'],
+      ['2025-09-16 00:10:00', null],
+    ]);
+    const aggregateConfig: CsvMergeConfig = {
+      primaryColumns: ['time'], secondaryColumns: [{ source: 'value', output: 'value' }],
+      keyPairs: [{ primary: 'time', secondary: 'time', comparison: 'timestamp_aggregation' }],
+      joinType: 'left', duplicatePolicy: 'block', aggregationMethod: 'mean',
+    };
+    expect(mergeCsvDocuments(left, right, aggregateConfig).rows).toEqual([
+      ['2025-09-16 00:09:00', '2'],
+      ['2025-09-16 00:10:00', null],
+    ]);
+    const invalid = document(['time', 'value'], [
+      ['2025-09-16 00:09:00', '2'],
+      ['2025-09-16 00:09:15', 'not numeric'],
+      ['2025-09-16 00:09:30', 'also invalid'],
+    ]);
+    const validation = validateCsvMerge(left, invalid, aggregateConfig);
+    expect(validation.aggregationNumericIssues).toEqual([{ column: 'value', invalidValues: 2 }]);
+    expect(validation.errors).toContain('Column "value" contains 2 non-numeric values and cannot use mean aggregation.');
+  });
+
+  it('treats distinct sub-minute samples as a group but identical timestamps as duplicates', () => {
+    const left = document(['time'], [['2025-09-16 00:09:00']]);
+    const right = document(['time', 'value'], [
+      ['2025-09-16 00:09:00', '1'],
+      ['2025-09-16 00:09:00', '100'],
+      ['2025-09-16 00:09:15', '3'],
+    ]);
+    const aggregateConfig: CsvMergeConfig = {
+      primaryColumns: ['time'], secondaryColumns: [{ source: 'value', output: 'value' }],
+      keyPairs: [{ primary: 'time', secondary: 'time', comparison: 'timestamp_aggregation' }],
+      joinType: 'left', duplicatePolicy: 'block', aggregationMethod: 'mean',
+    };
+    const blocked = validateCsvMerge(left, right, aggregateConfig);
+    expect(blocked.secondaryDuplicateKeyCount).toBe(1);
+    expect(blocked.secondaryDiscardedDuplicateRows).toBe(1);
+    expect(blocked.errors).toContain('The selected key is not unique in the secondary CSV.');
+    const kept = mergeCsvDocuments(left, right, { ...aggregateConfig, duplicatePolicy: 'keep_first' });
+    expect(kept.rows).toEqual([['2025-09-16 00:09:00', '2']]);
+    expect(kept.validation.aggregationUsedSecondaryRows).toBe(2);
+  });
+
+  it('rejects overlapping primary aggregation windows for the same compound key', () => {
+    const left = document(['site', 'time'], [
+      ['A', '2025-09-16 00:09:00'],
+      ['A', '2025-09-16 00:09:30'],
+    ]);
+    const right = document(['site', 'time', 'value'], [['A', '2025-09-16 00:09:45', '1']]);
+    const validation = validateCsvMerge(left, right, {
+      primaryColumns: ['site', 'time'], secondaryColumns: [{ source: 'value', output: 'value' }],
+      keyPairs: [
+        { primary: 'site', secondary: 'site', comparison: 'exact' },
+        { primary: 'time', secondary: 'time', comparison: 'timestamp_aggregation' },
+      ],
+      joinType: 'left', duplicatePolicy: 'block', aggregationMethod: 'mean',
+    });
+    expect(validation.errors).toContain('Primary Timestamp aggregation windows overlap for the same compound key.');
+  });
+
   it('exports merged data losslessly as CSV and string-typed Parquet', async () => {
     const result = mergeCsvDocuments(primary, secondary, config);
     const table = csvMergeResultTable(result);

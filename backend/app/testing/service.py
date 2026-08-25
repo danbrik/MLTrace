@@ -4,6 +4,7 @@ import base64
 import csv
 import hashlib
 import json
+import math
 import shutil
 import time
 from dataclasses import dataclass
@@ -12,7 +13,7 @@ from pathlib import Path
 
 import numpy as np
 from PIL import Image, ImageDraw
-from sqlalchemy import delete, func, select
+from sqlalchemy import and_, delete, func, or_, select
 from sqlalchemy.orm import Session, selectinload
 
 from app import models
@@ -50,6 +51,8 @@ from app.schemas import (
     TestingRunResultImageResponse,
     TestingRunRead,
     TestingRunResultRead,
+    TestingRunPlotSeriesPage,
+    TestingRunPlotSeriesPoint,
     TestingRunResultsResponse,
 )
 from app.training.data import (
@@ -1090,6 +1093,127 @@ def get_testing_run_results(
         ],
         total=total,
         decimated=decimated,
+    )
+
+
+def _plot_series_value(row, score_series: str) -> float:
+    metadata = row.result_metadata or {}
+    if score_series == "score":
+        value = row.score
+    elif score_series == "full_mse":
+        value = row.full_mse
+    elif score_series == "roi_mse":
+        value = row.roi_mse
+    elif score_series == "reconstruction":
+        value = metadata.get("reconstruction_score", row.full_mse)
+    elif score_series == "prediction":
+        value = metadata.get("prediction_score")
+        if value is None:
+            value = row.roi_mse if row.roi_mse is not None else row.score
+    elif score_series in {"fast_residual", "fast_feature", "fast_combined"}:
+        fast = metadata.get("fast_anogan")
+        keys = {
+            "fast_residual": "residual_score",
+            "fast_feature": "feature_score",
+            "fast_combined": "combined_score",
+        }
+        value = fast.get(keys[score_series]) if isinstance(fast, dict) else None
+    elif score_series.startswith("future+"):
+        try:
+            horizon = int(score_series.split("+", 1)[1])
+        except ValueError as exc:
+            raise ValueError(f"Unsupported score series '{score_series}'.") from exc
+        value = next((
+            item.get("score")
+            for item in metadata.get("future_scores", [])
+            if isinstance(item, dict) and item.get("horizon") == horizon
+        ), None)
+    else:
+        raise ValueError(f"Unsupported score series '{score_series}'.")
+    if not isinstance(value, (int, float)) or not math.isfinite(float(value)):
+        raise ValueError(
+            f"Score series '{score_series}' is missing or non-finite at inference position {row.position}."
+        )
+    return float(value)
+
+
+def get_testing_run_plot_series(
+    db: Session,
+    run_id: int,
+    *,
+    score_series: str,
+    start_timestamp: datetime | None,
+    end_timestamp: datetime | None,
+    after_timestamp: datetime | None,
+    after_position: int | None,
+    expected_result_revision: int | None,
+    limit: int,
+) -> TestingRunPlotSeriesPage | None:
+    """Return a lean, keyset-paginated, full-resolution inference score series."""
+    run = db.get(models.TestingRun, run_id)
+    if run is None:
+        return None
+    if run.status != "finished":
+        raise ValueError("Only finished inference runs can be exported.")
+    source_revision = run.result_revision
+    if expected_result_revision is not None and run.result_revision != expected_result_revision:
+        raise RuntimeError("Inference results changed while the plot export was being prepared. Start the export again.")
+    if (after_timestamp is None) != (after_position is None):
+        raise ValueError("Both cursor timestamp and cursor position are required.")
+    if start_timestamp and end_timestamp and end_timestamp < start_timestamp:
+        raise ValueError("Export end timestamp must not be before its start timestamp.")
+
+    filters = [models.TestingRunResult.testing_run_id == run_id]
+    if start_timestamp is not None:
+        filters.append(models.TestingRunResult.timestamp >= start_timestamp.replace(tzinfo=None))
+    if end_timestamp is not None:
+        filters.append(models.TestingRunResult.timestamp <= end_timestamp.replace(tzinfo=None))
+    total = db.scalar(select(func.count()).select_from(models.TestingRunResult).where(*filters)) or 0
+    page_filters = list(filters)
+    if after_timestamp is not None and after_position is not None:
+        cursor_time = after_timestamp.replace(tzinfo=None)
+        page_filters.append(or_(
+            models.TestingRunResult.timestamp > cursor_time,
+            and_(
+                models.TestingRunResult.timestamp == cursor_time,
+                models.TestingRunResult.position > after_position,
+            ),
+        ))
+    rows = db.execute(
+        select(
+            models.TestingRunResult.position,
+            models.TestingRunResult.timestamp,
+            models.TestingRunResult.score,
+            models.TestingRunResult.full_mse,
+            models.TestingRunResult.roi_mse,
+            models.TestingRunResult.result_metadata,
+        )
+        .where(*page_filters)
+        .order_by(models.TestingRunResult.timestamp, models.TestingRunResult.position)
+        .limit(limit + 1)
+    ).all()
+    db.refresh(run, attribute_names=["result_revision"])
+    if run.result_revision != source_revision:
+        raise RuntimeError("Inference results changed while the plot export was being prepared. Start the export again.")
+    has_more = len(rows) > limit
+    visible = rows[:limit]
+    points = [
+        TestingRunPlotSeriesPoint(
+            position=row.position,
+            timestamp=row.timestamp,
+            value=_plot_series_value(row, score_series),
+        )
+        for row in visible
+    ]
+    last = visible[-1] if has_more and visible else None
+    return TestingRunPlotSeriesPage(
+        testing_run_id=run.id,
+        score_series=score_series,
+        result_revision=source_revision,
+        total=total,
+        points=points,
+        next_timestamp=last.timestamp if last else None,
+        next_position=last.position if last else None,
     )
 
 

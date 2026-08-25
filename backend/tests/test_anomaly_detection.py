@@ -825,6 +825,34 @@ def test_baseline_transitions_survive_series_decimation() -> None:
     ]
 
 
+def test_saved_run_plot_export_recomputes_every_result_and_diagnostic_point() -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:", poolclass=StaticPool)
+    SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+    Base.metadata.create_all(engine)
+    with SessionLocal() as db:
+        testing_run = _seed_testing_run(db, count=25)
+        created = anomaly_service.create_run(db, AnomalyDetectionRunCreate(
+            name="Full export",
+            testing_run_id=testing_run.id,
+            start_timestamp=BASE,
+            end_timestamp=BASE + timedelta(minutes=24),
+            config=_event_config(),
+        ))
+        preview = anomaly_service.get_run(db, created.id, max_points=4)
+        result = anomaly_service.export_plot_table(db, created.id, "result")
+        diagnostic = anomaly_service.export_plot_table(db, created.id, "diagnostic")
+
+    assert preview is not None and preview.decimated is True
+    assert result is not None and result["rowCount"] == 25
+    assert diagnostic is not None and diagnostic["rowCount"] == 25
+    assert [column["name"] for column in result["columns"]] == [
+        "timestamp", "Raw error", "Raw score (smoothing disabled)", "Threshold On", "Threshold Off",
+    ]
+    assert [column["name"] for column in diagnostic["columns"]] == [
+        "timestamp", "Candidates in last N samples", "Required K = 2", "Above-threshold sample",
+    ]
+
+
 def test_quantile_preview_uses_only_selected_smoothed_validation_range() -> None:
     engine = create_engine("sqlite+pysqlite:///:memory:", poolclass=StaticPool)
     SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
