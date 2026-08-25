@@ -19,12 +19,14 @@
     "@vitejs/plugin-react": "^5.0.4",
     "hyparquet-writer": "^0.16.6",
     "lucide-react": "^0.468.0",
+    "papaparse": "^5.7.0",
     "plotly.js": "^2.35.3",
     "react": "^19.1.1",
     "react-dom": "^19.1.1",
     "vite": "^7.1.12"
   },
   "devDependencies": {
+    "@types/papaparse": "^5.5.2",
     "@types/plotly.js": "^3.0.10",
     "@types/react": "^19.1.12",
     "@types/react-dom": "^19.1.9",

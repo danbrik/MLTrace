@@ -6,6 +6,7 @@ import {
   BrainCircuit,
   CalendarClock,
   ClipboardCheck,
+  FileSpreadsheet,
   Database,
   Eye,
   FlaskConical,
@@ -23,6 +24,7 @@ import { PageErrorBoundary } from './components/PageErrorBoundary';
 import { AnalysisPage } from './pages/AnalysisPage';
 import { AnomalyDetectionPage } from './pages/AnomalyDetectionPage';
 import { DataManagerPage } from './pages/DataManagerPage';
+import { CsvMergePage } from './pages/CsvMergePage';
 import { DatasetsPage } from './pages/DatasetsPage';
 import { InspectPage } from './pages/InspectPage';
 import { EvaluationPage } from './pages/EvaluationPage';
@@ -49,6 +51,7 @@ type Page =
   | 'analysis'
   | 'evaluation'
   | 'anomaly-detection'
+  | 'csv-merge'
   | 'scheduler'
   | 'data-manager';
 
@@ -62,7 +65,7 @@ export function App() {
   const requestedPage = match?.[2] as Page | undefined;
   const page: Page = requestedPage && [
     'datasets', 'training-datasets', 'preprocessing', 'methods', 'training-pipelines', 'testing',
-    'inspect', 'optimization', 'analysis', 'evaluation', 'anomaly-detection', 'scheduler', 'data-manager',
+    'inspect', 'optimization', 'analysis', 'evaluation', 'anomaly-detection', 'csv-merge', 'scheduler', 'data-manager',
   ].includes(requestedPage) ? requestedPage : 'datasets';
   const [project, setProject] = useState<Project | null>(null);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
@@ -113,6 +116,7 @@ export function App() {
     { id: 'analysis', label: 'Model Analysis', icon: <BarChart3 size={18} /> },
     { id: 'evaluation', label: 'Evaluation', icon: <ClipboardCheck size={18} /> },
     { id: 'anomaly-detection', label: 'Anomaly Detection', icon: <Activity size={18} /> },
+    { id: 'csv-merge', label: 'CSV Merge', icon: <FileSpreadsheet size={18} /> },
     { id: 'scheduler', label: 'Scheduler', icon: <CalendarClock size={18} /> },
     { id: 'data-manager', label: 'Data Manager', icon: <Archive size={18} /> },
   ];
@@ -225,6 +229,11 @@ export function App() {
         <Box display={page === 'anomaly-detection' ? 'block' : 'none'}>
           <PageErrorBoundary label="Anomaly Detection">
             <AnomalyDetectionPage active={page === 'anomaly-detection'} />
+          </PageErrorBoundary>
+        </Box>
+        <Box display={page === 'csv-merge' ? 'block' : 'none'}>
+          <PageErrorBoundary label="CSV Merge">
+            <CsvMergePage active={page === 'csv-merge'} />
           </PageErrorBoundary>
         </Box>
         <Box display={page === 'scheduler' ? 'block' : 'none'}>
