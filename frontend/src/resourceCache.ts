@@ -18,7 +18,9 @@ export type ResourceKey =
   | 'rois'
   | 'evaluationProfiles'
   | 'evaluationLabelSets'
-  | 'evaluations';
+  | 'evaluations'
+  | 'redundancySources'
+  | 'redundancyAnalyses';
 
 type CacheEntry<T> = {
   value?: T;

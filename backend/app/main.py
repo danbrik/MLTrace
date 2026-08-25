@@ -2079,6 +2079,8 @@ def create_app() -> FastAPI:
         status_code=204,
     )
 
+    from app.redundancy.router import register_routes as register_redundancy_routes
+    register_redundancy_routes(app)
     return app
 
 

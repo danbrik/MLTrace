@@ -1272,5 +1272,70 @@ class EvaluationDriftBucketResult(Base):
     included: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
 
 
+class RedundancyCsvSource(Base):
+    """Immutable project-local CSV source used by redundancy analyses."""
+
+    __tablename__ = "redundancy_csv_sources"
+    __table_args__ = (
+        UniqueConstraint("sha256", name="uq_redundancy_csv_source_sha256"),
+        Index("ix_redundancy_csv_sources_created", "created_at"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    original_filename: Mapped[str] = mapped_column(String(255), nullable=False)
+    sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    artifact_path: Mapped[str] = mapped_column(Text, nullable=False)
+    byte_size: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    delimiter: Mapped[str] = mapped_column(String(8), nullable=False)
+    encoding: Mapped[str] = mapped_column(String(32), nullable=False, default="utf-8")
+    row_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    headers: Mapped[list] = mapped_column(json_type(), nullable=False)
+    column_profiles: Mapped[list] = mapped_column(json_type(), nullable=False)
+    preview_rows: Mapped[list] = mapped_column(json_type(), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=False), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=False), server_default=func.now(), onupdate=func.now()
+    )
+    analyses: Mapped[list["RedundancyAnalysis"]] = relationship(back_populates="source")
+
+
+class RedundancyAnalysis(Base):
+    """Persisted draft or immutable snapshot of one redundancy calculation."""
+
+    __tablename__ = "redundancy_analyses"
+    __table_args__ = (
+        Index("ix_redundancy_analyses_source", "source_id"),
+        Index("ix_redundancy_analyses_status", "status", "job_status"),
+        Index("ix_redundancy_analyses_created", "created_at"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    source_id: Mapped[int] = mapped_column(
+        ForeignKey("redundancy_csv_sources.id", ondelete="RESTRICT"), nullable=False
+    )
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    description: Mapped[str | None] = mapped_column(Text)
+    status: Mapped[str] = mapped_column(String(24), nullable=False, default="draft")
+    job_status: Mapped[str] = mapped_column(String(24), nullable=False, default="not_calculated")
+    progress: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    error_message: Mapped[str | None] = mapped_column(Text)
+    source_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    time_column: Mapped[str] = mapped_column(String(255), nullable=False)
+    start_timestamp: Mapped[datetime] = mapped_column(DateTime(timezone=False), nullable=False)
+    end_timestamp: Mapped[datetime] = mapped_column(DateTime(timezone=False), nullable=False)
+    selected_columns: Mapped[list] = mapped_column(json_type(), nullable=False)
+    config: Mapped[dict] = mapped_column(json_type(), nullable=False)
+    active_cutoff: Mapped[float] = mapped_column(Float, nullable=False, default=0.9)
+    result: Mapped[dict | None] = mapped_column(json_type())
+    cancel_requested: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    finalized_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=False))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=False), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=False), server_default=func.now(), onupdate=func.now()
+    )
+    source: Mapped[RedundancyCsvSource] = relationship(back_populates="analyses")
+
+
 ModelConfiguration = MethodConfiguration
 ModelConfigurationParameter = MethodConfigurationParameter

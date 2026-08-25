@@ -118,6 +118,8 @@ def cache_revisions(db: Session) -> CacheRevisionsRead:
         "anomalyDetectionRuns": _revision_for_model(db, models.AnomalyDetectionRun, models.AnomalyDetectionRun.updated_at),
         "optimizationStudies": _revision_for_model(db, models.OptimizationStudy, models.OptimizationStudy.updated_at),
         "rois": _revision_for_model(db, models.RoiDefinition, models.RoiDefinition.updated_at),
+        "redundancySources": _revision_for_model(db, models.RedundancyCsvSource, models.RedundancyCsvSource.updated_at),
+        "redundancyAnalyses": _revision_for_model(db, models.RedundancyAnalysis, models.RedundancyAnalysis.updated_at),
         "preprocessingSteps": f"static:{len(registry.list_definitions())}",
         "methodDefinitions": f"static:{len(model_registry.list_definitions())}",
         "methodLayers": f"static:{len(list_layer_definitions())}",

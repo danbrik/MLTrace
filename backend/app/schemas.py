@@ -196,6 +196,130 @@ class PreprocessingStepRead(BaseModel):
     default_config: dict
 
 
+# --- Multivariate CSV redundancy analysis ---------------------------------
+
+
+class RedundancyConfig(BaseModel):
+    high_missing_fraction: float = Field(default=0.30, ge=0, le=1)
+    nearly_constant_fraction: float = Field(default=0.95, ge=0.5, le=1)
+    min_valid_values: int = Field(default=10, ge=3)
+    min_pair_values: int = Field(default=10, ge=3)
+    numeric_candidate_fraction: float = Field(default=0.80, ge=0, le=1)
+    missing_tokens: list[str] = Field(default_factory=lambda: ["", "na", "n/a", "null", "none", "nan"])
+    linkage_method: Literal["average"] = "average"
+
+
+class RedundancyAnalysisCreate(BaseModel):
+    source_id: int
+    name: str = Field(min_length=1, max_length=255)
+    description: str | None = None
+    time_column: str = Field(min_length=1, max_length=255)
+    start_timestamp: datetime
+    end_timestamp: datetime
+    selected_columns: list[str] = Field(min_length=2, max_length=100)
+    config: RedundancyConfig = Field(default_factory=RedundancyConfig)
+    active_cutoff: float = Field(default=0.9, ge=0, le=1)
+
+    @model_validator(mode="after")
+    def valid_redundancy_range(self):
+        self.start_timestamp = self.start_timestamp.replace(tzinfo=None)
+        self.end_timestamp = self.end_timestamp.replace(tzinfo=None)
+        if self.end_timestamp < self.start_timestamp:
+            raise ValueError("end_timestamp must be at or after start_timestamp")
+        if len(set(self.selected_columns)) != len(self.selected_columns):
+            raise ValueError("selected_columns must be unique")
+        if self.time_column in self.selected_columns:
+            raise ValueError("The time column cannot be an analysis variable")
+        return self
+
+
+class RedundancyAnalysisUpdate(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=255)
+    description: str | None = None
+    time_column: str | None = Field(default=None, min_length=1, max_length=255)
+    start_timestamp: datetime | None = None
+    end_timestamp: datetime | None = None
+    selected_columns: list[str] | None = Field(default=None, min_length=2, max_length=100)
+    config: RedundancyConfig | None = None
+    active_cutoff: float | None = Field(default=None, ge=0, le=1)
+
+    @model_validator(mode="after")
+    def validate_redundancy_update(self):
+        non_nullable = {"name", "time_column", "start_timestamp", "end_timestamp", "selected_columns", "config", "active_cutoff"}
+        for field in non_nullable & self.model_fields_set:
+            if getattr(self, field) is None:
+                raise ValueError(f"{field} cannot be null")
+        if self.start_timestamp is not None:
+            self.start_timestamp = self.start_timestamp.replace(tzinfo=None)
+        if self.end_timestamp is not None:
+            self.end_timestamp = self.end_timestamp.replace(tzinfo=None)
+        if self.selected_columns is not None and len(set(self.selected_columns)) != len(self.selected_columns):
+            raise ValueError("selected_columns must be unique")
+        return self
+
+
+class RedundancyClusterCutRequest(BaseModel):
+    cutoff: float = Field(ge=0, le=1)
+
+
+class RedundancyFinalizeRequest(BaseModel):
+    cutoff: float = Field(default=0.9, ge=0, le=1)
+
+
+class RedundancySourceRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: int
+    name: str
+    original_filename: str
+    sha256: str
+    byte_size: int
+    delimiter: str
+    encoding: str
+    row_count: int
+    headers: list[str]
+    column_profiles: list[dict]
+    preview_rows: list[list[str | None]]
+    created_at: datetime
+    updated_at: datetime
+
+
+class RedundancyAnalysisRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: int
+    source_id: int
+    name: str
+    description: str | None
+    status: str
+    job_status: str
+    progress: float
+    error_message: str | None
+    source_sha256: str
+    time_column: str
+    start_timestamp: datetime
+    end_timestamp: datetime
+    selected_columns: list[str]
+    config: dict
+    active_cutoff: float
+    result: dict | None
+    finalized_at: datetime | None
+    created_at: datetime
+    updated_at: datetime
+
+
+class RedundancySeriesPoint(BaseModel):
+    timestamp: datetime
+    position: int
+    continuity_segment: int
+    values: dict[str, float | None]
+
+
+class RedundancySeriesRead(BaseModel):
+    total: int
+    decimated: bool
+    next_offset: int | None = None
+    points: list[RedundancySeriesPoint]
+
+
 class PreprocessingPipelineCreate(BaseModel):
     name: str = Field(min_length=1, max_length=255)
     description: str | None = None

@@ -70,6 +70,7 @@ def _used_ids(db: Session, entity_type: str) -> set[int]:
         ],
         "evaluation_profile": [m.ModelEvaluation.profile_id],
         "evaluation_label_set": [m.ModelEvaluation.label_set_id],
+        "redundancy_csv_source": [m.RedundancyAnalysis.source_id],
     }.get(entity_type, [])
     used: set[int] = set()
     for column in columns:

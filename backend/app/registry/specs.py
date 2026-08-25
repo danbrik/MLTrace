@@ -248,6 +248,13 @@ def _evaluation_label_set_dependents(db: Session, label_set_id: int) -> list[Dep
     )
 
 
+def _redundancy_source_dependents(db: Session, source_id: int) -> list[Dependent]:
+    return _named(
+        db, "redundancy_analysis", models.RedundancyAnalysis, models.RedundancyAnalysis.id,
+        lambda row: row.name, models.RedundancyAnalysis.source_id == source_id,
+    )
+
+
 # -- artifact resolvers --------------------------------------------------------
 
 
@@ -271,6 +278,10 @@ def _heatmap_range_artifacts(_db: Session, row) -> list[Path]:
 
 def _inspect_artifacts(_db: Session, row) -> list[Path]:
     return [data_dir() / "inspect_runs" / str(row.id)]
+
+
+def _redundancy_source_artifacts(_db: Session, row) -> list[Path]:
+    return [Path(row.artifact_path)]
 
 
 # -- deleters (wrappers around existing service functions) ----------------------
@@ -421,6 +432,16 @@ def _delete_drift_calculation(db: Session, entity_id: int) -> bool:
         db.delete(row); db.commit(); return True
     workspace_service.delete_drift_calculation(db, workspace.training_run_id, entity_id)
     return True
+
+
+def _delete_redundancy_source(db: Session, entity_id: int) -> bool:
+    from app.redundancy.service import delete_source
+    return delete_source(db, entity_id)
+
+
+def _delete_redundancy_analysis(db: Session, entity_id: int) -> bool:
+    from app.redundancy.service import delete_analysis
+    return delete_analysis(db, entity_id)
 
 
 # -- specs -----------------------------------------------------------------------
@@ -637,6 +658,23 @@ ENTITY_SPECS: dict[str, EntitySpec] = {
         filters=[_CREATED_FILTER],
         deleter=_delete_analysis_layout,
     ),
+    "redundancy_csv_source": EntitySpec(
+        key="redundancy_csv_source", label="Redundancy CSV Sources",
+        model=models.RedundancyCsvSource, name_of=lambda row: row.name,
+        list_fields=["id", "name", "original_filename", "row_count", "byte_size", "created_at"],
+        search_fields=["name", "original_filename", "sha256"], filters=[_USAGE_FILTER, _CREATED_FILTER],
+        dependents=_redundancy_source_dependents, artifacts=_redundancy_source_artifacts,
+        deleter=_delete_redundancy_source, size_of=lambda row: row.byte_size,
+        detail_exclude=frozenset({"preview_rows"}),
+    ),
+    "redundancy_analysis": EntitySpec(
+        key="redundancy_analysis", label="Redundancy Analyses",
+        model=models.RedundancyAnalysis, name_of=lambda row: row.name,
+        list_fields=["id", "name", "source_id", "status", "job_status", "progress", "active_cutoff", "created_at", "finalized_at"],
+        search_fields=["name", "description", "time_column"], filters=[_STATUS_FILTER, _CREATED_FILTER],
+        deleter=_delete_redundancy_analysis, blockers=_job_blockers,
+        detail_exclude=frozenset({"result"}),
+    ),
     "evaluation_profile": EntitySpec(
         key="evaluation_profile",
         label="Evaluation Profiles",
@@ -734,6 +772,7 @@ ENTITY_SPECS: dict[str, EntitySpec] = {
 
 # Bottom-up deletion order for cascades: children before their parents.
 DELETE_ORDER: list[str] = [
+    "redundancy_analysis",
     "evaluation_separation_calculation",
     "evaluation_drift_calculation",
     "model_evaluation",
@@ -755,4 +794,5 @@ DELETE_ORDER: list[str] = [
     "preprocessing_pipeline",
     "training_dataset",
     "dataset",
+    "redundancy_csv_source",
 ]

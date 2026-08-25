@@ -70,6 +70,11 @@ import type {
   RoiDefinition,
   RoiDefinitionPayload,
   RoiPreview,
+  RedundancyAnalysis,
+  RedundancyClusterCut,
+  RedundancyConfig,
+  RedundancySeries,
+  RedundancySource,
   SchedulerSettings,
   TestingRun,
   TestingRunBulkResponse,
@@ -137,10 +142,11 @@ async function request<T>(path: string, options?: RequestInit, timeoutMs?: numbe
 
   let response: Response;
   try {
+    const isFormData = typeof FormData !== 'undefined' && options?.body instanceof FormData;
     response = await fetch(`${API_BASE_URL}${path}`, {
       ...options,
       headers: {
-        'Content-Type': 'application/json',
+        ...(!isFormData ? { 'Content-Type': 'application/json' } : {}),
         ...((projectId ?? activeProjectId) ? { 'X-MLTrace-Project-ID': projectId ?? activeProjectId ?? '' } : {}),
         ...options?.headers,
       },
@@ -1656,4 +1662,115 @@ export function registryDelete(items: RegistryItemRef[], cascade: boolean): Prom
     method: 'POST',
     body: JSON.stringify({ items, cascade }),
   }, 120_000);
+}
+
+// -- Multivariate CSV redundancy analysis -----------------------------------
+
+export function listRedundancySources(): Promise<RedundancySource[]> {
+  return cachedList<RedundancySource[]>('redundancySources', '/api/redundancy/sources', RUN_TTL_MS);
+}
+
+export function uploadRedundancySource(file: File, name?: string): Promise<RedundancySource> {
+  const form = new FormData();
+  form.append('file', file);
+  const query = name?.trim() ? `?name=${encodeURIComponent(name.trim())}` : '';
+  return request<RedundancySource>(`/api/redundancy/sources${query}`, { method: 'POST', body: form }, 120_000)
+    .then((source) => { invalidate(['redundancySources']); return source; });
+}
+
+export async function deleteRedundancySource(sourceId: number): Promise<void> {
+  await request<void>(`/api/redundancy/sources/${sourceId}`, { method: 'DELETE' });
+  invalidate(['redundancySources']);
+}
+
+export function listRedundancyAnalyses(): Promise<RedundancyAnalysis[]> {
+  return cachedList<RedundancyAnalysis[]>('redundancyAnalyses', '/api/redundancy/analyses', RUN_TTL_MS);
+}
+
+export function getRedundancyAnalysis(id: number): Promise<RedundancyAnalysis> {
+  return request<RedundancyAnalysis>(`/api/redundancy/analyses/${id}`);
+}
+
+export type RedundancyAnalysisPayload = {
+  source_id: number;
+  name: string;
+  description?: string | null;
+  time_column: string;
+  start_timestamp: string;
+  end_timestamp: string;
+  selected_columns: string[];
+  config: RedundancyConfig;
+  active_cutoff: number;
+};
+
+export function createRedundancyAnalysis(payload: RedundancyAnalysisPayload): Promise<RedundancyAnalysis> {
+  return request<RedundancyAnalysis>('/api/redundancy/analyses', { method: 'POST', body: JSON.stringify(payload) })
+    .then((analysis) => { invalidate(['redundancyAnalyses']); return analysis; });
+}
+
+export function updateRedundancyAnalysis(id: number, payload: Partial<Omit<RedundancyAnalysisPayload, 'source_id'>>): Promise<RedundancyAnalysis> {
+  return request<RedundancyAnalysis>(`/api/redundancy/analyses/${id}`, { method: 'PATCH', body: JSON.stringify(payload) })
+    .then((analysis) => { invalidate(['redundancyAnalyses']); return analysis; });
+}
+
+export function calculateRedundancyAnalysis(id: number): Promise<RedundancyAnalysis> {
+  return request<RedundancyAnalysis>(`/api/redundancy/analyses/${id}/calculate`, { method: 'POST' })
+    .then((analysis) => { invalidate(['redundancyAnalyses']); return analysis; });
+}
+
+export function cancelRedundancyAnalysis(id: number): Promise<RedundancyAnalysis> {
+  return request<RedundancyAnalysis>(`/api/redundancy/analyses/${id}/cancel`, { method: 'POST' })
+    .then((analysis) => { invalidate(['redundancyAnalyses']); return analysis; });
+}
+
+export function retryRedundancyAnalysis(id: number): Promise<RedundancyAnalysis> {
+  return request<RedundancyAnalysis>(`/api/redundancy/analyses/${id}/retry`, { method: 'POST' })
+    .then((analysis) => { invalidate(['redundancyAnalyses']); return analysis; });
+}
+
+export function previewRedundancyClusterCut(id: number, cutoff: number): Promise<RedundancyClusterCut> {
+  return request<RedundancyClusterCut>(`/api/redundancy/analyses/${id}/cluster-cut`, {
+    method: 'POST', body: JSON.stringify({ cutoff }),
+  });
+}
+
+export function finalizeRedundancyAnalysis(id: number, cutoff: number): Promise<RedundancyAnalysis> {
+  return request<RedundancyAnalysis>(`/api/redundancy/analyses/${id}/finalize`, {
+    method: 'POST', body: JSON.stringify({ cutoff }),
+  }).then((analysis) => { invalidate(['redundancyAnalyses']); return analysis; });
+}
+
+export function duplicateRedundancyAnalysis(id: number): Promise<RedundancyAnalysis> {
+  return request<RedundancyAnalysis>(`/api/redundancy/analyses/${id}/duplicate`, { method: 'POST' })
+    .then((analysis) => { invalidate(['redundancyAnalyses']); return analysis; });
+}
+
+export async function deleteRedundancyAnalysis(id: number): Promise<void> {
+  await request<void>(`/api/redundancy/analyses/${id}`, { method: 'DELETE' });
+  invalidate(['redundancyAnalyses']);
+}
+
+export function getRedundancySeries(id: number, columns: string[], maxPoints = 8000): Promise<RedundancySeries> {
+  const query = new URLSearchParams({ max_points: String(maxPoints) });
+  columns.forEach((column) => query.append('columns', column));
+  return request<RedundancySeries>(`/api/redundancy/analyses/${id}/series?${query.toString()}`, undefined, 120_000);
+}
+
+export async function getFullRedundancySeries(id: number, columns: string[]): Promise<RedundancySeries> {
+  const points: RedundancySeries['points'] = [];
+  let offset: number | null = 0;
+  let total = 0;
+  while (offset !== null) {
+    const query: URLSearchParams = new URLSearchParams({ max_points: '0', offset: String(offset), page_size: '50000' });
+    columns.forEach((column) => query.append('columns', column));
+    const page: RedundancySeries = await request<RedundancySeries>(`/api/redundancy/analyses/${id}/series?${query.toString()}`, undefined, 120_000);
+    total = page.total;
+    points.push(...page.points);
+    offset = page.next_offset;
+  }
+  return { total, decimated: false, next_offset: null, points };
+}
+
+export function redundancyExportUrl(id: number, kind: 'quality' | 'pairs' | 'clusters' | 'correlation' | 'parameters'): string {
+  return projectMediaUrl(`/api/redundancy/analyses/${id}/exports/${kind}`);
 }

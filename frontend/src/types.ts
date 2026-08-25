@@ -1759,6 +1759,139 @@ export type SchedulerSettings = {
   only_gpu: boolean;
 };
 
+// -- Multivariate CSV redundancy analysis -----------------------------------
+
+export type RedundancyColumnProfile = {
+  name: string;
+  non_missing: number;
+  numeric: number;
+  timestamp: number;
+  numeric_fraction: number;
+  timestamp_fraction: number;
+  timestamp_start: string | null;
+  timestamp_end: string | null;
+};
+
+export type RedundancySource = {
+  id: number;
+  name: string;
+  original_filename: string;
+  sha256: string;
+  byte_size: number;
+  delimiter: string;
+  encoding: string;
+  row_count: number;
+  headers: string[];
+  column_profiles: RedundancyColumnProfile[];
+  preview_rows: Array<Array<string | null>>;
+  created_at: string;
+  updated_at: string;
+};
+
+export type RedundancyConfig = {
+  high_missing_fraction: number;
+  nearly_constant_fraction: number;
+  min_valid_values: number;
+  min_pair_values: number;
+  numeric_candidate_fraction: number;
+  missing_tokens: string[];
+  linkage_method: 'average';
+};
+
+export type RedundancyQuality = {
+  variable: string;
+  valid_n: number;
+  missing_n: number;
+  missing_fraction: number;
+  invalid_numeric_n: number;
+  mean: number | null;
+  median: number | null;
+  std: number | null;
+  min: number | null;
+  max: number | null;
+  unique_n: number;
+  statuses: string[];
+};
+
+export type RedundancyPair = {
+  variable_a: string;
+  variable_b: string;
+  spearman_rho: number;
+  absolute_rho: number;
+  pearson_r: number | null;
+  common_n: number;
+};
+
+export type RedundancyClusterCut = {
+  cutoff: number;
+  distance_cutoff: number;
+  assignments: Array<{ variable: string; cluster_id: number }>;
+  clusters: Array<{
+    cluster_id: number;
+    variable_count: number;
+    variables: string[];
+    mean_abs_rho: number | null;
+    min_abs_rho: number | null;
+    max_abs_rho: number | null;
+  }>;
+};
+
+export type RedundancyResult = {
+  parameters: Record<string, unknown>;
+  summary: {
+    timepoint_count: number;
+    numeric_variable_count: number;
+    clusterable_variable_count: number;
+    excluded_from_clustering_count: number;
+    invalid_time_row_count: number;
+  };
+  variables: string[];
+  quality: RedundancyQuality[];
+  spearman: Array<Array<number | null>>;
+  common_n: number[][];
+  pairs: RedundancyPair[];
+  clusterable_variables: string[];
+  clustering_exclusions: Array<{ variable: string; missing_with: string[]; message: string }>;
+  linkage: number[][];
+  leaf_order: string[];
+  dendrogram: { icoord: number[][]; dcoord: number[][]; labels: string[] };
+  cluster_cut: RedundancyClusterCut;
+};
+
+export type RedundancyAnalysis = {
+  id: number;
+  source_id: number;
+  name: string;
+  description: string | null;
+  status: 'draft' | 'finalized';
+  job_status: 'not_calculated' | 'queued' | 'running' | 'ready' | 'failed' | 'cancelled' | 'stale';
+  progress: number;
+  error_message: string | null;
+  source_sha256: string;
+  time_column: string;
+  start_timestamp: string;
+  end_timestamp: string;
+  selected_columns: string[];
+  config: RedundancyConfig;
+  active_cutoff: number;
+  result: RedundancyResult | null;
+  finalized_at: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type RedundancySeries = {
+  total: number;
+  decimated: boolean;
+  next_offset: number | null;
+  points: Array<{
+    timestamp: string;
+    position: number;
+    continuity_segment: number;
+    values: Record<string, number | null>;
+  }>;
+};
+
 export type ModelArchitecture = MethodDefinition;
 export type ModelConfigurationParameter = MethodConfigurationParameter;
 export type ModelConfiguration = MethodConfiguration;
