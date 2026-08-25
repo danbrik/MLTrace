@@ -7,6 +7,7 @@ import {
   parseCsvTimestamp,
   parseCsvText,
   timestampNormalizationSuggested,
+  timestampNormalizationPreview,
   validateCsvMerge,
   type CsvDocument,
   type CsvMergeConfig,
@@ -259,6 +260,21 @@ describe('CSV keyed merge', () => {
       ['B', '2025-09-16 00:09:00', 'other site', 'match B'],
     ]);
     expect(kept.validation.matchedRows).toBe(2);
+    expect(kept.validation.matchedPairPreview).toEqual([
+      {
+        primaryRowNumber: 1,
+        primaryKeyValues: ['A', '2025-09-16 00:09:00'],
+        secondaryRowNumber: 1,
+        secondaryKeyValues: ['A', '2025.09.16 00:09:00.000'],
+      },
+      {
+        primaryRowNumber: 3,
+        primaryKeyValues: ['B', '2025-09-16 00:09:00'],
+        secondaryRowNumber: 2,
+        secondaryKeyValues: ['B', '2025.09.16 00:09:00'],
+      },
+    ]);
+    expect(blocked.matchedPairPreview).toHaveLength(3);
   });
 
   it('formats selected secondary timestamp keys like the primary without losing precision', () => {
@@ -278,6 +294,35 @@ describe('CSV keyed merge', () => {
       ['2025-09-16 00:09', '2025-09-16 00:09', 'match'],
       ['2025-09-16 00:10:02.1234', '2025-09-16 00:10:02.1234', 'unmatched'],
       ['invalid timestamp', 'invalid timestamp', 'invalid'],
+    ]);
+
+    expect(timestampNormalizationPreview(left, right, {
+      primary: 'time', secondary: 'time', comparison: 'timestamp',
+    }, 3)).toEqual([
+      {
+        rowNumber: 1,
+        primaryOriginal: '2025-09-16 00:09',
+        primaryComparisonKey: '2025-09-16T00:09:00',
+        secondaryOriginal: '2025.09.16T00:09:00.000',
+        secondaryOutput: '2025-09-16 00:09',
+        secondaryComparisonKey: '2025-09-16T00:09:00',
+      },
+      {
+        rowNumber: 2,
+        primaryOriginal: null,
+        primaryComparisonKey: null,
+        secondaryOriginal: '2025.09.16T00:10:02.1234',
+        secondaryOutput: '2025-09-16 00:10:02.1234',
+        secondaryComparisonKey: '2025-09-16T00:10:02.1234',
+      },
+      {
+        rowNumber: 3,
+        primaryOriginal: null,
+        primaryComparisonKey: null,
+        secondaryOriginal: 'invalid timestamp',
+        secondaryOutput: 'invalid timestamp',
+        secondaryComparisonKey: null,
+      },
     ]);
   });
 

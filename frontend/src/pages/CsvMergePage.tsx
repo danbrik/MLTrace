@@ -26,6 +26,7 @@ import {
   mergeCsvDocuments,
   parseCsvFile,
   timestampNormalizationSuggested,
+  timestampNormalizationPreview,
   validateCsvMerge,
   type CsvDocument,
   type CsvDuplicatePolicy,
@@ -114,6 +115,85 @@ function DuplicateSummary({ validation, policy, onKeepFirst }: {
         {!resolved && <Button variant="light" color="yellow" w="fit-content" onClick={onKeepFirst}>Keep first entries</Button>}
       </Stack>
     </Alert>
+  );
+}
+
+function TimestampNormalizationPreview({ primary, secondary, pair }: {
+  primary: CsvDocument;
+  secondary: CsvDocument;
+  pair: CsvKeyPair;
+}) {
+  const rows = timestampNormalizationPreview(primary, secondary, pair);
+  const renderValue = (value: string | null, comparisonKey?: string | null) => (
+    <Stack gap={2}>
+      <Text size="xs" ff="monospace">{value ?? <Text span c="dimmed">—</Text>}</Text>
+      {value !== null && comparisonKey === null && <Text size="xs" c="red">Invalid timestamp · remains unmatched</Text>}
+    </Stack>
+  );
+  return (
+    <Paper withBorder p="sm">
+      <Stack gap="xs">
+        <div>
+          <Text fw={600} size="sm">Timestamp normalization preview · {pair.primary} ↔ {pair.secondary}</Text>
+          <Text size="xs" c="dimmed">
+            Primary values remain unchanged. Matching uses the canonical comparison key shown below. Valid secondary output values adopt the first valid primary timestamp style; required precision is retained.
+          </Text>
+        </div>
+        <Table.ScrollContainer minWidth={1050}>
+          <Table striped withTableBorder withColumnBorders>
+            <Table.Thead><Table.Tr>
+              <Table.Th w={55}>Head row</Table.Th>
+              <Table.Th>Primary · unchanged</Table.Th>
+              <Table.Th>Primary · comparison key</Table.Th>
+              <Table.Th>Secondary · original</Table.Th>
+              <Table.Th>Secondary · output preview</Table.Th>
+              <Table.Th>Secondary · comparison key</Table.Th>
+            </Table.Tr></Table.Thead>
+            <Table.Tbody>{rows.map((row) => <Table.Tr key={row.rowNumber}>
+              <Table.Td><Text size="xs">{row.rowNumber}</Text></Table.Td>
+              <Table.Td>{renderValue(row.primaryOriginal, row.primaryComparisonKey)}</Table.Td>
+              <Table.Td><Text size="xs" ff="monospace" c={row.primaryComparisonKey ? undefined : 'dimmed'}>{row.primaryComparisonKey ?? '—'}</Text></Table.Td>
+              <Table.Td>{renderValue(row.secondaryOriginal, row.secondaryComparisonKey)}</Table.Td>
+              <Table.Td>{renderValue(row.secondaryOutput, row.secondaryComparisonKey)}</Table.Td>
+              <Table.Td><Text size="xs" ff="monospace" c={row.secondaryComparisonKey ? undefined : 'dimmed'}>{row.secondaryComparisonKey ?? '—'}</Text></Table.Td>
+            </Table.Tr>)}</Table.Tbody>
+          </Table>
+        </Table.ScrollContainer>
+        <Text size="xs" c="dimmed">Rows are shown by their independent source-file positions; the preview does not imply that equal row numbers match.</Text>
+      </Stack>
+    </Paper>
+  );
+}
+
+function MatchedPairsPreview({ rows, pairs }: {
+  rows: CsvMergeValidation['matchedPairPreview'];
+  pairs: CsvKeyPair[];
+}) {
+  const renderKeys = (values: Array<string | null>, side: 'primary' | 'secondary') => (
+    <Stack gap={2}>{values.map((value, index) => (
+      <Text size="xs" ff="monospace" key={`${side}:${pairs[index]?.[side]}`}>
+        <Text span c="dimmed">{pairs[index]?.[side]}: </Text>{value ?? '—'}
+      </Text>
+    ))}</Stack>
+  );
+  return (
+    <Stack gap={5}>
+      <Text size="sm" fw={600}>First {Math.min(5, rows.length)} matched row pairs</Text>
+      {rows.length === 0
+        ? <Text size="sm" c="dimmed">No matching row pairs are available for the current key configuration.</Text>
+        : <Table.ScrollContainer minWidth={720}>
+          <Table striped withTableBorder withColumnBorders>
+            <Table.Thead><Table.Tr><Table.Th>Primary row</Table.Th><Table.Th>Primary original key</Table.Th><Table.Th>Secondary row</Table.Th><Table.Th>Secondary original key</Table.Th></Table.Tr></Table.Thead>
+            <Table.Tbody>{rows.map((row) => <Table.Tr key={`${row.primaryRowNumber}:${row.secondaryRowNumber}`}>
+              <Table.Td>{row.primaryRowNumber}</Table.Td>
+              <Table.Td>{renderKeys(row.primaryKeyValues, 'primary')}</Table.Td>
+              <Table.Td>{row.secondaryRowNumber}</Table.Td>
+              <Table.Td>{renderKeys(row.secondaryKeyValues, 'secondary')}</Table.Td>
+            </Table.Tr>)}</Table.Tbody>
+          </Table>
+        </Table.ScrollContainer>}
+      <Text size="xs" c="dimmed">These are the original source values. A pair appears here only when all configured key components match using their selected comparison modes.</Text>
+    </Stack>
   );
 }
 
@@ -358,6 +438,14 @@ export function CsvMergePage({ active }: { active: boolean }) {
               })}</Table.Tbody>
             </Table>
           </Table.ScrollContainer>
+          {keyPairs.filter((pair) => pair.comparison === 'timestamp').map((pair) => (
+            <TimestampNormalizationPreview
+              key={`${pair.primary}:${pair.secondary}`}
+              primary={primary}
+              secondary={secondary}
+              pair={pair}
+            />
+          ))}
           <Button variant="light" leftSection={<Plus size={15} />} onClick={addKeyPair} disabled={keyPairs.length >= Math.min(primary.headers.length, secondary.headers.length)}>Add key column</Button>
           {validation && (() => {
             const effectivePrimaryRows = validation.matchedRows + validation.unmatchedPrimaryRows;
@@ -371,6 +459,7 @@ export function CsvMergePage({ active }: { active: boolean }) {
                   <Text size="sm">Unmatched secondary: <b>{validation.unmatchedSecondaryRows.toLocaleString()}</b></Text>
                   <Text size="sm">Expected result rows: <b>{validation.expectedRows.toLocaleString()}</b></Text>
                 </SimpleGrid>
+                <MatchedPairsPreview rows={validation.matchedPairPreview} pairs={keyPairs} />
               </Stack>
             </Alert>;
           })()}

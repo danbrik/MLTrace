@@ -59,12 +59,29 @@ export type CsvMergeValidation = {
   unmatchedPrimaryRows: number;
   unmatchedSecondaryRows: number;
   expectedRows: number;
+  matchedPairPreview: CsvMatchedPairPreviewRow[];
 };
 
 export type CsvMergeResult = {
   headers: string[];
   rows: CsvCell[][];
   validation: CsvMergeValidation;
+};
+
+export type CsvTimestampPreviewRow = {
+  rowNumber: number;
+  primaryOriginal: CsvCell;
+  primaryComparisonKey: string | null;
+  secondaryOriginal: CsvCell;
+  secondaryOutput: CsvCell;
+  secondaryComparisonKey: string | null;
+};
+
+export type CsvMatchedPairPreviewRow = {
+  primaryRowNumber: number;
+  primaryKeyValues: CsvCell[];
+  secondaryRowNumber: number;
+  secondaryKeyValues: CsvCell[];
 };
 
 function parseErrorMessage(error: ParseError): string {
@@ -343,6 +360,34 @@ function secondaryOutputValue(
   return value !== null && style ? formatTimestamp(value, style) : value;
 }
 
+export function timestampNormalizationPreview(
+  primary: CsvDocument,
+  secondary: CsvDocument,
+  pair: CsvKeyPair,
+  limit = 5,
+): CsvTimestampPreviewRow[] {
+  const primaryIndex = columnIndex(primary, pair.primary);
+  const secondaryIndex = columnIndex(secondary, pair.secondary);
+  if (primaryIndex < 0 || secondaryIndex < 0 || limit <= 0) return [];
+  const primaryStyles = firstPrimaryTimestampStyles(primary, [{ ...pair, comparison: 'timestamp' }]);
+  const style = primaryStyles.get(pair.secondary);
+  const rowCount = Math.min(Math.max(primary.rows.length, secondary.rows.length), Math.floor(limit));
+  return Array.from({ length: rowCount }, (_, index) => {
+    const primaryOriginal = primary.rows[index]?.[primaryIndex] ?? null;
+    const secondaryOriginal = secondary.rows[index]?.[secondaryIndex] ?? null;
+    const primaryParsed = primaryOriginal === null ? null : parseCsvTimestamp(primaryOriginal);
+    const secondaryParsed = secondaryOriginal === null ? null : parseCsvTimestamp(secondaryOriginal);
+    return {
+      rowNumber: index + 1,
+      primaryOriginal,
+      primaryComparisonKey: primaryParsed?.canonical ?? null,
+      secondaryOriginal,
+      secondaryOutput: secondaryOriginal !== null && style ? formatTimestamp(secondaryOriginal, style) : secondaryOriginal,
+      secondaryComparisonKey: secondaryParsed?.canonical ?? null,
+    };
+  });
+}
+
 function unique(values: string[]): boolean {
   return new Set(values).size === values.length;
 }
@@ -376,7 +421,7 @@ export function validateCsvMerge(
       primaryDiscardedDuplicateRows: 0, secondaryDiscardedDuplicateRows: 0,
       primaryInvalidTimestampRows: 0, secondaryInvalidTimestampRows: 0,
       secondaryMissingKeys: 0, matchedRows: 0, unmatchedPrimaryRows: primary.rows.length,
-      unmatchedSecondaryRows: secondary.rows.length, expectedRows: 0,
+      unmatchedSecondaryRows: secondary.rows.length, expectedRows: 0, matchedPairPreview: [],
     };
   }
   const primaryKeys = keyIndex(primary, config.keyPairs, 'primary');
@@ -391,6 +436,7 @@ export function validateCsvMerge(
     : secondary.rows.map((_, index) => index);
   let matchedRows = 0;
   const matchedSecondary = new Set<number>();
+  const matchedPairRows: CsvMatchedPairPreviewRow[] = [];
   primaryRowIndexes.forEach((rowIndex) => {
     const row = primary.rows[rowIndex];
     const value = compositeKey(row, primary, config.keyPairs, 'primary');
@@ -399,6 +445,14 @@ export function validateCsvMerge(
     if (secondaryRow !== undefined) {
       matchedRows += 1;
       matchedSecondary.add(secondaryRow);
+      if (matchedPairRows.length < 5) {
+        matchedPairRows.push({
+          primaryRowNumber: rowIndex + 1,
+          primaryKeyValues: config.keyPairs.map((pair) => row[columnIndex(primary, pair.primary)] ?? null),
+          secondaryRowNumber: secondaryRow + 1,
+          secondaryKeyValues: config.keyPairs.map((pair) => secondary.rows[secondaryRow][columnIndex(secondary, pair.secondary)] ?? null),
+        });
+      }
     }
   });
   const unmatchedPrimaryRows = primaryRowIndexes.length - matchedRows;
@@ -424,6 +478,7 @@ export function validateCsvMerge(
     unmatchedPrimaryRows,
     unmatchedSecondaryRows,
     expectedRows,
+    matchedPairPreview: matchedPairRows,
   };
 }
 
