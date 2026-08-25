@@ -1,7 +1,9 @@
-import { useEffect, useMemo, useRef } from 'react';
-import { useMantineColorScheme } from '@mantine/core';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Alert, Button, Group, Modal, Select, Stack, Text, TextInput, useMantineColorScheme } from '@mantine/core';
 import Plotly, { type Data, type Layout, type Config, type PlotlyHTMLElement, type PlotMouseEvent, type PlotSelectionEvent, type PlotRelayoutEvent } from '../lib/plotly';
+import { buildPlotExportTable, normalizedDownloadName, plotTableToCsv, plotTableToParquet } from '../lib/plotExport';
 import { preparePlotData } from '../lib/plotGaps';
+import { withSeparatedRangeSliderLegend } from '../lib/plotLayout';
 import { relayoutRange, visibleYRelayoutUpdate, type TimeSeriesAxisRange, type TimeSeriesTraceValues } from '../lib/timeSeriesViewport';
 
 export type PlotlyChartClick = {
@@ -55,9 +57,26 @@ export function PlotlyChart({ data, layout, config, height = 400, className, onC
   const rescaleFrameRef = useRef<number | null>(null);
   const pendingXRangeRef = useRef<TimeSeriesAxisRange | null>(null);
   const applyingYRangeRef = useRef(0);
+  const [exportOpened, setExportOpened] = useState(false);
+  const [exportFormat, setExportFormat] = useState<'csv' | 'parquet'>('csv');
+  const [exportName, setExportName] = useState('plot-data');
+  const [exporting, setExporting] = useState(false);
+  const [exportError, setExportError] = useState<string | null>(null);
   const { colorScheme } = useMantineColorScheme();
   const dark = colorScheme === 'dark';
   const preparedData = useMemo(() => preparePlotData(data), [data]);
+  const exportTable = useMemo(() => buildPlotExportTable(data), [data]);
+  const chromeLayout = useMemo(() => withSeparatedRangeSliderLegend(layout, preparedData), [layout, preparedData]);
+  const defaultExportName = useMemo(() => {
+    const title = layout?.title;
+    const text = typeof title === 'string' ? title : title?.text;
+    return typeof text === 'string' && text.trim() ? text.replace(/<[^>]*>/g, '').trim() : 'plot-data';
+  }, [layout?.title]);
+  const openExport = useCallback(() => {
+    setExportName(defaultExportName);
+    setExportError(null);
+    setExportOpened(true);
+  }, [defaultExportName]);
   const traceValues = useMemo<TimeSeriesTraceValues[]>(() => preparedData.flatMap((trace) => {
     const values = trace as unknown as {
       x?: Array<string | number | Date | null>;
@@ -68,8 +87,19 @@ export function PlotlyChart({ data, layout, config, height = 400, className, onC
     return [{ x: values.x, y: values.y, yaxis: values.yaxis ?? 'y' }];
   }), [preparedData]);
   const effectiveConfig = useMemo<Partial<Config>>(() => {
-    if (!rescaleYOnVisibleX) return { ...BASE_CONFIG, ...config };
-    const additions = [...new Set([...(config?.modeBarButtonsToAdd ?? []), 'autoScale2d' as const])];
+    const downloadButton = {
+      name: 'downloadPlotData',
+      title: 'Download plot data',
+      icon: Plotly.Icons.disk,
+      click: openExport,
+    };
+    const configuredAdditions = (config?.modeBarButtonsToAdd ?? []).filter((button) => (
+      typeof button === 'string' || button.name !== downloadButton.name
+    ));
+    const additions = rescaleYOnVisibleX
+      ? [...configuredAdditions, 'autoScale2d' as const, downloadButton]
+      : [...configuredAdditions, downloadButton];
+    if (!rescaleYOnVisibleX) return { ...BASE_CONFIG, ...config, modeBarButtonsToAdd: additions };
     const removals = (config?.modeBarButtonsToRemove ?? BASE_CONFIG.modeBarButtonsToRemove ?? [])
       .filter((button) => button !== 'autoScale2d');
     return {
@@ -79,7 +109,7 @@ export function PlotlyChart({ data, layout, config, height = 400, className, onC
       modeBarButtonsToAdd: additions,
       modeBarButtonsToRemove: removals,
     };
-  }, [config, rescaleYOnVisibleX]);
+  }, [config, openExport, rescaleYOnVisibleX]);
 
   useEffect(() => {
     const el = ref.current;
@@ -87,19 +117,20 @@ export function PlotlyChart({ data, layout, config, height = 400, className, onC
 
     const themedLayout: Partial<Layout> = {
       autosize: true,
-      margin: { l: 56, r: 24, t: 16, b: 48 },
       paper_bgcolor: 'rgba(0,0,0,0)',
       plot_bgcolor: 'rgba(0,0,0,0)',
+      ...chromeLayout,
+      margin: { l: 56, r: 24, t: 16, b: 48, ...chromeLayout.margin },
       font: {
         family: 'Inter, system-ui, sans-serif',
         size: 12,
         color: dark ? '#c1c2c5' : '#343a40',
+        ...chromeLayout.font,
       },
-      ...layout,
     };
 
     Plotly.react(el as unknown as PlotlyHTMLElement, preparedData, themedLayout, effectiveConfig);
-  }, [preparedData, layout, effectiveConfig, dark]);
+  }, [preparedData, chromeLayout, effectiveConfig, dark]);
 
   useEffect(() => {
     const plot = ref.current as unknown as PlotlyHTMLElement | null;
@@ -198,12 +229,68 @@ export function PlotlyChart({ data, layout, config, height = 400, className, onC
     };
   }, []);
 
+  const download = async () => {
+    if (exportTable.columns.length === 0) return;
+    setExporting(true);
+    setExportError(null);
+    try {
+      const filename = normalizedDownloadName(exportName, exportFormat);
+      const blob = exportFormat === 'csv'
+        ? new Blob([plotTableToCsv(exportTable)], { type: 'text/csv;charset=utf-8' })
+        : new Blob([await plotTableToParquet(exportTable)], { type: 'application/vnd.apache.parquet' });
+      const url = URL.createObjectURL(blob);
+      const anchor = document.createElement('a');
+      anchor.href = url;
+      anchor.download = filename;
+      anchor.style.display = 'none';
+      document.body.appendChild(anchor);
+      anchor.click();
+      anchor.remove();
+      window.setTimeout(() => URL.revokeObjectURL(url), 0);
+      setExportOpened(false);
+    } catch (error) {
+      setExportError(error instanceof Error ? error.message : 'The plot data could not be exported.');
+    } finally {
+      setExporting(false);
+    }
+  };
+
   return (
-    <div
-      ref={ref}
-      className={className}
-      style={{ width: '100%', height: typeof height === 'number' ? `${height}px` : height }}
-    />
+    <>
+      <div
+        ref={ref}
+        className={className}
+        style={{ width: '100%', height: typeof height === 'number' ? `${height}px` : height }}
+      />
+      <Modal opened={exportOpened} onClose={() => !exporting && setExportOpened(false)} title="Download plot data" centered>
+        <Stack gap="md">
+          <Text size="sm" c="dimmed">
+            Every graph is exported as a separate column. Time-series rows use dataset-local timestamps in YYYY.MM.DD hh:mm:ss format.
+          </Text>
+          {exportTable.columns.length === 0 && (
+            <Alert color="yellow" title="No tabular plot data">
+              This visualization has no exportable X/Y or heatmap values.
+            </Alert>
+          )}
+          {exportError && <Alert color="red" title="Export failed">{exportError}</Alert>}
+          <TextInput label="File name" value={exportName} onChange={(event) => setExportName(event.currentTarget.value)} />
+          <Select
+            label="File type"
+            data={[{ value: 'csv', label: 'CSV' }, { value: 'parquet', label: 'Parquet' }]}
+            value={exportFormat}
+            allowDeselect={false}
+            onChange={(value) => setExportFormat(value === 'parquet' ? 'parquet' : 'csv')}
+          />
+          <Text size="xs" c="dimmed">
+            {exportTable.rowCount.toLocaleString()} rows · {exportTable.seriesCount.toLocaleString()} graph columns
+          </Text>
+          <Group justify="flex-end">
+            <Button variant="default" onClick={() => setExportOpened(false)} disabled={exporting}>Cancel</Button>
+            <Button onClick={() => void download()} loading={exporting} disabled={exportTable.columns.length === 0}>Download</Button>
+          </Group>
+        </Stack>
+      </Modal>
+    </>
   );
 }
 
