@@ -16,6 +16,7 @@ export type CsvParseOutcome = {
 };
 
 export type CsvJoinType = 'left' | 'inner' | 'full';
+export type CsvDuplicatePolicy = 'block' | 'keep_first';
 
 export type CsvKeyPair = {
   primary: string;
@@ -32,6 +33,7 @@ export type CsvMergeConfig = {
   secondaryColumns: CsvSecondaryColumn[];
   keyPairs: CsvKeyPair[];
   joinType: CsvJoinType;
+  duplicatePolicy: CsvDuplicatePolicy;
 };
 
 export type CsvDuplicateKey = {
@@ -43,6 +45,10 @@ export type CsvMergeValidation = {
   errors: string[];
   primaryDuplicateKeys: CsvDuplicateKey[];
   secondaryDuplicateKeys: CsvDuplicateKey[];
+  primaryDuplicateKeyCount: number;
+  secondaryDuplicateKeyCount: number;
+  primaryDiscardedDuplicateRows: number;
+  secondaryDiscardedDuplicateRows: number;
   primaryMissingKeys: number;
   secondaryMissingKeys: number;
   matchedRows: number;
@@ -136,16 +142,25 @@ function compositeKey(row: CsvCell[], indexes: number[]): { key: string | null; 
 function keyIndex(
   document: CsvDocument,
   indexes: number[],
-): { rowsByKey: Map<string, number>; duplicates: CsvDuplicateKey[]; missing: number } {
+): {
+  rowsByKey: Map<string, number>;
+  duplicates: CsvDuplicateKey[];
+  discardedDuplicateRows: number;
+  retainedRowIndexes: number[];
+  missing: number;
+} {
   const allRows = new Map<string, number[]>();
+  const retainedRowIndexes: number[] = [];
   let missing = 0;
   document.rows.forEach((row, index) => {
     const value = compositeKey(row, indexes);
     if (value.key === null) {
       missing += 1;
+      retainedRowIndexes.push(index);
       return;
     }
     const rows = allRows.get(value.key) ?? [];
+    if (rows.length === 0) retainedRowIndexes.push(index);
     rows.push(index);
     allRows.set(value.key, rows);
   });
@@ -156,6 +171,8 @@ function keyIndex(
   return {
     rowsByKey: new Map([...allRows.entries()].map(([key, rows]) => [key, rows[0]])),
     duplicates,
+    discardedDuplicateRows: duplicates.reduce((total, item) => total + item.rows.length - 1, 0),
+    retainedRowIndexes,
     missing,
   };
 }
@@ -189,17 +206,26 @@ export function validateCsvMerge(
   if (primaryIndexes.some((index) => index < 0) || secondaryIndexes.some((index) => index < 0) || config.keyPairs.length === 0) {
     return {
       errors: [...new Set(errors)], primaryDuplicateKeys: [], secondaryDuplicateKeys: [], primaryMissingKeys: 0,
+      primaryDuplicateKeyCount: 0, secondaryDuplicateKeyCount: 0,
+      primaryDiscardedDuplicateRows: 0, secondaryDiscardedDuplicateRows: 0,
       secondaryMissingKeys: 0, matchedRows: 0, unmatchedPrimaryRows: primary.rows.length,
       unmatchedSecondaryRows: secondary.rows.length, expectedRows: 0,
     };
   }
   const primaryKeys = keyIndex(primary, primaryIndexes);
   const secondaryKeys = keyIndex(secondary, secondaryIndexes);
-  if (primaryKeys.duplicates.length > 0) errors.push('The selected key is not unique in the primary CSV.');
-  if (secondaryKeys.duplicates.length > 0) errors.push('The selected key is not unique in the secondary CSV.');
+  if (config.duplicatePolicy === 'block' && primaryKeys.duplicates.length > 0) errors.push('The selected key is not unique in the primary CSV.');
+  if (config.duplicatePolicy === 'block' && secondaryKeys.duplicates.length > 0) errors.push('The selected key is not unique in the secondary CSV.');
+  const primaryRowIndexes = config.duplicatePolicy === 'keep_first'
+    ? primaryKeys.retainedRowIndexes
+    : primary.rows.map((_, index) => index);
+  const secondaryRowIndexes = config.duplicatePolicy === 'keep_first'
+    ? secondaryKeys.retainedRowIndexes
+    : secondary.rows.map((_, index) => index);
   let matchedRows = 0;
   const matchedSecondary = new Set<number>();
-  primary.rows.forEach((row) => {
+  primaryRowIndexes.forEach((rowIndex) => {
+    const row = primary.rows[rowIndex];
     const value = compositeKey(row, primaryIndexes);
     if (value.key === null) return;
     const secondaryRow = secondaryKeys.rowsByKey.get(value.key);
@@ -208,17 +234,21 @@ export function validateCsvMerge(
       matchedSecondary.add(secondaryRow);
     }
   });
-  const unmatchedPrimaryRows = primary.rows.length - matchedRows;
-  const unmatchedSecondaryRows = secondary.rows.length - matchedSecondary.size;
+  const unmatchedPrimaryRows = primaryRowIndexes.length - matchedRows;
+  const unmatchedSecondaryRows = secondaryRowIndexes.length - matchedSecondary.size;
   const expectedRows = config.joinType === 'inner'
     ? matchedRows
     : config.joinType === 'full'
-      ? primary.rows.length + unmatchedSecondaryRows
-      : primary.rows.length;
+      ? primaryRowIndexes.length + unmatchedSecondaryRows
+      : primaryRowIndexes.length;
   return {
     errors: [...new Set(errors)],
     primaryDuplicateKeys: primaryKeys.duplicates,
     secondaryDuplicateKeys: secondaryKeys.duplicates,
+    primaryDuplicateKeyCount: primaryKeys.duplicates.length,
+    secondaryDuplicateKeyCount: secondaryKeys.duplicates.length,
+    primaryDiscardedDuplicateRows: primaryKeys.discardedDuplicateRows,
+    secondaryDiscardedDuplicateRows: secondaryKeys.discardedDuplicateRows,
     primaryMissingKeys: primaryKeys.missing,
     secondaryMissingKeys: secondaryKeys.missing,
     matchedRows,
@@ -239,11 +269,20 @@ export function mergeCsvDocuments(
   const secondaryKeyIndexes = config.keyPairs.map((pair) => columnIndex(secondary, pair.secondary));
   const primaryOutputIndexes = config.primaryColumns.map((name) => columnIndex(primary, name));
   const secondaryOutputIndexes = config.secondaryColumns.map((column) => columnIndex(secondary, column.source));
-  const secondaryKeys = keyIndex(secondary, secondaryKeyIndexes).rowsByKey;
+  const primaryKeys = keyIndex(primary, primaryKeyIndexes);
+  const secondaryKeyDetails = keyIndex(secondary, secondaryKeyIndexes);
+  const secondaryKeys = secondaryKeyDetails.rowsByKey;
+  const primaryRowIndexes = config.duplicatePolicy === 'keep_first'
+    ? primaryKeys.retainedRowIndexes
+    : primary.rows.map((_, index) => index);
+  const secondaryRowIndexes = config.duplicatePolicy === 'keep_first'
+    ? secondaryKeyDetails.retainedRowIndexes
+    : secondary.rows.map((_, index) => index);
   const matchedSecondary = new Set<number>();
   const rows: CsvCell[][] = [];
 
-  primary.rows.forEach((primaryRow) => {
+  primaryRowIndexes.forEach((primaryIndex) => {
+    const primaryRow = primary.rows[primaryIndex];
     const value = compositeKey(primaryRow, primaryKeyIndexes);
     const secondaryIndex = value.key === null ? undefined : secondaryKeys.get(value.key);
     if (config.joinType === 'inner' && secondaryIndex === undefined) return;
@@ -256,8 +295,9 @@ export function mergeCsvDocuments(
   });
 
   if (config.joinType === 'full') {
-    secondary.rows.forEach((secondaryRow, secondaryIndex) => {
+    secondaryRowIndexes.forEach((secondaryIndex) => {
       if (matchedSecondary.has(secondaryIndex)) return;
+      const secondaryRow = secondary.rows[secondaryIndex];
       const primaryValues = primaryOutputIndexes.map((index) => {
         const primaryHeader = primary.headers[index];
         const mappingIndex = config.keyPairs.findIndex((pair) => pair.primary === primaryHeader);

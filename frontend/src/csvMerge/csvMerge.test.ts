@@ -29,6 +29,7 @@ const config: CsvMergeConfig = {
   secondaryColumns: [{ source: 'value', output: 'joined_value' }],
   keyPairs: [{ primary: 'id', secondary: 'key' }, { primary: 'site', secondary: 'site_key' }],
   joinType: 'left',
+  duplicatePolicy: 'block',
 };
 
 describe('CSV parsing', () => {
@@ -86,7 +87,7 @@ describe('CSV keyed merge', () => {
     const right = document(['key', 'value'], [['A', 'match']]);
     const result = mergeCsvDocuments(left, right, {
       primaryColumns: ['key'], secondaryColumns: [{ source: 'value', output: 'value' }],
-      keyPairs: [{ primary: 'key', secondary: 'key' }], joinType: 'left',
+      keyPairs: [{ primary: 'key', secondary: 'key' }], joinType: 'left', duplicatePolicy: 'block',
     });
     expect(result.rows).toEqual([['A', 'match'], [' A', null], ['a', null]]);
   });
@@ -98,6 +99,7 @@ describe('CSV keyed merge', () => {
       secondaryColumns: [{ source: 'value', output: 'key' }],
       keyPairs: [{ primary: 'key', secondary: 'key' }, { primary: 'key', secondary: 'site_key' }],
       joinType: 'left',
+      duplicatePolicy: 'block',
     });
     expect(validation.errors).toEqual(expect.arrayContaining([
       'Each primary key column may only be used once.',
@@ -105,6 +107,60 @@ describe('CSV keyed merge', () => {
       'The selected key is not unique in the primary CSV.',
     ]));
     expect(validation.primaryDuplicateKeys[0]).toEqual({ key: 'x | x', rows: [1, 2] });
+    expect(validation).toMatchObject({ primaryDuplicateKeyCount: 1, primaryDiscardedDuplicateRows: 1 });
+  });
+
+  it('keeps only the first primary and secondary row for duplicate keys', () => {
+    const duplicatePrimary = document(['key', 'group', 'primary_value'], [
+      ['x', 'A', 'primary-first'],
+      ['x', 'A', 'primary-second'],
+      ['x', 'A', 'primary-third'],
+      ['x', 'B', 'different-composite-key'],
+      [null, 'A', 'empty-first'],
+      [null, 'A', 'empty-second'],
+    ]);
+    const duplicateSecondary = document(['key', 'group', 'secondary_value'], [
+      ['x', 'A', 'secondary-first'],
+      ['x', 'A', 'secondary-second'],
+      ['z', 'A', 'secondary-unmatched'],
+    ]);
+    const duplicateConfig: CsvMergeConfig = {
+      primaryColumns: ['key', 'group', 'primary_value'],
+      secondaryColumns: [{ source: 'secondary_value', output: 'secondary_value' }],
+      keyPairs: [{ primary: 'key', secondary: 'key' }, { primary: 'group', secondary: 'group' }],
+      joinType: 'left',
+      duplicatePolicy: 'keep_first',
+    };
+
+    const validation = validateCsvMerge(duplicatePrimary, duplicateSecondary, duplicateConfig);
+    expect(validation.errors).toEqual([]);
+    expect(validation).toMatchObject({
+      primaryDuplicateKeyCount: 1,
+      primaryDiscardedDuplicateRows: 2,
+      secondaryDuplicateKeyCount: 1,
+      secondaryDiscardedDuplicateRows: 1,
+      matchedRows: 1,
+      unmatchedPrimaryRows: 3,
+      unmatchedSecondaryRows: 1,
+      expectedRows: 4,
+    });
+    expect(mergeCsvDocuments(duplicatePrimary, duplicateSecondary, duplicateConfig).rows).toEqual([
+      ['x', 'A', 'primary-first', 'secondary-first'],
+      ['x', 'B', 'different-composite-key', null],
+      [null, 'A', 'empty-first', null],
+      [null, 'A', 'empty-second', null],
+    ]);
+
+    expect(mergeCsvDocuments(duplicatePrimary, duplicateSecondary, { ...duplicateConfig, joinType: 'inner' }).rows)
+      .toEqual([['x', 'A', 'primary-first', 'secondary-first']]);
+    expect(mergeCsvDocuments(duplicatePrimary, duplicateSecondary, { ...duplicateConfig, joinType: 'full' }).rows)
+      .toEqual([
+        ['x', 'A', 'primary-first', 'secondary-first'],
+        ['x', 'B', 'different-composite-key', null],
+        [null, 'A', 'empty-first', null],
+        [null, 'A', 'empty-second', null],
+        ['z', 'A', null, 'secondary-unmatched'],
+      ]);
   });
 
   it('reports missing keys and expected output sizes for every join type', () => {
