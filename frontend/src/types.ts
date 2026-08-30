@@ -218,6 +218,39 @@ export type PreprocessingPipeline = {
   step_types?: string[];
 };
 
+export type ImageDistributionMetricSummary = {
+  median: number;
+  q25: number;
+  q75: number;
+};
+
+export type ImageDistributionHourlyPoint = {
+  hour: string;
+  image_count: number;
+  mean_intensity: ImageDistributionMetricSummary;
+  spatial_std_intensity: ImageDistributionMetricSummary;
+  q95_intensity: ImageDistributionMetricSummary;
+};
+
+export type ImageDistributionResult = {
+  dataset_id: number;
+  dataset_name: string;
+  preprocessing_pipeline_id: number;
+  preprocessing_pipeline_name: string;
+  cache_key: string;
+  cache_hit: boolean;
+  total_images: number;
+  successful_images: number;
+  failed_images: number;
+  hourly: ImageDistributionHourlyPoint[];
+  periods: Array<{
+    name: string;
+    usage_label: string;
+    start: string;
+    end: string;
+  }>;
+};
+
 export type PreprocessingPreviewImage = {
   node_id: string;
   step_type: string;

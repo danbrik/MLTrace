@@ -2434,6 +2434,41 @@ class RegistryItemRef(BaseModel):
     id: int
 
 
+class ImageDistributionMetricSummary(BaseModel):
+    median: float
+    q25: float
+    q75: float
+
+
+class ImageDistributionHourlyPoint(BaseModel):
+    hour: datetime
+    image_count: int
+    mean_intensity: ImageDistributionMetricSummary
+    spatial_std_intensity: ImageDistributionMetricSummary
+    q95_intensity: ImageDistributionMetricSummary
+
+
+class ImageDistributionPeriod(BaseModel):
+    name: str
+    usage_label: str
+    start: datetime
+    end: datetime
+
+
+class ImageDistributionResponse(BaseModel):
+    dataset_id: int
+    dataset_name: str
+    preprocessing_pipeline_id: int
+    preprocessing_pipeline_name: str
+    cache_key: str
+    cache_hit: bool
+    total_images: int
+    successful_images: int
+    failed_images: int
+    hourly: list[ImageDistributionHourlyPoint]
+    periods: list[ImageDistributionPeriod]
+
+
 class RegistryDeleteRequest(BaseModel):
     items: list[RegistryItemRef] = Field(min_length=1)
     cascade: bool = False

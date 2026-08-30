@@ -55,6 +55,7 @@ from app.schemas import (
     InspectCsvData,
     InspectRunCreate,
     InspectRunRead,
+    ImageDistributionResponse,
     TemporalDynamicsRequest,
     TemporalDynamicsResponse,
     TestingRunPlotSeriesPage,
@@ -138,6 +139,7 @@ from app.evaluation import service as evaluation_service
 from app.evaluation import workspace_service as evaluation_workspace_service
 from app.analysis import service as analysis_service
 from app.analysis import baseline as baseline_analysis_service
+from app.analysis import image_distribution as image_distribution_service
 from app.heatmap import service as heatmap_service
 from app.registry import service as registry_service
 from app.inspect import service as inspect_service
@@ -864,6 +866,26 @@ def create_app() -> FastAPI:
             return baseline_analysis_service.calculate(db, payload)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.post("/api/analysis/image-distribution", response_model=ImageDistributionResponse)
+    def api_calculate_image_distribution(
+        dataset_id: int = Query(..., ge=1),
+        preprocessing_pipeline_id: int = Query(..., ge=1),
+        db: Session = Depends(get_db),
+    ):
+        try:
+            return image_distribution_service.calculate(db, dataset_id, preprocessing_pipeline_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.get("/api/analysis/image-distribution/{cache_key}/csv")
+    def api_download_image_distribution_csv(cache_key: str):
+        if len(cache_key) != 24 or any(character not in "0123456789abcdef" for character in cache_key):
+            raise HTTPException(status_code=400, detail="Invalid cache key.")
+        path = image_distribution_service.cache_path(cache_key)
+        if not path.is_file():
+            raise HTTPException(status_code=404, detail="Cached analysis CSV not found.")
+        return FileResponse(path, media_type="text/csv", filename=f"image-distribution-{cache_key}.csv")
 
     @app.post("/api/analysis/image-comparison", response_model=AnalysisImageComparisonResponse)
     def api_calculate_analysis_image_comparison(

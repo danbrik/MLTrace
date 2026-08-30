@@ -41,6 +41,7 @@ import type {
   TemporalDynamicsResult,
   InspectArtifactRunPage,
   InspectCsvData,
+  ImageDistributionResult,
   MethodConfiguration,
   MethodConfigurationPayload,
   MethodConfigurationSavePayload,
@@ -429,6 +430,18 @@ export function listPreprocessingPipelines(): Promise<PreprocessingPipeline[]> {
     '/api/preprocessing/pipelines?summary=true',
     REFERENCE_TTL_MS,
   ).then((pipelines) => pipelines.map(normalizePreprocessingPipeline));
+}
+
+export function calculateImageDistribution(datasetId: number, preprocessingPipelineId: number): Promise<ImageDistributionResult> {
+  const query = new URLSearchParams({
+    dataset_id: String(datasetId),
+    preprocessing_pipeline_id: String(preprocessingPipelineId),
+  });
+  return request<ImageDistributionResult>(`/api/analysis/image-distribution?${query}`, { method: 'POST' }, 60 * 60 * 1000);
+}
+
+export function imageDistributionCsvUrl(cacheKey: string): string {
+  return projectMediaUrl(`/api/analysis/image-distribution/${encodeURIComponent(cacheKey)}/csv`);
 }
 
 export function getPreprocessingPipeline(pipelineId: number): Promise<PreprocessingPipeline> {

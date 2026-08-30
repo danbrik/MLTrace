@@ -7,11 +7,13 @@ import {
   CalendarClock,
   ClipboardCheck,
   FileSpreadsheet,
+  Gauge,
   Database,
   Eye,
   FlaskConical,
   ListChecks,
   Network,
+  LineChart,
   SlidersHorizontal,
   PanelLeftClose,
   PanelLeftOpen,
@@ -27,8 +29,10 @@ import { AnomalyDetectionPage } from './pages/AnomalyDetectionPage';
 import { DataManagerPage } from './pages/DataManagerPage';
 import { CsvMergePage } from './pages/CsvMergePage';
 import { RedundancyAnalysisPage } from './pages/RedundancyAnalysisPage';
+import { ThresholdPage } from './pages/ThresholdPage';
 import { DatasetsPage } from './pages/DatasetsPage';
 import { InspectPage } from './pages/InspectPage';
+import { ImageDistributionPage } from './pages/ImageDistributionPage';
 import { EvaluationPage } from './pages/EvaluationPage';
 import { MethodsPage } from './pages/ModelsPage';
 import { OptimizationPage } from './pages/OptimizationPage';
@@ -51,10 +55,12 @@ type Page =
   | 'inspect'
   | 'optimization'
   | 'analysis'
+  | 'image-distribution'
   | 'evaluation'
   | 'anomaly-detection'
   | 'csv-merge'
   | 'redundancy-analysis'
+  | 'threshold'
   | 'scheduler'
   | 'data-manager';
 
@@ -68,7 +74,7 @@ export function App() {
   const requestedPage = match?.[2] as Page | undefined;
   const page: Page = requestedPage && [
     'datasets', 'training-datasets', 'preprocessing', 'methods', 'training-pipelines', 'testing',
-    'inspect', 'optimization', 'analysis', 'evaluation', 'anomaly-detection', 'csv-merge', 'redundancy-analysis', 'scheduler', 'data-manager',
+    'inspect', 'optimization', 'analysis', 'image-distribution', 'evaluation', 'anomaly-detection', 'csv-merge', 'redundancy-analysis', 'threshold', 'scheduler', 'data-manager',
   ].includes(requestedPage) ? requestedPage : 'datasets';
   const [project, setProject] = useState<Project | null>(null);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
@@ -117,10 +123,12 @@ export function App() {
     { id: 'inspect', label: 'Inspect Dataset', icon: <Eye size={18} /> },
     { id: 'optimization', label: 'Optimization', icon: <SlidersHorizontal size={18} /> },
     { id: 'analysis', label: 'Model Analysis', icon: <BarChart3 size={18} /> },
+    { id: 'image-distribution', label: 'Image Distribution', icon: <LineChart size={18} /> },
     { id: 'evaluation', label: 'Evaluation', icon: <ClipboardCheck size={18} /> },
     { id: 'anomaly-detection', label: 'Anomaly Detection', icon: <Activity size={18} /> },
     { id: 'csv-merge', label: 'CSV Merge', icon: <FileSpreadsheet size={18} /> },
     { id: 'redundancy-analysis', label: 'Redundancy Analysis', icon: <Network size={18} /> },
+    { id: 'threshold', label: 'Threshold', icon: <Gauge size={18} /> },
     { id: 'scheduler', label: 'Scheduler', icon: <CalendarClock size={18} /> },
     { id: 'data-manager', label: 'Data Manager', icon: <Archive size={18} /> },
   ];
@@ -225,6 +233,11 @@ export function App() {
             <AnalysisPage active={page === 'analysis'} />
           </PageErrorBoundary>
         </Box>
+        <Box display={page === 'image-distribution' ? 'block' : 'none'}>
+          <PageErrorBoundary label="Image Distribution">
+            <ImageDistributionPage active={page === 'image-distribution'} />
+          </PageErrorBoundary>
+        </Box>
         <Box display={page === 'evaluation' ? 'block' : 'none'}>
           <PageErrorBoundary label="Evaluation">
             <EvaluationPage active={page === 'evaluation'} />
@@ -243,6 +256,11 @@ export function App() {
         <Box display={page === 'redundancy-analysis' ? 'block' : 'none'}>
           <PageErrorBoundary label="Redundancy Analysis">
             <RedundancyAnalysisPage active={page === 'redundancy-analysis'} />
+          </PageErrorBoundary>
+        </Box>
+        <Box display={page === 'threshold' ? 'block' : 'none'}>
+          <PageErrorBoundary label="Threshold">
+            <ThresholdPage active={page === 'threshold'} />
           </PageErrorBoundary>
         </Box>
         <Box display={page === 'scheduler' ? 'block' : 'none'}>
