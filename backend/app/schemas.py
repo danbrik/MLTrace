@@ -2456,8 +2456,9 @@ class ImageDistributionPeriod(BaseModel):
 
 
 class ImageDistributionResponse(BaseModel):
-    dataset_id: int
-    dataset_name: str
+    training_dataset_id: int
+    training_dataset_name: str
+    usage_label: str
     preprocessing_pipeline_id: int
     preprocessing_pipeline_name: str
     cache_key: str

@@ -18,7 +18,13 @@ def _write_image(path: Path, pixels: list[int]) -> None:
 def test_image_distribution_aggregates_hourly_and_reuses_csv(tmp_path, monkeypatch) -> None:
     db = make_db()
     try:
-        dataset = models.Dataset(name="camera", root_path=str(tmp_path), status="ready")
+        dataset = models.Dataset(
+            name="camera",
+            root_path=str(tmp_path),
+            status="ready",
+            timestamp_regex=r"(\d{8}_\d{6})",
+            timestamp_format="%Y%m%d_%H%M%S",
+        )
         pipeline = models.PreprocessingPipeline(
             name="raw",
             graph={
@@ -33,9 +39,9 @@ def test_image_distribution_aggregates_hourly_and_reuses_csv(tmp_path, monkeypat
         db.flush()
         start = datetime(2026, 1, 1, 10, 10)
         specs = [
-            ("a.png", start, [0, 0, 0, 4]),
-            ("b.png", start + timedelta(minutes=20), [2, 2, 2, 2]),
-            ("c.png", start + timedelta(hours=3), [10, 10, 10, 10]),
+            ("20260101_101000.tif", start, [0, 0, 0, 4]),
+            ("20260101_103000.tif", start + timedelta(minutes=20), [2, 2, 2, 2]),
+            ("20260101_131000.tif", start + timedelta(hours=3), [10, 10, 10, 10]),
         ]
         for name, timestamp, pixels in specs:
             path = tmp_path / name
@@ -58,14 +64,14 @@ def test_image_distribution_aggregates_hourly_and_reuses_csv(tmp_path, monkeypat
             training_dataset_id=training.id,
             folder_id=folder.id,
             start_timestamp=start,
-            end_timestamp=start + timedelta(minutes=30),
+            end_timestamp=start + timedelta(hours=3),
             stride=1,
         ))
         db.commit()
         monkeypatch.setattr(image_distribution, "cache_path", lambda key: tmp_path / "cache" / f"{key}.csv")
 
-        first = image_distribution.calculate(db, dataset.id, pipeline.id)
-        second = image_distribution.calculate(db, dataset.id, pipeline.id)
+        first = image_distribution.calculate(db, training.id, pipeline.id)
+        second = image_distribution.calculate(db, training.id, pipeline.id)
 
         assert first.cache_hit is False
         assert second.cache_hit is True
@@ -74,6 +80,7 @@ def test_image_distribution_aggregates_hourly_and_reuses_csv(tmp_path, monkeypat
         assert first.hourly[0].mean_intensity.median == pytest.approx(1.5)
         assert first.hourly[0].q95_intensity.median == pytest.approx(2.7)
         assert first.periods[0].name == "train period"
-        assert (tmp_path / "cache" / f"{first.cache_key}.csv").read_text().startswith("image_id,timestamp,relative_path")
+        assert first.training_dataset_name == "train period"
+        assert (tmp_path / "cache" / f"{first.cache_key}.csv").read_text().startswith("image_index,timestamp,relative_path")
     finally:
         db.close()

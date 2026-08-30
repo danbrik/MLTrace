@@ -11,7 +11,7 @@ import tempfile
 
 import numpy as np
 from sqlalchemy import select
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, selectinload
 
 from app import models
 from app.database import data_dir
@@ -23,11 +23,12 @@ from app.schemas import (
     ImageDistributionResponse,
     PreprocessingGraph,
 )
+from app.training.data import ResolvedDatasetImage, enumerate_training_dataset_image_records
 
 
 METRIC_VERSION = "image-distribution-v1"
 CSV_FIELDS = [
-    "image_id",
+    "image_index",
     "timestamp",
     "relative_path",
     "mean_intensity",
@@ -37,15 +38,23 @@ CSV_FIELDS = [
 ]
 
 
-def _cache_key(dataset: models.Dataset, pipeline: models.PreprocessingPipeline, images: list[models.DatasetImage]) -> str:
+def _cache_key(
+    training_dataset: models.TrainingDataset,
+    pipeline: models.PreprocessingPipeline,
+    images: list[ResolvedDatasetImage],
+) -> str:
     image_revision = [
-        [image.id, image.timestamp_parsed.isoformat(), image.file_size_bytes, image.modified_time.isoformat() if image.modified_time else None]
+        [image.file_path, image.timestamp_parsed.isoformat()]
         for image in images
     ]
     payload = {
         "version": METRIC_VERSION,
-        "dataset_id": dataset.id,
-        "dataset_updated_at": dataset.updated_at.isoformat() if dataset.updated_at else None,
+        "training_dataset_id": training_dataset.id,
+        "training_dataset_updated_at": training_dataset.updated_at.isoformat() if training_dataset.updated_at else None,
+        "rules": [
+            [rule.id, rule.folder_id, rule.start_timestamp.isoformat(), rule.end_timestamp.isoformat(), rule.stride]
+            for rule in training_dataset.rules
+        ],
         "pipeline_id": pipeline.id,
         "pipeline_graph": pipeline.graph,
         "images": image_revision,
@@ -119,41 +128,36 @@ def _aggregate(rows: list[dict[str, str]]) -> list[ImageDistributionHourlyPoint]
     return points
 
 
-def _training_periods(db: Session, dataset_id: int) -> list[ImageDistributionPeriod]:
-    rows = db.execute(
-        select(models.TrainingDatasetRule, models.TrainingDataset)
-        .join(models.TrainingDataset, models.TrainingDataset.id == models.TrainingDatasetRule.training_dataset_id)
-        .join(models.DatasetFolder, models.DatasetFolder.id == models.TrainingDatasetRule.folder_id)
-        .where(models.DatasetFolder.dataset_id == dataset_id)
-        .order_by(models.TrainingDatasetRule.start_timestamp)
-    ).all()
+def _training_periods(training_dataset: models.TrainingDataset) -> list[ImageDistributionPeriod]:
     return [ImageDistributionPeriod(
         name=training_dataset.name,
         usage_label=training_dataset.usage_label,
         start=rule.start_timestamp,
         end=rule.end_timestamp,
-    ) for rule, training_dataset in rows]
+    ) for rule in sorted(training_dataset.rules, key=lambda item: item.start_timestamp)]
 
 
-def calculate(db: Session, dataset_id: int, preprocessing_pipeline_id: int) -> ImageDistributionResponse:
-    dataset = db.get(models.Dataset, dataset_id)
-    if dataset is None:
-        raise ValueError("Dataset not found.")
-    if dataset.status != "ready":
-        raise ValueError("Dataset must be scanned and ready before analysis.")
+def calculate(db: Session, training_dataset_id: int, preprocessing_pipeline_id: int) -> ImageDistributionResponse:
+    training_dataset = db.scalar(
+        select(models.TrainingDataset)
+        .where(models.TrainingDataset.id == training_dataset_id)
+        .options(
+            selectinload(models.TrainingDataset.rules)
+            .selectinload(models.TrainingDatasetRule.folder)
+            .selectinload(models.DatasetFolder.dataset)
+        )
+    )
+    if training_dataset is None:
+        raise ValueError("Train/Test dataset not found.")
     pipeline = db.get(models.PreprocessingPipeline, preprocessing_pipeline_id)
     if pipeline is None:
         raise ValueError("Preprocessing pipeline not found.")
 
-    images = list(db.scalars(
-        select(models.DatasetImage)
-        .where(models.DatasetImage.dataset_id == dataset_id)
-        .order_by(models.DatasetImage.timestamp_parsed, models.DatasetImage.id)
-    ))
+    images = enumerate_training_dataset_image_records(training_dataset)
     if not images:
-        raise ValueError("Dataset contains no indexed images.")
+        raise ValueError("Train/Test dataset selects no images.")
 
-    key = _cache_key(dataset, pipeline, images)
+    key = _cache_key(training_dataset, pipeline, images)
     path = cache_path(key)
     cache_hit = path.is_file()
     if cache_hit:
@@ -167,11 +171,11 @@ def calculate(db: Session, dataset_id: int, preprocessing_pipeline_id: int) -> I
     if not cache_hit:
         compiled = compile_pipeline(PreprocessingGraph.model_validate(pipeline.graph))
         rows = []
-        for image in images:
+        for index, image in enumerate(images):
             row = {
-                "image_id": str(image.id),
+                "image_index": str(index),
                 "timestamp": image.timestamp_parsed.isoformat(),
-                "relative_path": image.relative_path,
+                "relative_path": str(Path(image.folder_relative_path) / image.file_name),
                 "mean_intensity": "",
                 "spatial_std_intensity": "",
                 "q95_intensity": "",
@@ -194,8 +198,9 @@ def calculate(db: Session, dataset_id: int, preprocessing_pipeline_id: int) -> I
 
     failed = sum(bool(row.get("error")) for row in rows)
     return ImageDistributionResponse(
-        dataset_id=dataset.id,
-        dataset_name=dataset.name,
+        training_dataset_id=training_dataset.id,
+        training_dataset_name=training_dataset.name,
+        usage_label=training_dataset.usage_label,
         preprocessing_pipeline_id=pipeline.id,
         preprocessing_pipeline_name=pipeline.name,
         cache_key=key,
@@ -204,5 +209,5 @@ def calculate(db: Session, dataset_id: int, preprocessing_pipeline_id: int) -> I
         successful_images=len(rows) - failed,
         failed_images=failed,
         hourly=_aggregate(rows),
-        periods=_training_periods(db, dataset.id),
+        periods=_training_periods(training_dataset),
     )

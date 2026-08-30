@@ -6,18 +6,18 @@ import { useEffect, useMemo, useState } from 'react';
 import {
   calculateImageDistribution,
   imageDistributionCsvUrl,
-  listDatasets,
   listPreprocessingPipelines,
+  listTrainingDatasets,
 } from '../api';
 import { PlotlyChart } from '../components/PlotlyChart';
 import { withLineGapPolicy } from '../lib/plotGaps';
 import type { Data, Layout } from '../lib/plotly';
 import type {
-  Dataset,
   ImageDistributionHourlyPoint,
   ImageDistributionMetricSummary,
   ImageDistributionResult,
   PreprocessingPipeline,
+  TrainingDataset,
 } from '../types';
 
 type Props = { active: boolean };
@@ -113,9 +113,9 @@ function MetricPlot({ result, metricKey, title, yTitle }: {
 }
 
 export function ImageDistributionPage({ active }: Props) {
-  const [datasets, setDatasets] = useState<Dataset[]>([]);
+  const [trainingDatasets, setTrainingDatasets] = useState<TrainingDataset[]>([]);
   const [pipelines, setPipelines] = useState<PreprocessingPipeline[]>([]);
-  const [datasetId, setDatasetId] = useState<string | null>(null);
+  const [trainingDatasetId, setTrainingDatasetId] = useState<string | null>(null);
   const [pipelineId, setPipelineId] = useState<string | null>(null);
   const [result, setResult] = useState<ImageDistributionResult | null>(null);
   const [loadingOptions, setLoadingOptions] = useState(false);
@@ -126,10 +126,10 @@ export function ImageDistributionPage({ active }: Props) {
     if (!active) return;
     let cancelled = false;
     setLoadingOptions(true);
-    Promise.all([listDatasets(), listPreprocessingPipelines()])
-      .then(([nextDatasets, nextPipelines]) => {
+    Promise.all([listTrainingDatasets(), listPreprocessingPipelines()])
+      .then(([nextTrainingDatasets, nextPipelines]) => {
         if (cancelled) return;
-        setDatasets(nextDatasets);
+        setTrainingDatasets(nextTrainingDatasets);
         setPipelines(nextPipelines);
       })
       .catch((reason) => { if (!cancelled) setError(reason instanceof Error ? reason.message : String(reason)); })
@@ -137,20 +137,20 @@ export function ImageDistributionPage({ active }: Props) {
     return () => { cancelled = true; };
   }, [active]);
 
-  const datasetOptions = useMemo(() => datasets.map((dataset) => ({
+  const datasetOptions = useMemo(() => trainingDatasets.map((dataset) => ({
     value: String(dataset.id),
-    label: dataset.status === 'ready' ? dataset.name : `${dataset.name} (${dataset.status})`,
-    disabled: dataset.status !== 'ready',
-  })), [datasets]);
+    label: `${dataset.name} · ${dataset.usage_label}`,
+    disabled: dataset.invalid_rule_count > 0,
+  })), [trainingDatasets]);
   const pipelineOptions = useMemo(() => pipelines.map((pipeline) => ({ value: String(pipeline.id), label: pipeline.name })), [pipelines]);
 
   async function run() {
-    if (!datasetId || !pipelineId) return;
+    if (!trainingDatasetId || !pipelineId) return;
     setCalculating(true);
     setError(null);
     setResult(null);
     try {
-      const next = await calculateImageDistribution(Number(datasetId), Number(pipelineId));
+      const next = await calculateImageDistribution(Number(trainingDatasetId), Number(pipelineId));
       setResult(next);
       notifications.show({
         color: next.failed_images ? 'yellow' : 'green',
@@ -174,11 +174,11 @@ export function ImageDistributionPage({ active }: Props) {
       <Paper withBorder p="md">
         <Stack gap="md">
           <SimpleGrid cols={{ base: 1, md: 2 }}>
-            <Select label="Datensatz" placeholder="Datensatz auswählen" data={datasetOptions} value={datasetId} onChange={setDatasetId} searchable disabled={loadingOptions || calculating} />
+            <Select label="Train/Test Dataset" placeholder="Train/Test Dataset auswählen" data={datasetOptions} value={trainingDatasetId} onChange={setTrainingDatasetId} searchable disabled={loadingOptions || calculating} />
             <Select label="Preprocessing" placeholder="Pipeline auswählen" data={pipelineOptions} value={pipelineId} onChange={setPipelineId} searchable disabled={loadingOptions || calculating} />
           </SimpleGrid>
           <Group>
-            <Button leftSection={calculating ? <Loader size={16} color="white" /> : <Play size={16} />} onClick={run} disabled={!datasetId || !pipelineId || calculating}>
+            <Button leftSection={calculating ? <Loader size={16} color="white" /> : <Play size={16} />} onClick={run} disabled={!trainingDatasetId || !pipelineId || calculating}>
               {calculating ? 'Alle Bilder werden verarbeitet …' : 'Analyse starten'}
             </Button>
             <Text size="sm" c="dimmed">Gleiche, unveränderte Konfigurationen werden direkt aus der CSV geladen.</Text>
@@ -195,7 +195,7 @@ export function ImageDistributionPage({ active }: Props) {
               <div>
                 <Group gap="xs">
                   <Badge color={result.cache_hit ? 'blue' : 'green'}>{result.cache_hit ? 'Aus CSV geladen' : 'Neu berechnet'}</Badge>
-                  <Text fw={600}>{result.dataset_name} · {result.preprocessing_pipeline_name}</Text>
+                  <Text fw={600}>{result.training_dataset_name} ({result.usage_label}) · {result.preprocessing_pipeline_name}</Text>
                 </Group>
                 <Text size="sm" c="dimmed" mt={6}>
                   {result.successful_images.toLocaleString('de-DE')} Bilder, {result.hourly.length.toLocaleString('de-DE')} Stundenfenster. Pixelwerte werden in der von der Pipeline ausgegebenen Skala ausgewertet.

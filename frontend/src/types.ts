@@ -233,8 +233,9 @@ export type ImageDistributionHourlyPoint = {
 };
 
 export type ImageDistributionResult = {
-  dataset_id: number;
-  dataset_name: string;
+  training_dataset_id: number;
+  training_dataset_name: string;
+  usage_label: string;
   preprocessing_pipeline_id: number;
   preprocessing_pipeline_name: string;
   cache_key: string;

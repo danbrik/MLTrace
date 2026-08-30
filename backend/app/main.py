@@ -869,12 +869,12 @@ def create_app() -> FastAPI:
 
     @app.post("/api/analysis/image-distribution", response_model=ImageDistributionResponse)
     def api_calculate_image_distribution(
-        dataset_id: int = Query(..., ge=1),
+        training_dataset_id: int = Query(..., ge=1),
         preprocessing_pipeline_id: int = Query(..., ge=1),
         db: Session = Depends(get_db),
     ):
         try:
-            return image_distribution_service.calculate(db, dataset_id, preprocessing_pipeline_id)
+            return image_distribution_service.calculate(db, training_dataset_id, preprocessing_pipeline_id)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 

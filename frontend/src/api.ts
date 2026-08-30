@@ -432,9 +432,9 @@ export function listPreprocessingPipelines(): Promise<PreprocessingPipeline[]> {
   ).then((pipelines) => pipelines.map(normalizePreprocessingPipeline));
 }
 
-export function calculateImageDistribution(datasetId: number, preprocessingPipelineId: number): Promise<ImageDistributionResult> {
+export function calculateImageDistribution(trainingDatasetId: number, preprocessingPipelineId: number): Promise<ImageDistributionResult> {
   const query = new URLSearchParams({
-    dataset_id: String(datasetId),
+    training_dataset_id: String(trainingDatasetId),
     preprocessing_pipeline_id: String(preprocessingPipelineId),
   });
   return request<ImageDistributionResult>(`/api/analysis/image-distribution?${query}`, { method: 'POST' }, 60 * 60 * 1000);
