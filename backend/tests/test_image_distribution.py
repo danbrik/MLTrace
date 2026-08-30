@@ -8,6 +8,7 @@ from sqlalchemy.orm import sessionmaker
 from app import models
 from app import database
 from app.analysis import image_distribution
+from app.analysis import image_distribution_runtime
 from app.schemas import ImageDistributionRunCreate
 from tests.test_testing_service import make_db
 
@@ -21,9 +22,11 @@ def _write_image(path: Path, pixels: list[int]) -> None:
 def test_image_distribution_aggregates_hourly_and_reuses_csv(tmp_path, monkeypatch) -> None:
     db = make_db()
     try:
+        image_root = tmp_path / "images"
+        image_root.mkdir()
         dataset = models.Dataset(
             name="camera",
-            root_path=str(tmp_path),
+            root_path=str(image_root),
             status="ready",
             timestamp_regex=r"(\d{8}_\d{6})",
             timestamp_format="%Y%m%d_%H%M%S",
@@ -47,7 +50,7 @@ def test_image_distribution_aggregates_hourly_and_reuses_csv(tmp_path, monkeypat
             ("20260101_131000.tif", start + timedelta(hours=3), [10, 10, 10, 10]),
         ]
         for name, timestamp, pixels in specs:
-            path = tmp_path / name
+            path = image_root / name
             _write_image(path, pixels)
             db.add(models.DatasetImage(
                 dataset_id=dataset.id,
@@ -72,6 +75,26 @@ def test_image_distribution_aggregates_hourly_and_reuses_csv(tmp_path, monkeypat
         ))
         db.commit()
         monkeypatch.setattr(image_distribution, "cache_path", lambda key: tmp_path / "cache" / f"{key}.csv")
+        monkeypatch.setattr(
+            image_distribution_runtime,
+            "folder_index_path",
+            lambda folder_id: tmp_path / "folder_indexes" / f"{folder_id}.sqlite",
+        )
+        monkeypatch.setattr(
+            image_distribution_runtime,
+            "run_manifest_path",
+            lambda run_id: tmp_path / "runs" / str(run_id) / "manifest.sqlite",
+        )
+        monkeypatch.setattr(
+            image_distribution_runtime,
+            "cache_csv_path",
+            lambda key: tmp_path / "stream_cache" / f"{key}.csv",
+        )
+        monkeypatch.setattr(
+            image_distribution_runtime,
+            "cache_result_path",
+            lambda key: tmp_path / "stream_cache" / f"{key}.json",
+        )
 
         progress = []
         first = image_distribution.calculate(
@@ -118,7 +141,22 @@ def test_image_distribution_aggregates_hourly_and_reuses_csv(tmp_path, monkeypat
         assert finished.status == "finished"
         assert finished.current_step == "finished"
         assert finished.processed_images == finished.total_images == 3
-        assert finished.cache_hit is True
+        assert finished.cache_hit is False
         assert finished.result["hourly"][0]["mean_intensity"]["median"] == pytest.approx(1.5)
+
+        cached_run = image_distribution.enqueue(
+            db,
+            ImageDistributionRunCreate(
+                training_dataset_id=training.id,
+                preprocessing_pipeline_id=pipeline.id,
+            ),
+            wake_scheduler=False,
+        )
+        image_distribution.run_scheduled(cached_run.id)
+        db.expire_all()
+        cached = db.get(models.ImageDistributionRun, cached_run.id)
+        assert cached is not None
+        assert cached.status == "finished"
+        assert cached.cache_hit is True
     finally:
         db.close()

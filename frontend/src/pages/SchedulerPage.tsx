@@ -158,6 +158,12 @@ function ProgressCell({ job }: { job: SchedulerJob }) {
       <Stack gap={2}>
         <Text size="xs">{job.run.current_step.replaceAll('_', ' ')}{total != null ? ` · ${done}/${total} images` : ''}</Text>
         {total != null && total > 0 && <Progress value={Math.min(100, done / total * 100)} size="sm" radius="sm" color={runStatusColor(job.run.status)} />}
+        {job.run.throughput_images_per_second != null && (
+          <Text size="xs" c="dimmed">
+            {job.run.throughput_images_per_second.toFixed(1)} imgs/s · {job.run.effective_worker_count ?? 1} workers
+            {job.run.eta_seconds != null ? ` · ETA ${formatDuration(job.run.eta_seconds)}` : ''}
+          </Text>
+        )}
       </Stack>
     );
   }

@@ -273,6 +273,30 @@ export type ImageDistributionRun = {
   processed_images: number;
   successful_images: number;
   failed_images: number;
+  phase_processed: number;
+  phase_total: number | null;
+  processed_bytes: number;
+  total_bytes: number | null;
+  throughput_images_per_second: number | null;
+  throughput_mb_per_second: number | null;
+  eta_seconds: number | null;
+  effective_worker_count: number | null;
+  calibration_results: Array<{
+    workers: number;
+    images: number;
+    seconds: number;
+    images_per_second: number;
+    mb_per_second: number;
+  }> | null;
+  stride_projections: Array<{
+    factor: number;
+    estimated_images: number;
+    estimated_seconds: number | null;
+    estimated_median_images_per_hour: number;
+    estimated_min_images_per_hour: number;
+  }> | null;
+  heartbeat_at: string | null;
+  resume_count: number;
   cache_key: string | null;
   cache_hit: boolean;
   result: ImageDistributionResult | null;

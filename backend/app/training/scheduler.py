@@ -274,11 +274,21 @@ class JobScheduler:
                         model = spec["model"]
                         for run in db.scalars(select(model).where(model.status == "running")):
                             if not _pid_alive(run.pid):
-                                run.status = "failed"
-                                if hasattr(run, "current_step"):
-                                    run.current_step = "failed"
-                                run.ended_at = datetime.utcnow()
-                                run.error_message = "Worker process was not running after a server restart."
+                                if model is models.ImageDistributionRun and int(run.resume_count or 0) < 3:
+                                    run.status = "queued"
+                                    run.current_step = "queued_for_resume"
+                                    run.enqueued_at = models.utc_now()
+                                    run.started_at = None
+                                    run.ended_at = None
+                                    run.pid = None
+                                    run.resume_count = int(run.resume_count or 0) + 1
+                                    run.error_message = "Worker stopped during restart; queued to resume from its manifest."
+                                else:
+                                    run.status = "failed"
+                                    if hasattr(run, "current_step"):
+                                        run.current_step = "failed"
+                                    run.ended_at = models.utc_now()
+                                    run.error_message = "Worker process was not running after a server restart."
                     db.commit()
                 finally:
                     db.close()
@@ -346,11 +356,20 @@ class JobScheduler:
                     if run is not None and run.status == "running":
                         retry_request = Path(project.artifact_dir) / "runs" / str(run_id) / "retry-request.json"
                         if kind != "train" or not retry_request.is_file():
-                            run.status = "failed"
-                            if hasattr(run, "current_step"):
-                                run.current_step = "failed"
-                            run.ended_at = datetime.utcnow()
-                            run.error_message = run.error_message or "Worker exited without reporting a result."
+                            if kind == "image_distribution" and int(run.resume_count or 0) < 3:
+                                run.status = "queued"
+                                run.current_step = "queued_for_resume"
+                                run.enqueued_at = models.utc_now()
+                                run.started_at = None
+                                run.pid = None
+                                run.resume_count = int(run.resume_count or 0) + 1
+                                run.error_message = "Worker exited unexpectedly; queued to resume from its manifest."
+                            else:
+                                run.status = "failed"
+                                if hasattr(run, "current_step"):
+                                    run.current_step = "failed"
+                                run.ended_at = models.utc_now()
+                                run.error_message = run.error_message or "Worker exited without reporting a result."
                             db.commit()
                 finally:
                     db.close()

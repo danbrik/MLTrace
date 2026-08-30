@@ -40,6 +40,13 @@ const PERIOD_BADGE_COLORS: Record<string, string> = {
 };
 const STEP_LABELS: Record<string, string> = {
   queued: 'Wartet im Scheduler',
+  queued_for_resume: 'Wartet auf automatische Fortsetzung',
+  loading_configuration: 'Konfiguration wird geladen',
+  waiting_for_folder_index: 'Wartet auf einen laufenden Ordnerindex',
+  loading_folder_index: 'Gespeicherter Ordnerindex wird geladen',
+  indexing_folders: 'NAS-Ordner werden streamingbasiert indexiert',
+  selecting_images: 'Train/Test-Regeln und Stride werden angewendet',
+  calibrating_workers: 'Optimale CPU-Parallelität wird kalibriert',
   resolving_images: 'Ausgewählte Bilder werden ermittelt',
   checking_cache: 'Gespeicherte CSV wird geprüft',
   loading_cache: 'Gespeicherte CSV wird geladen',
@@ -51,6 +58,30 @@ const STEP_LABELS: Record<string, string> = {
   failed: 'Analyse fehlgeschlagen',
   aborted: 'Analyse abgebrochen',
 };
+
+function formatDurationSeconds(value: number | null): string {
+  if (value == null || !Number.isFinite(value)) return 'wird ermittelt';
+  const seconds = Math.max(0, Math.round(value));
+  const days = Math.floor(seconds / 86400);
+  const hours = Math.floor((seconds % 86400) / 3600);
+  const minutes = Math.floor((seconds % 3600) / 60);
+  if (days > 0) return `${days} T ${hours} Std`;
+  if (hours > 0) return `${hours} Std ${minutes} Min`;
+  if (minutes > 0) return `${minutes} Min`;
+  return `${seconds} Sek`;
+}
+
+function formatBytes(value: number | null): string {
+  if (value == null) return '—';
+  const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+  let scaled = value;
+  let unit = 0;
+  while (scaled >= 1024 && unit < units.length - 1) {
+    scaled /= 1024;
+    unit += 1;
+  }
+  return `${scaled.toLocaleString('de-DE', { maximumFractionDigits: unit >= 3 ? 2 : 1 })} ${units[unit]}`;
+}
 
 function parseDatasetTime(value: string): number {
   return Date.parse(/[zZ]|[+-]\d\d:\d\d$/.test(value) ? value : `${value}Z`);
@@ -163,11 +194,15 @@ export function ImageDistributionPage({ active }: Props) {
   useEffect(() => {
     if (!active || !activeRun || !['queued', 'running'].includes(activeRun.status)) return undefined;
     let cancelled = false;
+    let timer: number | null = null;
+    let retryDelay = 1000;
     const poll = async () => {
       try {
         const next = await getImageDistributionRun(activeRun.id);
         if (cancelled) return;
+        retryDelay = 1000;
         setActiveRun(next);
+        setError(null);
         if (next.status === 'finished' && next.result) {
           setResult(next.result);
           notifications.show({
@@ -179,14 +214,18 @@ export function ImageDistributionPage({ active }: Props) {
           setError(next.error_message ?? (next.status === 'aborted' ? 'Analyse wurde abgebrochen.' : 'Analyse fehlgeschlagen.'));
         }
       } catch (reason) {
-        if (!cancelled) setError(reason instanceof Error ? reason.message : String(reason));
+        if (!cancelled) {
+          setError(`Fortschritt vorübergehend nicht erreichbar; der Scheduler-Job läuft weiter. ${reason instanceof Error ? reason.message : String(reason)}`);
+          retryDelay = Math.min(15_000, retryDelay * 2);
+        }
+      } finally {
+        if (!cancelled) timer = window.setTimeout(poll, retryDelay);
       }
     };
     void poll();
-    const interval = window.setInterval(poll, 1000);
     return () => {
       cancelled = true;
-      window.clearInterval(interval);
+      if (timer !== null) window.clearTimeout(timer);
     };
   }, [active, activeRun?.id, activeRun?.status]);
 
@@ -197,6 +236,17 @@ export function ImageDistributionPage({ active }: Props) {
   })), [trainingDatasets]);
   const pipelineOptions = useMemo(() => pipelines.map((pipeline) => ({ value: String(pipeline.id), label: pipeline.name })), [pipelines]);
   const hasActiveRun = activeRun != null && (activeRun.status === 'queued' || activeRun.status === 'running');
+  const phaseProgress = activeRun?.phase_total && activeRun.phase_total > 0
+    ? activeRun.phase_processed / activeRun.phase_total * 100
+    : null;
+  const imageProgress = activeRun?.total_images && activeRun.total_images > 0
+    ? activeRun.processed_images / activeRun.total_images * 100
+    : null;
+  const displayedProgress = activeRun?.current_step === 'processing_images' || activeRun?.current_step === 'calibrating_workers'
+    ? imageProgress
+    : phaseProgress ?? imageProgress;
+  const heartbeatStale = activeRun?.status === 'running' && activeRun.heartbeat_at != null
+    && Date.now() - new Date(activeRun.heartbeat_at).getTime() > 120_000;
 
   async function run() {
     if (!trainingDatasetId || !pipelineId) return;
@@ -259,7 +309,7 @@ export function ImageDistributionPage({ active }: Props) {
               </Badge>
             </Group>
             <Progress
-              value={activeRun.total_images && activeRun.total_images > 0 ? Math.min(100, activeRun.processed_images / activeRun.total_images * 100) : 0}
+              value={Math.min(100, displayedProgress ?? 0)}
               animated={activeRun.status === 'running'}
               color={activeRun.status === 'failed' ? 'red' : activeRun.status === 'aborted' ? 'orange' : 'blue'}
             />
@@ -267,6 +317,40 @@ export function ImageDistributionPage({ active }: Props) {
               <Text size="xs" c="dimmed">
                 {activeRun.successful_images.toLocaleString('de-DE')} erfolgreich · {activeRun.failed_images.toLocaleString('de-DE')} fehlgeschlagen
               </Text>
+            )}
+            {heartbeatStale && (
+              <Alert color="yellow" title="Keine aktuelle Fortschrittsmeldung">
+                Seit mehr als zwei Minuten wurde kein Heartbeat gespeichert. Der Job wird nicht automatisch beendet und kann auf das NAS oder einen Ordnerindex warten.
+              </Alert>
+            )}
+            <SimpleGrid cols={{ base: 2, md: 4 }}>
+              <div><Text size="xs" c="dimmed">Durchsatz</Text><Text size="sm" fw={600}>{activeRun.throughput_images_per_second != null ? `${activeRun.throughput_images_per_second.toFixed(1)} Bilder/s` : 'wird kalibriert'}</Text></div>
+              <div><Text size="xs" c="dimmed">NAS-Durchsatz</Text><Text size="sm" fw={600}>{activeRun.throughput_mb_per_second != null ? `${activeRun.throughput_mb_per_second.toFixed(1)} MB/s` : '—'}</Text></div>
+              <div><Text size="xs" c="dimmed">Restlaufzeit</Text><Text size="sm" fw={600}>{formatDurationSeconds(activeRun.eta_seconds)}</Text></div>
+              <div><Text size="xs" c="dimmed">CPU-Worker</Text><Text size="sm" fw={600}>{activeRun.effective_worker_count ?? '—'}</Text></div>
+              <div><Text size="xs" c="dimmed">Gelesen</Text><Text size="sm" fw={600}>{formatBytes(activeRun.processed_bytes)}</Text></div>
+              <div><Text size="xs" c="dimmed">Gesamtvolumen</Text><Text size="sm" fw={600}>{formatBytes(activeRun.total_bytes)}</Text></div>
+              <div><Text size="xs" c="dimmed">Vergangen</Text><Text size="sm" fw={600}>{activeRun.started_at ? formatDurationSeconds((Date.now() - new Date(activeRun.started_at).getTime()) / 1000) : '—'}</Text></div>
+              <div><Text size="xs" c="dimmed">Fortsetzungen</Text><Text size="sm" fw={600}>{activeRun.resume_count}</Text></div>
+            </SimpleGrid>
+            {(activeRun.stride_projections?.length ?? 0) > 0 && (
+              <div>
+                <Text size="sm" fw={600} mb={4}>Projektion für größeren Train/Test-Stride</Text>
+                <SimpleGrid cols={{ base: 1, md: 3 }}>
+                  {activeRun.stride_projections?.map((projection) => (
+                    <Paper key={projection.factor} withBorder p="xs">
+                      <Text size="sm" fw={600}>Stride × {projection.factor}</Text>
+                      <Text size="xs" c="dimmed">
+                        ≈ {projection.estimated_images.toLocaleString('de-DE')} Bilder · {formatDurationSeconds(projection.estimated_seconds)}
+                      </Text>
+                      <Text size="xs" c={projection.estimated_median_images_per_hour >= 300 ? 'green' : 'orange'}>
+                        Median ≈ {projection.estimated_median_images_per_hour.toFixed(0)} Bilder/Stunde
+                      </Text>
+                    </Paper>
+                  ))}
+                </SimpleGrid>
+                <Text size="xs" c="dimmed" mt={4}>Nur Empfehlung; geändert wird der Stride ausschließlich im Train/Test Dataset.</Text>
+              </div>
             )}
           </Stack>
         </Paper>

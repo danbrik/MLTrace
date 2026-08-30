@@ -2020,6 +2020,18 @@ class ImageDistributionRunRead(BaseModel):
     processed_images: int
     successful_images: int
     failed_images: int
+    phase_processed: int
+    phase_total: int | None
+    processed_bytes: int
+    total_bytes: int | None
+    throughput_images_per_second: float | None
+    throughput_mb_per_second: float | None
+    eta_seconds: float | None
+    effective_worker_count: int | None
+    calibration_results: list[dict] | None
+    stride_projections: list[dict] | None
+    heartbeat_at: datetime | None
+    resume_count: int
     cache_key: str | None
     cache_hit: bool
     result: dict | None

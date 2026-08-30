@@ -31,6 +31,7 @@ from app.schemas import (
 )
 from app.training.data import ResolvedDatasetImage, enumerate_training_dataset_image_records
 from app.training.scheduler import next_queue_rank, scheduler
+from app.analysis import image_distribution_runtime as scalable_runtime
 
 
 METRIC_VERSION = "image-distribution-v1"
@@ -75,7 +76,7 @@ def _cache_key(
 
 
 def cache_path(cache_key: str) -> Path:
-    return data_dir() / "image_distribution" / f"{cache_key}.csv"
+    return scalable_runtime.cache_csv_path(cache_key)
 
 
 def _write_csv(path: Path, rows: list[dict[str, str]]) -> None:
@@ -343,43 +344,120 @@ def run_scheduled(run_id: int, abort_event: threading.Event | None = None) -> No
     from app.database import SessionLocal
 
     db = SessionLocal()
-    last_commit = 0.0
     try:
         run = db.get(models.ImageDistributionRun, run_id)
         if run is None:
             return
         run.status = "running"
-        run.current_step = "resolving_images"
+        run.current_step = "loading_configuration"
         run.started_at = run.started_at or models.utc_now()
         run.device = "CPU"
         run.error_message = None
+        run.heartbeat_at = models.utc_now()
         db.commit()
 
-        def report(step: str, processed: int, total: int | None, successful: int, failed: int) -> None:
-            nonlocal last_commit
-            now = time.monotonic()
-            terminal_update = total is not None and processed >= total
-            if step == "processing_images" and not terminal_update and now - last_commit < 0.5:
-                return
+        last_step = run.current_step
+
+        def report(step: str, payload: dict) -> None:
+            nonlocal last_step
             current = db.get(models.ImageDistributionRun, run_id)
             if current is None:
                 raise AbortedError()
             current.current_step = step
-            current.processed_images = processed
-            current.total_images = total
-            current.successful_images = successful
-            current.failed_images = failed
+            if step != last_step:
+                current.phase_processed = int(payload.get("phase_processed") or 0)
+                current.phase_total = payload.get("phase_total")
+                last_step = step
+            for field in (
+                "phase_processed", "phase_total", "processed_images", "total_images",
+                "successful_images", "failed_images", "processed_bytes", "total_bytes",
+                "throughput_images_per_second", "throughput_mb_per_second", "eta_seconds",
+                "effective_worker_count", "calibration_results", "stride_projections",
+            ):
+                if field in payload:
+                    setattr(current, field, payload[field])
+            current.heartbeat_at = models.utc_now()
             db.commit()
-            last_commit = now
 
         try:
-            result = calculate(
-                db,
-                run.training_dataset_id,
-                run.preprocessing_pipeline_id,
-                progress=report,
-                abort_event=abort_event,
+            training_dataset = db.scalar(
+                select(models.TrainingDataset)
+                .where(models.TrainingDataset.id == run.training_dataset_id)
+                .options(
+                    selectinload(models.TrainingDataset.rules)
+                    .selectinload(models.TrainingDatasetRule.folder)
+                    .selectinload(models.DatasetFolder.dataset)
+                )
             )
+            pipeline = db.get(models.PreprocessingPipeline, run.preprocessing_pipeline_id)
+            if training_dataset is None:
+                raise ValueError("Train/Test dataset not found.")
+            if pipeline is None:
+                raise ValueError("Preprocessing pipeline not found.")
+
+            cache_key = scalable_runtime.configuration_key(training_dataset, pipeline)
+            run.cache_key = cache_key
+            db.commit()
+            report("checking_cache", {})
+            result = scalable_runtime.load_cached_result(cache_key)
+            if result is None:
+                manifest_path, cache_key, total_images, total_bytes, resumed = scalable_runtime.prepare_manifest(
+                    run_id, training_dataset, pipeline, abort_event, report
+                )
+                run = db.get(models.ImageDistributionRun, run_id)
+                assert run is not None
+                run.manifest_path = str(manifest_path)
+                run.cache_key = cache_key
+                run.total_images = total_images
+                run.total_bytes = total_bytes
+                db.commit()
+                processed, successful, failed, processed_bytes, calibration, projections, resumed = scalable_runtime.process_manifest(
+                    manifest_path,
+                    pipeline.graph,
+                    total_images,
+                    total_bytes,
+                    abort_event,
+                    report,
+                )
+                report("writing_csv", {
+                    "processed_images": processed,
+                    "total_images": total_images,
+                    "successful_images": successful,
+                    "failed_images": failed,
+                    "processed_bytes": processed_bytes,
+                    "total_bytes": total_bytes,
+                    "phase_processed": 0,
+                    "phase_total": total_images,
+                    "calibration_results": calibration,
+                    "stride_projections": projections,
+                })
+                hourly = scalable_runtime.export_and_aggregate(
+                    manifest_path, scalable_runtime.cache_csv_path(cache_key), abort_event, report
+                )
+                result = ImageDistributionResponse(
+                    training_dataset_id=training_dataset.id,
+                    training_dataset_name=training_dataset.name,
+                    usage_label=training_dataset.usage_label,
+                    preprocessing_pipeline_id=pipeline.id,
+                    preprocessing_pipeline_name=pipeline.name,
+                    cache_key=cache_key,
+                    cache_hit=False,
+                    total_images=total_images,
+                    successful_images=successful,
+                    failed_images=failed,
+                    hourly=hourly,
+                    periods=scalable_runtime.training_periods(training_dataset),
+                )
+                scalable_runtime.save_cached_result(result)
+            else:
+                report("loading_cache", {
+                    "processed_images": result.total_images,
+                    "total_images": result.total_images,
+                    "successful_images": result.successful_images,
+                    "failed_images": result.failed_images,
+                    "phase_processed": result.total_images,
+                    "phase_total": result.total_images,
+                })
             run = db.get(models.ImageDistributionRun, run_id)
             if run is None:
                 return
@@ -395,8 +473,10 @@ def run_scheduled(run_id: int, abort_event: threading.Event | None = None) -> No
             run.cache_hit = result.cache_hit
             run.csv_path = str(cache_path(result.cache_key))
             run.result = result.model_dump(mode="json")
+            run.eta_seconds = 0.0
+            run.heartbeat_at = models.utc_now()
             db.commit()
-        except AbortedError:
+        except (AbortedError, scalable_runtime.RuntimeAbortedError):
             db.rollback()
             run = db.get(models.ImageDistributionRun, run_id)
             if run is not None:

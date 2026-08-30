@@ -257,6 +257,15 @@ export function SchedulerDetailsModal({
         <Row label="Progress">
           <Text size="sm">{run.processed_images}{run.total_images != null ? ` / ${run.total_images}` : ''} images · {run.successful_images} successful · {run.failed_images} failed</Text>
         </Row>
+        <Row label="Throughput">
+          <Text size="sm">
+            {run.throughput_images_per_second != null ? `${run.throughput_images_per_second.toFixed(1)} images/s` : 'calibrating'}
+            {run.throughput_mb_per_second != null ? ` · ${run.throughput_mb_per_second.toFixed(1)} MB/s` : ''}
+            {run.effective_worker_count != null ? ` · ${run.effective_worker_count} CPU workers` : ''}
+          </Text>
+        </Row>
+        <Row label="ETA"><Text size="sm">{formatDuration(run.eta_seconds)}</Text></Row>
+        <Row label="Resume"><Text size="sm">{run.resume_count} automatic resumes</Text></Row>
         <Row label="Cache"><Text size="sm">{run.cache_hit ? 'Loaded from CSV cache' : run.cache_key ? 'New CSV created' : 'Not checked yet'}</Text></Row>
         {run.error_message && <Paper withBorder p="xs" radius="sm" bg="var(--mantine-color-red-0)"><Text size="sm" c="red">{run.error_message}</Text></Paper>}
       </Stack>
