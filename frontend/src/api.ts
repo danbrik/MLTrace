@@ -42,6 +42,7 @@ import type {
   InspectArtifactRunPage,
   InspectCsvData,
   ImageDistributionResult,
+  ImageDistributionRun,
   MethodConfiguration,
   MethodConfigurationPayload,
   MethodConfigurationSavePayload,
@@ -432,12 +433,34 @@ export function listPreprocessingPipelines(): Promise<PreprocessingPipeline[]> {
   ).then((pipelines) => pipelines.map(normalizePreprocessingPipeline));
 }
 
-export function calculateImageDistribution(trainingDatasetId: number, preprocessingPipelineId: number): Promise<ImageDistributionResult> {
-  const query = new URLSearchParams({
-    training_dataset_id: String(trainingDatasetId),
-    preprocessing_pipeline_id: String(preprocessingPipelineId),
+export function calculateImageDistribution(trainingDatasetId: number, preprocessingPipelineId: number): Promise<ImageDistributionRun> {
+  return request<ImageDistributionRun>('/api/image-distribution-runs', {
+    method: 'POST',
+    body: JSON.stringify({
+      training_dataset_id: trainingDatasetId,
+      preprocessing_pipeline_id: preprocessingPipelineId,
+    }),
   });
-  return request<ImageDistributionResult>(`/api/analysis/image-distribution?${query}`, { method: 'POST' }, 60 * 60 * 1000);
+}
+
+export function listImageDistributionRuns(): Promise<ImageDistributionRun[]> {
+  return request<ImageDistributionRun[]>('/api/image-distribution-runs');
+}
+
+export function getImageDistributionRun(runId: number, projectId?: string): Promise<ImageDistributionRun> {
+  return request<ImageDistributionRun>(`/api/image-distribution-runs/${runId}`, undefined, undefined, projectId);
+}
+
+export function getImageDistributionRunLog(runId: number, projectId?: string): Promise<{ log: string }> {
+  return request<{ log: string }>(`/api/image-distribution-runs/${runId}/log`, undefined, undefined, projectId);
+}
+
+export function abortImageDistributionRun(runId: number, projectId?: string): Promise<ImageDistributionRun> {
+  return request<ImageDistributionRun>(`/api/image-distribution-runs/${runId}/abort`, { method: 'POST' }, undefined, projectId);
+}
+
+export function deleteImageDistributionRun(runId: number, projectId?: string): Promise<void> {
+  return request<void>(`/api/image-distribution-runs/${runId}`, { method: 'DELETE' }, undefined, projectId);
 }
 
 export function imageDistributionCsvUrl(cacheKey: string): string {
@@ -1574,12 +1597,12 @@ export function updateSchedulerSettings(payload: { max_gpu_slots: number; only_g
   });
 }
 
-export function moveSchedulerJob(kind: 'train' | 'test' | 'heatmap', runId: number, direction: 'up' | 'down', projectId?: string): Promise<{
-  kind: 'train' | 'test' | 'heatmap';
+export function moveSchedulerJob(kind: 'train' | 'test' | 'heatmap' | 'image_distribution', runId: number, direction: 'up' | 'down', projectId?: string): Promise<{
+  kind: 'train' | 'test' | 'heatmap' | 'image_distribution';
   run_id: number;
   queue_rank: number | null;
 }> {
-  return request<{ kind: 'train' | 'test' | 'heatmap'; run_id: number; queue_rank: number | null }>(`/api/scheduler/jobs/${kind}/${runId}/move`, {
+  return request<{ kind: 'train' | 'test' | 'heatmap' | 'image_distribution'; run_id: number; queue_rank: number | null }>(`/api/scheduler/jobs/${kind}/${runId}/move`, {
     method: 'POST',
     body: JSON.stringify({ direction }),
   }, undefined, projectId).then((response) => {

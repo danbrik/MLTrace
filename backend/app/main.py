@@ -55,7 +55,8 @@ from app.schemas import (
     InspectCsvData,
     InspectRunCreate,
     InspectRunRead,
-    ImageDistributionResponse,
+    ImageDistributionRunCreate,
+    ImageDistributionRunRead,
     TemporalDynamicsRequest,
     TemporalDynamicsResponse,
     TestingRunPlotSeriesPage,
@@ -867,16 +868,50 @@ def create_app() -> FastAPI:
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    @app.post("/api/analysis/image-distribution", response_model=ImageDistributionResponse)
-    def api_calculate_image_distribution(
-        training_dataset_id: int = Query(..., ge=1),
-        preprocessing_pipeline_id: int = Query(..., ge=1),
-        db: Session = Depends(get_db),
-    ):
+    @app.post("/api/image-distribution-runs", response_model=ImageDistributionRunRead)
+    def api_enqueue_image_distribution(payload: ImageDistributionRunCreate, db: Session = Depends(get_db)):
         try:
-            return image_distribution_service.calculate(db, training_dataset_id, preprocessing_pipeline_id)
+            return image_distribution_service.enqueue(db, payload)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.get("/api/image-distribution-runs", response_model=list[ImageDistributionRunRead])
+    def api_list_image_distribution_runs(db: Session = Depends(get_db)):
+        return image_distribution_service.list_runs(db)
+
+    @app.get("/api/image-distribution-runs/{run_id}", response_model=ImageDistributionRunRead)
+    def api_get_image_distribution_run(run_id: int, db: Session = Depends(get_db)):
+        run = image_distribution_service.get_run(db, run_id)
+        if run is None:
+            raise HTTPException(status_code=404, detail="Image-distribution run not found.")
+        return run
+
+    @app.get("/api/image-distribution-runs/{run_id}/log", response_model=TrainingRunLogResponse)
+    def api_get_image_distribution_log(run_id: int, db: Session = Depends(get_db)):
+        log = image_distribution_service.read_log(db, run_id)
+        if log is None:
+            raise HTTPException(status_code=404, detail="Image-distribution run not found.")
+        return TrainingRunLogResponse(log=log)
+
+    @app.post("/api/image-distribution-runs/{run_id}/abort", response_model=ImageDistributionRunRead)
+    def api_abort_image_distribution_run(run_id: int, db: Session = Depends(get_db)):
+        try:
+            run = image_distribution_service.abort_run(db, run_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        if run is None:
+            raise HTTPException(status_code=404, detail="Image-distribution run not found.")
+        return run
+
+    @app.delete("/api/image-distribution-runs/{run_id}", status_code=204)
+    def api_delete_image_distribution_run(run_id: int, db: Session = Depends(get_db)):
+        try:
+            deleted = image_distribution_service.delete_run(db, run_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        if not deleted:
+            raise HTTPException(status_code=404, detail="Image-distribution run not found.")
+        return None
 
     @app.get("/api/analysis/image-distribution/{cache_key}/csv")
     def api_download_image_distribution_csv(cache_key: str):
@@ -1956,6 +1991,7 @@ def create_app() -> FastAPI:
                         ("train", training_service.list_training_runs(db)),
                         ("test", testing_service.list_testing_runs(db)),
                         ("heatmap", heatmap_service.list_heatmap_ranges(db)),
+                        ("image_distribution", image_distribution_service.list_runs(db)),
                     )
                     for kind, runs in groups:
                         for run in runs:

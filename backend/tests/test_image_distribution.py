@@ -3,9 +3,12 @@ from pathlib import Path
 
 from PIL import Image
 import pytest
+from sqlalchemy.orm import sessionmaker
 
 from app import models
+from app import database
 from app.analysis import image_distribution
+from app.schemas import ImageDistributionRunCreate
 from tests.test_testing_service import make_db
 
 
@@ -70,7 +73,15 @@ def test_image_distribution_aggregates_hourly_and_reuses_csv(tmp_path, monkeypat
         db.commit()
         monkeypatch.setattr(image_distribution, "cache_path", lambda key: tmp_path / "cache" / f"{key}.csv")
 
-        first = image_distribution.calculate(db, training.id, pipeline.id)
+        progress = []
+        first = image_distribution.calculate(
+            db,
+            training.id,
+            pipeline.id,
+            progress=lambda step, processed, total, successful, failed: progress.append(
+                (step, processed, total, successful, failed)
+            ),
+        )
         second = image_distribution.calculate(db, training.id, pipeline.id)
 
         assert first.cache_hit is False
@@ -80,7 +91,34 @@ def test_image_distribution_aggregates_hourly_and_reuses_csv(tmp_path, monkeypat
         assert first.hourly[0].mean_intensity.median == pytest.approx(1.5)
         assert first.hourly[0].q95_intensity.median == pytest.approx(2.7)
         assert first.periods[0].name == "train period"
+        assert progress[0][0] == "resolving_images"
+        assert any(step[0] == "processing_images" and step[1] == 3 for step in progress)
+        assert progress[-1][0] == "aggregating_hourly"
         assert first.training_dataset_name == "train period"
         assert (tmp_path / "cache" / f"{first.cache_key}.csv").read_text().startswith("image_index,timestamp,relative_path")
+
+        run = image_distribution.enqueue(
+            db,
+            ImageDistributionRunCreate(
+                training_dataset_id=training.id,
+                preprocessing_pipeline_id=pipeline.id,
+            ),
+            wake_scheduler=False,
+        )
+        assert run.status == "queued"
+        assert run.current_step == "queued"
+        assert run.training_dataset_name == "train period"
+
+        worker_sessions = sessionmaker(autocommit=False, autoflush=False, bind=db.get_bind())
+        monkeypatch.setattr(database, "SessionLocal", worker_sessions)
+        image_distribution.run_scheduled(run.id)
+        db.expire_all()
+        finished = db.get(models.ImageDistributionRun, run.id)
+        assert finished is not None
+        assert finished.status == "finished"
+        assert finished.current_step == "finished"
+        assert finished.processed_images == finished.total_images == 3
+        assert finished.cache_hit is True
+        assert finished.result["hourly"][0]["mean_intensity"]["median"] == pytest.approx(1.5)
     finally:
         db.close()

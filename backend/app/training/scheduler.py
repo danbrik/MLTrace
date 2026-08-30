@@ -53,6 +53,12 @@ _KINDS: dict[str, dict] = {
     "train": {"model": models.TrainingRun, "module": "app.training.worker", "subdir": "runs"},
     "test": {"model": models.TestingRun, "module": "app.testing.worker", "subdir": "testing_runs"},
     "heatmap": {"model": models.HeatmapRangeRun, "module": "app.heatmap.worker", "subdir": "heatmap_ranges"},
+    "image_distribution": {
+        "model": models.ImageDistributionRun,
+        "module": "app.analysis.image_distribution_worker",
+        "subdir": "image_distribution_runs",
+        "force_cpu": True,
+    },
 }
 
 
@@ -269,6 +275,8 @@ class JobScheduler:
                         for run in db.scalars(select(model).where(model.status == "running")):
                             if not _pid_alive(run.pid):
                                 run.status = "failed"
+                                if hasattr(run, "current_step"):
+                                    run.current_step = "failed"
                                 run.ended_at = datetime.utcnow()
                                 run.error_message = "Worker process was not running after a server restart."
                     db.commit()
@@ -339,6 +347,8 @@ class JobScheduler:
                         retry_request = Path(project.artifact_dir) / "runs" / str(run_id) / "retry-request.json"
                         if kind != "train" or not retry_request.is_file():
                             run.status = "failed"
+                            if hasattr(run, "current_step"):
+                                run.current_step = "failed"
                             run.ended_at = datetime.utcnow()
                             run.error_message = run.error_message or "Worker exited without reporting a result."
                             db.commit()
@@ -355,7 +365,7 @@ class JobScheduler:
                     active += self._active_count(db)
                 finally:
                     db.close()
-        if active >= limit or (only_gpu and detected_gpus <= 0):
+        if active >= limit:
             return
         gpu_limit = min(limit, detected_gpus) if detected_gpus > 0 else 0
         for entry in list_queue_entries():
@@ -372,9 +382,10 @@ class JobScheduler:
                     if run is None or run.status != "queued":
                         remove_queue_entry(entry.project_id, entry.kind, entry.run_id)
                         continue
-                    gpu = self._free_gpu(busy, gpu_limit) if gpu_limit > 0 else None
-                    if gpu is None and (only_gpu or detected_gpus > 0):
-                        break
+                    force_cpu = bool(_KINDS[entry.kind].get("force_cpu"))
+                    gpu = None if force_cpu else (self._free_gpu(busy, gpu_limit) if gpu_limit > 0 else None)
+                    if not force_cpu and gpu is None and (only_gpu or detected_gpus > 0):
+                        continue
                     self._launch(db, project, entry.kind, run, gpu)
                     if gpu is not None:
                         busy.add(gpu)

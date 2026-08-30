@@ -6,6 +6,7 @@ import { orderedGraphNodes, stepDetail, formatResolution } from './graph';
 import { formatDuration } from './runStatus';
 import type {
   HeatmapRangeRun,
+  ImageDistributionRun,
   MethodConfiguration,
   MethodDefinition,
   PreprocessingPipeline,
@@ -17,7 +18,8 @@ import type {
 export type SchedulerJob =
   | { kind: 'train'; run: TrainingRun }
   | { kind: 'test'; run: TestingRun }
-  | { kind: 'heatmap'; run: HeatmapRangeRun };
+  | { kind: 'heatmap'; run: HeatmapRangeRun }
+  | { kind: 'image_distribution'; run: ImageDistributionRun };
 
 function Row({ label, children }: { label: string; children: ReactNode }) {
   return (
@@ -114,6 +116,8 @@ export function SchedulerDetailsModal({
       ? job.run.training_pipeline_name
       : job.kind === 'heatmap'
         ? `Heatmap video · ${job.run.testing_run_name}`
+        : job.kind === 'image_distribution'
+          ? `Image distribution · ${job.run.training_dataset_name}`
         : job.run.name
     : '';
 
@@ -243,6 +247,22 @@ export function SchedulerDetailsModal({
     );
   }
 
+  function renderImageDistribution(run: ImageDistributionRun) {
+    return (
+      <Stack gap="sm">
+        <Row label="Type"><Badge color="cyan" variant="light">Image distribution</Badge></Row>
+        <Row label="Dataset"><Text size="sm">{run.training_dataset_name} · {run.usage_label}</Text></Row>
+        <Row label="Preprocessing"><PreprocessingSteps pipeline={preprocessingById.get(run.preprocessing_pipeline_id)} /></Row>
+        <Row label="Step"><Text size="sm">{run.current_step}</Text></Row>
+        <Row label="Progress">
+          <Text size="sm">{run.processed_images}{run.total_images != null ? ` / ${run.total_images}` : ''} images · {run.successful_images} successful · {run.failed_images} failed</Text>
+        </Row>
+        <Row label="Cache"><Text size="sm">{run.cache_hit ? 'Loaded from CSV cache' : run.cache_key ? 'New CSV created' : 'Not checked yet'}</Text></Row>
+        {run.error_message && <Paper withBorder p="xs" radius="sm" bg="var(--mantine-color-red-0)"><Text size="sm" c="red">{run.error_message}</Text></Paper>}
+      </Stack>
+    );
+  }
+
   return (
     <Modal opened={job !== null} onClose={onClose} title={title} size="xl">
       {job &&
@@ -250,6 +270,8 @@ export function SchedulerDetailsModal({
           ? renderTraining(job.run)
           : job.kind === 'heatmap'
             ? renderHeatmap(job.run)
+            : job.kind === 'image_distribution'
+              ? renderImageDistribution(job.run)
             : renderTesting(job.run))}
     </Modal>
   );

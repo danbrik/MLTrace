@@ -1,12 +1,14 @@
-import { Alert, Badge, Button, Group, Loader, Paper, Select, SimpleGrid, Stack, Text, Title } from '@mantine/core';
+import { Alert, Badge, Button, Group, Loader, Paper, Progress, Select, SimpleGrid, Stack, Text, Title } from '@mantine/core';
 import { notifications } from '@mantine/notifications';
 import { Download, Play } from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
 
 import {
   calculateImageDistribution,
+  getImageDistributionRun,
   imageDistributionCsvUrl,
   listPreprocessingPipelines,
+  listImageDistributionRuns,
   listTrainingDatasets,
 } from '../api';
 import { PlotlyChart } from '../components/PlotlyChart';
@@ -16,6 +18,7 @@ import type {
   ImageDistributionHourlyPoint,
   ImageDistributionMetricSummary,
   ImageDistributionResult,
+  ImageDistributionRun,
   PreprocessingPipeline,
   TrainingDataset,
 } from '../types';
@@ -34,6 +37,19 @@ const PERIOD_BADGE_COLORS: Record<string, string> = {
   validation: 'green',
   test: 'yellow',
   mixed: 'violet',
+};
+const STEP_LABELS: Record<string, string> = {
+  queued: 'Wartet im Scheduler',
+  resolving_images: 'Ausgewählte Bilder werden ermittelt',
+  checking_cache: 'Gespeicherte CSV wird geprüft',
+  loading_cache: 'Gespeicherte CSV wird geladen',
+  preparing_pipeline: 'Preprocessing wird vorbereitet',
+  processing_images: 'Bilder werden verarbeitet',
+  writing_csv: 'Ergebnisse werden als CSV gespeichert',
+  aggregating_hourly: 'Stündliche Kennzahlen werden aggregiert',
+  finished: 'Analyse abgeschlossen',
+  failed: 'Analyse fehlgeschlagen',
+  aborted: 'Analyse abgebrochen',
 };
 
 function parseDatasetTime(value: string): number {
@@ -118,6 +134,7 @@ export function ImageDistributionPage({ active }: Props) {
   const [trainingDatasetId, setTrainingDatasetId] = useState<string | null>(null);
   const [pipelineId, setPipelineId] = useState<string | null>(null);
   const [result, setResult] = useState<ImageDistributionResult | null>(null);
+  const [activeRun, setActiveRun] = useState<ImageDistributionRun | null>(null);
   const [loadingOptions, setLoadingOptions] = useState(false);
   const [calculating, setCalculating] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -126,16 +143,52 @@ export function ImageDistributionPage({ active }: Props) {
     if (!active) return;
     let cancelled = false;
     setLoadingOptions(true);
-    Promise.all([listTrainingDatasets(), listPreprocessingPipelines()])
-      .then(([nextTrainingDatasets, nextPipelines]) => {
+    Promise.all([listTrainingDatasets(), listPreprocessingPipelines(), listImageDistributionRuns()])
+      .then(([nextTrainingDatasets, nextPipelines, runs]) => {
         if (cancelled) return;
         setTrainingDatasets(nextTrainingDatasets);
         setPipelines(nextPipelines);
+        const ongoing = runs.find((run) => run.status === 'running' || run.status === 'queued');
+        if (ongoing) {
+          setActiveRun(ongoing);
+          setTrainingDatasetId(String(ongoing.training_dataset_id));
+          setPipelineId(String(ongoing.preprocessing_pipeline_id));
+        }
       })
       .catch((reason) => { if (!cancelled) setError(reason instanceof Error ? reason.message : String(reason)); })
       .finally(() => { if (!cancelled) setLoadingOptions(false); });
     return () => { cancelled = true; };
   }, [active]);
+
+  useEffect(() => {
+    if (!active || !activeRun || !['queued', 'running'].includes(activeRun.status)) return undefined;
+    let cancelled = false;
+    const poll = async () => {
+      try {
+        const next = await getImageDistributionRun(activeRun.id);
+        if (cancelled) return;
+        setActiveRun(next);
+        if (next.status === 'finished' && next.result) {
+          setResult(next.result);
+          notifications.show({
+            color: next.failed_images ? 'yellow' : 'green',
+            title: next.cache_hit ? 'Gespeicherte Analyse geladen' : 'Analyse abgeschlossen',
+            message: `${next.successful_images.toLocaleString('de-DE')} von ${(next.total_images ?? 0).toLocaleString('de-DE')} Bildern ausgewertet.`,
+          });
+        } else if (next.status === 'failed' || next.status === 'aborted') {
+          setError(next.error_message ?? (next.status === 'aborted' ? 'Analyse wurde abgebrochen.' : 'Analyse fehlgeschlagen.'));
+        }
+      } catch (reason) {
+        if (!cancelled) setError(reason instanceof Error ? reason.message : String(reason));
+      }
+    };
+    void poll();
+    const interval = window.setInterval(poll, 1000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(interval);
+    };
+  }, [active, activeRun?.id, activeRun?.status]);
 
   const datasetOptions = useMemo(() => trainingDatasets.map((dataset) => ({
     value: String(dataset.id),
@@ -143,19 +196,21 @@ export function ImageDistributionPage({ active }: Props) {
     disabled: dataset.invalid_rule_count > 0,
   })), [trainingDatasets]);
   const pipelineOptions = useMemo(() => pipelines.map((pipeline) => ({ value: String(pipeline.id), label: pipeline.name })), [pipelines]);
+  const hasActiveRun = activeRun != null && (activeRun.status === 'queued' || activeRun.status === 'running');
 
   async function run() {
     if (!trainingDatasetId || !pipelineId) return;
     setCalculating(true);
     setError(null);
     setResult(null);
+    setActiveRun(null);
     try {
       const next = await calculateImageDistribution(Number(trainingDatasetId), Number(pipelineId));
-      setResult(next);
+      setActiveRun(next);
       notifications.show({
-        color: next.failed_images ? 'yellow' : 'green',
-        title: next.cache_hit ? 'Gespeicherte Analyse geladen' : 'Analyse abgeschlossen',
-        message: `${next.successful_images.toLocaleString('de-DE')} von ${next.total_images.toLocaleString('de-DE')} Bildern ausgewertet.`,
+        color: 'blue',
+        title: 'Analyse eingeplant',
+        message: 'Der Vorgang ist jetzt im Scheduler sichtbar.',
       });
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : String(reason));
@@ -178,8 +233,8 @@ export function ImageDistributionPage({ active }: Props) {
             <Select label="Preprocessing" placeholder="Pipeline auswählen" data={pipelineOptions} value={pipelineId} onChange={setPipelineId} searchable disabled={loadingOptions || calculating} />
           </SimpleGrid>
           <Group>
-            <Button leftSection={calculating ? <Loader size={16} color="white" /> : <Play size={16} />} onClick={run} disabled={!trainingDatasetId || !pipelineId || calculating}>
-              {calculating ? 'Alle Bilder werden verarbeitet …' : 'Analyse starten'}
+            <Button leftSection={calculating ? <Loader size={16} color="white" /> : <Play size={16} />} onClick={run} disabled={!trainingDatasetId || !pipelineId || calculating || hasActiveRun}>
+              {calculating ? 'Analyse wird eingeplant …' : hasActiveRun ? 'Analyse läuft im Scheduler' : 'Analyse starten'}
             </Button>
             <Text size="sm" c="dimmed">Gleiche, unveränderte Konfigurationen werden direkt aus der CSV geladen.</Text>
           </Group>
@@ -187,6 +242,35 @@ export function ImageDistributionPage({ active }: Props) {
       </Paper>
 
       {error && <Alert color="red" title="Analyse nicht möglich">{error}</Alert>}
+
+      {activeRun && (
+        <Paper withBorder p="md">
+          <Stack gap="xs">
+            <Group justify="space-between">
+              <div>
+                <Text fw={600}>{STEP_LABELS[activeRun.current_step] ?? activeRun.current_step}</Text>
+                <Text size="sm" c="dimmed">
+                  Lauf #{activeRun.id} · Status {activeRun.status}
+                  {activeRun.total_images != null ? ` · ${activeRun.processed_images.toLocaleString('de-DE')} / ${activeRun.total_images.toLocaleString('de-DE')} Bilder` : ''}
+                </Text>
+              </div>
+              <Badge color={activeRun.status === 'finished' ? 'green' : activeRun.status === 'failed' ? 'red' : activeRun.status === 'aborted' ? 'orange' : 'blue'}>
+                {activeRun.status}
+              </Badge>
+            </Group>
+            <Progress
+              value={activeRun.total_images && activeRun.total_images > 0 ? Math.min(100, activeRun.processed_images / activeRun.total_images * 100) : 0}
+              animated={activeRun.status === 'running'}
+              color={activeRun.status === 'failed' ? 'red' : activeRun.status === 'aborted' ? 'orange' : 'blue'}
+            />
+            {activeRun.total_images != null && (
+              <Text size="xs" c="dimmed">
+                {activeRun.successful_images.toLocaleString('de-DE')} erfolgreich · {activeRun.failed_images.toLocaleString('de-DE')} fehlgeschlagen
+              </Text>
+            )}
+          </Stack>
+        </Paper>
+      )}
 
       {result && (
         <>

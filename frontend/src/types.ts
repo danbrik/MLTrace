@@ -61,9 +61,9 @@ export type GpuSnapshot = {
 export type SchedulerJobWithProject = {
   project_id: string;
   project_name: string;
-  kind: 'train' | 'test' | 'heatmap';
+  kind: 'train' | 'test' | 'heatmap' | 'image_distribution';
   queue_rank: number | null;
-  run: TrainingRun | TestingRun | HeatmapRangeRun;
+  run: TrainingRun | TestingRun | HeatmapRangeRun | ImageDistributionRun;
 };
 
 export type Dataset = {
@@ -250,6 +250,34 @@ export type ImageDistributionResult = {
     start: string;
     end: string;
   }>;
+};
+
+export type ImageDistributionRun = {
+  id: number;
+  training_dataset_id: number;
+  preprocessing_pipeline_id: number;
+  training_dataset_name: string;
+  usage_label: string;
+  preprocessing_pipeline_name: string;
+  status: string;
+  enqueued_at: string | null;
+  queue_rank: number | null;
+  started_at: string | null;
+  ended_at: string | null;
+  duration_seconds: number | null;
+  error_message: string | null;
+  gpu_index: number | null;
+  device: string | null;
+  current_step: string;
+  total_images: number | null;
+  processed_images: number;
+  successful_images: number;
+  failed_images: number;
+  cache_key: string | null;
+  cache_hit: boolean;
+  result: ImageDistributionResult | null;
+  created_at: string;
+  updated_at: string;
 };
 
 export type PreprocessingPreviewImage = {

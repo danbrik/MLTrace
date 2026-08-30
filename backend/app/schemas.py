@@ -1193,7 +1193,7 @@ class SchedulerJobMoveRequest(BaseModel):
 
 
 class SchedulerJobMoveResponse(BaseModel):
-    kind: Literal["train", "test", "heatmap"]
+    kind: Literal["train", "test", "heatmap", "image_distribution"]
     run_id: int
     queue_rank: int | None
 
@@ -1992,12 +1992,47 @@ class HeatmapRangeRunRead(BaseModel):
     updated_at: datetime
 
 
+class ImageDistributionRunCreate(BaseModel):
+    training_dataset_id: int = Field(ge=1)
+    preprocessing_pipeline_id: int = Field(ge=1)
+
+
+class ImageDistributionRunRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    training_dataset_id: int
+    preprocessing_pipeline_id: int
+    training_dataset_name: str
+    usage_label: str
+    preprocessing_pipeline_name: str
+    status: str
+    enqueued_at: datetime | None
+    queue_rank: int | None
+    started_at: datetime | None
+    ended_at: datetime | None
+    duration_seconds: float | None
+    error_message: str | None
+    gpu_index: int | None
+    device: str | None
+    current_step: str
+    total_images: int | None
+    processed_images: int
+    successful_images: int
+    failed_images: int
+    cache_key: str | None
+    cache_hit: bool
+    result: dict | None
+    created_at: datetime
+    updated_at: datetime
+
+
 class SchedulerJobWithProjectRead(BaseModel):
     project_id: str
     project_name: str
-    kind: Literal["train", "test", "heatmap"]
+    kind: Literal["train", "test", "heatmap", "image_distribution"]
     queue_rank: int | None = None
-    run: TrainingRunRead | TestingRunRead | HeatmapRangeRunRead
+    run: TrainingRunRead | TestingRunRead | HeatmapRangeRunRead | ImageDistributionRunRead
 
 
 class InspectArtifactRunRead(BaseModel):

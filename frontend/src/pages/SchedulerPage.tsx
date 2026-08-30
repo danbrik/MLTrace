@@ -31,18 +31,22 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 
 import {
   abortHeatmapRange,
+  abortImageDistributionRun,
   abortTestingRun,
   abortTrainingRun,
   clearHeatmaps,
   deleteHeatmapRange,
+  deleteImageDistributionRun,
   deleteTestingRun,
   deleteTrainingRun,
   getHeatmapRangeLog,
+  getImageDistributionRunLog,
   getSchedulerSettings,
   getGpuUsage,
   getTestingRunLog,
   getTrainingRunLog,
   listHeatmapRanges,
+  listImageDistributionRuns,
   listMethodConfigurations,
   listMethodDefinitions,
   listPreprocessingPipelines,
@@ -63,6 +67,7 @@ import type { SchedulerJob } from '../training/SchedulerDetailsModal';
 import { formatDuration, runStatusColor } from '../training/runStatus';
 import type {
   HeatmapRangeRun,
+  ImageDistributionRun,
   MethodConfiguration,
   MethodDefinition,
   HeatmapRunSummary,
@@ -103,11 +108,14 @@ function jobKey(job: DisplayJob): string {
 function jobName(job: SchedulerJob): string {
   if (job.kind === 'train') return job.run.training_pipeline_name;
   if (job.kind === 'heatmap') return `Heatmap video · ${job.run.testing_run_name}`;
+  if (job.kind === 'image_distribution') return `Image distribution · ${job.run.training_dataset_name}`;
   return job.run.name;
 }
 
 function jobMethodType(job: SchedulerJob): string {
-  return job.kind === 'heatmap' ? 'heatmap video' : job.run.method_type;
+  if (job.kind === 'heatmap') return 'heatmap video';
+  if (job.kind === 'image_distribution') return 'image statistics';
+  return job.run.method_type;
 }
 
 function summarizeHeatmaps(heatmaps: HeatmapRunSummary[]): HeatmapGroup[] {
@@ -143,6 +151,16 @@ function summarizeHeatmaps(heatmaps: HeatmapRunSummary[]): HeatmapGroup[] {
 }
 
 function ProgressCell({ job }: { job: SchedulerJob }) {
+  if (job.kind === 'image_distribution') {
+    const done = job.run.processed_images;
+    const total = job.run.total_images;
+    return (
+      <Stack gap={2}>
+        <Text size="xs">{job.run.current_step.replaceAll('_', ' ')}{total != null ? ` · ${done}/${total} images` : ''}</Text>
+        {total != null && total > 0 && <Progress value={Math.min(100, done / total * 100)} size="sm" radius="sm" color={runStatusColor(job.run.status)} />}
+      </Stack>
+    );
+  }
   if (job.kind === 'heatmap') {
     const done = job.run.done_count ?? 0;
     const total = job.run.frame_count ?? null;
@@ -199,8 +217,13 @@ function LogModal({ job, onClose }: { job: DisplayJob | null; onClose: () => voi
     if (!job) return undefined;
     let cancelled = false;
     const load = () => {
-      const fetcher =
-        job.kind === 'train' ? getTrainingRunLog : job.kind === 'heatmap' ? getHeatmapRangeLog : getTestingRunLog;
+      const fetcher = job.kind === 'train'
+        ? getTrainingRunLog
+        : job.kind === 'heatmap'
+          ? getHeatmapRangeLog
+          : job.kind === 'image_distribution'
+            ? getImageDistributionRunLog
+            : getTestingRunLog;
       fetcher(job.run.id, job.project_id)
         .then((result) => {
           if (!cancelled) setLog(result.log);
@@ -238,6 +261,7 @@ export function SchedulerPage({ active = true }: { active?: boolean }) {
   const [methodDefs, setMethodDefs] = useState<MethodDefinition[]>([]);
   const [heatmaps, setHeatmaps] = useState<HeatmapRunSummary[]>([]);
   const [heatmapRanges, setHeatmapRanges] = useState<HeatmapRangeRun[]>([]);
+  const [imageDistributionRuns, setImageDistributionRuns] = useState<ImageDistributionRun[]>([]);
   const [schedulerSettings, setSchedulerSettings] = useState<SchedulerSettings | null>(null);
   const [gpuUsage, setGpuUsage] = useState<GpuSnapshot | null>(null);
   const [scope, setScope] = useState<'project' | 'all'>('project');
@@ -262,16 +286,18 @@ export function SchedulerPage({ active = true }: { active?: boolean }) {
       setGlobalJobs(await listSchedulerJobs('all'));
       return;
     }
-    const [nextTraining, nextTesting, nextHeatmaps, nextHeatmapRanges] = await Promise.all([
+    const [nextTraining, nextTesting, nextHeatmaps, nextHeatmapRanges, nextImageDistributionRuns] = await Promise.all([
       listTrainingRuns(),
       listTestingRuns(),
       listHeatmaps(),
       listHeatmapRanges(),
+      listImageDistributionRuns(),
     ]);
     setTrainingRuns(nextTraining);
     setTestingRuns(nextTesting);
     setHeatmaps(nextHeatmaps);
     setHeatmapRanges(nextHeatmapRanges);
+    setImageDistributionRuns(nextImageDistributionRuns);
   }
 
   async function refreshGpu(force = false) {
@@ -333,6 +359,7 @@ export function SchedulerPage({ active = true }: { active?: boolean }) {
       ...trainingRuns.map((run) => ({ kind: 'train' as const, run })),
       ...testingRuns.map((run) => ({ kind: 'test' as const, run })),
       ...heatmapRanges.map((run) => ({ kind: 'heatmap' as const, run })),
+      ...imageDistributionRuns.map((run) => ({ kind: 'image_distribution' as const, run })),
     ];
     return list.sort((a, b) => {
       const aQueued = a.run.status === 'queued';
@@ -346,7 +373,7 @@ export function SchedulerPage({ active = true }: { active?: boolean }) {
       if (aQueued !== bQueued) return aQueued ? -1 : 1;
       return (b.run.created_at ?? '').localeCompare(a.run.created_at ?? '');
     });
-  }, [trainingRuns, testingRuns, heatmapRanges, globalJobs, scope]);
+  }, [trainingRuns, testingRuns, heatmapRanges, imageDistributionRuns, globalJobs, scope]);
 
   const queuedJobs = useMemo(() => jobs.filter((job) => job.run.status === 'queued'), [jobs]);
   const queueIndexByKey = useMemo(
@@ -398,6 +425,10 @@ export function SchedulerPage({ active = true }: { active?: boolean }) {
   }
 
   function handleAbort(job: DisplayJob) {
+    if (job.kind === 'image_distribution') {
+      withRefresh(`abort:${jobKey(job)}`, () => abortImageDistributionRun(job.run.id, job.project_id), 'Could not abort');
+      return;
+    }
     const action =
       job.kind === 'train'
         ? () => abortTrainingRun(job.run.id, job.project_id)
@@ -408,7 +439,7 @@ export function SchedulerPage({ active = true }: { active?: boolean }) {
   }
 
   function handleRestart(job: DisplayJob, mode: 'complete' | 'checkpoint' = 'complete') {
-    if (job.kind === 'heatmap') return; // heatmap videos are not restartable; re-render from Analysis
+    if (job.kind === 'heatmap' || job.kind === 'image_distribution') return;
     if (mode === 'complete' && (job.kind === 'test' || job.kind === 'train') && !window.confirm(
       `Restart ${job.kind === 'train' ? 'training' : 'inference'} "${jobName(job)}" completely? Existing progress and its checkpoint will be removed.`,
     )) return;
@@ -424,9 +455,11 @@ export function SchedulerPage({ active = true }: { active?: boolean }) {
   }
 
   function handleDelete(job: DisplayJob) {
-    const label = job.kind === 'train' ? 'training run' : job.kind === 'heatmap' ? 'heatmap video' : 'inference';
+    const label = job.kind === 'train' ? 'training run' : job.kind === 'heatmap' ? 'heatmap video' : job.kind === 'image_distribution' ? 'image distribution analysis' : 'inference';
     if (!window.confirm(`Remove ${label} "${jobName(job)}"?`)) return;
-    const action =
+    const action = job.kind === 'image_distribution'
+      ? () => deleteImageDistributionRun(job.run.id, job.project_id)
+      :
       job.kind === 'train'
         ? () => deleteTrainingRun(job.run.id, job.project_id)
         : job.kind === 'heatmap'
@@ -474,7 +507,7 @@ export function SchedulerPage({ active = true }: { active?: boolean }) {
       <div>
         <Title order={2}>Scheduler</Title>
         <Text c="dimmed" size="sm">
-          All training and inference jobs across the GPU queue — queued, running, finished, failed, aborted.
+          Training, inference, heatmap and image-distribution jobs — queued, running, finished, failed or aborted.
         </Text>
       </div>
 
@@ -529,9 +562,9 @@ export function SchedulerPage({ active = true }: { active?: boolean }) {
         <Stack gap="md">
           <Group justify="space-between" align="center">
             <div>
-              <Title order={3}>GPU queue settings</Title>
+              <Title order={3}>Scheduler settings</Title>
               <Text size="sm" c="dimmed">
-                Applies to training and scheduled inference jobs. CPU heatmap calculations run separately.
+                Controls the shared worker slots. Image-distribution analyses run on CPU and remain visible in the same queue.
               </Text>
             </div>
             <Badge variant="light" color={schedulerSettings?.detected_gpu_count ? 'grape' : 'gray'}>
@@ -593,6 +626,7 @@ export function SchedulerPage({ active = true }: { active?: boolean }) {
                 { value: 'train', label: 'Training' },
                 { value: 'test', label: 'Inference' },
                 { value: 'heatmap', label: 'Heatmap' },
+                { value: 'image_distribution', label: 'Image distribution' },
               ]}
               value={typeFilter}
               onChange={setTypeFilter}
@@ -647,10 +681,10 @@ export function SchedulerPage({ active = true }: { active?: boolean }) {
                     <Table.Tr key={key}>
                       <Table.Td>
                         <Badge
-                          color={job.kind === 'train' ? 'blue' : job.kind === 'heatmap' ? 'teal' : 'grape'}
+                          color={job.kind === 'train' ? 'blue' : job.kind === 'heatmap' ? 'teal' : job.kind === 'image_distribution' ? 'cyan' : 'grape'}
                           variant="light"
                         >
-                          {job.kind === 'train' ? 'Training' : job.kind === 'heatmap' ? 'Heatmap' : 'Inference'}
+                          {job.kind === 'train' ? 'Training' : job.kind === 'heatmap' ? 'Heatmap' : job.kind === 'image_distribution' ? 'Image distribution' : 'Inference'}
                         </Badge>
                       </Table.Td>
                       {scope === 'all' && <Table.Td><Badge variant="outline">{job.project_name}</Badge></Table.Td>}
