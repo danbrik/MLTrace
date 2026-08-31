@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import csv
 from collections import defaultdict
-from datetime import datetime
+from datetime import UTC, datetime
 import hashlib
 import json
 import math
 from pathlib import Path
 import shutil
+import sqlite3
 import tempfile
 import threading
 import time
@@ -22,6 +23,11 @@ from app.database import data_dir
 from app.preprocessing.pipeline import compile_pipeline
 from app.schemas import (
     ImageDistributionHourlyPoint,
+    ImageDistributionIntervalInput,
+    ImageDistributionIntervalMetric,
+    ImageDistributionIntervalRequest,
+    ImageDistributionIntervalResponse,
+    ImageDistributionIntervalSummary,
     ImageDistributionMetricSummary,
     ImageDistributionPeriod,
     ImageDistributionResponse,
@@ -311,6 +317,139 @@ def abort_run(db: Session, run_id: int) -> ImageDistributionRunRead | None:
     else:
         raise ValueError("Only queued or running jobs can be aborted.")
     return _serialize_run(run)
+
+
+def _normalized_interval_timestamp(value: datetime) -> datetime:
+    if value.tzinfo is not None:
+        return value.astimezone(UTC).replace(tzinfo=None)
+    return value
+
+
+def _interval_metric(values: np.ndarray) -> ImageDistributionIntervalMetric | None:
+    if values.size == 0:
+        return None
+    q25, median, q75 = np.quantile(values, [0.25, 0.5, 0.75])
+    return ImageDistributionIntervalMetric(
+        median=float(median),
+        q25=float(q25),
+        q75=float(q75),
+        iqr=float(q75 - q25),
+    )
+
+
+def _summarize_interval_rows(
+    interval: ImageDistributionIntervalInput,
+    rows,
+    count: int | None = None,
+) -> ImageDistributionIntervalSummary:
+    if count is not None:
+        values = np.empty((count, 3), dtype=np.float64)
+        actual_count = 0
+        for actual_count, row in enumerate(rows, start=1):
+            values[actual_count - 1] = row
+        values = values[:actual_count]
+    else:
+        collected = list(rows)
+        values = np.asarray(collected, dtype=np.float64) if collected else np.empty((0, 3), dtype=np.float64)
+    if values.ndim == 1:
+        values = values.reshape((-1, 3))
+    return ImageDistributionIntervalSummary(
+        id=interval.id,
+        name=interval.name,
+        start=interval.start,
+        end=interval.end,
+        image_count=int(count if count is not None else len(values)),
+        mean_intensity=_interval_metric(values[:, 0]),
+        spatial_std_intensity=_interval_metric(values[:, 1]),
+        q95_intensity=_interval_metric(values[:, 2]),
+    )
+
+
+def _manifest_for_cache(db: Session, run: models.ImageDistributionRun) -> Path | None:
+    candidates = [run]
+    candidates.extend(db.scalars(
+        select(models.ImageDistributionRun)
+        .where(
+            models.ImageDistributionRun.cache_key == run.cache_key,
+            models.ImageDistributionRun.status == "finished",
+            models.ImageDistributionRun.manifest_path.is_not(None),
+            models.ImageDistributionRun.id != run.id,
+        )
+        .order_by(models.ImageDistributionRun.id.desc())
+    ))
+    for candidate in candidates:
+        if candidate.manifest_path:
+            path = Path(candidate.manifest_path)
+            if path.is_file():
+                return path
+    return None
+
+
+def calculate_interval_summaries(
+    db: Session,
+    run_id: int,
+    payload: ImageDistributionIntervalRequest,
+) -> ImageDistributionIntervalResponse:
+    run = db.get(models.ImageDistributionRun, run_id)
+    if run is None:
+        raise LookupError("Image-distribution run not found.")
+    if run.status != "finished" or not run.cache_key:
+        raise ValueError("Interval statistics are available only after the analysis has finished.")
+
+    intervals = [interval.model_copy(update={
+        "start": _normalized_interval_timestamp(interval.start),
+        "end": _normalized_interval_timestamp(interval.end),
+    }) for interval in payload.intervals]
+    manifest_path = _manifest_for_cache(db, run)
+    summaries: list[ImageDistributionIntervalSummary] = []
+    if manifest_path is not None:
+        connection = sqlite3.connect(manifest_path, timeout=60.0)
+        try:
+            for interval in intervals:
+                parameters = (interval.start.isoformat(), interval.end.isoformat())
+                count = int(connection.execute(
+                    "SELECT COUNT(*) FROM selected WHERE status=1 AND timestamp >= ? AND timestamp <= ?",
+                    parameters,
+                ).fetchone()[0])
+                rows = connection.execute(
+                    "SELECT mean_intensity, spatial_std_intensity, q95_intensity "
+                    "FROM selected WHERE status=1 AND timestamp >= ? AND timestamp <= ? ORDER BY timestamp, id",
+                    parameters,
+                )
+                summaries.append(_summarize_interval_rows(interval, rows, count))
+        finally:
+            connection.close()
+    else:
+        csv_path = cache_path(run.cache_key)
+        if not csv_path.is_file():
+            raise ValueError("The cached image-distribution CSV is no longer available.")
+        collected: dict[str, list[tuple[float, float, float]]] = {interval.id: [] for interval in intervals}
+        with csv_path.open("r", encoding="utf-8", newline="") as handle:
+            for row in csv.DictReader(handle):
+                if row.get("error"):
+                    continue
+                try:
+                    timestamp = datetime.fromisoformat(row["timestamp"])
+                    values = (
+                        float(row["mean_intensity"]),
+                        float(row["spatial_std_intensity"]),
+                        float(row["q95_intensity"]),
+                    )
+                except (KeyError, TypeError, ValueError):
+                    continue
+                for interval in intervals:
+                    if interval.start <= timestamp <= interval.end:
+                        collected[interval.id].append(values)
+        summaries = [
+            _summarize_interval_rows(interval, collected[interval.id])
+            for interval in intervals
+        ]
+
+    return ImageDistributionIntervalResponse(
+        run_id=run.id,
+        cache_key=run.cache_key,
+        intervals=summaries,
+    )
 
 
 def delete_run(db: Session, run_id: int) -> bool:

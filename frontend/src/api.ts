@@ -43,6 +43,8 @@ import type {
   InspectCsvData,
   ImageDistributionResult,
   ImageDistributionRun,
+  ImageDistributionIntervalDraft,
+  ImageDistributionIntervalResponse,
   MethodConfiguration,
   MethodConfigurationPayload,
   MethodConfigurationSavePayload,
@@ -449,6 +451,16 @@ export function listImageDistributionRuns(): Promise<ImageDistributionRun[]> {
 
 export function getImageDistributionRun(runId: number, projectId?: string): Promise<ImageDistributionRun> {
   return request<ImageDistributionRun>(`/api/image-distribution-runs/${runId}`, undefined, undefined, projectId);
+}
+
+export function calculateImageDistributionIntervals(
+  runId: number,
+  intervals: ImageDistributionIntervalDraft[],
+): Promise<ImageDistributionIntervalResponse> {
+  return request<ImageDistributionIntervalResponse>(`/api/image-distribution-runs/${runId}/interval-statistics`, {
+    method: 'POST',
+    body: JSON.stringify({ intervals }),
+  });
 }
 
 export function getImageDistributionRunLog(runId: number, projectId?: string): Promise<{ log: string }> {

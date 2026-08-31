@@ -57,6 +57,8 @@ from app.schemas import (
     InspectRunRead,
     ImageDistributionRunCreate,
     ImageDistributionRunRead,
+    ImageDistributionIntervalRequest,
+    ImageDistributionIntervalResponse,
     TemporalDynamicsRequest,
     TemporalDynamicsResponse,
     TestingRunPlotSeriesPage,
@@ -885,6 +887,22 @@ def create_app() -> FastAPI:
         if run is None:
             raise HTTPException(status_code=404, detail="Image-distribution run not found.")
         return run
+
+    @app.post(
+        "/api/image-distribution-runs/{run_id}/interval-statistics",
+        response_model=ImageDistributionIntervalResponse,
+    )
+    def api_calculate_image_distribution_interval_statistics(
+        run_id: int,
+        payload: ImageDistributionIntervalRequest,
+        db: Session = Depends(get_db),
+    ):
+        try:
+            return image_distribution_service.calculate_interval_summaries(db, run_id, payload)
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     @app.get("/api/image-distribution-runs/{run_id}/log", response_model=TrainingRunLogResponse)
     def api_get_image_distribution_log(run_id: int, db: Session = Depends(get_db)):

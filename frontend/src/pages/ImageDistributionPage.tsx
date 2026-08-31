@@ -1,10 +1,11 @@
-import { Alert, Badge, Button, Group, Loader, Paper, Progress, Select, SimpleGrid, Stack, Text, Title } from '@mantine/core';
+import { ActionIcon, Alert, Badge, Button, Group, Loader, Paper, Progress, ScrollArea, Select, SimpleGrid, Stack, Table, Text, TextInput, Title } from '@mantine/core';
 import { notifications } from '@mantine/notifications';
-import { Download, Play } from 'lucide-react';
+import { Calculator, Download, Play, Plus, Trash2 } from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
 
 import {
   calculateImageDistribution,
+  calculateImageDistributionIntervals,
   getImageDistributionRun,
   imageDistributionCsvUrl,
   listPreprocessingPipelines,
@@ -12,10 +13,14 @@ import {
   listTrainingDatasets,
 } from '../api';
 import { PlotlyChart } from '../components/PlotlyChart';
+import { DateTime24Input } from '../components/DateTime24Input';
 import { withLineGapPolicy } from '../lib/plotGaps';
 import type { Data, Layout } from '../lib/plotly';
 import type {
   ImageDistributionHourlyPoint,
+  ImageDistributionIntervalDraft,
+  ImageDistributionIntervalMetric,
+  ImageDistributionIntervalSummary,
   ImageDistributionMetricSummary,
   ImageDistributionResult,
   ImageDistributionRun,
@@ -81,6 +86,32 @@ function formatBytes(value: number | null): string {
     unit += 1;
   }
   return `${scaled.toLocaleString('de-DE', { maximumFractionDigits: unit >= 3 ? 2 : 1 })} ${units[unit]}`;
+}
+
+function formatMetric(value: number): string {
+  return value.toLocaleString('de-DE', { maximumSignificantDigits: 6 });
+}
+
+function formatIqr(metric: ImageDistributionIntervalMetric): string {
+  return `${formatMetric(metric.q25)} – ${formatMetric(metric.q75)} (Δ ${formatMetric(metric.iqr)})`;
+}
+
+function intervalInputValue(value: string): string {
+  return value.slice(0, 19);
+}
+
+function newIntervalId(): string {
+  return globalThis.crypto?.randomUUID?.() ?? `interval-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+}
+
+function defaultIntervalBounds(result: ImageDistributionResult): { start: string; end: string } {
+  if (result.hourly.length === 0) return { start: '', end: '' };
+  const start = intervalInputValue(result.hourly[0].hour);
+  const lastHour = parseDatasetTime(result.hourly[result.hourly.length - 1].hour);
+  return {
+    start,
+    end: new Date(lastHour + 3_599_999).toISOString().slice(0, 19),
+  };
 }
 
 function parseDatasetTime(value: string): number {
@@ -169,6 +200,10 @@ export function ImageDistributionPage({ active }: Props) {
   const [loadingOptions, setLoadingOptions] = useState(false);
   const [calculating, setCalculating] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [intervals, setIntervals] = useState<ImageDistributionIntervalDraft[]>([]);
+  const [intervalResults, setIntervalResults] = useState<ImageDistributionIntervalSummary[]>([]);
+  const [intervalCalculating, setIntervalCalculating] = useState(false);
+  const [intervalError, setIntervalError] = useState<string | null>(null);
 
   useEffect(() => {
     if (!active) return;
@@ -190,6 +225,12 @@ export function ImageDistributionPage({ active }: Props) {
       .finally(() => { if (!cancelled) setLoadingOptions(false); });
     return () => { cancelled = true; };
   }, [active]);
+
+  useEffect(() => {
+    setIntervals([]);
+    setIntervalResults([]);
+    setIntervalError(null);
+  }, [result?.cache_key]);
 
   useEffect(() => {
     if (!active || !activeRun || !['queued', 'running'].includes(activeRun.status)) return undefined;
@@ -266,6 +307,57 @@ export function ImageDistributionPage({ active }: Props) {
       setError(reason instanceof Error ? reason.message : String(reason));
     } finally {
       setCalculating(false);
+    }
+  }
+
+  function addInterval() {
+    if (!result) return;
+    const bounds = defaultIntervalBounds(result);
+    setIntervals((current) => [
+      ...current,
+      {
+        id: newIntervalId(),
+        name: `Zeitraum ${current.length + 1}`,
+        ...bounds,
+      },
+    ]);
+    setIntervalResults([]);
+    setIntervalError(null);
+  }
+
+  function updateInterval(id: string, update: Partial<ImageDistributionIntervalDraft>) {
+    setIntervals((current) => current.map((interval) => interval.id === id ? { ...interval, ...update } : interval));
+    setIntervalResults([]);
+    setIntervalError(null);
+  }
+
+  function removeInterval(id: string) {
+    setIntervals((current) => current.filter((interval) => interval.id !== id));
+    setIntervalResults((current) => current.filter((interval) => interval.id !== id));
+    setIntervalError(null);
+  }
+
+  async function calculateIntervals() {
+    if (!activeRun || activeRun.status !== 'finished' || intervals.length === 0) return;
+    const invalid = intervals.find((interval) => (
+      !interval.name.trim() || !interval.start || !interval.end || interval.end < interval.start
+    ));
+    if (invalid) {
+      setIntervalError(`Bitte Name, Start und Ende für „${invalid.name || 'unbenannter Zeitraum'}“ prüfen.`);
+      return;
+    }
+    setIntervalCalculating(true);
+    setIntervalError(null);
+    try {
+      const response = await calculateImageDistributionIntervals(
+        activeRun.id,
+        intervals.map((interval) => ({ ...interval, name: interval.name.trim() })),
+      );
+      setIntervalResults(response.intervals);
+    } catch (reason) {
+      setIntervalError(reason instanceof Error ? reason.message : String(reason));
+    } finally {
+      setIntervalCalculating(false);
     }
   }
 
@@ -384,6 +476,121 @@ export function ImageDistributionPage({ active }: Props) {
               </Group>
             )}
           </Paper>
+
+          {activeRun?.status === 'finished' && (
+            <Paper withBorder p="md">
+              <Stack gap="md">
+                <Group justify="space-between" align="flex-start">
+                  <div>
+                    <Title order={4}>Kennzahlen für frei gewählte Zeiträume</Title>
+                    <Text size="sm" c="dimmed">
+                      Die Quantile werden exakt aus den Einzelbildwerten der CSV berechnet, nicht aus den bereits aggregierten Stundenwerten.
+                    </Text>
+                  </div>
+                  <Button variant="light" leftSection={<Plus size={16} />} onClick={addInterval}>
+                    Zeitraum hinzufügen
+                  </Button>
+                </Group>
+
+                {intervals.length === 0 ? (
+                  <Alert color="blue">Füge einen oder mehrere Zeiträume hinzu, um sie miteinander zu vergleichen.</Alert>
+                ) : (
+                  <Stack gap="sm">
+                    {intervals.map((interval) => {
+                      const bounds = defaultIntervalBounds(result);
+                      const rangeInvalid = Boolean(interval.start && interval.end && interval.end < interval.start);
+                      return (
+                        <Paper key={interval.id} withBorder p="sm">
+                          <SimpleGrid cols={{ base: 1, lg: 4 }}>
+                            <TextInput
+                              label="Bezeichnung"
+                              value={interval.name}
+                              error={!interval.name.trim() ? 'Bezeichnung erforderlich' : undefined}
+                              onChange={(event) => updateInterval(interval.id, { name: event.currentTarget.value })}
+                            />
+                            <DateTime24Input
+                              label="Start"
+                              value={interval.start}
+                              min={bounds.start}
+                              max={bounds.end}
+                              error={rangeInvalid ? 'Start liegt nach Ende' : undefined}
+                              onChange={(value) => updateInterval(interval.id, { start: value })}
+                            />
+                            <DateTime24Input
+                              label="Ende"
+                              value={interval.end}
+                              min={bounds.start}
+                              max={bounds.end}
+                              error={rangeInvalid ? 'Ende liegt vor Start' : undefined}
+                              onChange={(value) => updateInterval(interval.id, { end: value })}
+                            />
+                            <Group align="flex-end" justify="flex-end">
+                              <ActionIcon
+                                color="red"
+                                variant="light"
+                                size="lg"
+                                aria-label={`Zeitraum ${interval.name} entfernen`}
+                                onClick={() => removeInterval(interval.id)}
+                              >
+                                <Trash2 size={18} />
+                              </ActionIcon>
+                            </Group>
+                          </SimpleGrid>
+                        </Paper>
+                      );
+                    })}
+                    <Group justify="flex-end">
+                      <Button
+                        leftSection={intervalCalculating ? <Loader size={16} color="white" /> : <Calculator size={16} />}
+                        onClick={calculateIntervals}
+                        disabled={intervalCalculating}
+                      >
+                        Zeitraumkennzahlen berechnen
+                      </Button>
+                    </Group>
+                  </Stack>
+                )}
+
+                {intervalError && <Alert color="red">{intervalError}</Alert>}
+
+                {intervalResults.length > 0 && (
+                  <ScrollArea>
+                    <Table striped highlightOnHover miw={1250} verticalSpacing="sm">
+                      <Table.Thead>
+                        <Table.Tr>
+                          <Table.Th>Zeitraum</Table.Th>
+                          <Table.Th>Bilder</Table.Th>
+                          <Table.Th>Mean Median</Table.Th>
+                          <Table.Th>Mean IQR (Q25–Q75)</Table.Th>
+                          <Table.Th>Q95 Median</Table.Th>
+                          <Table.Th>Q95 IQR (Q25–Q75)</Table.Th>
+                          <Table.Th>Std Median</Table.Th>
+                          <Table.Th>Std IQR (Q25–Q75)</Table.Th>
+                        </Table.Tr>
+                      </Table.Thead>
+                      <Table.Tbody>
+                        {intervalResults.map((interval) => (
+                          <Table.Tr key={interval.id}>
+                            <Table.Td>
+                              <Text fw={600}>{interval.name}</Text>
+                              <Text size="xs" c="dimmed">{intervalInputValue(interval.start)} – {intervalInputValue(interval.end)}</Text>
+                            </Table.Td>
+                            <Table.Td>{interval.image_count.toLocaleString('de-DE')}</Table.Td>
+                            <Table.Td>{interval.mean_intensity ? formatMetric(interval.mean_intensity.median) : '—'}</Table.Td>
+                            <Table.Td>{interval.mean_intensity ? formatIqr(interval.mean_intensity) : '—'}</Table.Td>
+                            <Table.Td>{interval.q95_intensity ? formatMetric(interval.q95_intensity.median) : '—'}</Table.Td>
+                            <Table.Td>{interval.q95_intensity ? formatIqr(interval.q95_intensity) : '—'}</Table.Td>
+                            <Table.Td>{interval.spatial_std_intensity ? formatMetric(interval.spatial_std_intensity.median) : '—'}</Table.Td>
+                            <Table.Td>{interval.spatial_std_intensity ? formatIqr(interval.spatial_std_intensity) : '—'}</Table.Td>
+                          </Table.Tr>
+                        ))}
+                      </Table.Tbody>
+                    </Table>
+                  </ScrollArea>
+                )}
+              </Stack>
+            </Paper>
+          )}
 
           {result.hourly.length === 0 ? (
             <Alert color="yellow">Keine erfolgreich verarbeiteten Bilder für die Zeitaggregation vorhanden.</Alert>

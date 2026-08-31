@@ -9,7 +9,11 @@ from app import models
 from app import database
 from app.analysis import image_distribution
 from app.analysis import image_distribution_runtime
-from app.schemas import ImageDistributionRunCreate
+from app.schemas import (
+    ImageDistributionIntervalInput,
+    ImageDistributionIntervalRequest,
+    ImageDistributionRunCreate,
+)
 from tests.test_testing_service import make_db
 
 
@@ -144,6 +148,34 @@ def test_image_distribution_aggregates_hourly_and_reuses_csv(tmp_path, monkeypat
         assert finished.cache_hit is False
         assert finished.result["hourly"][0]["mean_intensity"]["median"] == pytest.approx(1.5)
 
+        interval_result = image_distribution.calculate_interval_summaries(
+            db,
+            run.id,
+            ImageDistributionIntervalRequest(intervals=[
+                ImageDistributionIntervalInput(
+                    id="morning",
+                    name="Morning block",
+                    start=start,
+                    end=start + timedelta(minutes=50),
+                ),
+                ImageDistributionIntervalInput(
+                    id="empty",
+                    name="Empty block",
+                    start=start + timedelta(hours=1),
+                    end=start + timedelta(hours=2),
+                ),
+            ]),
+        )
+        morning, empty = interval_result.intervals
+        assert morning.image_count == 2
+        assert morning.mean_intensity.median == pytest.approx(1.5)
+        assert morning.mean_intensity.q25 == pytest.approx(1.25)
+        assert morning.mean_intensity.q75 == pytest.approx(1.75)
+        assert morning.mean_intensity.iqr == pytest.approx(0.5)
+        assert morning.q95_intensity.median == pytest.approx(2.7)
+        assert empty.image_count == 0
+        assert empty.mean_intensity is None
+
         cached_run = image_distribution.enqueue(
             db,
             ImageDistributionRunCreate(
@@ -158,5 +190,51 @@ def test_image_distribution_aggregates_hourly_and_reuses_csv(tmp_path, monkeypat
         assert cached is not None
         assert cached.status == "finished"
         assert cached.cache_hit is True
+    finally:
+        db.close()
+
+
+def test_image_distribution_interval_statistics_fall_back_to_csv(tmp_path, monkeypatch) -> None:
+    db = make_db()
+    try:
+        cache_key = "a" * 24
+        csv_path = tmp_path / f"{cache_key}.csv"
+        csv_path.write_text(
+            "image_index,timestamp,relative_path,mean_intensity,spatial_std_intensity,q95_intensity,error\n"
+            "0,2026-01-01T10:00:00,a.tif,1,2,3,\n"
+            "1,2026-01-01T10:30:00,b.tif,3,4,7,\n"
+            "2,2026-01-01T11:00:00,broken.tif,,,,broken\n",
+            encoding="utf-8",
+        )
+        run = models.ImageDistributionRun(
+            training_dataset_id=1,
+            preprocessing_pipeline_id=1,
+            training_dataset_name="Train",
+            usage_label="train",
+            preprocessing_pipeline_name="Raw",
+            status="finished",
+            current_step="finished",
+            cache_key=cache_key,
+        )
+        db.add(run)
+        db.commit()
+        monkeypatch.setattr(image_distribution, "cache_path", lambda _key: csv_path)
+
+        response = image_distribution.calculate_interval_summaries(
+            db,
+            run.id,
+            ImageDistributionIntervalRequest(intervals=[ImageDistributionIntervalInput(
+                id="block",
+                name="Block",
+                start=datetime(2026, 1, 1, 10, 0),
+                end=datetime(2026, 1, 1, 11, 0),
+            )]),
+        )
+
+        summary = response.intervals[0]
+        assert summary.image_count == 2
+        assert summary.mean_intensity.median == pytest.approx(2.0)
+        assert summary.spatial_std_intensity.iqr == pytest.approx(1.0)
+        assert summary.q95_intensity.q75 == pytest.approx(6.0)
     finally:
         db.close()

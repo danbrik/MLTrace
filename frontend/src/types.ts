@@ -304,6 +304,33 @@ export type ImageDistributionRun = {
   updated_at: string;
 };
 
+export type ImageDistributionIntervalDraft = {
+  id: string;
+  name: string;
+  start: string;
+  end: string;
+};
+
+export type ImageDistributionIntervalMetric = {
+  median: number;
+  q25: number;
+  q75: number;
+  iqr: number;
+};
+
+export type ImageDistributionIntervalSummary = ImageDistributionIntervalDraft & {
+  image_count: number;
+  mean_intensity: ImageDistributionIntervalMetric | null;
+  spatial_std_intensity: ImageDistributionIntervalMetric | null;
+  q95_intensity: ImageDistributionIntervalMetric | null;
+};
+
+export type ImageDistributionIntervalResponse = {
+  run_id: number;
+  cache_key: string;
+  intervals: ImageDistributionIntervalSummary[];
+};
+
 export type PreprocessingPreviewImage = {
   node_id: string;
   step_type: string;

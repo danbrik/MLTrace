@@ -2517,6 +2517,54 @@ class ImageDistributionResponse(BaseModel):
     periods: list[ImageDistributionPeriod]
 
 
+class ImageDistributionIntervalInput(BaseModel):
+    id: str = Field(min_length=1, max_length=128)
+    name: str = Field(min_length=1, max_length=255)
+    start: datetime
+    end: datetime
+
+    @model_validator(mode="after")
+    def validate_range(self):
+        if self.end < self.start:
+            raise ValueError("end must be after start")
+        return self
+
+
+class ImageDistributionIntervalRequest(BaseModel):
+    intervals: list[ImageDistributionIntervalInput] = Field(min_length=1, max_length=100)
+
+    @model_validator(mode="after")
+    def validate_unique_ids(self):
+        ids = [interval.id for interval in self.intervals]
+        if len(ids) != len(set(ids)):
+            raise ValueError("interval ids must be unique")
+        return self
+
+
+class ImageDistributionIntervalMetric(BaseModel):
+    median: float
+    q25: float
+    q75: float
+    iqr: float
+
+
+class ImageDistributionIntervalSummary(BaseModel):
+    id: str
+    name: str
+    start: datetime
+    end: datetime
+    image_count: int
+    mean_intensity: ImageDistributionIntervalMetric | None
+    spatial_std_intensity: ImageDistributionIntervalMetric | None
+    q95_intensity: ImageDistributionIntervalMetric | None
+
+
+class ImageDistributionIntervalResponse(BaseModel):
+    run_id: int
+    cache_key: str
+    intervals: list[ImageDistributionIntervalSummary]
+
+
 class RegistryDeleteRequest(BaseModel):
     items: list[RegistryItemRef] = Field(min_length=1)
     cascade: bool = False
