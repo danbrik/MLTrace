@@ -45,6 +45,8 @@ import type {
   ImageDistributionRun,
   ImageDistributionIntervalDraft,
   ImageDistributionIntervalResponse,
+  ResolutionSensitivityInterval,
+  ResolutionSensitivityRun,
   MethodConfiguration,
   MethodConfigurationPayload,
   MethodConfigurationSavePayload,
@@ -477,6 +479,43 @@ export function deleteImageDistributionRun(runId: number, projectId?: string): P
 
 export function imageDistributionCsvUrl(cacheKey: string): string {
   return projectMediaUrl(`/api/analysis/image-distribution/${encodeURIComponent(cacheKey)}/csv`);
+}
+
+export function createResolutionSensitivityRun(payload: {
+  training_dataset_id: number;
+  pipeline_ids: number[];
+  intervals: ResolutionSensitivityInterval[];
+  samples_per_interval: number;
+  label_set_id?: number | null;
+  ssim_data_range?: number | null;
+}): Promise<ResolutionSensitivityRun> {
+  return request<ResolutionSensitivityRun>('/api/resolution-sensitivity-runs', {
+    method: 'POST', body: JSON.stringify(payload),
+  });
+}
+
+export function listResolutionSensitivityRuns(): Promise<ResolutionSensitivityRun[]> {
+  return request<ResolutionSensitivityRun[]>('/api/resolution-sensitivity-runs');
+}
+
+export function getResolutionSensitivityRun(runId: number, projectId?: string): Promise<ResolutionSensitivityRun> {
+  return request<ResolutionSensitivityRun>(`/api/resolution-sensitivity-runs/${runId}`, undefined, undefined, projectId);
+}
+
+export function getResolutionSensitivityRunLog(runId: number, projectId?: string): Promise<{ log: string }> {
+  return request<{ log: string }>(`/api/resolution-sensitivity-runs/${runId}/log`, undefined, undefined, projectId);
+}
+
+export function abortResolutionSensitivityRun(runId: number, projectId?: string): Promise<ResolutionSensitivityRun> {
+  return request<ResolutionSensitivityRun>(`/api/resolution-sensitivity-runs/${runId}/abort`, { method: 'POST' }, undefined, projectId);
+}
+
+export function deleteResolutionSensitivityRun(runId: number, projectId?: string): Promise<void> {
+  return request<void>(`/api/resolution-sensitivity-runs/${runId}`, { method: 'DELETE' }, undefined, projectId);
+}
+
+export function resolutionSensitivityExportUrl(runId: number, kind: 'details' | 'summary'): string {
+  return projectMediaUrl(`/api/resolution-sensitivity-runs/${runId}/exports/${kind}`);
 }
 
 export function getPreprocessingPipeline(pipelineId: number): Promise<PreprocessingPipeline> {
@@ -1609,12 +1648,12 @@ export function updateSchedulerSettings(payload: { max_gpu_slots: number; only_g
   });
 }
 
-export function moveSchedulerJob(kind: 'train' | 'test' | 'heatmap' | 'image_distribution', runId: number, direction: 'up' | 'down', projectId?: string): Promise<{
-  kind: 'train' | 'test' | 'heatmap' | 'image_distribution';
+export function moveSchedulerJob(kind: 'train' | 'test' | 'heatmap' | 'image_distribution' | 'resolution_sensitivity', runId: number, direction: 'up' | 'down', projectId?: string): Promise<{
+  kind: 'train' | 'test' | 'heatmap' | 'image_distribution' | 'resolution_sensitivity';
   run_id: number;
   queue_rank: number | null;
 }> {
-  return request<{ kind: 'train' | 'test' | 'heatmap' | 'image_distribution'; run_id: number; queue_rank: number | null }>(`/api/scheduler/jobs/${kind}/${runId}/move`, {
+  return request<{ kind: 'train' | 'test' | 'heatmap' | 'image_distribution' | 'resolution_sensitivity'; run_id: number; queue_rank: number | null }>(`/api/scheduler/jobs/${kind}/${runId}/move`, {
     method: 'POST',
     body: JSON.stringify({ direction }),
   }, undefined, projectId).then((response) => {

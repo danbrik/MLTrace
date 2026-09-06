@@ -1193,7 +1193,7 @@ class SchedulerJobMoveRequest(BaseModel):
 
 
 class SchedulerJobMoveResponse(BaseModel):
-    kind: Literal["train", "test", "heatmap", "image_distribution"]
+    kind: Literal["train", "test", "heatmap", "image_distribution", "resolution_sensitivity"]
     run_id: int
     queue_rank: int | None
 
@@ -2042,9 +2042,9 @@ class ImageDistributionRunRead(BaseModel):
 class SchedulerJobWithProjectRead(BaseModel):
     project_id: str
     project_name: str
-    kind: Literal["train", "test", "heatmap", "image_distribution"]
+    kind: Literal["train", "test", "heatmap", "image_distribution", "resolution_sensitivity"]
     queue_rank: int | None = None
-    run: TrainingRunRead | TestingRunRead | HeatmapRangeRunRead | ImageDistributionRunRead
+    run: dict
 
 
 class InspectArtifactRunRead(BaseModel):
@@ -2563,6 +2563,79 @@ class ImageDistributionIntervalResponse(BaseModel):
     run_id: int
     cache_key: str
     intervals: list[ImageDistributionIntervalSummary]
+
+
+class ResolutionSensitivityInterval(BaseModel):
+    id: str = Field(min_length=1, max_length=128)
+    name: str = Field(min_length=1, max_length=255)
+    type: Literal["normal", "event"]
+    start: datetime
+    end: datetime
+
+    @model_validator(mode="after")
+    def validate_interval(self):
+        self.start = _dataset_local_naive(self.start)
+        self.end = _dataset_local_naive(self.end)
+        if self.end <= self.start:
+            raise ValueError("Interval end must be after start.")
+        return self
+
+
+class ResolutionSensitivityRunCreate(BaseModel):
+    training_dataset_id: int = Field(ge=1)
+    pipeline_ids: list[int] = Field(min_length=4, max_length=4)
+    intervals: list[ResolutionSensitivityInterval] = Field(min_length=2, max_length=200)
+    samples_per_interval: int = Field(default=100, ge=1, le=10000)
+    label_set_id: int | None = Field(default=None, ge=1)
+    ssim_data_range: float | None = Field(default=None, gt=0)
+
+    @model_validator(mode="after")
+    def validate_configuration(self):
+        if len(set(self.pipeline_ids)) != 4:
+            raise ValueError("Four distinct preprocessing pipelines are required.")
+        ids = [interval.id for interval in self.intervals]
+        if len(ids) != len(set(ids)):
+            raise ValueError("Interval ids must be unique.")
+        if not any(interval.type == "normal" for interval in self.intervals):
+            raise ValueError("At least one normal interval is required.")
+        if not any(interval.type == "event" for interval in self.intervals):
+            raise ValueError("At least one event interval is required.")
+        ordered = sorted(self.intervals, key=lambda interval: (interval.start, interval.end))
+        for previous, current in zip(ordered, ordered[1:]):
+            if current.start < previous.end:
+                raise ValueError(f"Intervals '{previous.name}' and '{current.name}' overlap.")
+        return self
+
+
+class ResolutionSensitivityRunRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    training_dataset_id: int
+    label_set_id: int | None
+    training_dataset_name: str
+    label_set_name: str | None
+    status: str
+    enqueued_at: datetime | None
+    queue_rank: int | None
+    started_at: datetime | None
+    ended_at: datetime | None
+    duration_seconds: float | None
+    error_message: str | None
+    gpu_index: int | None
+    device: str | None
+    current_step: str
+    total_images: int | None
+    processed_images: int
+    successful_images: int
+    failed_images: int
+    heartbeat_at: datetime | None
+    config: dict
+    pipeline_snapshot: list[dict]
+    data_range: float | None
+    result: dict | None
+    created_at: datetime
+    updated_at: datetime
 
 
 class RegistryDeleteRequest(BaseModel):

@@ -59,6 +59,12 @@ _KINDS: dict[str, dict] = {
         "subdir": "image_distribution_runs",
         "force_cpu": True,
     },
+    "resolution_sensitivity": {
+        "model": models.ResolutionSensitivityRun,
+        "module": "app.analysis.resolution_sensitivity_worker",
+        "subdir": "resolution_sensitivity_runs",
+        "force_cpu": True,
+    },
 }
 
 

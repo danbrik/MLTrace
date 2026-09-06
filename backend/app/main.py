@@ -59,6 +59,8 @@ from app.schemas import (
     ImageDistributionRunRead,
     ImageDistributionIntervalRequest,
     ImageDistributionIntervalResponse,
+    ResolutionSensitivityRunCreate,
+    ResolutionSensitivityRunRead,
     TemporalDynamicsRequest,
     TemporalDynamicsResponse,
     TestingRunPlotSeriesPage,
@@ -143,6 +145,7 @@ from app.evaluation import workspace_service as evaluation_workspace_service
 from app.analysis import service as analysis_service
 from app.analysis import baseline as baseline_analysis_service
 from app.analysis import image_distribution as image_distribution_service
+from app.analysis import resolution_sensitivity as resolution_sensitivity_service
 from app.heatmap import service as heatmap_service
 from app.registry import service as registry_service
 from app.inspect import service as inspect_service
@@ -939,6 +942,60 @@ def create_app() -> FastAPI:
         if not path.is_file():
             raise HTTPException(status_code=404, detail="Cached analysis CSV not found.")
         return FileResponse(path, media_type="text/csv", filename=f"image-distribution-{cache_key}.csv")
+
+    @app.post("/api/resolution-sensitivity-runs", response_model=ResolutionSensitivityRunRead)
+    def api_enqueue_resolution_sensitivity(payload: ResolutionSensitivityRunCreate, db: Session = Depends(get_db)):
+        try:
+            return resolution_sensitivity_service.enqueue(db, payload)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.get("/api/resolution-sensitivity-runs", response_model=list[ResolutionSensitivityRunRead])
+    def api_list_resolution_sensitivity_runs(db: Session = Depends(get_db)):
+        return resolution_sensitivity_service.list_runs(db)
+
+    @app.get("/api/resolution-sensitivity-runs/{run_id}", response_model=ResolutionSensitivityRunRead)
+    def api_get_resolution_sensitivity_run(run_id: int, db: Session = Depends(get_db)):
+        run = resolution_sensitivity_service.get_run(db, run_id)
+        if run is None:
+            raise HTTPException(status_code=404, detail="Resolution-sensitivity run not found.")
+        return run
+
+    @app.get("/api/resolution-sensitivity-runs/{run_id}/log", response_model=TrainingRunLogResponse)
+    def api_get_resolution_sensitivity_log(run_id: int, db: Session = Depends(get_db)):
+        log = resolution_sensitivity_service.read_log(db, run_id)
+        if log is None:
+            raise HTTPException(status_code=404, detail="Resolution-sensitivity run not found.")
+        return TrainingRunLogResponse(log=log)
+
+    @app.post("/api/resolution-sensitivity-runs/{run_id}/abort", response_model=ResolutionSensitivityRunRead)
+    def api_abort_resolution_sensitivity_run(run_id: int, db: Session = Depends(get_db)):
+        try:
+            run = resolution_sensitivity_service.abort_run(db, run_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        if run is None:
+            raise HTTPException(status_code=404, detail="Resolution-sensitivity run not found.")
+        return run
+
+    @app.delete("/api/resolution-sensitivity-runs/{run_id}", status_code=204)
+    def api_delete_resolution_sensitivity_run(run_id: int, db: Session = Depends(get_db)):
+        try:
+            deleted = resolution_sensitivity_service.delete_run(db, run_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        if not deleted:
+            raise HTTPException(status_code=404, detail="Resolution-sensitivity run not found.")
+        return None
+
+    @app.get("/api/resolution-sensitivity-runs/{run_id}/exports/{kind}")
+    def api_export_resolution_sensitivity(run_id: int, kind: str, db: Session = Depends(get_db)):
+        if kind not in {"details", "summary"}:
+            raise HTTPException(status_code=400, detail="Export kind must be details or summary.")
+        path = resolution_sensitivity_service.export_path(db, run_id, kind)
+        if path is None:
+            raise HTTPException(status_code=404, detail="Resolution-sensitivity export not found.")
+        return FileResponse(path, media_type="text/csv", filename=f"resolution-sensitivity-{run_id}-{kind}.csv")
 
     @app.post("/api/analysis/image-comparison", response_model=AnalysisImageComparisonResponse)
     def api_calculate_analysis_image_comparison(
@@ -2010,6 +2067,7 @@ def create_app() -> FastAPI:
                         ("test", testing_service.list_testing_runs(db)),
                         ("heatmap", heatmap_service.list_heatmap_ranges(db)),
                         ("image_distribution", image_distribution_service.list_runs(db)),
+                        ("resolution_sensitivity", resolution_sensitivity_service.list_runs(db)),
                     )
                     for kind, runs in groups:
                         for run in runs:

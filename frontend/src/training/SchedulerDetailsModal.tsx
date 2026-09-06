@@ -7,6 +7,7 @@ import { formatDuration } from './runStatus';
 import type {
   HeatmapRangeRun,
   ImageDistributionRun,
+  ResolutionSensitivityRun,
   MethodConfiguration,
   MethodDefinition,
   PreprocessingPipeline,
@@ -19,7 +20,8 @@ export type SchedulerJob =
   | { kind: 'train'; run: TrainingRun }
   | { kind: 'test'; run: TestingRun }
   | { kind: 'heatmap'; run: HeatmapRangeRun }
-  | { kind: 'image_distribution'; run: ImageDistributionRun };
+  | { kind: 'image_distribution'; run: ImageDistributionRun }
+  | { kind: 'resolution_sensitivity'; run: ResolutionSensitivityRun };
 
 function Row({ label, children }: { label: string; children: ReactNode }) {
   return (
@@ -118,6 +120,8 @@ export function SchedulerDetailsModal({
         ? `Heatmap video · ${job.run.testing_run_name}`
         : job.kind === 'image_distribution'
           ? `Image distribution · ${job.run.training_dataset_name}`
+        : job.kind === 'resolution_sensitivity'
+          ? `Resolution sensitivity · ${job.run.training_dataset_name}`
         : job.run.name
     : '';
 
@@ -272,6 +276,18 @@ export function SchedulerDetailsModal({
     );
   }
 
+  function renderResolutionSensitivity(run: ResolutionSensitivityRun) {
+    return <Stack gap="sm">
+      <Row label="Type"><Badge color="indigo" variant="light">Resolution sensitivity</Badge></Row>
+      <Row label="Dataset"><Text size="sm">{run.training_dataset_name}</Text></Row>
+      <Row label="Pipelines"><Group gap="xs">{run.pipeline_snapshot.map((item) => <Badge key={item.resolution} variant="light">{item.resolution} · {item.name}</Badge>)}</Group></Row>
+      <Row label="Intervals"><Text size="sm">{run.config.intervals.filter((item) => item.type === 'normal').length} normal · {run.config.intervals.filter((item) => item.type === 'event').length} events · {run.config.samples_per_interval} samples each</Text></Row>
+      <Row label="Progress"><Text size="sm">{run.processed_images}{run.total_images != null ? ` / ${run.total_images}` : ''} unique images</Text></Row>
+      <Row label="SSIM range"><Text size="sm">{run.data_range ?? run.config.ssim_data_range ?? 'automatic'}</Text></Row>
+      {run.error_message && <Paper withBorder p="xs" radius="sm" bg="var(--mantine-color-red-0)"><Text size="sm" c="red">{run.error_message}</Text></Paper>}
+    </Stack>;
+  }
+
   return (
     <Modal opened={job !== null} onClose={onClose} title={title} size="xl">
       {job &&
@@ -281,6 +297,8 @@ export function SchedulerDetailsModal({
             ? renderHeatmap(job.run)
             : job.kind === 'image_distribution'
               ? renderImageDistribution(job.run)
+            : job.kind === 'resolution_sensitivity'
+              ? renderResolutionSensitivity(job.run)
             : renderTesting(job.run))}
     </Modal>
   );

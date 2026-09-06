@@ -789,6 +789,53 @@ class ImageDistributionRun(Base):
     )
 
 
+class ResolutionSensitivityRun(Base):
+    """Queued preprocessing-resolution sensitivity analysis."""
+
+    __tablename__ = "resolution_sensitivity_runs"
+    __table_args__ = (
+        Index("ix_resolution_sensitivity_runs_status", "status"),
+        Index("ix_resolution_sensitivity_runs_created_at", "created_at"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    training_dataset_id: Mapped[int] = mapped_column(
+        ForeignKey("training_datasets.id", ondelete="RESTRICT"), nullable=False
+    )
+    label_set_id: Mapped[int | None] = mapped_column(
+        ForeignKey("evaluation_label_sets.id", ondelete="SET NULL")
+    )
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="queued")
+    enqueued_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=False))
+    queue_rank: Mapped[int | None] = mapped_column(Integer)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=False))
+    ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=False))
+    duration_seconds: Mapped[float | None] = mapped_column(Float)
+    error_message: Mapped[str | None] = mapped_column(Text)
+    gpu_index: Mapped[int | None] = mapped_column(Integer)
+    device: Mapped[str | None] = mapped_column(String(32))
+    pid: Mapped[int | None] = mapped_column(Integer)
+    log_path: Mapped[str | None] = mapped_column(Text)
+    current_step: Mapped[str] = mapped_column(String(64), nullable=False, default="queued")
+    total_images: Mapped[int | None] = mapped_column(Integer)
+    processed_images: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    successful_images: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    failed_images: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=False))
+    config: Mapped[dict] = mapped_column(json_type(), nullable=False)
+    pipeline_snapshot: Mapped[list] = mapped_column(json_type(), nullable=False)
+    training_dataset_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    label_set_name: Mapped[str | None] = mapped_column(String(255))
+    data_range: Mapped[float | None] = mapped_column(Float)
+    detail_csv_path: Mapped[str | None] = mapped_column(Text)
+    summary_csv_path: Mapped[str | None] = mapped_column(Text)
+    result: Mapped[dict | None] = mapped_column(json_type())
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=False), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=False), server_default=func.now(), onupdate=func.now()
+    )
+
+
 class InspectRun(Base):
     """CPU-only preprocessing inspection video over a selected train/test range."""
 

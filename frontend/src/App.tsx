@@ -15,6 +15,7 @@ import {
   Network,
   LineChart,
   SlidersHorizontal,
+  ScanSearch,
   PanelLeftClose,
   PanelLeftOpen,
   Route,
@@ -33,6 +34,7 @@ import { ThresholdPage } from './pages/ThresholdPage';
 import { DatasetsPage } from './pages/DatasetsPage';
 import { InspectPage } from './pages/InspectPage';
 import { ImageDistributionPage } from './pages/ImageDistributionPage';
+import { ResolutionSensitivityPage } from './pages/ResolutionSensitivityPage';
 import { EvaluationPage } from './pages/EvaluationPage';
 import { MethodsPage } from './pages/ModelsPage';
 import { OptimizationPage } from './pages/OptimizationPage';
@@ -56,6 +58,7 @@ type Page =
   | 'optimization'
   | 'analysis'
   | 'image-distribution'
+  | 'resolution-sensitivity'
   | 'evaluation'
   | 'anomaly-detection'
   | 'csv-merge'
@@ -74,7 +77,7 @@ export function App() {
   const requestedPage = match?.[2] as Page | undefined;
   const page: Page = requestedPage && [
     'datasets', 'training-datasets', 'preprocessing', 'methods', 'training-pipelines', 'testing',
-    'inspect', 'optimization', 'analysis', 'image-distribution', 'evaluation', 'anomaly-detection', 'csv-merge', 'redundancy-analysis', 'threshold', 'scheduler', 'data-manager',
+    'inspect', 'optimization', 'analysis', 'image-distribution', 'resolution-sensitivity', 'evaluation', 'anomaly-detection', 'csv-merge', 'redundancy-analysis', 'threshold', 'scheduler', 'data-manager',
   ].includes(requestedPage) ? requestedPage : 'datasets';
   const [project, setProject] = useState<Project | null>(null);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
@@ -124,6 +127,7 @@ export function App() {
     { id: 'optimization', label: 'Optimization', icon: <SlidersHorizontal size={18} /> },
     { id: 'analysis', label: 'Model Analysis', icon: <BarChart3 size={18} /> },
     { id: 'image-distribution', label: 'Image Distribution', icon: <LineChart size={18} /> },
+    { id: 'resolution-sensitivity', label: 'Resolution Sensitivity', icon: <ScanSearch size={18} /> },
     { id: 'evaluation', label: 'Evaluation', icon: <ClipboardCheck size={18} /> },
     { id: 'anomaly-detection', label: 'Anomaly Detection', icon: <Activity size={18} /> },
     { id: 'csv-merge', label: 'CSV Merge', icon: <FileSpreadsheet size={18} /> },
@@ -236,6 +240,11 @@ export function App() {
         <Box display={page === 'image-distribution' ? 'block' : 'none'}>
           <PageErrorBoundary label="Image Distribution">
             <ImageDistributionPage active={page === 'image-distribution'} />
+          </PageErrorBoundary>
+        </Box>
+        <Box display={page === 'resolution-sensitivity' ? 'block' : 'none'}>
+          <PageErrorBoundary label="Resolution Sensitivity">
+            <ResolutionSensitivityPage active={page === 'resolution-sensitivity'} />
           </PageErrorBoundary>
         </Box>
         <Box display={page === 'evaluation' ? 'block' : 'none'}>

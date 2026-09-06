@@ -61,9 +61,9 @@ export type GpuSnapshot = {
 export type SchedulerJobWithProject = {
   project_id: string;
   project_name: string;
-  kind: 'train' | 'test' | 'heatmap' | 'image_distribution';
+  kind: 'train' | 'test' | 'heatmap' | 'image_distribution' | 'resolution_sensitivity';
   queue_rank: number | null;
-  run: TrainingRun | TestingRun | HeatmapRangeRun | ImageDistributionRun;
+  run: TrainingRun | TestingRun | HeatmapRangeRun | ImageDistributionRun | ResolutionSensitivityRun;
 };
 
 export type Dataset = {
@@ -329,6 +329,94 @@ export type ImageDistributionIntervalResponse = {
   run_id: number;
   cache_key: string;
   intervals: ImageDistributionIntervalSummary[];
+};
+
+export type ResolutionSensitivityInterval = {
+  id: string;
+  name: string;
+  type: 'normal' | 'event';
+  start: string;
+  end: string;
+};
+
+export type ResolutionSensitivityMetricSummary = {
+  median: number | null;
+  q25: number | null;
+  q75: number | null;
+  iqr: number | null;
+};
+
+export type ResolutionSensitivityFeatureSummary = {
+  median_separation: number | null;
+  minimum_absolute_separation: number | null;
+};
+
+export type ResolutionSensitivityOverview = {
+  resolution: number;
+  pixel_count: number;
+  pixel_share: number;
+  ssim: ResolutionSensitivityMetricSummary;
+  mae: ResolutionSensitivityMetricSummary;
+  features: Record<'mean_intensity' | 'q95_intensity' | 'spatial_std_intensity', ResolutionSensitivityFeatureSummary>;
+  weakest_event: string | null;
+  weakest_feature: string | null;
+};
+
+export type ResolutionSensitivitySeparation = {
+  event_id: string;
+  event_name: string;
+  resolution: number;
+  feature: 'mean_intensity' | 'q95_intensity' | 'spatial_std_intensity';
+  separation: number | null;
+  retention: number | null;
+};
+
+export type ResolutionSensitivityResult = {
+  sample_count: number;
+  unique_image_count: number;
+  duplicate_sample_count: number;
+  successful_unique_images: number;
+  failed_unique_images: number;
+  data_range: number;
+  normal_statistics: Record<string, Record<string, { median: number; mad: number; robust_scale: number }>>;
+  overview: ResolutionSensitivityOverview[];
+  separations: ResolutionSensitivitySeparation[];
+};
+
+export type ResolutionSensitivityRun = {
+  id: number;
+  training_dataset_id: number;
+  label_set_id: number | null;
+  training_dataset_name: string;
+  label_set_name: string | null;
+  status: string;
+  enqueued_at: string | null;
+  queue_rank: number | null;
+  started_at: string | null;
+  ended_at: string | null;
+  duration_seconds: number | null;
+  error_message: string | null;
+  gpu_index: number | null;
+  device: string | null;
+  current_step: string;
+  total_images: number | null;
+  processed_images: number;
+  successful_images: number;
+  failed_images: number;
+  heartbeat_at: string | null;
+  config: {
+    training_dataset_id: number;
+    pipeline_ids: number[];
+    intervals: ResolutionSensitivityInterval[];
+    samples_per_interval: number;
+    label_set_id: number | null;
+    ssim_data_range: number | null;
+  };
+  pipeline_snapshot: Array<{ resolution: number; pipeline_id: number; name: string; graph: PreprocessingGraph }>;
+  data_range: number | null;
+  result: ResolutionSensitivityResult | null;
+  created_at: string;
+  updated_at: string;
 };
 
 export type PreprocessingPreviewImage = {
