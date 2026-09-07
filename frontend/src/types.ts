@@ -457,6 +457,7 @@ export type SpatialSensitivityResult = {
 };
 export type SpatialSensitivityRun = {
   id: number; status: string; enqueued_at: string | null; queue_rank: number | null;
+  abort_requested_at?: string | null; force_killed_at?: string | null;
   started_at: string | null; ended_at: string | null; duration_seconds: number | null;
   error_message: string | null; gpu_index: number | null; device: string | null;
   current_step: string; total_images: number | null; processed_images: number;

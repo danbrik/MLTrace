@@ -5,6 +5,7 @@ from concurrent.futures import ThreadPoolExecutor
 import hashlib
 from datetime import datetime, timedelta
 import json
+import os
 from pathlib import Path
 import sqlite3
 import shutil
@@ -14,7 +15,7 @@ import zipfile
 
 import cv2
 import numpy as np
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session, selectinload
 
 from app import models
@@ -67,6 +68,7 @@ def _matching_finished_run(db: Session, signature: str) -> models.SpatialSensiti
     return db.scalar(select(models.SpatialSensitivityRun).where(
         models.SpatialSensitivityRun.config_signature == signature,
         models.SpatialSensitivityRun.status == "finished",
+        models.SpatialSensitivityRun.abort_requested_at.is_(None),
     ).order_by(models.SpatialSensitivityRun.ended_at.desc(), models.SpatialSensitivityRun.id.desc()))
 
 
@@ -266,30 +268,49 @@ def enqueue(db: Session, payload: SpatialSensitivityRunCreate, *, wake_scheduler
     return SpatialSensitivityRunRead.model_validate(run)
 
 
+def _run_read(row: models.SpatialSensitivityRun) -> SpatialSensitivityRunRead:
+    result = SpatialSensitivityRunRead.model_validate(row)
+    if row.abort_requested_at and row.pid is not None:
+        # Older detached workers may publish a late terminal status. Until the
+        # scheduler confirms their exit, clients must keep polling cancellation.
+        result.status = "running"
+        result.current_step = "abort_requested"
+        result.result = None
+    return result
+
+
 def list_runs(db: Session) -> list[SpatialSensitivityRunRead]:
-    return [SpatialSensitivityRunRead.model_validate(row) for row in db.scalars(select(models.SpatialSensitivityRun).order_by(models.SpatialSensitivityRun.created_at.desc())).all()]
+    return [_run_read(row) for row in db.scalars(select(models.SpatialSensitivityRun).order_by(models.SpatialSensitivityRun.created_at.desc())).all()]
 
 
 def get_run(db: Session, run_id: int) -> SpatialSensitivityRunRead | None:
     row = db.get(models.SpatialSensitivityRun, run_id)
-    return SpatialSensitivityRunRead.model_validate(row) if row else None
+    return _run_read(row) if row else None
 
 
 def abort_run(db: Session, run_id: int) -> SpatialSensitivityRunRead | None:
     run = db.get(models.SpatialSensitivityRun, run_id)
     if run is None: return None
-    if run.status == "queued":
-        run.status = run.current_step = "aborted"; run.ended_at = models.utc_now(); run.error_message = "Aborted before it started."
-        db.commit(); db.refresh(run)
-    elif run.status == "running": scheduler.request_abort("spatial_sensitivity", run.id, run.pid)
-    else: raise ValueError("Only queued or running jobs can be aborted.")
-    return SpatialSensitivityRunRead.model_validate(run)
+    now = models.utc_now()
+    db.execute(update(models.SpatialSensitivityRun).where(
+        models.SpatialSensitivityRun.id == run_id, models.SpatialSensitivityRun.status == "queued",
+    ).values(status="aborted", current_step="aborted", abort_requested_at=now, ended_at=now,
+             error_message="Aborted before it started."))
+    db.execute(update(models.SpatialSensitivityRun).where(
+        models.SpatialSensitivityRun.id == run_id, models.SpatialSensitivityRun.status == "running",
+        models.SpatialSensitivityRun.abort_requested_at.is_(None),
+    ).values(abort_requested_at=now))
+    db.commit(); db.refresh(run)
+    # The durable request is handled by the scheduler in the correct project.
+    scheduler.wake()
+    return _run_read(run)
 
 
 def delete_run(db: Session, run_id: int) -> bool:
     run = db.get(models.SpatialSensitivityRun, run_id)
     if run is None: return False
-    if run.status == "running": raise ValueError("Abort the spatial-sensitivity analysis before removing it.")
+    if run.status == "running" or (run.abort_requested_at and run.pid is not None):
+        raise ValueError("Wait for the spatial-sensitivity worker to stop before removing it.")
     shutil.rmtree(_artifact_dir(run.id), ignore_errors=True); db.delete(run); db.commit(); return True
 
 
@@ -690,31 +711,64 @@ def calculate(run: models.SpatialSensitivityRun, datasets: dict[int, models.Trai
 def run_scheduled(run_id: int, abort_event: threading.Event | None = None) -> None:
     from app.database import SessionLocal
     abort_event = abort_event or threading.Event(); started = time.perf_counter(); db = SessionLocal()
+    owns_run = False
     try:
-        run = db.get(models.SpatialSensitivityRun, run_id)
-        if run is None: return
-        run.status = "running"; run.current_step = "loading_configuration"; run.started_at = run.started_at or models.utc_now(); run.device = "CPU"; run.error_message = None; db.commit()
+        # Wait for the scheduler's atomic queued -> running claim. In particular,
+        # never resurrect a queued job which was cancelled while Popen started.
+        for _ in range(100):
+            db.expire_all()
+            run = db.get(models.SpatialSensitivityRun, run_id)
+            if run is None or run.status not in {"queued", "running"}: return
+            if run.status == "running" and run.pid == os.getpid():
+                owns_run = True
+                break
+            db.rollback()
+            if abort_event.wait(0.1): return
+        else:
+            return
+
+        def write_active(**values):
+            changed = db.execute(update(models.SpatialSensitivityRun).where(
+                models.SpatialSensitivityRun.id == run_id,
+                models.SpatialSensitivityRun.status == "running",
+                models.SpatialSensitivityRun.abort_requested_at.is_(None),
+            ).values(**values))
+            db.commit()
+            if not changed.rowcount:
+                raise AbortedError()
+
         def report(step, done, total):
-            current = db.get(models.SpatialSensitivityRun, run_id)
-            if current is None or abort_event.is_set(): raise AbortedError()
-            current.current_step = step; current.processed_images = done; current.total_images = total; current.heartbeat_at = models.utc_now(); db.commit()
-        datasets = {}
-        for item in run.dataset_snapshot:
-            dataset = db.scalar(_dataset_query(int(item["id"])))
-            if dataset is None: raise ValueError(f"Train/Test dataset #{item['id']} not found.")
-            datasets[dataset.id] = dataset
+            if abort_event.is_set(): raise AbortedError()
+            write_active(current_step=step, processed_images=done, total_images=total, heartbeat_at=models.utc_now())
         try:
+            write_active(current_step="loading_configuration")
+            datasets = {}
+            for item in run.dataset_snapshot:
+                dataset = db.scalar(_dataset_query(int(item["id"])))
+                if dataset is None: raise ValueError(f"Train/Test dataset #{item['id']} not found.")
+                datasets[dataset.id] = dataset
             result, csv_path, archive, successful, failed = calculate(run, datasets, abort_event, report)
-            run = db.get(models.SpatialSensitivityRun, run_id); assert run is not None
-            run.status = run.current_step = "finished"; run.ended_at = models.utc_now(); run.duration_seconds = round(time.perf_counter()-started, 3)
-            run.successful_images = successful; run.failed_images = failed; run.csv_path = str(csv_path); run.archive_path = str(archive); run.result = result; db.commit()
+            _abort_if_requested(abort_event)
+            write_active(status="finished", current_step="finished", ended_at=models.utc_now(),
+                duration_seconds=round(time.perf_counter()-started, 3), successful_images=successful,
+                failed_images=failed, csv_path=str(csv_path), archive_path=str(archive), result=result)
         except AbortedError:
-            db.rollback(); run = db.get(models.SpatialSensitivityRun, run_id)
-            if run: run.status = run.current_step = "aborted"; run.ended_at = models.utc_now(); run.error_message = "Spatial sensitivity analysis aborted by user."; db.commit()
+            db.rollback()
+            # Keep the scheduler slot until this process has actually exited.
+            db.execute(update(models.SpatialSensitivityRun).where(
+                models.SpatialSensitivityRun.id == run_id, models.SpatialSensitivityRun.status == "running",
+                models.SpatialSensitivityRun.abort_requested_at.is_(None),
+            ).values(abort_requested_at=models.utc_now()))
+            db.commit()
         except Exception as exc:
-            db.rollback(); run = db.get(models.SpatialSensitivityRun, run_id)
-            if run: run.status = run.current_step = "failed"; run.ended_at = models.utc_now(); run.error_message = str(exc); db.commit()
+            db.rollback()
+            db.execute(update(models.SpatialSensitivityRun).where(
+                models.SpatialSensitivityRun.id == run_id, models.SpatialSensitivityRun.status == "running",
+                models.SpatialSensitivityRun.abort_requested_at.is_(None),
+            ).values(status="failed", current_step="failed", ended_at=models.utc_now(), error_message=str(exc)))
+            db.commit()
             raise
     finally:
-        _cleanup_run_temporaries(run_id)
+        if owns_run:
+            _cleanup_run_temporaries(run_id)
         db.close()

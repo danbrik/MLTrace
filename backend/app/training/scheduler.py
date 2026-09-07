@@ -26,7 +26,7 @@ import threading
 from datetime import datetime, timedelta
 from pathlib import Path
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.engine import make_url
 
 from app import models
@@ -282,8 +282,12 @@ class JobScheduler:
                 db = SessionLocal()
                 try:
                     self._apply_worker_results(db, project.artifact_dir)
+                    from app.analysis.spatial_abort import reconcile_project
+                    reconcile_project(db, project.id)
                     for spec in _KINDS.values():
                         model = spec["model"]
+                        if model is models.SpatialSensitivityRun:
+                            continue
                         for run in db.scalars(select(model).where(model.status == "running")):
                             if not _pid_alive(run.pid):
                                 if model is models.ImageDistributionRun and int(run.resume_count or 0) < 3:
@@ -343,6 +347,11 @@ class JobScheduler:
             self._wake.clear()
 
     def _tick(self) -> None:
+        from app.analysis.spatial_abort import reconcile_project
+        for project in list_projects():
+            with project_context(project.database_url, project.artifact_dir):
+                with SessionLocal() as db:
+                    reconcile_project(db, project.id)
         self._apply_checkpoint_metadata_requests()
         self._apply_retry_requests()
         self._activate_due_training_retries()
@@ -356,6 +365,8 @@ class JobScheduler:
             for key in finished:
                 self._processes.pop(key, None)
         for project_id, kind, run_id in finished:
+            if kind == "spatial_sensitivity":
+                continue  # Reconciled above, including durable cancellation requests.
             project = get_project(project_id)
             if project is None:
                 continue
@@ -624,6 +635,33 @@ class JobScheduler:
             )
         finally:
             log_file.close()
+
+        if kind == "spatial_sensitivity":
+            import psutil
+            try:
+                birth = psutil.Process(proc.pid).create_time()
+                changed = db.execute(update(models.SpatialSensitivityRun).where(
+                    models.SpatialSensitivityRun.id == run.id,
+                    models.SpatialSensitivityRun.status == "queued",
+                ).values(status="running", started_at=datetime.utcnow(), gpu_index=gpu_index,
+                         device=device_label, pid=proc.pid, log_path=str(log_path), error_message=None,
+                         process_started_at=birth, process_project_id=project.id))
+                db.commit()
+                if not changed.rowcount:
+                    proc.kill()  # Our own child lost the queued/abort race; never run it.
+                    proc.wait(timeout=10)
+                    return
+                db.refresh(run)
+            except Exception:
+                db.rollback()
+                if proc.poll() is None:
+                    proc.kill()
+                    proc.wait(timeout=10)
+                raise
+            remove_queue_entry(project.id, kind, run.id)
+            with self._lock:
+                self._processes[(project.id, kind, run.id)] = proc
+            return
 
         run.status = "running"
         run.started_at = datetime.utcnow()

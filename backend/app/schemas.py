@@ -2782,6 +2782,8 @@ class SpatialSensitivityRunRead(BaseModel):
 
     id: int
     status: str
+    abort_requested_at: datetime | None = None
+    force_killed_at: datetime | None = None
     enqueued_at: datetime | None
     queue_rank: int | None
     started_at: datetime | None
