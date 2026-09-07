@@ -65,6 +65,12 @@ _KINDS: dict[str, dict] = {
         "subdir": "resolution_sensitivity_runs",
         "force_cpu": True,
     },
+    "spatial_sensitivity": {
+        "model": models.SpatialSensitivityRun,
+        "module": "app.analysis.spatial_sensitivity_worker",
+        "subdir": "spatial_sensitivity_runs",
+        "force_cpu": True,
+    },
 }
 
 

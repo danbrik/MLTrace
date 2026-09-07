@@ -1193,7 +1193,7 @@ class SchedulerJobMoveRequest(BaseModel):
 
 
 class SchedulerJobMoveResponse(BaseModel):
-    kind: Literal["train", "test", "heatmap", "image_distribution", "resolution_sensitivity"]
+    kind: Literal["train", "test", "heatmap", "image_distribution", "resolution_sensitivity", "spatial_sensitivity"]
     run_id: int
     queue_rank: int | None
 
@@ -2042,7 +2042,7 @@ class ImageDistributionRunRead(BaseModel):
 class SchedulerJobWithProjectRead(BaseModel):
     project_id: str
     project_name: str
-    kind: Literal["train", "test", "heatmap", "image_distribution", "resolution_sensitivity"]
+    kind: Literal["train", "test", "heatmap", "image_distribution", "resolution_sensitivity", "spatial_sensitivity"]
     queue_rank: int | None = None
     run: dict
 
@@ -2633,6 +2633,107 @@ class ResolutionSensitivityRunRead(BaseModel):
     config: dict
     pipeline_snapshot: list[dict]
     data_range: float | None
+    result: dict | None
+    created_at: datetime
+    updated_at: datetime
+
+
+class SpatialSensitivityEvent(BaseModel):
+    id: str = Field(min_length=1, max_length=128)
+    training_dataset_id: int = Field(ge=1)
+    start: datetime
+    end: datetime
+
+    @model_validator(mode="after")
+    def validate_interval(self):
+        self.start = _dataset_local_naive(self.start)
+        self.end = _dataset_local_naive(self.end)
+        if self.end < self.start:
+            raise ValueError("Event end must not be before start.")
+        return self
+
+
+class SpatialSensitivityPreviewRequest(BaseModel):
+    training_dataset_id: int = Field(ge=1)
+    target_timestamp: datetime
+    range_start: datetime | None = None
+    range_end: datetime | None = None
+
+    @model_validator(mode="after")
+    def normalize_times(self):
+        self.target_timestamp = _dataset_local_naive(self.target_timestamp)
+        if self.range_start is not None:
+            self.range_start = _dataset_local_naive(self.range_start)
+        if self.range_end is not None:
+            self.range_end = _dataset_local_naive(self.range_end)
+        return self
+
+
+class SpatialSensitivityPreviewRead(BaseModel):
+    training_dataset_id: int
+    source_image_path: str
+    source_timestamp: datetime
+    width: int
+    height: int
+    dtype: str
+    image_data_url: str
+
+
+class SpatialSensitivityRunCreate(BaseModel):
+    training_dataset_ids: list[int] = Field(min_length=1, max_length=100)
+    events: list[SpatialSensitivityEvent] = Field(min_length=1, max_length=200)
+    normal_window_hours: float = Field(gt=0, le=24 * 365)
+    epsilon: float = Field(default=1.0, gt=0)
+    roi_points: list[RoiPoint] = Field(min_length=4, max_length=4)
+    roi_source_dataset_id: int = Field(ge=1)
+    roi_source_timestamp: datetime
+    example_event_id: str | None = None
+    example_normal_timestamp: datetime | None = None
+    example_event_timestamp: datetime | None = None
+
+    @model_validator(mode="after")
+    def validate_configuration(self):
+        self.roi_source_timestamp = _dataset_local_naive(self.roi_source_timestamp)
+        if self.example_normal_timestamp is not None:
+            self.example_normal_timestamp = _dataset_local_naive(self.example_normal_timestamp)
+        if self.example_event_timestamp is not None:
+            self.example_event_timestamp = _dataset_local_naive(self.example_event_timestamp)
+        if len(set(self.training_dataset_ids)) != len(self.training_dataset_ids):
+            raise ValueError("Dataset ids must be distinct.")
+        allowed = set(self.training_dataset_ids)
+        if self.roi_source_dataset_id not in allowed:
+            raise ValueError("ROI source dataset must be selected.")
+        event_ids = [event.id for event in self.events]
+        if len(set(event_ids)) != len(event_ids):
+            raise ValueError("Event ids must be unique.")
+        if any(event.training_dataset_id not in allowed for event in self.events):
+            raise ValueError("Every event dataset must be selected.")
+        if self.example_event_id is not None and self.example_event_id not in event_ids:
+            raise ValueError("Example event id was not found.")
+        return self
+
+
+class SpatialSensitivityRunRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    status: str
+    enqueued_at: datetime | None
+    queue_rank: int | None
+    started_at: datetime | None
+    ended_at: datetime | None
+    duration_seconds: float | None
+    error_message: str | None
+    gpu_index: int | None
+    device: str | None
+    current_step: str
+    total_images: int | None
+    processed_images: int
+    successful_images: int
+    failed_images: int
+    heartbeat_at: datetime | None
+    config: dict
+    dataset_snapshot: list[dict]
     result: dict | None
     created_at: datetime
     updated_at: datetime

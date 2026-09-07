@@ -35,6 +35,7 @@ import { DatasetsPage } from './pages/DatasetsPage';
 import { InspectPage } from './pages/InspectPage';
 import { ImageDistributionPage } from './pages/ImageDistributionPage';
 import { ResolutionSensitivityPage } from './pages/ResolutionSensitivityPage';
+import { SpatialSensitivityPage } from './pages/SpatialSensitivityPage';
 import { EvaluationPage } from './pages/EvaluationPage';
 import { MethodsPage } from './pages/ModelsPage';
 import { OptimizationPage } from './pages/OptimizationPage';
@@ -59,6 +60,7 @@ type Page =
   | 'analysis'
   | 'image-distribution'
   | 'resolution-sensitivity'
+  | 'spatial-sensitivity'
   | 'evaluation'
   | 'anomaly-detection'
   | 'csv-merge'
@@ -77,7 +79,7 @@ export function App() {
   const requestedPage = match?.[2] as Page | undefined;
   const page: Page = requestedPage && [
     'datasets', 'training-datasets', 'preprocessing', 'methods', 'training-pipelines', 'testing',
-    'inspect', 'optimization', 'analysis', 'image-distribution', 'resolution-sensitivity', 'evaluation', 'anomaly-detection', 'csv-merge', 'redundancy-analysis', 'threshold', 'scheduler', 'data-manager',
+    'inspect', 'optimization', 'analysis', 'image-distribution', 'resolution-sensitivity', 'spatial-sensitivity', 'evaluation', 'anomaly-detection', 'csv-merge', 'redundancy-analysis', 'threshold', 'scheduler', 'data-manager',
   ].includes(requestedPage) ? requestedPage : 'datasets';
   const [project, setProject] = useState<Project | null>(null);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
@@ -128,6 +130,7 @@ export function App() {
     { id: 'analysis', label: 'Model Analysis', icon: <BarChart3 size={18} /> },
     { id: 'image-distribution', label: 'Image Distribution', icon: <LineChart size={18} /> },
     { id: 'resolution-sensitivity', label: 'Resolution Sensitivity', icon: <ScanSearch size={18} /> },
+    { id: 'spatial-sensitivity', label: 'Spatial ROI Sensitivity', icon: <ScanSearch size={18} /> },
     { id: 'evaluation', label: 'Evaluation', icon: <ClipboardCheck size={18} /> },
     { id: 'anomaly-detection', label: 'Anomaly Detection', icon: <Activity size={18} /> },
     { id: 'csv-merge', label: 'CSV Merge', icon: <FileSpreadsheet size={18} /> },
@@ -245,6 +248,11 @@ export function App() {
         <Box display={page === 'resolution-sensitivity' ? 'block' : 'none'}>
           <PageErrorBoundary label="Resolution Sensitivity">
             <ResolutionSensitivityPage active={page === 'resolution-sensitivity'} />
+          </PageErrorBoundary>
+        </Box>
+        <Box display={page === 'spatial-sensitivity' ? 'block' : 'none'}>
+          <PageErrorBoundary label="Spatial ROI Sensitivity">
+            <SpatialSensitivityPage active={page === 'spatial-sensitivity'} />
           </PageErrorBoundary>
         </Box>
         <Box display={page === 'evaluation' ? 'block' : 'none'}>

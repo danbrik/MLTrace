@@ -61,6 +61,10 @@ from app.schemas import (
     ImageDistributionIntervalResponse,
     ResolutionSensitivityRunCreate,
     ResolutionSensitivityRunRead,
+    SpatialSensitivityPreviewRequest,
+    SpatialSensitivityPreviewRead,
+    SpatialSensitivityRunCreate,
+    SpatialSensitivityRunRead,
     TemporalDynamicsRequest,
     TemporalDynamicsResponse,
     TestingRunPlotSeriesPage,
@@ -146,6 +150,7 @@ from app.analysis import service as analysis_service
 from app.analysis import baseline as baseline_analysis_service
 from app.analysis import image_distribution as image_distribution_service
 from app.analysis import resolution_sensitivity as resolution_sensitivity_service
+from app.analysis import spatial_sensitivity as spatial_sensitivity_service
 from app.heatmap import service as heatmap_service
 from app.registry import service as registry_service
 from app.inspect import service as inspect_service
@@ -996,6 +1001,57 @@ def create_app() -> FastAPI:
         if path is None:
             raise HTTPException(status_code=404, detail="Resolution-sensitivity export not found.")
         return FileResponse(path, media_type="text/csv", filename=f"resolution-sensitivity-{run_id}-{kind}.csv")
+
+    @app.post("/api/spatial-sensitivity/preview", response_model=SpatialSensitivityPreviewRead)
+    def api_spatial_sensitivity_preview(payload: SpatialSensitivityPreviewRequest, db: Session = Depends(get_db)):
+        try:
+            return spatial_sensitivity_service.preview(db, payload)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.post("/api/spatial-sensitivity-runs", response_model=SpatialSensitivityRunRead)
+    def api_enqueue_spatial_sensitivity(payload: SpatialSensitivityRunCreate, db: Session = Depends(get_db)):
+        try:
+            return spatial_sensitivity_service.enqueue(db, payload)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.get("/api/spatial-sensitivity-runs", response_model=list[SpatialSensitivityRunRead])
+    def api_list_spatial_sensitivity(db: Session = Depends(get_db)):
+        return spatial_sensitivity_service.list_runs(db)
+
+    @app.get("/api/spatial-sensitivity-runs/{run_id}", response_model=SpatialSensitivityRunRead)
+    def api_get_spatial_sensitivity(run_id: int, db: Session = Depends(get_db)):
+        run = spatial_sensitivity_service.get_run(db, run_id)
+        if run is None: raise HTTPException(status_code=404, detail="Spatial-sensitivity run not found.")
+        return run
+
+    @app.get("/api/spatial-sensitivity-runs/{run_id}/log", response_model=TrainingRunLogResponse)
+    def api_get_spatial_sensitivity_log(run_id: int, db: Session = Depends(get_db)):
+        log = spatial_sensitivity_service.read_log(db, run_id)
+        if log is None: raise HTTPException(status_code=404, detail="Spatial-sensitivity run not found.")
+        return TrainingRunLogResponse(log=log)
+
+    @app.post("/api/spatial-sensitivity-runs/{run_id}/abort", response_model=SpatialSensitivityRunRead)
+    def api_abort_spatial_sensitivity(run_id: int, db: Session = Depends(get_db)):
+        try: run = spatial_sensitivity_service.abort_run(db, run_id)
+        except ValueError as exc: raise HTTPException(status_code=409, detail=str(exc)) from exc
+        if run is None: raise HTTPException(status_code=404, detail="Spatial-sensitivity run not found.")
+        return run
+
+    @app.delete("/api/spatial-sensitivity-runs/{run_id}", status_code=204)
+    def api_delete_spatial_sensitivity(run_id: int, db: Session = Depends(get_db)):
+        try: deleted = spatial_sensitivity_service.delete_run(db, run_id)
+        except ValueError as exc: raise HTTPException(status_code=409, detail=str(exc)) from exc
+        if not deleted: raise HTTPException(status_code=404, detail="Spatial-sensitivity run not found.")
+        return None
+
+    @app.get("/api/spatial-sensitivity-runs/{run_id}/artifacts/{name}")
+    def api_spatial_sensitivity_artifact(run_id: int, name: str, db: Session = Depends(get_db)):
+        path = spatial_sensitivity_service.artifact_path(db, run_id, name)
+        if path is None: raise HTTPException(status_code=404, detail="Artifact not found.")
+        media = "application/zip" if path.suffix == ".zip" else "text/csv" if path.suffix == ".csv" else "application/pdf" if path.suffix == ".pdf" else "image/png" if path.suffix == ".png" else "application/octet-stream"
+        return FileResponse(path, media_type=media, filename=path.name)
 
     @app.post("/api/analysis/image-comparison", response_model=AnalysisImageComparisonResponse)
     def api_calculate_analysis_image_comparison(
@@ -2068,6 +2124,7 @@ def create_app() -> FastAPI:
                         ("heatmap", heatmap_service.list_heatmap_ranges(db)),
                         ("image_distribution", image_distribution_service.list_runs(db)),
                         ("resolution_sensitivity", resolution_sensitivity_service.list_runs(db)),
+                        ("spatial_sensitivity", spatial_sensitivity_service.list_runs(db)),
                     )
                     for kind, runs in groups:
                         for run in runs:

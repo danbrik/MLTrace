@@ -33,17 +33,20 @@ import {
   abortHeatmapRange,
   abortImageDistributionRun,
   abortResolutionSensitivityRun,
+  abortSpatialSensitivityRun,
   abortTestingRun,
   abortTrainingRun,
   clearHeatmaps,
   deleteHeatmapRange,
   deleteImageDistributionRun,
   deleteResolutionSensitivityRun,
+  deleteSpatialSensitivityRun,
   deleteTestingRun,
   deleteTrainingRun,
   getHeatmapRangeLog,
   getImageDistributionRunLog,
   getResolutionSensitivityRunLog,
+  getSpatialSensitivityRunLog,
   getSchedulerSettings,
   getGpuUsage,
   getTestingRunLog,
@@ -51,6 +54,7 @@ import {
   listHeatmapRanges,
   listImageDistributionRuns,
   listResolutionSensitivityRuns,
+  listSpatialSensitivityRuns,
   listMethodConfigurations,
   listMethodDefinitions,
   listPreprocessingPipelines,
@@ -73,6 +77,7 @@ import type {
   HeatmapRangeRun,
   ImageDistributionRun,
   ResolutionSensitivityRun,
+  SpatialSensitivityRun,
   MethodConfiguration,
   MethodDefinition,
   HeatmapRunSummary,
@@ -115,6 +120,7 @@ function jobName(job: SchedulerJob): string {
   if (job.kind === 'heatmap') return `Heatmap video · ${job.run.testing_run_name}`;
   if (job.kind === 'image_distribution') return `Image distribution · ${job.run.training_dataset_name}`;
   if (job.kind === 'resolution_sensitivity') return `Resolution sensitivity · ${job.run.training_dataset_name}`;
+  if (job.kind === 'spatial_sensitivity') return `Spatial sensitivity · ${job.run.dataset_snapshot.map(item => item.name).join(', ')}`;
   return job.run.name;
 }
 
@@ -122,6 +128,7 @@ function jobMethodType(job: SchedulerJob): string {
   if (job.kind === 'heatmap') return 'heatmap video';
   if (job.kind === 'image_distribution') return 'image statistics';
   if (job.kind === 'resolution_sensitivity') return 'preprocessing sensitivity';
+  if (job.kind === 'spatial_sensitivity') return 'spatial ROI sensitivity';
   return job.run.method_type;
 }
 
@@ -158,7 +165,7 @@ function summarizeHeatmaps(heatmaps: HeatmapRunSummary[]): HeatmapGroup[] {
 }
 
 function ProgressCell({ job }: { job: SchedulerJob }) {
-  if (job.kind === 'image_distribution' || job.kind === 'resolution_sensitivity') {
+  if (job.kind === 'image_distribution' || job.kind === 'resolution_sensitivity' || job.kind === 'spatial_sensitivity') {
     const done = job.run.processed_images;
     const total = job.run.total_images;
     return (
@@ -238,6 +245,8 @@ function LogModal({ job, onClose }: { job: DisplayJob | null; onClose: () => voi
             ? getImageDistributionRunLog
           : job.kind === 'resolution_sensitivity'
             ? getResolutionSensitivityRunLog
+          : job.kind === 'spatial_sensitivity'
+            ? getSpatialSensitivityRunLog
             : getTestingRunLog;
       fetcher(job.run.id, job.project_id)
         .then((result) => {
@@ -278,6 +287,7 @@ export function SchedulerPage({ active = true }: { active?: boolean }) {
   const [heatmapRanges, setHeatmapRanges] = useState<HeatmapRangeRun[]>([]);
   const [imageDistributionRuns, setImageDistributionRuns] = useState<ImageDistributionRun[]>([]);
   const [resolutionSensitivityRuns, setResolutionSensitivityRuns] = useState<ResolutionSensitivityRun[]>([]);
+  const [spatialSensitivityRuns, setSpatialSensitivityRuns] = useState<SpatialSensitivityRun[]>([]);
   const [schedulerSettings, setSchedulerSettings] = useState<SchedulerSettings | null>(null);
   const [gpuUsage, setGpuUsage] = useState<GpuSnapshot | null>(null);
   const [scope, setScope] = useState<'project' | 'all'>('project');
@@ -302,13 +312,14 @@ export function SchedulerPage({ active = true }: { active?: boolean }) {
       setGlobalJobs(await listSchedulerJobs('all'));
       return;
     }
-    const [nextTraining, nextTesting, nextHeatmaps, nextHeatmapRanges, nextImageDistributionRuns, nextResolutionSensitivityRuns] = await Promise.all([
+    const [nextTraining, nextTesting, nextHeatmaps, nextHeatmapRanges, nextImageDistributionRuns, nextResolutionSensitivityRuns, nextSpatialSensitivityRuns] = await Promise.all([
       listTrainingRuns(),
       listTestingRuns(),
       listHeatmaps(),
       listHeatmapRanges(),
       listImageDistributionRuns(),
       listResolutionSensitivityRuns(),
+      listSpatialSensitivityRuns(),
     ]);
     setTrainingRuns(nextTraining);
     setTestingRuns(nextTesting);
@@ -316,6 +327,7 @@ export function SchedulerPage({ active = true }: { active?: boolean }) {
     setHeatmapRanges(nextHeatmapRanges);
     setImageDistributionRuns(nextImageDistributionRuns);
     setResolutionSensitivityRuns(nextResolutionSensitivityRuns);
+    setSpatialSensitivityRuns(nextSpatialSensitivityRuns);
   }
 
   async function refreshGpu(force = false) {
@@ -379,6 +391,7 @@ export function SchedulerPage({ active = true }: { active?: boolean }) {
       ...heatmapRanges.map((run) => ({ kind: 'heatmap' as const, run })),
       ...imageDistributionRuns.map((run) => ({ kind: 'image_distribution' as const, run })),
       ...resolutionSensitivityRuns.map((run) => ({ kind: 'resolution_sensitivity' as const, run })),
+      ...spatialSensitivityRuns.map((run) => ({ kind: 'spatial_sensitivity' as const, run })),
     ];
     return list.sort((a, b) => {
       const aQueued = a.run.status === 'queued';
@@ -392,7 +405,7 @@ export function SchedulerPage({ active = true }: { active?: boolean }) {
       if (aQueued !== bQueued) return aQueued ? -1 : 1;
       return (b.run.created_at ?? '').localeCompare(a.run.created_at ?? '');
     });
-  }, [trainingRuns, testingRuns, heatmapRanges, imageDistributionRuns, resolutionSensitivityRuns, globalJobs, scope]);
+  }, [trainingRuns, testingRuns, heatmapRanges, imageDistributionRuns, resolutionSensitivityRuns, spatialSensitivityRuns, globalJobs, scope]);
 
   const queuedJobs = useMemo(() => jobs.filter((job) => job.run.status === 'queued'), [jobs]);
   const queueIndexByKey = useMemo(
@@ -452,6 +465,10 @@ export function SchedulerPage({ active = true }: { active?: boolean }) {
       withRefresh(`abort:${jobKey(job)}`, () => abortResolutionSensitivityRun(job.run.id, job.project_id), 'Could not abort');
       return;
     }
+    if (job.kind === 'spatial_sensitivity') {
+      withRefresh(`abort:${jobKey(job)}`, () => abortSpatialSensitivityRun(job.run.id, job.project_id), 'Could not abort');
+      return;
+    }
     const action =
       job.kind === 'train'
         ? () => abortTrainingRun(job.run.id, job.project_id)
@@ -462,7 +479,7 @@ export function SchedulerPage({ active = true }: { active?: boolean }) {
   }
 
   function handleRestart(job: DisplayJob, mode: 'complete' | 'checkpoint' = 'complete') {
-    if (job.kind === 'heatmap' || job.kind === 'image_distribution' || job.kind === 'resolution_sensitivity') return;
+    if (job.kind === 'heatmap' || job.kind === 'image_distribution' || job.kind === 'resolution_sensitivity' || job.kind === 'spatial_sensitivity') return;
     if (mode === 'complete' && (job.kind === 'test' || job.kind === 'train') && !window.confirm(
       `Restart ${job.kind === 'train' ? 'training' : 'inference'} "${jobName(job)}" completely? Existing progress and its checkpoint will be removed.`,
     )) return;
@@ -478,9 +495,11 @@ export function SchedulerPage({ active = true }: { active?: boolean }) {
   }
 
   function handleDelete(job: DisplayJob) {
-    const label = job.kind === 'train' ? 'training run' : job.kind === 'heatmap' ? 'heatmap video' : job.kind === 'image_distribution' ? 'image distribution analysis' : job.kind === 'resolution_sensitivity' ? 'resolution sensitivity analysis' : 'inference';
+    const label = job.kind === 'train' ? 'training run' : job.kind === 'heatmap' ? 'heatmap video' : job.kind === 'image_distribution' ? 'image distribution analysis' : job.kind === 'resolution_sensitivity' ? 'resolution sensitivity analysis' : job.kind === 'spatial_sensitivity' ? 'spatial sensitivity analysis' : 'inference';
     if (!window.confirm(`Remove ${label} "${jobName(job)}"?`)) return;
-    const action = job.kind === 'resolution_sensitivity'
+    const action = job.kind === 'spatial_sensitivity'
+      ? () => deleteSpatialSensitivityRun(job.run.id, job.project_id)
+      : job.kind === 'resolution_sensitivity'
       ? () => deleteResolutionSensitivityRun(job.run.id, job.project_id)
       : job.kind === 'image_distribution'
       ? () => deleteImageDistributionRun(job.run.id, job.project_id)
@@ -653,6 +672,7 @@ export function SchedulerPage({ active = true }: { active?: boolean }) {
                 { value: 'heatmap', label: 'Heatmap' },
                 { value: 'image_distribution', label: 'Image distribution' },
                 { value: 'resolution_sensitivity', label: 'Resolution sensitivity' },
+                { value: 'spatial_sensitivity', label: 'Spatial sensitivity' },
               ]}
               value={typeFilter}
               onChange={setTypeFilter}
@@ -707,10 +727,10 @@ export function SchedulerPage({ active = true }: { active?: boolean }) {
                     <Table.Tr key={key}>
                       <Table.Td>
                         <Badge
-                          color={job.kind === 'train' ? 'blue' : job.kind === 'heatmap' ? 'teal' : job.kind === 'image_distribution' ? 'cyan' : job.kind === 'resolution_sensitivity' ? 'indigo' : 'grape'}
+                          color={job.kind === 'train' ? 'blue' : job.kind === 'heatmap' ? 'teal' : job.kind === 'image_distribution' ? 'cyan' : job.kind === 'resolution_sensitivity' ? 'indigo' : job.kind === 'spatial_sensitivity' ? 'orange' : 'grape'}
                           variant="light"
                         >
-                          {job.kind === 'train' ? 'Training' : job.kind === 'heatmap' ? 'Heatmap' : job.kind === 'image_distribution' ? 'Image distribution' : job.kind === 'resolution_sensitivity' ? 'Resolution sensitivity' : 'Inference'}
+                          {job.kind === 'train' ? 'Training' : job.kind === 'heatmap' ? 'Heatmap' : job.kind === 'image_distribution' ? 'Image distribution' : job.kind === 'resolution_sensitivity' ? 'Resolution sensitivity' : job.kind === 'spatial_sensitivity' ? 'Spatial sensitivity' : 'Inference'}
                         </Badge>
                       </Table.Td>
                       {scope === 'all' && <Table.Td><Badge variant="outline">{job.project_name}</Badge></Table.Td>}

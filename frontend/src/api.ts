@@ -43,6 +43,9 @@ import type {
   InspectCsvData,
   ImageDistributionResult,
   ImageDistributionRun,
+  SpatialSensitivityEvent,
+  SpatialSensitivityPreview,
+  SpatialSensitivityRun,
   ImageDistributionIntervalDraft,
   ImageDistributionIntervalResponse,
   ResolutionSensitivityInterval,
@@ -517,6 +520,23 @@ export function deleteResolutionSensitivityRun(runId: number, projectId?: string
 export function resolutionSensitivityExportUrl(runId: number, kind: 'details' | 'summary'): string {
   return projectMediaUrl(`/api/resolution-sensitivity-runs/${runId}/exports/${kind}`);
 }
+
+export function previewSpatialSensitivity(payload: { training_dataset_id: number; target_timestamp: string; range_start?: string; range_end?: string }): Promise<SpatialSensitivityPreview> {
+  return request<SpatialSensitivityPreview>('/api/spatial-sensitivity/preview', { method: 'POST', body: JSON.stringify(payload) });
+}
+export function createSpatialSensitivityRun(payload: {
+  training_dataset_ids: number[]; events: SpatialSensitivityEvent[]; normal_window_hours: number; epsilon: number;
+  roi_points: Array<{ x: number; y: number }>; roi_source_dataset_id: number; roi_source_timestamp: string;
+  example_event_id?: string | null; example_normal_timestamp?: string | null; example_event_timestamp?: string | null;
+}): Promise<SpatialSensitivityRun> {
+  return request<SpatialSensitivityRun>('/api/spatial-sensitivity-runs', { method: 'POST', body: JSON.stringify(payload) });
+}
+export function listSpatialSensitivityRuns(): Promise<SpatialSensitivityRun[]> { return request('/api/spatial-sensitivity-runs'); }
+export function getSpatialSensitivityRun(id: number, projectId?: string): Promise<SpatialSensitivityRun> { return request(`/api/spatial-sensitivity-runs/${id}`, undefined, undefined, projectId); }
+export function abortSpatialSensitivityRun(id: number, projectId?: string): Promise<SpatialSensitivityRun> { return request(`/api/spatial-sensitivity-runs/${id}/abort`, { method: 'POST' }, undefined, projectId); }
+export function deleteSpatialSensitivityRun(id: number, projectId?: string): Promise<void> { return request(`/api/spatial-sensitivity-runs/${id}`, { method: 'DELETE' }, undefined, projectId); }
+export function getSpatialSensitivityRunLog(id: number, projectId?: string): Promise<{ log: string }> { return request(`/api/spatial-sensitivity-runs/${id}/log`, undefined, undefined, projectId); }
+export function spatialSensitivityArtifactUrl(id: number, name: string): string { return projectMediaUrl(`/api/spatial-sensitivity-runs/${id}/artifacts/${encodeURIComponent(name)}`); }
 
 export function getPreprocessingPipeline(pipelineId: number): Promise<PreprocessingPipeline> {
   return request<PreprocessingPipeline>(`/api/preprocessing/pipelines/${pipelineId}`).then(normalizePreprocessingPipeline);
@@ -1648,7 +1668,7 @@ export function updateSchedulerSettings(payload: { max_gpu_slots: number; only_g
   });
 }
 
-export function moveSchedulerJob(kind: 'train' | 'test' | 'heatmap' | 'image_distribution' | 'resolution_sensitivity', runId: number, direction: 'up' | 'down', projectId?: string): Promise<{
+export function moveSchedulerJob(kind: 'train' | 'test' | 'heatmap' | 'image_distribution' | 'resolution_sensitivity' | 'spatial_sensitivity', runId: number, direction: 'up' | 'down', projectId?: string): Promise<{
   kind: 'train' | 'test' | 'heatmap' | 'image_distribution' | 'resolution_sensitivity';
   run_id: number;
   queue_rank: number | null;

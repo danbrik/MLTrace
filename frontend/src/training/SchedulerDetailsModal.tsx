@@ -8,6 +8,7 @@ import type {
   HeatmapRangeRun,
   ImageDistributionRun,
   ResolutionSensitivityRun,
+  SpatialSensitivityRun,
   MethodConfiguration,
   MethodDefinition,
   PreprocessingPipeline,
@@ -21,7 +22,8 @@ export type SchedulerJob =
   | { kind: 'test'; run: TestingRun }
   | { kind: 'heatmap'; run: HeatmapRangeRun }
   | { kind: 'image_distribution'; run: ImageDistributionRun }
-  | { kind: 'resolution_sensitivity'; run: ResolutionSensitivityRun };
+  | { kind: 'resolution_sensitivity'; run: ResolutionSensitivityRun }
+  | { kind: 'spatial_sensitivity'; run: SpatialSensitivityRun };
 
 function Row({ label, children }: { label: string; children: ReactNode }) {
   return (
@@ -122,6 +124,8 @@ export function SchedulerDetailsModal({
           ? `Image distribution · ${job.run.training_dataset_name}`
         : job.kind === 'resolution_sensitivity'
           ? `Resolution sensitivity · ${job.run.training_dataset_name}`
+        : job.kind === 'spatial_sensitivity'
+          ? `Spatial sensitivity · ${job.run.dataset_snapshot.map((item) => item.name).join(', ')}`
         : job.run.name
     : '';
 
@@ -299,6 +303,8 @@ export function SchedulerDetailsModal({
               ? renderImageDistribution(job.run)
             : job.kind === 'resolution_sensitivity'
               ? renderResolutionSensitivity(job.run)
+            : job.kind === 'spatial_sensitivity'
+              ? <Stack gap="sm"><Row label="Type"><Badge color="orange">Spatial ROI sensitivity</Badge></Row><Row label="Datasets"><Text size="sm">{job.run.dataset_snapshot.map(item => item.name).join(', ')}</Text></Row><Row label="Progress"><Text size="sm">{job.run.processed_images} / {job.run.total_images ?? '—'} images</Text></Row>{job.run.error_message && <Text c="red">{job.run.error_message}</Text>}</Stack>
             : renderTesting(job.run))}
     </Modal>
   );

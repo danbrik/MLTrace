@@ -61,9 +61,9 @@ export type GpuSnapshot = {
 export type SchedulerJobWithProject = {
   project_id: string;
   project_name: string;
-  kind: 'train' | 'test' | 'heatmap' | 'image_distribution' | 'resolution_sensitivity';
+  kind: 'train' | 'test' | 'heatmap' | 'image_distribution' | 'resolution_sensitivity' | 'spatial_sensitivity';
   queue_rank: number | null;
-  run: TrainingRun | TestingRun | HeatmapRangeRun | ImageDistributionRun | ResolutionSensitivityRun;
+  run: TrainingRun | TestingRun | HeatmapRangeRun | ImageDistributionRun | ResolutionSensitivityRun | SpatialSensitivityRun;
 };
 
 export type Dataset = {
@@ -417,6 +417,28 @@ export type ResolutionSensitivityRun = {
   result: ResolutionSensitivityResult | null;
   created_at: string;
   updated_at: string;
+};
+
+export type SpatialSensitivityEvent = { id: string; training_dataset_id: number; start: string; end: string };
+export type SpatialSensitivityPreview = {
+  training_dataset_id: number; source_image_path: string; source_timestamp: string;
+  width: number; height: number; dtype: string; image_data_url: string;
+};
+export type SpatialSensitivityResult = {
+  events: Array<Record<string, number | string>>;
+  median: Record<string, number | string>;
+  vmax_d: number; vmax_z: number; epsilon: number; normal_window_hours: number;
+  artifact_names: string[];
+  aggregate_metrics: Record<string, number>;
+};
+export type SpatialSensitivityRun = {
+  id: number; status: string; enqueued_at: string | null; queue_rank: number | null;
+  started_at: string | null; ended_at: string | null; duration_seconds: number | null;
+  error_message: string | null; gpu_index: number | null; device: string | null;
+  current_step: string; total_images: number | null; processed_images: number;
+  successful_images: number; failed_images: number; heartbeat_at: string | null;
+  config: Record<string, unknown>; dataset_snapshot: Array<{ id: number; name: string; usage_label: string }>;
+  result: SpatialSensitivityResult | null; created_at: string; updated_at: string;
 };
 
 export type PreprocessingPreviewImage = {
