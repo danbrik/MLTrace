@@ -419,7 +419,27 @@ export type ResolutionSensitivityRun = {
   updated_at: string;
 };
 
-export type SpatialSensitivityEvent = { id: string; training_dataset_id: number; start: string; end: string };
+export type SpatialSensitivityEvent = { id: string; training_dataset_id: number; start: string; end: string; normal_start?: string | null };
+export type SpatialSensitivityWarpConfig = {
+  source_points: Array<{ x: number; y: number }>;
+  output_shape_mode: 'preserve_rectangle' | 'manual'; output_width: number; output_height: number;
+  interpolation: 'nearest' | 'linear' | 'area' | 'cubic';
+};
+export type SpatialSensitivityWarpPreview = {
+  training_dataset_id: number; source_timestamp: string; input_width: number; input_height: number;
+  output_width: number; output_height: number; output_shape_mode: string; interpolation: string; image_data_url: string;
+};
+export type SpatialSensitivityAnalysisConfig = {
+  training_dataset_ids: number[]; events: SpatialSensitivityEvent[]; normal_window_hours: number; epsilon: number;
+  roi_points: Array<{ x: number; y: number }>; roi_source_dataset_id: number; roi_source_timestamp: string;
+  example_event_id: string | null; example_normal_timestamp: string | null; example_event_timestamp: string | null;
+  warp_preview_config?: SpatialSensitivityWarpConfig | null;
+};
+export type SpatialSensitivityConfiguration = {
+  id: number; name: string; description: string | null; config: SpatialSensitivityAnalysisConfig;
+  config_signature: string; latest_finished_run_id: number | null; latest_finished_at: string | null;
+  created_at: string; updated_at: string;
+};
 export type SpatialSensitivityPreview = {
   training_dataset_id: number; source_image_path: string; source_timestamp: string;
   width: number; height: number; dtype: string; image_data_url: string;
@@ -437,7 +457,8 @@ export type SpatialSensitivityRun = {
   error_message: string | null; gpu_index: number | null; device: string | null;
   current_step: string; total_images: number | null; processed_images: number;
   successful_images: number; failed_images: number; heartbeat_at: string | null;
-  config: Record<string, unknown>; dataset_snapshot: Array<{ id: number; name: string; usage_label: string }>;
+  configuration_id: number | null; config_signature: string;
+  config: SpatialSensitivityAnalysisConfig; dataset_snapshot: Array<{ id: number; name: string; usage_label: string }>;
   result: SpatialSensitivityResult | null; created_at: string; updated_at: string;
 };
 

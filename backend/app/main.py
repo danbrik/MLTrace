@@ -63,8 +63,12 @@ from app.schemas import (
     ResolutionSensitivityRunRead,
     SpatialSensitivityPreviewRequest,
     SpatialSensitivityPreviewRead,
+    SpatialSensitivityConfigurationCreate,
+    SpatialSensitivityConfigurationRead,
     SpatialSensitivityRunCreate,
     SpatialSensitivityRunRead,
+    SpatialSensitivityWarpPreviewRequest,
+    SpatialSensitivityWarpPreviewRead,
     TemporalDynamicsRequest,
     TemporalDynamicsResponse,
     TestingRunPlotSeriesPage,
@@ -1008,6 +1012,39 @@ def create_app() -> FastAPI:
             return spatial_sensitivity_service.preview(db, payload)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.post("/api/spatial-sensitivity/warp-preview", response_model=SpatialSensitivityWarpPreviewRead)
+    def api_spatial_sensitivity_warp_preview(payload: SpatialSensitivityWarpPreviewRequest, db: Session = Depends(get_db)):
+        try: return spatial_sensitivity_service.warp_preview(db, payload)
+        except ValueError as exc: raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.get("/api/spatial-sensitivity/configurations", response_model=list[SpatialSensitivityConfigurationRead])
+    def api_list_spatial_sensitivity_configurations(db: Session = Depends(get_db)):
+        return spatial_sensitivity_service.list_configurations(db)
+
+    @app.post("/api/spatial-sensitivity/configurations", response_model=SpatialSensitivityConfigurationRead)
+    def api_create_spatial_sensitivity_configuration(payload: SpatialSensitivityConfigurationCreate, db: Session = Depends(get_db)):
+        try: return spatial_sensitivity_service.create_configuration(db, payload)
+        except ValueError as exc: raise HTTPException(status_code=409 if "already exists" in str(exc) else 400, detail=str(exc)) from exc
+
+    @app.get("/api/spatial-sensitivity/configurations/{configuration_id}", response_model=SpatialSensitivityConfigurationRead)
+    def api_get_spatial_sensitivity_configuration(configuration_id: int, db: Session = Depends(get_db)):
+        row = spatial_sensitivity_service.get_configuration(db, configuration_id)
+        if row is None: raise HTTPException(status_code=404, detail="Spatial-sensitivity configuration not found.")
+        return row
+
+    @app.put("/api/spatial-sensitivity/configurations/{configuration_id}", response_model=SpatialSensitivityConfigurationRead)
+    def api_update_spatial_sensitivity_configuration(configuration_id: int, payload: SpatialSensitivityConfigurationCreate, db: Session = Depends(get_db)):
+        try: row = spatial_sensitivity_service.update_configuration(db, configuration_id, payload)
+        except ValueError as exc: raise HTTPException(status_code=409 if "already exists" in str(exc) else 400, detail=str(exc)) from exc
+        if row is None: raise HTTPException(status_code=404, detail="Spatial-sensitivity configuration not found.")
+        return row
+
+    @app.delete("/api/spatial-sensitivity/configurations/{configuration_id}", status_code=204)
+    def api_delete_spatial_sensitivity_configuration(configuration_id: int, db: Session = Depends(get_db)):
+        if not spatial_sensitivity_service.delete_configuration(db, configuration_id):
+            raise HTTPException(status_code=404, detail="Spatial-sensitivity configuration not found.")
+        return None
 
     @app.post("/api/spatial-sensitivity-runs", response_model=SpatialSensitivityRunRead)
     def api_enqueue_spatial_sensitivity(payload: SpatialSensitivityRunCreate, db: Session = Depends(get_db)):

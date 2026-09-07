@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 from datetime import datetime, timedelta
 import json
 from pathlib import Path
@@ -11,13 +12,20 @@ import zipfile
 
 import cv2
 import numpy as np
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session, selectinload
 
 from app import models
 from app.database import data_dir
 from app.preprocessing.steps.load_image import LoadImageStep
-from app.schemas import SpatialSensitivityPreviewRequest, SpatialSensitivityPreviewRead, SpatialSensitivityRunCreate, SpatialSensitivityRunRead
+from app.preprocessing.steps.warp_perspective import WarpPerspectiveStep
+from app.preprocessing.pipeline import encode_absolute_image_data_url
+from app.schemas import (
+    SpatialSensitivityConfigurationCreate, SpatialSensitivityConfigurationRead,
+    SpatialSensitivityPreviewRequest, SpatialSensitivityPreviewRead,
+    SpatialSensitivityRunCreate, SpatialSensitivityRunRead,
+    SpatialSensitivityWarpPreviewRequest, SpatialSensitivityWarpPreviewRead,
+)
 from app.training.data import ResolvedDatasetImage, enumerate_training_dataset_image_records
 from app.training.scheduler import next_queue_rank, scheduler
 
@@ -38,6 +46,74 @@ def _dataset_query(dataset_id: int):
     return select(models.TrainingDataset).where(models.TrainingDataset.id == dataset_id).options(
         selectinload(models.TrainingDataset.rules).selectinload(models.TrainingDatasetRule.folder).selectinload(models.DatasetFolder.dataset)
     )
+
+
+def configuration_signature(config: dict) -> str:
+    normalized = SpatialSensitivityRunCreate.model_validate({**config, "configuration_id": None}).analysis_config()
+    if normalized.get("warp_preview_config") is None:
+        normalized.pop("warp_preview_config", None)
+    encoded = json.dumps(normalized, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _matching_finished_run(db: Session, signature: str) -> models.SpatialSensitivityRun | None:
+    return db.scalar(select(models.SpatialSensitivityRun).where(
+        models.SpatialSensitivityRun.config_signature == signature,
+        models.SpatialSensitivityRun.status == "finished",
+    ).order_by(models.SpatialSensitivityRun.ended_at.desc(), models.SpatialSensitivityRun.id.desc()))
+
+
+def _configuration_read(db: Session, row: models.SpatialSensitivityConfiguration) -> SpatialSensitivityConfigurationRead:
+    run = _matching_finished_run(db, row.config_signature)
+    return SpatialSensitivityConfigurationRead(
+        id=row.id, name=row.name, description=row.description, config=row.config,
+        config_signature=row.config_signature,
+        latest_finished_run_id=run.id if run else None,
+        latest_finished_at=run.ended_at if run else None,
+        created_at=row.created_at, updated_at=row.updated_at,
+    )
+
+
+def list_configurations(db: Session) -> list[SpatialSensitivityConfigurationRead]:
+    rows = db.scalars(select(models.SpatialSensitivityConfiguration).order_by(models.SpatialSensitivityConfiguration.updated_at.desc())).all()
+    return [_configuration_read(db, row) for row in rows]
+
+
+def get_configuration(db: Session, configuration_id: int) -> SpatialSensitivityConfigurationRead | None:
+    row = db.get(models.SpatialSensitivityConfiguration, configuration_id)
+    return _configuration_read(db, row) if row else None
+
+
+def _configuration_with_name(db: Session, name: str, exclude_id: int | None = None):
+    query = select(models.SpatialSensitivityConfiguration).where(func.lower(models.SpatialSensitivityConfiguration.name) == name.lower())
+    if exclude_id is not None: query = query.where(models.SpatialSensitivityConfiguration.id != exclude_id)
+    return db.scalar(query)
+
+
+def create_configuration(db: Session, payload: SpatialSensitivityConfigurationCreate) -> SpatialSensitivityConfigurationRead:
+    name = payload.name.strip()
+    if not name: raise ValueError("Configuration name is required.")
+    if _configuration_with_name(db, name): raise ValueError(f"Configuration name already exists: {name}")
+    row = models.SpatialSensitivityConfiguration(name=name, description=payload.description, config=payload.config,
+        config_signature=configuration_signature(payload.config))
+    db.add(row); db.commit(); db.refresh(row); return _configuration_read(db, row)
+
+
+def update_configuration(db: Session, configuration_id: int, payload: SpatialSensitivityConfigurationCreate) -> SpatialSensitivityConfigurationRead | None:
+    row = db.get(models.SpatialSensitivityConfiguration, configuration_id)
+    if row is None: return None
+    name = payload.name.strip()
+    if not name: raise ValueError("Configuration name is required.")
+    if _configuration_with_name(db, name, configuration_id): raise ValueError(f"Configuration name already exists: {name}")
+    row.name = name; row.description = payload.description; row.config = payload.config
+    row.config_signature = configuration_signature(payload.config)
+    db.commit(); db.refresh(row); return _configuration_read(db, row)
+
+
+def delete_configuration(db: Session, configuration_id: int) -> bool:
+    row = db.get(models.SpatialSensitivityConfiguration, configuration_id)
+    if row is None: return False
+    db.delete(row); db.commit(); return True
 
 
 def load_valid_uint16(path: str) -> np.ndarray:
@@ -89,6 +165,24 @@ def preview(db: Session, payload: SpatialSensitivityPreviewRequest) -> SpatialSe
     )
 
 
+def warp_preview(db: Session, payload: SpatialSensitivityWarpPreviewRequest) -> SpatialSensitivityWarpPreviewRead:
+    dataset = db.scalar(_dataset_query(payload.training_dataset_id))
+    if dataset is None: raise ValueError("Train/Test dataset not found.")
+    records = enumerate_training_dataset_image_records(dataset)
+    if payload.range_start is not None: records = [item for item in records if item.timestamp_parsed >= payload.range_start]
+    if payload.range_end is not None: records = [item for item in records if item.timestamp_parsed <= payload.range_end]
+    record, array = nearest_valid(records, payload.target_timestamp)
+    config = payload.warp.model_dump(mode="json")
+    transformed = WarpPerspectiveStep().apply(array, config, {})
+    return SpatialSensitivityWarpPreviewRead(
+        training_dataset_id=dataset.id, source_timestamp=record.timestamp_parsed,
+        input_width=array.shape[1], input_height=array.shape[0],
+        output_width=transformed.shape[1], output_height=transformed.shape[0],
+        output_shape_mode=config["output_shape_mode"], interpolation=config["interpolation"],
+        image_data_url=encode_absolute_image_data_url(transformed),
+    )
+
+
 def build_roi_mask(points: list[dict], shape: tuple[int, int] = (HEIGHT, WIDTH)) -> np.ndarray:
     polygon = np.rint([[float(point["x"]), float(point["y"])] for point in points]).astype(np.int32)
     if np.any(polygon[:, 0] < 0) or np.any(polygon[:, 0] >= shape[1]) or np.any(polygon[:, 1] < 0) or np.any(polygon[:, 1] >= shape[0]):
@@ -134,8 +228,15 @@ def enqueue(db: Session, payload: SpatialSensitivityRunCreate, *, wake_scheduler
     if len(datasets) != len(payload.training_dataset_ids):
         raise ValueError("One or more Train/Test datasets were not found.")
     snapshot = [{"id": item.id, "name": item.name, "usage_label": item.usage_label, "updated_at": item.updated_at.isoformat() if item.updated_at else None} for item in sorted(datasets, key=lambda x: x.id)]
+    analysis_config = payload.analysis_config()
+    signature = configuration_signature(analysis_config)
+    if payload.configuration_id is not None:
+        saved = db.get(models.SpatialSensitivityConfiguration, payload.configuration_id)
+        if saved is None: raise ValueError("Spatial-sensitivity configuration not found.")
+        if saved.config_signature != signature: raise ValueError("Run configuration differs from the selected saved configuration.")
     run = models.SpatialSensitivityRun(status="queued", current_step="queued", enqueued_at=models.utc_now(),
-        queue_rank=next_queue_rank(db), config=payload.model_dump(mode="json"), dataset_snapshot=snapshot)
+        queue_rank=next_queue_rank(db), configuration_id=payload.configuration_id, config_signature=signature,
+        config=analysis_config, dataset_snapshot=snapshot)
     db.add(run); db.flush()
     for dataset_id in payload.training_dataset_ids:
         db.add(models.SpatialSensitivityRunDataset(run_id=run.id, training_dataset_id=dataset_id))
@@ -249,9 +350,10 @@ def calculate(run: models.SpatialSensitivityRun, datasets: dict[int, models.Trai
     for event in events:
         start, end = datetime.fromisoformat(event["start"]), datetime.fromisoformat(event["end"])
         records = records_by_dataset[int(event["training_dataset_id"])]
-        normal = [r for r in records if start - timedelta(hours=hours) <= r.timestamp_parsed < start]
+        normal_start = datetime.fromisoformat(event["normal_start"]) if event.get("normal_start") else start - timedelta(hours=hours)
+        normal = [r for r in records if normal_start <= r.timestamp_parsed < start]
         active = [r for r in records if start <= r.timestamp_parsed <= end]
-        candidates += len(normal) + len(active); windows.append((event, start, end, normal, active))
+        candidates += len(normal) + len(active); windows.append((event, start, end, normal_start, normal, active))
     report("loading_images", 0, candidates)
     processed = successful = failed = 0
     manifest, rows, event_outputs = [], [], []
@@ -260,7 +362,7 @@ def calculate(run: models.SpatialSensitivityRun, datasets: dict[int, models.Trai
     def counted(ok):
         nonlocal processed, successful, failed
         processed += 1; successful += int(ok); failed += int(not ok); report("loading_images", processed, candidates)
-    for index, (event, start, end, normal_records, event_records) in enumerate(windows):
+    for index, (event, start, end, normal_start, normal_records, event_records) in enumerate(windows):
         if abort_event.is_set(): raise AbortedError()
         rejected_normal, rejected_event = [], []
         normal_stack = _stage(normal_records, root / f".{index}_normal_stack.npy", rejected_normal, manifest, counted)
@@ -274,7 +376,7 @@ def calculate(run: models.SpatialSensitivityRun, datasets: dict[int, models.Trai
         metrics = map_metrics(maps["difference"], maps["z_map"], mask, epsilon)
         dataset = datasets[int(event["training_dataset_id"])]
         row = {"event_id": event["id"], "training_dataset_id": dataset.id, "training_dataset": dataset.name,
-               "normal_start": (start - timedelta(hours=hours)).isoformat(), "normal_end": start.isoformat(),
+               "normal_start": normal_start.isoformat(), "normal_end": start.isoformat(),
                "event_start": start.isoformat(), "event_end": end.isoformat(), "normal_image_count": int(normal_stack.shape[0]),
                "event_image_count": int(event_stack.shape[0]), "invalid_normal_count": len(rejected_normal),
                "invalid_event_count": len(rejected_event), "epsilon": epsilon, **metrics}
@@ -312,7 +414,7 @@ def calculate(run: models.SpatialSensitivityRun, datasets: dict[int, models.Trai
     ax.set_xticks(x, [r["event_id"] for r in rows], rotation=30, ha="right"); ax.set_ylabel("Mean Z"); ax.legend(); artifact_names += _save_figure(fig, root / "z_inside_outside")
     # Reproducible illustrative raw images plus the corresponding median products.
     example_index = next((i for i, item in enumerate(events) if item["id"] == config.get("example_event_id")), 0)
-    example_event, example_start, example_end, example_normal_records, example_event_records = windows[example_index]
+    example_event, example_start, example_end, example_normal_start, example_normal_records, example_event_records = windows[example_index]
     normal_target = datetime.fromisoformat(config["example_normal_timestamp"]) if config.get("example_normal_timestamp") else example_start - timedelta(hours=hours / 2)
     event_target = datetime.fromisoformat(config["example_event_timestamp"]) if config.get("example_event_timestamp") else example_start + (example_end - example_start) / 2
     normal_record, normal_raw = nearest_valid(example_normal_records, normal_target)

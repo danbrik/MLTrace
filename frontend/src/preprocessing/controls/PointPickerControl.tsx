@@ -4,7 +4,7 @@ import { useEffect, useState } from 'react';
 import { defaultPoints, pointFromEvent, rectifiedQuadSize, type Point } from './geometry';
 import type { StepControl, StepControlProps } from './types';
 
-function PointPickerControl({ inputImage, config, disabled, onChange }: StepControlProps) {
+export function PointPickerControl({ inputImage, config, disabled, onChange }: StepControlProps) {
   const [draggingPoint, setDraggingPoint] = useState<number | null>(null);
   const points = (config.source_points as Point[] | undefined) ?? [];
   const automaticSize = config.output_shape_mode === 'preserve_rectangle' ? rectifiedQuadSize(points) : null;

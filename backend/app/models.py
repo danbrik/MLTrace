@@ -836,6 +836,22 @@ class ResolutionSensitivityRun(Base):
     )
 
 
+class SpatialSensitivityConfiguration(Base):
+    """Named reusable full-resolution spatial ROI analysis configuration."""
+
+    __tablename__ = "spatial_sensitivity_configurations"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    name: Mapped[str] = mapped_column(String(255), nullable=False, unique=True)
+    description: Mapped[str | None] = mapped_column(Text)
+    config: Mapped[dict] = mapped_column(json_type(), nullable=False)
+    config_signature: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=False), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=False), server_default=func.now(), onupdate=func.now()
+    )
+
+
 class SpatialSensitivityRun(Base):
     """Queued full-resolution spatial ROI sensitivity analysis."""
 
@@ -863,6 +879,10 @@ class SpatialSensitivityRun(Base):
     successful_images: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     failed_images: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=False))
+    configuration_id: Mapped[int | None] = mapped_column(
+        ForeignKey("spatial_sensitivity_configurations.id", ondelete="SET NULL")
+    )
+    config_signature: Mapped[str] = mapped_column(String(64), nullable=False, default="")
     config: Mapped[dict] = mapped_column(json_type(), nullable=False)
     dataset_snapshot: Mapped[list] = mapped_column(json_type(), nullable=False)
     result: Mapped[dict | None] = mapped_column(json_type())

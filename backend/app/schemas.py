@@ -2643,14 +2643,27 @@ class SpatialSensitivityEvent(BaseModel):
     training_dataset_id: int = Field(ge=1)
     start: datetime
     end: datetime
+    normal_start: datetime | None = None
 
     @model_validator(mode="after")
     def validate_interval(self):
         self.start = _dataset_local_naive(self.start)
         self.end = _dataset_local_naive(self.end)
+        if self.normal_start is not None:
+            self.normal_start = _dataset_local_naive(self.normal_start)
         if self.end < self.start:
             raise ValueError("Event end must not be before start.")
+        if self.normal_start is not None and self.normal_start >= self.start:
+            raise ValueError("Normal start must be before event start.")
         return self
+
+
+class SpatialSensitivityWarpConfig(BaseModel):
+    source_points: list[RoiPoint] = Field(min_length=4, max_length=4)
+    output_shape_mode: Literal["preserve_rectangle", "manual"] = "preserve_rectangle"
+    output_width: int = Field(default=128, ge=1, le=10000)
+    output_height: int = Field(default=128, ge=1, le=10000)
+    interpolation: Literal["nearest", "linear", "area", "cubic"] = "linear"
 
 
 class SpatialSensitivityPreviewRequest(BaseModel):
@@ -2679,7 +2692,24 @@ class SpatialSensitivityPreviewRead(BaseModel):
     image_data_url: str
 
 
+class SpatialSensitivityWarpPreviewRequest(SpatialSensitivityPreviewRequest):
+    warp: SpatialSensitivityWarpConfig
+
+
+class SpatialSensitivityWarpPreviewRead(BaseModel):
+    training_dataset_id: int
+    source_timestamp: datetime
+    input_width: int
+    input_height: int
+    output_width: int
+    output_height: int
+    output_shape_mode: str
+    interpolation: str
+    image_data_url: str
+
+
 class SpatialSensitivityRunCreate(BaseModel):
+    configuration_id: int | None = Field(default=None, ge=1)
     training_dataset_ids: list[int] = Field(min_length=1, max_length=100)
     events: list[SpatialSensitivityEvent] = Field(min_length=1, max_length=200)
     normal_window_hours: float = Field(gt=0, le=24 * 365)
@@ -2690,6 +2720,7 @@ class SpatialSensitivityRunCreate(BaseModel):
     example_event_id: str | None = None
     example_normal_timestamp: datetime | None = None
     example_event_timestamp: datetime | None = None
+    warp_preview_config: SpatialSensitivityWarpConfig | None = None
 
     @model_validator(mode="after")
     def validate_configuration(self):
@@ -2712,6 +2743,35 @@ class SpatialSensitivityRunCreate(BaseModel):
             raise ValueError("Example event id was not found.")
         return self
 
+    def analysis_config(self) -> dict:
+        return self.model_dump(mode="json", exclude={"configuration_id"})
+
+
+class SpatialSensitivityConfigurationCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=255)
+    description: str | None = None
+    config: dict
+
+    @field_validator("config")
+    @classmethod
+    def validate_config(cls, value: dict):
+        parsed = SpatialSensitivityRunCreate.model_validate({**value, "configuration_id": None})
+        return parsed.analysis_config()
+
+
+class SpatialSensitivityConfigurationRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    name: str
+    description: str | None
+    config: dict
+    config_signature: str
+    latest_finished_run_id: int | None = None
+    latest_finished_at: datetime | None = None
+    created_at: datetime
+    updated_at: datetime
+
 
 class SpatialSensitivityRunRead(BaseModel):
     model_config = ConfigDict(from_attributes=True)
@@ -2732,6 +2792,8 @@ class SpatialSensitivityRunRead(BaseModel):
     successful_images: int
     failed_images: int
     heartbeat_at: datetime | None
+    configuration_id: int | None
+    config_signature: str
     config: dict
     dataset_snapshot: list[dict]
     result: dict | None
