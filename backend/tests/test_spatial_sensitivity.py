@@ -25,15 +25,15 @@ def test_robust_change_maps_and_unclipped_metrics() -> None:
     event = np.array([[[11, 5], [4, 20]], [[11, 5], [4, 20]]], dtype=np.uint16)
     maps = compute_maps(normal, event, epsilon=1.0)
     np.testing.assert_array_equal(maps["median_normal"], [[1, 3], [4, 8]])
-    np.testing.assert_array_equal(maps["difference"], [[10, 2], [0, 12]])
+    np.testing.assert_array_equal(maps["D_med"], [[10, 2], [0, 12]])
     np.testing.assert_array_equal(maps["mad_normal"], [[0, 2], [0, 4]])
-    assert maps["z_map"][0, 0] == pytest.approx(10)
+    assert maps["R_med"][0, 0] == pytest.approx(10)
     mask = np.array([[True, False], [True, False]])
-    metrics = map_metrics(maps["difference"], maps["z_map"], mask, 1.0)
-    assert metrics["mean_d_in"] == 5
-    assert metrics["mean_d_out"] == 7
-    assert metrics["q_d"] == pytest.approx(5 / 8)
-    assert metrics["p_in"] == pytest.approx(10 / 24 * 100)
+    metrics = map_metrics(maps, mask)
+    assert metrics["D_med_in"] == 5
+    assert metrics["D_med_out"] == 7
+    assert metrics["Q_D_med"] == pytest.approx(5 / 7)
+    assert metrics["P_in_D_med"] == pytest.approx(10 / 24 * 100)
 
 
 def test_polygon_mask_keeps_inside_and_outside() -> None:
@@ -88,8 +88,8 @@ def test_calculate_writes_reproducible_artifacts(tmp_path: Path, monkeypatch) ->
     monkeypatch.setattr(spatial_sensitivity, "enumerate_training_dataset_image_records", lambda _: records)
     monkeypatch.setattr(spatial_sensitivity, "_save_figure", lambda fig, base: [])
     result, csv_path, archive, successful, failed = calculate(run, {1: dataset}, __import__("threading").Event(), lambda *_: None)
-    assert result["events"][0]["mean_d_in"] == 40
-    assert result["events"][0]["p_in"] == pytest.approx(result["events"][0]["area_in"] / (60 * 80) * 100)
+    assert result["events"][0]["D_med_in"] == 40
+    assert result["events"][0]["P_in_D_med"] == pytest.approx(result["events"][0]["area_in"] / (60 * 80) * 100)
     assert csv_path.is_file() and archive.is_file()
     assert (output / "event_001_arrays.npz").is_file()
     assert successful == 3 and failed == 0
@@ -111,13 +111,14 @@ def test_configuration_signature_is_canonical_and_covers_analysis_fields() -> No
     config = _analysis_config()
     reordered = dict(reversed(list(config.items())))
     assert configuration_signature(config) == configuration_signature(reordered)
-    changed = {**config, "epsilon": 2.0}
+    changed = {**config, "normal_sample_size": 500}
     assert configuration_signature(config) != configuration_signature(changed)
     warped = {**config, "warp_preview_config": {"source_points": config["roi_points"], "output_shape_mode": "manual", "output_width": 320, "output_height": 240, "interpolation": "cubic"}}
     assert configuration_signature(config) != configuration_signature(warped)
     sampled = SpatialSensitivityRunCreate(**config)
     assert sampled.normal_sample_size == 1000 and sampled.event_sample_size == 1000 and sampled.sampling_seed == 42
-    assert configuration_signature(config) != configuration_signature({**config, "sampling_seed": 43})
+    with pytest.raises(ValueError):
+        SpatialSensitivityRunCreate(**{**config, "sampling_seed": 43})
 
 
 def test_deterministic_sample_is_bounded_and_backfills_invalid_images(tmp_path: Path, monkeypatch) -> None:
@@ -201,7 +202,7 @@ def test_saved_configuration_finds_exact_latest_finished_run_and_preserves_histo
         db.add_all([older, newer, failed]); db.commit()
         loaded = spatial_sensitivity.get_configuration(db, saved.id)
         assert loaded and loaded.latest_finished_run_id == newer.id
-        changed = SpatialSensitivityConfigurationCreate(name="ROI Study", description="changed", config={**payload.config, "epsilon": 2})
+        changed = SpatialSensitivityConfigurationCreate(name="ROI Study", description="changed", config={**payload.config, "normal_sample_size": 500})
         updated = spatial_sensitivity.update_configuration(db, saved.id, changed)
         assert updated and updated.latest_finished_run_id is None
         assert spatial_sensitivity.delete_configuration(db, saved.id)
@@ -220,7 +221,7 @@ def test_enqueue_records_saved_configuration_and_rejects_dirty_payload() -> None
         assert created.configuration_id == saved.id
         assert created.config_signature == saved.config_signature
         with pytest.raises(ValueError, match="differs"):
-            spatial_sensitivity.enqueue(db, SpatialSensitivityRunCreate(**{**_analysis_config(), "epsilon": 3}, configuration_id=saved.id), wake_scheduler=False)
+            spatial_sensitivity.enqueue(db, SpatialSensitivityRunCreate(**{**_analysis_config(), "normal_sample_size": 300}, configuration_id=saved.id), wake_scheduler=False)
     finally:
         db.close()
 
@@ -257,7 +258,7 @@ def test_spatial_configuration_api_crud_and_latest_result() -> None:
             config_signature=body["config_signature"], configuration_id=body["id"], dataset_snapshot=[], ended_at=datetime(2026, 2, 1)); db.add(run); db.commit(); run_id = run.id; db.close()
         loaded = client.get(f"/api/spatial-sensitivity/configurations/{body['id']}")
         assert loaded.status_code == 200 and loaded.json()["latest_finished_run_id"] == run_id
-        updated = client.put(f"/api/spatial-sensitivity/configurations/{body['id']}", json={"name": "API config", "description": "changed", "config": {**_analysis_config(), "epsilon": 2}})
+        updated = client.put(f"/api/spatial-sensitivity/configurations/{body['id']}", json={"name": "API config", "description": "changed", "config": {**_analysis_config(), "normal_sample_size": 500}})
         assert updated.status_code == 200 and updated.json()["latest_finished_run_id"] is None
         assert client.delete(f"/api/spatial-sensitivity/configurations/{body['id']}").status_code == 204
         assert client.get(f"/api/spatial-sensitivity-runs/{run_id}").status_code == 200

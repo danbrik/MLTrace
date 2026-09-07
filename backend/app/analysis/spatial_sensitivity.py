@@ -34,7 +34,16 @@ from app.training.folder_time_index import iter_training_dataset_range_records, 
 from app.training.scheduler import next_queue_rank, scheduler
 
 HEIGHT, WIDTH = 960, 1280
-MAD_SCALE = 1.4826
+ANALYSIS_VERSION = "mad_median_q95_v2"
+EPSILON = 1.0
+RATIO_FLOOR = 1e-12
+METRIC_TITLES = {
+    "D_med": "Absolute change (median)",
+    "R_med": "Robust normalized change (median)",
+    "D_q95": "Absolute change (Q95)",
+    "R_q95": "Robust normalized change (Q95)",
+}
+AGGREGATE_NAMES = {name: name.replace("_", "_agg_", 1) for name in METRIC_TITLES}
 COMPUTE_MEMORY_BUDGET_BYTES = 256 * 1024 * 1024
 LOAD_WORKERS = 4
 LOAD_PREFETCH = 8
@@ -73,14 +82,24 @@ def _matching_finished_run(db: Session, signature: str) -> models.SpatialSensiti
 
 
 def _configuration_read(db: Session, row: models.SpatialSensitivityConfiguration) -> SpatialSensitivityConfigurationRead:
-    run = _matching_finished_run(db, row.config_signature)
+    config = current_configuration(row.config)
+    signature = configuration_signature(config)
+    run = _matching_finished_run(db, signature)
     return SpatialSensitivityConfigurationRead(
-        id=row.id, name=row.name, description=row.description, config=row.config,
-        config_signature=row.config_signature,
+        id=row.id, name=row.name, description=row.description, config=config,
+        config_signature=signature,
         latest_finished_run_id=run.id if run else None,
         latest_finished_at=run.ended_at if run else None,
         created_at=row.created_at, updated_at=row.updated_at,
     )
+
+
+def current_configuration(config: dict) -> dict:
+    """Upgrade an editor copy; historical configurations/runs stay untouched."""
+    values = {**config, "analysis_version": ANALYSIS_VERSION, "epsilon": EPSILON, "sampling_seed": 42}
+    for key in ("normal_sample_size", "event_sample_size"):
+        values[key] = min(1000, int(config.get(key, 1000)))
+    return SpatialSensitivityRunCreate.model_validate(values).analysis_config()
 
 
 def list_configurations(db: Session) -> list[SpatialSensitivityConfigurationRead]:
@@ -218,31 +237,45 @@ def build_roi_mask(points: list[dict], shape: tuple[int, int] = (HEIGHT, WIDTH))
     return mask.astype(bool)
 
 
-def compute_maps(normal: np.ndarray, event: np.ndarray, epsilon: float) -> dict[str, np.ndarray]:
-    normal = np.asarray(normal)
-    event = np.asarray(event)
-    if normal.ndim != 3 or event.ndim != 3 or normal.shape[1:] != event.shape[1:]:
+def _event_maps(event: np.ndarray, median_normal: np.ndarray, mad_normal: np.ndarray) -> dict[str, np.ndarray]:
+    median_event = np.median(event, axis=0).astype(np.float32)
+    deviations = np.abs(event.astype(np.float32) - median_normal)
+    denominator = mad_normal.astype(np.float64) + EPSILON
+    D_med = np.abs(median_event - median_normal)
+    D_q95 = np.quantile(deviations, .95, axis=0, method="linear")
+    # Compute normalized per-frame deviations before their temporal quantile.
+    R_q95 = np.quantile(deviations.astype(np.float64) / denominator, .95, axis=0, method="linear")
+    return {"median_event": median_event, "D_med": D_med.astype(np.float32),
+            "R_med": (D_med / denominator).astype(np.float32),
+            "D_q95": D_q95.astype(np.float32), "R_q95": R_q95.astype(np.float32)}
+
+
+def compute_maps(normal: np.ndarray, event: np.ndarray, epsilon: float = EPSILON) -> dict[str, np.ndarray]:
+    normal, event = np.asarray(normal), np.asarray(event)
+    if epsilon != EPSILON:
+        raise ValueError("MAD normalization requires epsilon = 1.0.")
+    if normal.ndim != 3 or event.ndim != 3 or not len(normal) or not len(event) or normal.shape[1:] != event.shape[1:]:
         raise ValueError("Normal and event stacks must be non-empty and have the same image shape.")
     median_normal = np.median(normal, axis=0).astype(np.float32)
-    median_event = np.median(event, axis=0).astype(np.float32)
     mad = np.median(np.abs(normal.astype(np.float32) - median_normal), axis=0).astype(np.float32)
-    difference = np.abs(median_event - median_normal).astype(np.float32)
-    robust_sigma = (MAD_SCALE * mad).astype(np.float32)
-    z_map = (difference / (robust_sigma + float(epsilon))).astype(np.float32)
-    return {"median_normal": median_normal, "median_event": median_event, "mad_normal": mad,
-            "robust_sigma": robust_sigma, "difference": difference, "z_map": z_map}
+    return {"median_normal": median_normal, "mad_normal": mad, **_event_maps(event, median_normal, mad)}
 
 
-def map_metrics(difference: np.ndarray, z_map: np.ndarray, mask: np.ndarray, epsilon: float) -> dict[str, float | int]:
-    inside, outside = mask, ~mask
-    d_in, d_out = float(difference[inside].mean()), float(difference[outside].mean())
-    z_in, z_out = float(z_map[inside].mean()), float(z_map[outside].mean())
-    c_in, c_out = float(difference[inside].sum(dtype=np.float64)), float(difference[outside].sum(dtype=np.float64))
-    total = c_in + c_out
-    return {"area_in": int(inside.sum()), "area_out": int(outside.sum()), "mean_d_in": d_in, "mean_d_out": d_out,
-            "q_d": d_in / (d_out + epsilon), "mean_z_in": z_in, "mean_z_out": z_out,
-            "q_z": z_in / (z_out + epsilon), "c_in": c_in, "c_out": c_out,
-            "p_in": (100.0 * c_in / total) if total else 0.0}
+def map_metrics(maps: dict[str, np.ndarray], mask: np.ndarray) -> dict[str, float | int]:
+    inside, outside = mask.astype(bool), ~mask.astype(bool)
+    if not inside.any() or not outside.any():
+        raise ValueError("ROI must leave pixels both inside and outside.")
+    metrics = {"area_in": int(inside.sum()), "area_out": int(outside.sum())}
+    for name in METRIC_TITLES:
+        values = maps[name]
+        mean_in, mean_out = float(values[inside].mean(dtype=np.float64)), float(values[outside].mean(dtype=np.float64))
+        metrics.update({f"{name}_in": mean_in, f"{name}_out": mean_out,
+                        f"Q_{name}": mean_in / max(mean_out, RATIO_FLOOR)})
+        if name.startswith("D_"):
+            c_in, c_out = float(values[inside].sum(dtype=np.float64)), float(values[outside].sum(dtype=np.float64))
+            metrics.update({f"C_in_{name}": c_in, f"C_out_{name}": c_out,
+                            f"P_in_{name}": 100.0 * c_in / (c_in + c_out) if c_in + c_out else 0.0})
+    return metrics
 
 
 def enqueue(db: Session, payload: SpatialSensitivityRunCreate, *, wake_scheduler: bool = True) -> SpatialSensitivityRunRead:
@@ -255,7 +288,7 @@ def enqueue(db: Session, payload: SpatialSensitivityRunCreate, *, wake_scheduler
     if payload.configuration_id is not None:
         saved = db.get(models.SpatialSensitivityConfiguration, payload.configuration_id)
         if saved is None: raise ValueError("Spatial-sensitivity configuration not found.")
-        if saved.config_signature != signature: raise ValueError("Run configuration differs from the selected saved configuration.")
+        if configuration_signature(current_configuration(saved.config)) != signature: raise ValueError("Run configuration differs from the selected saved configuration.")
     run = models.SpatialSensitivityRun(status="queued", current_step="queued", enqueued_at=models.utc_now(),
         queue_rank=next_queue_rank(db), configuration_id=payload.configuration_id, config_signature=signature,
         config=analysis_config, dataset_snapshot=snapshot)
@@ -476,23 +509,25 @@ def _tile_rows(sample_count: int, *, bytes_per_value: int) -> int:
 
 
 def _compute_normal_staged(normal: np.memmap, abort_event) -> dict[str, np.ndarray]:
-    output = {name: np.empty((HEIGHT, WIDTH), dtype=np.float32) for name in ("median_normal", "mad_normal", "robust_sigma")}
+    output = {name: np.empty((HEIGHT, WIDTH), dtype=np.float32) for name in ("median_normal", "mad_normal")}
     rows = _tile_rows(int(normal.shape[0]), bytes_per_value=8)
     for y in range(0, HEIGHT, rows):
         _abort_if_requested(abort_event); end = min(HEIGHT, y + rows)
         median = np.median(normal[:, y:end], axis=0).astype(np.float32)
         mad = np.median(np.abs(normal[:, y:end].astype(np.float32) - median), axis=0).astype(np.float32)
         output["median_normal"][y:end] = median; output["mad_normal"][y:end] = mad
-        output["robust_sigma"][y:end] = MAD_SCALE * mad
     return output
 
 
-def _compute_event_staged(event: np.memmap, abort_event) -> np.ndarray:
-    output = np.empty((HEIGHT, WIDTH), dtype=np.float32)
-    rows = _tile_rows(int(event.shape[0]), bytes_per_value=4)
+def _compute_event_staged(event: np.memmap, normal: dict[str, np.ndarray], abort_event) -> dict[str, np.ndarray]:
+    output = {name: np.empty((HEIGHT, WIDTH), dtype=np.float32) for name in ("median_event", *METRIC_TITLES)}
+    # Budget includes deviations, float64 normalization and quantile work copies.
+    rows = _tile_rows(int(event.shape[0]), bytes_per_value=40)
     for y in range(0, HEIGHT, rows):
         _abort_if_requested(abort_event); end = min(HEIGHT, y + rows)
-        output[y:end] = np.median(event[:, y:end], axis=0).astype(np.float32)
+        block = _event_maps(event[:, y:end], normal["median_normal"][y:end], normal["mad_normal"][y:end])
+        for name, array in block.items():
+            output[name][y:end] = array
     return output
 
 
@@ -534,9 +569,25 @@ def _cleanup_run_temporaries(run_id: int) -> None:
             pass
 
 
+def _shared_vmax(store: np.memmap, scratch: Path, abort_event) -> float:
+    """Exact pooled quantile using a disposable, disk-backed partition array."""
+    flattened = store.reshape(-1)
+    work = np.lib.format.open_memmap(scratch, mode="w+", dtype=np.float32, shape=(store.size,))
+    try:
+        for offset in range(0, store.size, 1_000_000):
+            _abort_if_requested(abort_event)
+            work[offset:offset + 1_000_000] = flattened[offset:offset + 1_000_000]
+        value = float(np.quantile(work, .995, axis=0, method="linear", overwrite_input=True))
+        _abort_if_requested(abort_event)
+        return value if value > 0 else 1.0
+    finally:
+        del work
+        scratch.unlink(missing_ok=True)
+
+
 def calculate(run: models.SpatialSensitivityRun, datasets: dict[int, models.TrainingDataset], abort_event, report):
     plt = _plotting()
-    config, root = run.config, _artifact_dir(run.id); root.mkdir(parents=True, exist_ok=True)
+    config, root = current_configuration(run.config), _artifact_dir(run.id); root.mkdir(parents=True, exist_ok=True)
     points = config["roi_points"]; mask = build_roi_mask(points, (HEIGHT, WIDTH)); np.save(root / "roi_mask.npy", mask)
     events = config["events"]; hours = float(config["normal_window_hours"]); epsilon = float(config["epsilon"])
     normal_sample_size = int(config.get("normal_sample_size", 1000))
@@ -545,9 +596,9 @@ def calculate(run: models.SpatialSensitivityRun, datasets: dict[int, models.Trai
     windows = []
     processed = successful = failed = 0
     manifest_windows, rows, event_outputs = [], [], []
-    d_store = np.lib.format.open_memmap(root / ".all_difference.npy", mode="w+", dtype=np.float32, shape=(len(events), HEIGHT, WIDTH))
-    z_store = np.lib.format.open_memmap(root / ".all_z.npy", mode="w+", dtype=np.float32, shape=(len(events), HEIGHT, WIDTH))
-    temporary_paths: list[Path] = [root / ".all_difference.npy", root / ".all_z.npy"]
+    stores = {name: np.lib.format.open_memmap(root / f".all_{name}.npy", mode="w+", dtype=np.float32,
+              shape=(len(events), HEIGHT, WIDTH)) for name in METRIC_TITLES}
+    temporary_paths: list[Path] = [root / f".all_{name}.npy" for name in METRIC_TITLES]
     for index, event in enumerate(events):
         _abort_if_requested(abort_event)
         start, end = datetime.fromisoformat(event["start"]), datetime.fromisoformat(event["end"])
@@ -578,13 +629,11 @@ def calculate(run: models.SpatialSensitivityRun, datasets: dict[int, models.Trai
             abort_event=abort_event, progress=lambda done, total: report("loading_event_sample", done, total))
         processed += event_summary["attempted_count"]; successful += event_summary["valid_sample_size"]; failed += event_summary["rejected_attempt_count"]
         report("calculating_event_statistics", 0, int(event_stack.shape[0]))
-        maps["median_event"] = _compute_event_staged(event_stack, abort_event)
+        maps.update(_compute_event_staged(event_stack, maps, abort_event))
         del event_stack; event_stack_path.unlink(missing_ok=True)
-        maps["difference"] = np.abs(maps["median_event"] - maps["median_normal"]).astype(np.float32)
-        maps["z_map"] = (maps["difference"] / (maps["robust_sigma"] + epsilon)).astype(np.float32)
         safe_id = f"event_{index + 1:03d}"
         np.savez_compressed(root / f"{safe_id}_arrays.npz", **maps)
-        metrics = map_metrics(maps["difference"], maps["z_map"], mask, epsilon)
+        metrics = map_metrics(maps, mask)
         row = {"event_id": event["id"], "training_dataset_id": dataset.id, "training_dataset": dataset.name,
                "normal_start": normal_start.isoformat(), "normal_end": start.isoformat(),
                "event_start": start.isoformat(), "event_end": end.isoformat(),
@@ -594,46 +643,52 @@ def calculate(run: models.SpatialSensitivityRun, datasets: dict[int, models.Trai
                "event_candidate_count": event_candidate_count, "event_requested_sample_size": event_sample_size,
                "event_attempted_count": event_summary["attempted_count"], "event_image_count": event_summary["valid_sample_size"],
                "invalid_event_count": event_summary["rejected_attempt_count"], "event_sample_shortfall": event_summary["sample_shortfall"],
-               "sampling_seed": sampling_seed, "sampling_mode": "deterministic_uniform", "epsilon": epsilon, **metrics}
+               "sampling_seed": sampling_seed, "sampling_mode": "deterministic_uniform", "epsilon": epsilon,
+               "ratio_floor": RATIO_FLOOR, **metrics}
         manifest_windows.extend([
             {"event_id": event["id"], "window": "normal", **normal_summary, "rejected": rejected_normal},
             {"event_id": event["id"], "window": "event", **event_summary, "rejected": rejected_event},
         ])
-        d_store[index] = maps["difference"]; z_store[index] = maps["z_map"]
+        for name in METRIC_TITLES: stores[name][index] = maps[name]
         rows.append(row); event_outputs.append((safe_id, event, row, normal_candidates, event_candidates))
         windows.append((event, start, end, normal_start, normal_candidates, event_candidates))
         del maps
     report("aggregating", len(events), len(events))
-    d_store.flush(); z_store.flush()
-    d_agg = np.mean(d_store, axis=0, dtype=np.float64).astype(np.float32)
-    z_agg = np.mean(z_store, axis=0, dtype=np.float64).astype(np.float32)
-    np.savez_compressed(root / "aggregate_arrays.npz", difference=d_agg, z_map=z_agg)
-    vmax_d = float(np.quantile(d_store, .995))
-    vmax_z = float(np.quantile(z_store, .995))
-    vmax_d = vmax_d if vmax_d > 0 else 1.0; vmax_z = vmax_z if vmax_z > 0 else 1.0
+    aggregates, vmax = {}, {}
+    for name, store in stores.items():
+        _abort_if_requested(abort_event)
+        store.flush()
+        aggregates[name] = np.mean(store, axis=0, dtype=np.float64).astype(np.float32)
+        vmax[name] = _shared_vmax(store, root / ".quantile_work.npy", abort_event)
+    np.savez_compressed(root / "aggregate_arrays.npz", **{AGGREGATE_NAMES[name]: values for name, values in aggregates.items()})
     artifact_names = ["roi_mask.npy", "aggregate_arrays.npz"]
     for safe_id, event, _, _, _ in event_outputs:
-        _abort_if_requested(abort_event)
         with np.load(root / f"{safe_id}_arrays.npz") as saved:
             maps = {key: saved[key] for key in saved.files}
         artifact_names.append(f"{safe_id}_arrays.npz")
-        artifact_names += _map_figure(maps["difference"], f"{event['id']} – absolute change D", vmax_d, points, root / f"{safe_id}_D", "Absolute intensity difference")
-        artifact_names += _map_figure(maps["z_map"], f"{event['id']} – normalized change Z", vmax_z, points, root / f"{safe_id}_Z", "Robust normalized change")
-    artifact_names += _map_figure(d_agg, "Aggregated absolute change", vmax_d, points, root / "aggregate_D", "Absolute intensity difference")
-    artifact_names += _map_figure(z_agg, "Aggregated normalized change", vmax_z, points, root / "aggregate_Z", "Robust normalized change")
-    # Shared-scale event grids.
-    for metric, vmax, label in (("difference", vmax_d, "D"), ("z_map", vmax_z, "Z")):
+        for name, title in METRIC_TITLES.items():
+            _abort_if_requested(abort_event)
+            artifact_names += _map_figure(maps[name], f"{event['id']} – {title}", vmax[name], points, root / f"{safe_id}_{name}", name)
+    for name, title in METRIC_TITLES.items():
         _abort_if_requested(abort_event)
-        cols = min(3, len(events)); grid_rows = int(np.ceil(len(events) / cols)); fig, axes = plt.subplots(grid_rows, cols, figsize=(5 * cols, 4 * grid_rows), squeeze=False)
+        artifact_names += _map_figure(aggregates[name], f"Aggregated {title[0].lower() + title[1:]}", vmax[name],
+                                     points, root / AGGREGATE_NAMES[name], name)
+        cols = min(3, len(events)); grid_rows = int(np.ceil(len(events) / cols))
+        fig, axes = plt.subplots(grid_rows, cols, figsize=(5 * cols, 4 * grid_rows), squeeze=False)
         shown = None
         for ax, (event_index, (_, event, _, _, _)) in zip(axes.flat, enumerate(event_outputs)):
-            values = d_store[event_index] if metric == "difference" else z_store[event_index]
-            shown = ax.imshow(np.clip(values, 0, vmax), cmap="viridis", vmin=0, vmax=vmax); _draw_roi(ax, points); ax.set_title(event["id"]); ax.axis("off")
+            _abort_if_requested(abort_event)
+            shown = ax.imshow(stores[name][event_index], cmap="viridis", vmin=0, vmax=vmax[name])
+            _draw_roi(ax, points); ax.set_title(event["id"]); ax.axis("off")
         for ax in axes.flat[len(events):]: ax.axis("off")
-        fig.colorbar(shown, ax=axes.ravel().tolist(), label=label, shrink=.8); artifact_names += _save_figure(fig, root / f"events_grid_{label}")
-    fig, ax = plt.subplots(figsize=(max(7, len(rows) * .8), 4)); x = np.arange(len(rows)); width = .38
-    ax.bar(x-width/2, [r["mean_z_in"] for r in rows], width, label="Inside ROI"); ax.bar(x+width/2, [r["mean_z_out"] for r in rows], width, label="Outside ROI")
-    ax.set_xticks(x, [r["event_id"] for r in rows], rotation=30, ha="right"); ax.set_ylabel("Mean Z"); ax.legend(); artifact_names += _save_figure(fig, root / "z_inside_outside")
+        fig.colorbar(shown, ax=axes.ravel().tolist(), label=name, shrink=.8)
+        artifact_names += _save_figure(fig, root / f"events_grid_{name}")
+        fig, ax = plt.subplots(figsize=(max(7, len(rows) * .8), 4)); x = np.arange(len(rows)); width = .38
+        ax.bar(x-width/2, [r[f"{name}_in"] for r in rows], width, label="Inside ROI")
+        ax.bar(x+width/2, [r[f"{name}_out"] for r in rows], width, label="Outside ROI")
+        ax.set_xticks(x, [r["event_id"] for r in rows], rotation=30, ha="right")
+        ax.set_ylabel(f"Mean {name}"); ax.legend()
+        artifact_names += _save_figure(fig, root / f"{name}_inside_outside")
     # Reproducible illustrative raw images plus the corresponding median products.
     example_index = next((i for i, item in enumerate(events) if item["id"] == config.get("example_event_id")), 0)
     example_event, example_start, example_end, example_normal_start, example_normal_candidates, example_event_candidates = windows[example_index]
@@ -666,33 +721,37 @@ def calculate(run: models.SpatialSensitivityRun, datasets: dict[int, models.Trai
         (event_raw, "(c) Selected event raw image", False, "gray", gray_min, gray_max),
         (example_maps["median_normal"], "(d) Normal median", False, "gray", gray_min, gray_max),
         (example_maps["median_event"], "(e) Event median", False, "gray", gray_min, gray_max),
-        (example_maps["difference"], "(f) Absolute change D", True, "viridis", 0, vmax_d),
-        (example_maps["z_map"], "(g) Normalized change Z", True, "viridis", 0, vmax_z),
-        (d_agg, "(h) Aggregated D", True, "viridis", 0, vmax_d),
-        (z_agg, "(i) Aggregated Z", True, "viridis", 0, vmax_z),
     ]
-    fig, axes = plt.subplots(3, 3, figsize=(16, 12))
-    for ax, (array, title, roi, cmap, vmin, vmax) in zip(axes.flat, panels):
-        shown = ax.imshow(np.clip(array, vmin, vmax), cmap=cmap, vmin=vmin, vmax=vmax)
+    for name, title in METRIC_TITLES.items():
+        panels.append((example_maps[name], title, True, "viridis", 0, vmax[name]))
+    for name, title in METRIC_TITLES.items():
+        panels.append((aggregates[name], f"Aggregated {title[0].lower() + title[1:]}", True, "viridis", 0, vmax[name]))
+    fig, axes = plt.subplots(5, 3, figsize=(18, 22))
+    for ax, (array, title, roi, cmap, vmin, display_max) in zip(axes.flat, panels):
+        _abort_if_requested(abort_event)
+        shown = ax.imshow(array, cmap=cmap, vmin=vmin, vmax=display_max)
         if roi: _draw_roi(ax, points)
         ax.set_title(title); ax.axis("off")
         if cmap == "viridis": fig.colorbar(shown, ax=ax, fraction=.046, pad=.02)
     fig.suptitle("Spatial analysis of event-related image changes", fontsize=18)
+    for ax in axes.flat[len(panels):]: ax.axis("off")
     artifact_names += _save_figure(fig, root / "publication_overview")
-    numeric = [key for key, value in rows[0].items() if isinstance(value, (int, float)) and key not in {"training_dataset_id"}]
+    numeric = [key for key, value in rows[0].items() if isinstance(value, (int, float))]
     median_row = {key: "" for key in rows[0]}; median_row["event_id"] = "Median"; median_row["training_dataset"] = "All events"
     for key in numeric: median_row[key] = float(np.median([float(row[key]) for row in rows]))
     import pandas as pd
     csv_path = root / "results.csv"
     pd.DataFrame(rows + [median_row], columns=list(rows[0])).to_csv(csv_path, index=False)
     (root / "config.json").write_text(json.dumps(config, indent=2, ensure_ascii=False), encoding="utf-8")
-    manifest_payload = {"sampling": {"mode": "deterministic_uniform", "seed": sampling_seed,
+    manifest_payload = {"analysis_version": ANALYSIS_VERSION, "epsilon": EPSILON, "ratio_floor": RATIO_FLOOR,
+        "quantile_method": "linear", "vmax": vmax, "zero_total_change_P_in": 0.0,
+        "sampling": {"mode": "deterministic_uniform", "seed": sampling_seed,
         "normal_sample_size": normal_sample_size, "event_sample_size": event_sample_size},
         "windows": manifest_windows, "illustrations": {"roi_source": source_record.file_path,
         "normal": normal_record.file_path, "event": event_record.file_path}, "display_range": [gray_min, gray_max]}
     (root / "input_manifest.json").write_text(json.dumps(manifest_payload, indent=2, ensure_ascii=False), encoding="utf-8")
     artifact_names += ["results.csv", "config.json", "input_manifest.json"]
-    del d_store, z_store
+    stores.clear(); del store
     for temporary in temporary_paths: temporary.unlink(missing_ok=True)
     archive = root / "spatial_sensitivity_artifacts.zip"
     _abort_if_requested(abort_event)
@@ -700,11 +759,12 @@ def calculate(run: models.SpatialSensitivityRun, datasets: dict[int, models.Trai
         for path in sorted(root.iterdir()):
             if path.is_file() and path != archive: bundle.write(path, path.name)
     artifact_names.append(archive.name)
-    result = {"events": rows, "median": median_row, "vmax_d": vmax_d, "vmax_z": vmax_z,
+    result = {"analysis_version": ANALYSIS_VERSION, "events": rows, "median": median_row, "vmax": vmax,
+              "ratio_floor": RATIO_FLOOR, "quantile_method": "linear",
               "epsilon": epsilon, "normal_window_hours": hours, "artifact_names": artifact_names,
               "normal_sample_size": normal_sample_size, "event_sample_size": event_sample_size,
               "sampling_seed": sampling_seed, "sampling_mode": "deterministic_uniform",
-              "aggregate_metrics": map_metrics(d_agg, z_agg, mask, epsilon)}
+              "aggregate_metrics": map_metrics(aggregates, mask)}
     return result, csv_path, archive, successful, failed
 
 
@@ -742,6 +802,8 @@ def run_scheduled(run_id: int, abort_event: threading.Event | None = None) -> No
             write_active(current_step=step, processed_images=done, total_images=total, heartbeat_at=models.utc_now())
         try:
             write_active(current_step="loading_configuration")
+            if run.config.get("analysis_version") != ANALYSIS_VERSION:
+                raise ValueError("This queued run uses the previous spatial methodology. Reload its configuration and start a new analysis.")
             datasets = {}
             for item in run.dataset_snapshot:
                 dataset = db.scalar(_dataset_query(int(item["id"])))

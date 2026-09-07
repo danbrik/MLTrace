@@ -430,6 +430,7 @@ export type SpatialSensitivityWarpPreview = {
   output_width: number; output_height: number; output_shape_mode: string; interpolation: string; image_data_url: string;
 };
 export type SpatialSensitivityAnalysisConfig = {
+  analysis_version?: 'mad_median_q95_v2';
   training_dataset_ids: number[]; events: SpatialSensitivityEvent[]; normal_window_hours: number; epsilon: number;
   normal_sample_size: number; event_sample_size: number; sampling_seed: number;
   sampling_mode: 'deterministic_uniform';
@@ -447,9 +448,11 @@ export type SpatialSensitivityPreview = {
   width: number; height: number; dtype: string; image_data_url: string;
 };
 export type SpatialSensitivityResult = {
+  analysis_version?: string;
   events: Array<Record<string, number | string>>;
   median: Record<string, number | string>;
-  vmax_d: number; vmax_z: number; epsilon: number; normal_window_hours: number;
+  vmax?: Record<string, number>; epsilon: number; normal_window_hours: number;
+  ratio_floor?: number; quantile_method?: string;
   normal_sample_size?: number; event_sample_size?: number; sampling_seed?: number;
   sampling_mode?: 'deterministic_uniform';
   artifact_names: string[];

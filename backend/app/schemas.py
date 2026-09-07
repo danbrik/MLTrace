@@ -2709,14 +2709,15 @@ class SpatialSensitivityWarpPreviewRead(BaseModel):
 
 
 class SpatialSensitivityRunCreate(BaseModel):
+    analysis_version: Literal["mad_median_q95_v2"] = "mad_median_q95_v2"
     configuration_id: int | None = Field(default=None, ge=1)
     training_dataset_ids: list[int] = Field(min_length=1, max_length=100)
     events: list[SpatialSensitivityEvent] = Field(min_length=1, max_length=200)
     normal_window_hours: float = Field(gt=0, le=24 * 365)
-    epsilon: float = Field(default=1.0, gt=0)
-    normal_sample_size: int = Field(default=1000, ge=1, le=100_000)
-    event_sample_size: int = Field(default=1000, ge=1, le=100_000)
-    sampling_seed: int = Field(default=42, ge=0, le=9_007_199_254_740_991)
+    epsilon: Literal[1.0] = 1.0
+    normal_sample_size: int = Field(default=1000, ge=1, le=1000)
+    event_sample_size: int = Field(default=1000, ge=1, le=1000)
+    sampling_seed: Literal[42] = 42
     sampling_mode: Literal["deterministic_uniform"] = "deterministic_uniform"
     roi_points: list[RoiPoint] = Field(min_length=4, max_length=4)
     roi_source_dataset_id: int = Field(ge=1)

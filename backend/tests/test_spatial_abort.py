@@ -33,7 +33,7 @@ def factory(tmp_path, monkeypatch):
 
 
 def make_run(db, **kwargs):
-    run = models.SpatialSensitivityRun(config={}, dataset_snapshot=[], **{
+    run = models.SpatialSensitivityRun(config={"analysis_version": spatial.ANALYSIS_VERSION}, dataset_snapshot=[], **{
         "status": "running", "current_step": "calculating", "pid": 12345,
         "process_started_at": 100.0, "process_project_id": "project-a", **kwargs,
     })
