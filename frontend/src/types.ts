@@ -431,6 +431,8 @@ export type SpatialSensitivityWarpPreview = {
 };
 export type SpatialSensitivityAnalysisConfig = {
   training_dataset_ids: number[]; events: SpatialSensitivityEvent[]; normal_window_hours: number; epsilon: number;
+  normal_sample_size: number; event_sample_size: number; sampling_seed: number;
+  sampling_mode: 'deterministic_uniform';
   roi_points: Array<{ x: number; y: number }>; roi_source_dataset_id: number; roi_source_timestamp: string;
   example_event_id: string | null; example_normal_timestamp: string | null; example_event_timestamp: string | null;
   warp_preview_config?: SpatialSensitivityWarpConfig | null;
@@ -448,6 +450,8 @@ export type SpatialSensitivityResult = {
   events: Array<Record<string, number | string>>;
   median: Record<string, number | string>;
   vmax_d: number; vmax_z: number; epsilon: number; normal_window_hours: number;
+  normal_sample_size?: number; event_sample_size?: number; sampling_seed?: number;
+  sampling_mode?: 'deterministic_uniform';
   artifact_names: string[];
   aggregate_metrics: Record<string, number>;
 };

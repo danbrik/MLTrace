@@ -533,6 +533,7 @@ export function previewSpatialSensitivityWarp(payload: { training_dataset_id: nu
 }
 export function createSpatialSensitivityRun(payload: {
   training_dataset_ids: number[]; events: SpatialSensitivityEvent[]; normal_window_hours: number; epsilon: number;
+  normal_sample_size?: number; event_sample_size?: number; sampling_seed?: number; sampling_mode?: 'deterministic_uniform';
   roi_points: Array<{ x: number; y: number }>; roi_source_dataset_id: number; roi_source_timestamp: string;
   example_event_id?: string | null; example_normal_timestamp?: string | null; example_event_timestamp?: string | null;
   configuration_id?: number | null;

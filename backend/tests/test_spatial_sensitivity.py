@@ -17,6 +17,7 @@ from app.database import get_db
 from app.main import app
 from app.schemas import SpatialSensitivityConfigurationCreate, SpatialSensitivityRunCreate, SpatialSensitivityWarpPreviewRequest
 from app.training.data import ResolvedDatasetImage
+from app.training import folder_time_index
 
 
 def test_robust_change_maps_and_unclipped_metrics() -> None:
@@ -114,6 +115,56 @@ def test_configuration_signature_is_canonical_and_covers_analysis_fields() -> No
     assert configuration_signature(config) != configuration_signature(changed)
     warped = {**config, "warp_preview_config": {"source_points": config["roi_points"], "output_shape_mode": "manual", "output_width": 320, "output_height": 240, "interpolation": "cubic"}}
     assert configuration_signature(config) != configuration_signature(warped)
+    sampled = SpatialSensitivityRunCreate(**config)
+    assert sampled.normal_sample_size == 1000 and sampled.event_sample_size == 1000 and sampled.sampling_seed == 42
+    assert configuration_signature(config) != configuration_signature({**config, "sampling_seed": 43})
+
+
+def test_deterministic_sample_is_bounded_and_backfills_invalid_images(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(spatial_sensitivity, "HEIGHT", 2); monkeypatch.setattr(spatial_sensitivity, "WIDTH", 3)
+    base = datetime(2026, 1, 1)
+    records = [ResolvedDatasetImage(str(tmp_path / f"{index}.tif"), base + timedelta(minutes=index), "d", str(tmp_path), 1, ".", f"{index}.tif") for index in range(8)]
+    dataset = models.TrainingDataset(id=4, name="d", usage_label="train")
+    monkeypatch.setattr(spatial_sensitivity, "enumerate_training_dataset_image_records", lambda _: records)
+    invalid_paths: set[str] = set()
+    def fake_load(path: str):
+        if path in invalid_paths: raise ValueError("broken")
+        return np.full((2, 3), int(Path(path).stem), dtype=np.uint16)
+    monkeypatch.setattr(spatial_sensitivity, "load_valid_uint16", fake_load)
+    first = tmp_path / "first.sqlite3"; second = tmp_path / "second.sqlite3"; changed = tmp_path / "changed.sqlite3"
+    for path, seed in ((first, 42), (second, 42), (changed, 43)):
+        spatial_sensitivity._build_candidate_table(dataset, base, base + timedelta(minutes=7), end_inclusive=True,
+            event_id="U1", window_kind="normal", seed=seed, path=path, abort_event=__import__("threading").Event())
+    order = lambda path: [record.file_path for record in spatial_sensitivity._candidate_records(path, dataset)]
+    assert order(first) == order(second)
+    assert order(first) != order(changed)
+    invalid_paths.add(order(first)[0])
+    stack, summary, rejected = spatial_sensitivity._stage_sample(first, dataset, 7, tmp_path / "stack.npy",
+        event_id="U1", window_kind="normal", abort_event=__import__("threading").Event(), progress=lambda *_: None)
+    assert stack.shape == (7, 2, 3)
+    assert summary["valid_sample_size"] == 7 and summary["attempted_count"] == 8
+    selected_paths = [item["path"] for item in summary["selected_valid_images"]]
+    assert len(selected_paths) == len(set(selected_paths)) == 7
+    assert len(rejected) == 1 and rejected[0]["path"] in invalid_paths
+
+
+def test_disk_time_index_preserves_rule_stride_phase_for_clipped_range(tmp_path: Path, monkeypatch) -> None:
+    image_dir = tmp_path / "images"; image_dir.mkdir()
+    base = datetime(2026, 1, 1)
+    for minute in range(10):
+        (image_dir / f"image_20260101_00{minute:02d}00.tif").touch()
+    source = models.Dataset(id=1, name="source", root_path=str(image_dir), status="ready",
+        timestamp_regex=r"(?P<timestamp>\d{8}_\d{6})", timestamp_format="%Y%m%d_%H%M%S")
+    folder = models.DatasetFolder(id=2, dataset=source, relative_path=".", image_count=10,
+        first_timestamp=base, last_timestamp=base + timedelta(minutes=9))
+    selected = models.TrainingDataset(id=3, name="selected", usage_label="train")
+    rule = models.TrainingDatasetRule(id=4, training_dataset=selected, folder=folder,
+        start_timestamp=base, end_timestamp=base + timedelta(minutes=9), stride=2)
+    selected.rules = [rule]
+    monkeypatch.setattr(folder_time_index, "data_dir", lambda: tmp_path / "data")
+    records = list(folder_time_index.iter_training_dataset_range_records(
+        selected, base + timedelta(minutes=3), base + timedelta(minutes=7), end_inclusive=True))
+    assert [record.timestamp_parsed.minute for record in records] == [4, 6]
 
 
 def test_warp_preview_reuses_preprocessing_transformation(monkeypatch) -> None:
@@ -170,6 +221,19 @@ def test_enqueue_records_saved_configuration_and_rejects_dirty_payload() -> None
         assert created.config_signature == saved.config_signature
         with pytest.raises(ValueError, match="differs"):
             spatial_sensitivity.enqueue(db, SpatialSensitivityRunCreate(**{**_analysis_config(), "epsilon": 3}, configuration_id=saved.id), wake_scheduler=False)
+    finally:
+        db.close()
+
+
+def test_queued_spatial_run_can_be_aborted_immediately() -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:", poolclass=StaticPool)
+    Base.metadata.create_all(engine); db = sessionmaker(bind=engine)()
+    try:
+        run = models.SpatialSensitivityRun(status="queued", current_step="queued", config=_analysis_config(),
+            config_signature=configuration_signature(_analysis_config()), dataset_snapshot=[])
+        db.add(run); db.commit()
+        aborted = spatial_sensitivity.abort_run(db, run.id)
+        assert aborted and aborted.status == "aborted" and aborted.current_step == "aborted"
     finally:
         db.close()
 

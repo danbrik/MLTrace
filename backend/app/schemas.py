@@ -2714,6 +2714,10 @@ class SpatialSensitivityRunCreate(BaseModel):
     events: list[SpatialSensitivityEvent] = Field(min_length=1, max_length=200)
     normal_window_hours: float = Field(gt=0, le=24 * 365)
     epsilon: float = Field(default=1.0, gt=0)
+    normal_sample_size: int = Field(default=1000, ge=1, le=100_000)
+    event_sample_size: int = Field(default=1000, ge=1, le=100_000)
+    sampling_seed: int = Field(default=42, ge=0, le=9_007_199_254_740_991)
+    sampling_mode: Literal["deterministic_uniform"] = "deterministic_uniform"
     roi_points: list[RoiPoint] = Field(min_length=4, max_length=4)
     roi_source_dataset_id: int = Field(ge=1)
     roi_source_timestamp: datetime
