@@ -20,7 +20,8 @@ export type ResourceKey =
   | 'evaluationLabelSets'
   | 'evaluations'
   | 'redundancySources'
-  | 'redundancyAnalyses';
+  | 'redundancyAnalyses'
+  | 'dataQualityAnalyses';
 
 type CacheEntry<T> = {
   value?: T;

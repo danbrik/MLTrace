@@ -56,6 +56,11 @@ const BASE_CONFIG: Partial<Config> = {
  */
 export function PlotlyChart({ data, layout, config, height = 400, className, onClick, onSelected, onRelayout, rescaleYOnVisibleX = false, onDoubleClick, fullResolutionExport }: PlotlyChartProps) {
   const ref = useRef<HTMLDivElement | null>(null);
+  const pendingPlotOperations = useRef(new Set<Promise<unknown>>());
+  const trackPlotOperation = useCallback((operation: Promise<unknown>) => {
+    pendingPlotOperations.current.add(operation);
+    void operation.finally(() => pendingPlotOperations.current.delete(operation)).catch(error => console.error('Plotly operation failed', error));
+  }, []);
   const rescaleFrameRef = useRef<number | null>(null);
   const pendingXRangeRef = useRef<TimeSeriesAxisRange | null>(null);
   const applyingYRangeRef = useRef(0);
@@ -133,8 +138,8 @@ export function PlotlyChart({ data, layout, config, height = 400, className, onC
       },
     };
 
-    Plotly.react(el as unknown as PlotlyHTMLElement, preparedData, themedLayout, effectiveConfig);
-  }, [preparedData, chromeLayout, effectiveConfig, dark]);
+    trackPlotOperation(Plotly.react(el as unknown as PlotlyHTMLElement, preparedData, themedLayout, effectiveConfig));
+  }, [preparedData, chromeLayout, effectiveConfig, dark, trackPlotOperation]);
 
   useEffect(() => {
     const plot = ref.current as unknown as PlotlyHTMLElement | null;
@@ -224,14 +229,23 @@ export function PlotlyChart({ data, layout, config, height = 400, className, onC
   useEffect(() => {
     const el = ref.current;
     if (!el) return undefined;
-    const observer = new ResizeObserver(() => Plotly.Plots.resize(el));
+    const observer = new ResizeObserver(() => {
+      if (el.isConnected && el.clientWidth > 0 && el.clientHeight > 0) {
+        // Plotly returns a promise here, although its published types declare void.
+        trackPlotOperation(Plotly.Plots.resize(el) as unknown as Promise<unknown>);
+      }
+    });
     observer.observe(el);
 
     return () => {
       observer.disconnect();
-      Plotly.purge(el);
+      // Plotly resize/render is asynchronous. Purging while it is still running
+      // removes _fullLayout before its after-plot callback can finish.
+      void Promise.allSettled([...pendingPlotOperations.current]).then(() => {
+        if (!el.isConnected) Plotly.purge(el);
+      });
     };
-  }, []);
+  }, [trackPlotOperation]);
 
   const download = async () => {
     if (!fullResolutionExport && exportTable.columns.length === 0) return;

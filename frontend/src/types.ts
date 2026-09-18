@@ -2217,3 +2217,25 @@ export type RegistryDeletePreview = {
 };
 
 export type RegistryDeleteResult = { deleted: Record<string, number>; freed_bytes: number };
+
+export type DataQualityParameters = {
+  source_id: number; time_column: string; selected_columns: string[];
+  data_types: Record<string, 'numeric' | 'text'>;
+  start_timestamp: string; end_timestamp: string; interval_seconds: number;
+};
+export type SensorQuality = {
+  sensor: string; data_type: 'numeric' | 'text'; valid_n: number; missing_percent: number;
+  longest_gap_minutes: number; unique: number; constant: boolean; invalid_n: number; conflict_n: number;
+  min: number | null; q01: number | null; median: number | null; q99: number | null;
+  max: number | null; iqr: number | null; std: number | null;
+};
+export type DataQualityAnalysis = {
+  id: number; source_id: number; name: string; parameters: DataQualityParameters;
+  job_status: string; progress: number; stage: string; elapsed_seconds: number;
+  eta_seconds: number | null; started_at: string | null; error_message: string | null;
+  result: { summary: Record<string, string | number>; quality: SensorQuality[] } | null;
+  created_at: string; updated_at: string;
+};
+export type DataQualityHeatmap = {
+  x: string[]; bin_end: string[]; y: string[]; z: number[][]; aggregated: boolean;
+};

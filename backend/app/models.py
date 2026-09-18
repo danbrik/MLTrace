@@ -1517,3 +1517,24 @@ class RedundancyAnalysis(Base):
 
 ModelConfiguration = MethodConfiguration
 ModelConfigurationParameter = MethodConfigurationParameter
+
+
+class DataQualityAnalysis(Base):
+    __tablename__ = 'data_quality_analyses'
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    source_id: Mapped[int] = mapped_column(ForeignKey('redundancy_csv_sources.id', ondelete='RESTRICT'), index=True)
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    cache_key: Mapped[str] = mapped_column(String(64), unique=True, nullable=False)
+    parameters: Mapped[dict] = mapped_column(json_type(), nullable=False)
+    job_status: Mapped[str] = mapped_column(String(24), default='queued', nullable=False)
+    progress: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
+    stage: Mapped[str] = mapped_column(String(255), default='Queued', nullable=False)
+    elapsed_seconds: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
+    eta_seconds: Mapped[float | None] = mapped_column(Float)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime())
+    error_message: Mapped[str | None] = mapped_column(Text)
+    cancel_requested: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    result: Mapped[dict | None] = mapped_column(json_type())
+    missing_runs: Mapped[dict | None] = mapped_column(json_type())
+    created_at: Mapped[datetime] = mapped_column(DateTime(), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(), server_default=func.now(), onupdate=func.now())

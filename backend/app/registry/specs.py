@@ -252,7 +252,8 @@ def _redundancy_source_dependents(db: Session, source_id: int) -> list[Dependent
     return _named(
         db, "redundancy_analysis", models.RedundancyAnalysis, models.RedundancyAnalysis.id,
         lambda row: row.name, models.RedundancyAnalysis.source_id == source_id,
-    )
+    ) + _named(db, "data_quality_analysis", models.DataQualityAnalysis, models.DataQualityAnalysis.id,
+               lambda row: row.name, models.DataQualityAnalysis.source_id == source_id)
 
 
 # -- artifact resolvers --------------------------------------------------------
@@ -437,6 +438,11 @@ def _delete_drift_calculation(db: Session, entity_id: int) -> bool:
 def _delete_redundancy_source(db: Session, entity_id: int) -> bool:
     from app.redundancy.service import delete_source
     return delete_source(db, entity_id)
+
+
+def _delete_data_quality_analysis(db: Session, entity_id: int) -> bool:
+    from app.data_quality.service import delete_analysis
+    return delete_analysis(db, entity_id)
 
 
 def _delete_redundancy_analysis(db: Session, entity_id: int) -> bool:
@@ -667,6 +673,15 @@ ENTITY_SPECS: dict[str, EntitySpec] = {
         deleter=_delete_redundancy_source, size_of=lambda row: row.byte_size,
         detail_exclude=frozenset({"preview_rows"}),
     ),
+    "data_quality_analysis": EntitySpec(
+        key="data_quality_analysis", label="Data Quality Analyses",
+        model=models.DataQualityAnalysis, name_of=lambda row: row.name,
+        list_fields=["id", "name", "source_id", "job_status", "progress", "stage", "created_at"],
+        search_fields=["name"], filters=[_CREATED_FILTER],
+        deleter=_delete_data_quality_analysis,
+        blockers=lambda row: [f"Job is {row.job_status}. Cancel it before deleting."] if row.job_status in _ACTIVE else [],
+        detail_exclude=frozenset({"result", "missing_runs"}),
+    ),
     "redundancy_analysis": EntitySpec(
         key="redundancy_analysis", label="Redundancy Analyses",
         model=models.RedundancyAnalysis, name_of=lambda row: row.name,
@@ -772,6 +787,7 @@ ENTITY_SPECS: dict[str, EntitySpec] = {
 
 # Bottom-up deletion order for cascades: children before their parents.
 DELETE_ORDER: list[str] = [
+    "data_quality_analysis",
     "redundancy_analysis",
     "evaluation_separation_calculation",
     "evaluation_drift_calculation",

@@ -1900,3 +1900,29 @@ export async function getFullRedundancySeries(id: number, columns: string[]): Pr
 export function redundancyExportUrl(id: number, kind: 'quality' | 'pairs' | 'clusters' | 'correlation' | 'parameters'): string {
   return projectMediaUrl(`/api/redundancy/analyses/${id}/exports/${kind}`);
 }
+
+// -- Time-grid-aware data quality -------------------------------------------
+export function lookupDataQuality(parameters: import('./types').DataQualityParameters) {
+  return request<import('./types').DataQualityAnalysis | null>('/api/data-quality/analyses/lookup', { method: 'POST', body: JSON.stringify(parameters) });
+}
+export function startDataQuality(parameters: import('./types').DataQualityParameters) {
+  return request<import('./types').DataQualityAnalysis>('/api/data-quality/analyses', { method: 'POST', body: JSON.stringify(parameters) })
+    .then((row) => { invalidate(['dataQualityAnalyses']); return row; });
+}
+export function getDataQuality(id: number) {
+  return request<import('./types').DataQualityAnalysis>(`/api/data-quality/analyses/${id}`);
+}
+export function dataQualityAction(id: number, action: 'cancel' | 'retry') {
+  return request<import('./types').DataQualityAnalysis>(`/api/data-quality/analyses/${id}/${action}`, { method: 'POST' })
+    .then((row) => { invalidate(['dataQualityAnalyses']); return row; });
+}
+export async function deleteDataQuality(id: number) {
+  await request<void>(`/api/data-quality/analyses/${id}`, { method: 'DELETE' });
+  invalidate(['dataQualityAnalyses']);
+}
+export function getDataQualityHeatmap(id: number, start?: string, end?: string) {
+  const query = new URLSearchParams();
+  if (start) query.set('start', start);
+  if (end) query.set('end', end);
+  return request<import('./types').DataQualityHeatmap>(`/api/data-quality/analyses/${id}/heatmap?${query}`);
+}

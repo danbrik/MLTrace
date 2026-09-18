@@ -29,6 +29,7 @@ import { AnalysisPage } from './pages/AnalysisPage';
 import { AnomalyDetectionPage } from './pages/AnomalyDetectionPage';
 import { DataManagerPage } from './pages/DataManagerPage';
 import { CsvMergePage } from './pages/CsvMergePage';
+import { DataQualityAnalysisPage } from './pages/DataQualityAnalysisPage';
 import { RedundancyAnalysisPage } from './pages/RedundancyAnalysisPage';
 import { ThresholdPage } from './pages/ThresholdPage';
 import { DatasetsPage } from './pages/DatasetsPage';
@@ -64,6 +65,7 @@ type Page =
   | 'evaluation'
   | 'anomaly-detection'
   | 'csv-merge'
+  | 'data-quality-analysis'
   | 'redundancy-analysis'
   | 'threshold'
   | 'scheduler'
@@ -79,7 +81,7 @@ export function App() {
   const requestedPage = match?.[2] as Page | undefined;
   const page: Page = requestedPage && [
     'datasets', 'training-datasets', 'preprocessing', 'methods', 'training-pipelines', 'testing',
-    'inspect', 'optimization', 'analysis', 'image-distribution', 'resolution-sensitivity', 'spatial-sensitivity', 'evaluation', 'anomaly-detection', 'csv-merge', 'redundancy-analysis', 'threshold', 'scheduler', 'data-manager',
+    'inspect', 'optimization', 'analysis', 'image-distribution', 'resolution-sensitivity', 'spatial-sensitivity', 'evaluation', 'anomaly-detection', 'csv-merge', 'redundancy-analysis', 'data-quality-analysis', 'threshold', 'scheduler', 'data-manager',
   ].includes(requestedPage) ? requestedPage : 'datasets';
   const [project, setProject] = useState<Project | null>(null);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
@@ -134,6 +136,7 @@ export function App() {
     { id: 'evaluation', label: 'Evaluation', icon: <ClipboardCheck size={18} /> },
     { id: 'anomaly-detection', label: 'Anomaly Detection', icon: <Activity size={18} /> },
     { id: 'csv-merge', label: 'CSV Merge', icon: <FileSpreadsheet size={18} /> },
+    { id: 'data-quality-analysis', label: 'Data Quality Analysis', icon: <Network size={18} /> },
     { id: 'redundancy-analysis', label: 'Redundancy Analysis', icon: <Network size={18} /> },
     { id: 'threshold', label: 'Threshold', icon: <Gauge size={18} /> },
     { id: 'scheduler', label: 'Scheduler', icon: <CalendarClock size={18} /> },
@@ -269,6 +272,9 @@ export function App() {
           <PageErrorBoundary label="CSV Merge">
             <CsvMergePage active={page === 'csv-merge'} />
           </PageErrorBoundary>
+        </Box>
+        <Box display={page === 'data-quality-analysis' ? 'block' : 'none'}>
+          <PageErrorBoundary label="Data Quality Analysis"><DataQualityAnalysisPage active={page === 'data-quality-analysis'} /></PageErrorBoundary>
         </Box>
         <Box display={page === 'redundancy-analysis' ? 'block' : 'none'}>
           <PageErrorBoundary label="Redundancy Analysis">

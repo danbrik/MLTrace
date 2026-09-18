@@ -97,8 +97,9 @@ def delete_source(db: Session, source_id: int) -> bool:
     if row is None:
         return False
     count = db.scalar(select(func.count(models.RedundancyAnalysis.id)).where(models.RedundancyAnalysis.source_id == source_id)) or 0
-    if count:
-        raise ValueError("CSV source is used by redundancy analyses.")
+    quality_count = db.scalar(select(func.count(models.DataQualityAnalysis.id)).where(models.DataQualityAnalysis.source_id == source_id)) or 0
+    if count or quality_count:
+        raise ValueError("CSV source is used by redundancy or data quality analyses.")
     artifact_path = Path(row.artifact_path)
     db.delete(row)
     db.commit()
