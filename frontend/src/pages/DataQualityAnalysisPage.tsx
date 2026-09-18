@@ -1,9 +1,10 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { Alert, Badge, Button, Card, Checkbox, FileInput, Group, Loader, MultiSelect, NumberInput, Pagination, Paper, Progress, ScrollArea, Select, SimpleGrid, Stack, Table, Text, TextInput, Title } from '@mantine/core';
+import { Alert, Badge, Button, Card, Checkbox, FileInput, Group, Loader, MultiSelect, NumberInput, Pagination, Paper, Progress, ScrollArea, Select, SimpleGrid, Stack, Table, Tabs, Text, TextInput, Title } from '@mantine/core';
 import { dataQualityAction, deleteDataQuality, getDataQuality, getDataQualityHeatmap, listRedundancySources, lookupDataQuality, startDataQuality, uploadRedundancySource } from '../api';
 import type { DataQualityAnalysis, DataQualityHeatmap, DataQualityParameters, RedundancySource } from '../types';
 import { PlotlyChart } from '../components/PlotlyChart';
 import type { Data } from '../lib/plotly';
+import { CharacterizationPanel } from '../dataQuality/CharacterizationPanel';
 import { qualityFlags, visibleSensors } from '../dataQuality/helpers';
 
 const fmt = (value: unknown) => typeof value === 'number' ? value.toLocaleString(undefined, { maximumFractionDigits: 4 }) : value == null ? '—' : String(value);
@@ -81,6 +82,9 @@ function Results({ analysis }: { analysis: DataQualityAnalysis }) {
 }
 
 export function DataQualityAnalysisPage({ active }: { active: boolean }) {
+  const [selectedSensor, setSelectedSensor] = useState<string | null>(null);
+  const [characterizationRunning, setCharacterizationRunning] = useState(false);
+  const [tab, setTab] = useState<string | null>('quality');
   const [sources, setSources] = useState<RedundancySource[]>([]);
   const [sourceId, setSourceId] = useState<string | null>(null);
   const [timeColumn, setTimeColumn] = useState<string | null>(null);
@@ -103,7 +107,7 @@ export function DataQualityAnalysisPage({ active }: { active: boolean }) {
   useEffect(() => { if (active) void listRedundancySources().then(setSources).catch(e => setError(message(e))); }, [active]);
   useEffect(() => {
     const generation = ++selectionGeneration.current;
-    setAnalysis(null); setCacheHit(false); setError('');
+    setAnalysis(null); setCacheHit(false); setError(''); setCharacterizationRunning(false);
     if (!payload || !active) { setChecking(false); return; }
     setChecking(true);
     const timer = window.setTimeout(() => {
@@ -162,8 +166,12 @@ export function DataQualityAnalysisPage({ active }: { active: boolean }) {
     {analysis && <Paper withBorder p="md"><Group justify="space-between"><Text fw={600}>{analysis.stage}</Text><Badge>{analysis.job_status}</Badge></Group>
       {running && <><Progress value={analysis.progress * 100} animated mt="sm" /><Text size="sm" mt="xs">{Math.round(analysis.progress * 100)}% · Elapsed: {Math.round(analysis.elapsed_seconds)} s · {analysis.eta_seconds == null ? 'Estimating remaining time…' : `About ${Math.ceil(analysis.eta_seconds)} s remaining`}</Text><Button mt="sm" color="orange" variant="light" onClick={() => void run('cancel')}>Cancel</Button></>}
       {analysis.error_message && <Alert color="red" mt="sm">{analysis.error_message}</Alert>}
-      {!running && <Group mt="sm">{['failed', 'cancelled'].includes(analysis.job_status) && <Button loading={busy} onClick={() => void run('retry')}>Retry</Button>}<Button color="red" variant="subtle" onClick={() => { if (window.confirm('Delete this saved data quality analysis?')) void deleteDataQuality(analysis.id).then(() => { setAnalysis(null); setCacheHit(false); }).catch(e => setError(message(e))); }}>Delete analysis</Button></Group>}
+      {!running && <Group mt="sm">{['failed', 'cancelled'].includes(analysis.job_status) && <Button loading={busy} onClick={() => void run('retry')}>Retry</Button>}<Button color="red" variant="subtle" disabled={characterizationRunning} onClick={() => { if (window.confirm('Delete this saved data quality analysis?')) void deleteDataQuality(analysis.id).then(() => { setAnalysis(null); setCacheHit(false); }).catch(e => setError(message(e))); }}>Delete analysis</Button></Group>}
     </Paper>}
-    {analysis?.job_status === 'ready' && analysis.result && <Results key={analysis.id} analysis={analysis} />}
+    {analysis?.job_status === 'ready' && analysis.result && <Tabs value={tab} onChange={setTab} keepMounted={false}>
+      <Tabs.List><Tabs.Tab value="quality">Data Quality</Tabs.Tab><Tabs.Tab value="characterization">Statistical &amp; Temporal Characterization</Tabs.Tab></Tabs.List>
+      <Tabs.Panel value="quality" pt="md"><Results key={analysis.id} analysis={analysis} /></Tabs.Panel>
+      <Tabs.Panel value="characterization"><CharacterizationPanel key={analysis.id} analysisId={analysis.id} selectedSensor={selectedSensor} onSelectSensor={setSelectedSensor} onRunningChange={setCharacterizationRunning} /></Tabs.Panel>
+    </Tabs>}
   </Stack>;
 }

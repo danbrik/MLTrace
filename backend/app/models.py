@@ -1538,3 +1538,22 @@ class DataQualityAnalysis(Base):
     missing_runs: Mapped[dict | None] = mapped_column(json_type())
     created_at: Mapped[datetime] = mapped_column(DateTime(), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime(), server_default=func.now(), onupdate=func.now())
+
+
+class CharacterizationRun(Base):
+    __tablename__ = 'characterization_runs'
+    __table_args__ = (UniqueConstraint('analysis_id', 'version', name='uq_characterization_version'),)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    analysis_id: Mapped[int] = mapped_column(ForeignKey('data_quality_analyses.id', ondelete='RESTRICT'), index=True)
+    version: Mapped[int] = mapped_column(Integer, nullable=False)
+    job_status: Mapped[str] = mapped_column(String(24), nullable=False, default='queued')
+    progress: Mapped[float] = mapped_column(Float, nullable=False, default=0)
+    stage: Mapped[str] = mapped_column(String(255), nullable=False, default='Queued')
+    elapsed_seconds: Mapped[float] = mapped_column(Float, nullable=False, default=0)
+    eta_seconds: Mapped[float | None] = mapped_column(Float)
+    error_message: Mapped[str | None] = mapped_column(Text)
+    cancel_requested: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    result: Mapped[dict | None] = mapped_column(json_type())
+    artifact_path: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(), server_default=func.now(), onupdate=func.now())

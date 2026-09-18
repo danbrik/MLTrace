@@ -2239,3 +2239,26 @@ export type DataQualityAnalysis = {
 export type DataQualityHeatmap = {
   x: string[]; bin_end: string[]; y: string[]; z: number[][]; aggregated: boolean;
 };
+
+export type CharacterizationSummary = {
+  variable: string; data_type: 'numeric' | 'text'; valid_n: number;
+  mean: number | null; median: number | null; std: number | null; iqr: number | null;
+  min: number | null; q01: number | null; q05: number | null; q25: number | null;
+  q75: number | null; q95: number | null; q99: number | null; max: number | null;
+};
+export type CharacterizationRun = {
+  id: number; analysis_id: number; version: number; job_status: string; progress: number; stage: string;
+  elapsed_seconds: number; eta_seconds: number | null; error_message: string | null;
+  result: { summary: CharacterizationSummary[] } | null;
+};
+export type CharacterizationHistogram = { edges: number[]; counts: number[] };
+export type CharacterizationDetail = {
+  histogram: CharacterizationHistogram;
+  box: { q25: number; median: number; q75: number; lower: number; upper: number; outlier_count: number } | null;
+  dynamics: { pair_count: number; non_finite_pair_count: number; median_abs: number | null; q95_abs: number | null; q99_abs: number | null; max_abs: number | null; unchanged_percent: number | null };
+  delta_histogram: CharacterizationHistogram; absolute_delta_histogram: CharacterizationHistogram;
+};
+export type CharacterizationSeries = {
+  aggregated: boolean; interval_seconds: number;
+  points: { time: string; end: string; valid_n: number; q25: number | null; value: number | null; q75: number | null; connect_previous: boolean; has_internal_gap: boolean }[];
+};

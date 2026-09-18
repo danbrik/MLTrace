@@ -440,6 +440,21 @@ def _delete_redundancy_source(db: Session, entity_id: int) -> bool:
     return delete_source(db, entity_id)
 
 
+def _quality_blockers(row) -> list[str]:
+    from sqlalchemy.orm import object_session
+    from app.data_quality.characterization import active_for_analysis
+    messages = [f"Job is {row.job_status}. Cancel it before deleting."] if row.job_status in _ACTIVE else []
+    db = object_session(row)
+    if db is not None and active_for_analysis(db, row.id):
+        messages.append("Characterization is active. Cancel it before deleting.")
+    return messages
+
+
+def _quality_artifacts(db: Session, row) -> list[Path]:
+    from app.data_quality.characterization import root
+    return [root(run.id) for run in db.scalars(select(models.CharacterizationRun).where(models.CharacterizationRun.analysis_id == row.id))]
+
+
 def _delete_data_quality_analysis(db: Session, entity_id: int) -> bool:
     from app.data_quality.service import delete_analysis
     return delete_analysis(db, entity_id)
@@ -679,7 +694,7 @@ ENTITY_SPECS: dict[str, EntitySpec] = {
         list_fields=["id", "name", "source_id", "job_status", "progress", "stage", "created_at"],
         search_fields=["name"], filters=[_CREATED_FILTER],
         deleter=_delete_data_quality_analysis,
-        blockers=lambda row: [f"Job is {row.job_status}. Cancel it before deleting."] if row.job_status in _ACTIVE else [],
+        blockers=_quality_blockers, artifacts=_quality_artifacts,
         detail_exclude=frozenset({"result", "missing_runs"}),
     ),
     "redundancy_analysis": EntitySpec(

@@ -1926,3 +1926,21 @@ export function getDataQualityHeatmap(id: number, start?: string, end?: string) 
   if (end) query.set('end', end);
   return request<import('./types').DataQualityHeatmap>(`/api/data-quality/analyses/${id}/heatmap?${query}`);
 }
+
+export function getCharacterization(id: number) {
+  return request<import('./types').CharacterizationRun | null>(`/api/data-quality/analyses/${id}/characterization`);
+}
+export function characterizationAction(id: number, action: 'start' | 'retry' | 'cancel') {
+  return request<import('./types').CharacterizationRun>(`/api/data-quality/analyses/${id}/characterization${action === 'start' ? '' : '/' + action}`, { method: 'POST' });
+}
+export function getCharacterizationDetail(id: number, sensor: string) {
+  return request<import('./types').CharacterizationDetail>(`/api/data-quality/analyses/${id}/characterization/detail?${new URLSearchParams({ sensor })}`, undefined, 120_000);
+}
+export function getCharacterizationSeries(id: number, sensor: string, range: [string, string] | null) {
+  const query = new URLSearchParams({ sensor });
+  if (range) { query.set('start', range[0]); query.set('end', range[1]); }
+  return request<import('./types').CharacterizationSeries>(`/api/data-quality/analyses/${id}/characterization/series?${query}`, undefined, 120_000);
+}
+export function characterizationExportUrl(id: number, search: string, dataType: string, sort: string, descending: boolean) {
+  return projectMediaUrl(`/api/data-quality/analyses/${id}/characterization/export?${new URLSearchParams({ search, data_type: dataType, sort, descending: String(descending) })}`);
+}

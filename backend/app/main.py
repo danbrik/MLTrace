@@ -247,6 +247,8 @@ async def lifespan(app: FastAPI):
                 ensure_default_method_configurations(db)
                 from app.data_quality.service import reconcile_interrupted
                 reconcile_interrupted(db)
+                from app.data_quality.characterization import reconcile
+                reconcile(db)
             finally:
                 db.close()
     scheduler.start()
@@ -2313,6 +2315,8 @@ def create_app() -> FastAPI:
     register_redundancy_routes(app)
     from app.data_quality.router import register_routes as register_data_quality_routes
     register_data_quality_routes(app)
+    from app.data_quality.characterization_router import register_routes as register_characterization_routes
+    register_characterization_routes(app)
     return app
 
 

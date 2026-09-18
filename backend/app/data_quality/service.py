@@ -109,11 +109,15 @@ def retry(db, row):
 
 
 def delete_analysis(db, analysis_id):
+    db.execute(update(models.DataQualityAnalysis).where(models.DataQualityAnalysis.id == analysis_id)
+               .values(updated_at=models.DataQualityAnalysis.updated_at))
     row = db.get(models.DataQualityAnalysis, analysis_id)
     if row is None:
         return False
     if row.job_status in {'queued', 'running'}:
         raise ValueError('Cancel the running analysis before deleting it.')
+    from app.data_quality.characterization import delete_for_analysis
+    delete_for_analysis(db, analysis_id)
     db.delete(row)
     db.commit()
     return True

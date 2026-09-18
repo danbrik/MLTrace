@@ -4,7 +4,7 @@ import csv
 import math
 import json
 import struct
-from contextlib import ExitStack
+from contextlib import ExitStack, contextmanager
 from tempfile import TemporaryDirectory
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -29,13 +29,14 @@ def missing_runs(valid_indices: list[int], count: int) -> list[list[int]]:
     return runs
 
 
-def analyze(path: Path, delimiter: str, params: dict, row_count: int, progress=lambda *args: None, cancelled=lambda: False):
-    with TemporaryDirectory(prefix='mltrace-quality-') as directory:
-        with ExitStack() as stack:
-            return _analyze(path, delimiter, params, row_count, progress, cancelled, Path(directory), stack)
+@contextmanager
+def normalized_csv(path: Path, delimiter: str, params: dict, row_count: int,
+                   progress=lambda *args: None, cancelled=lambda: False):
+    with TemporaryDirectory(prefix='mltrace-quality-') as directory, ExitStack() as stack:
+        yield _prepare_normalized(path, delimiter, params, row_count, progress, cancelled, Path(directory), stack)
 
 
-def _analyze(path, delimiter, params, row_count, progress, cancelled, directory, stack):
+def _prepare_normalized(path, delimiter, params, row_count, progress, cancelled, directory, stack):
     columns = params['selected_columns']
     start = datetime.fromisoformat(params['start_timestamp'])
     end = datetime.fromisoformat(params['end_timestamp'])
@@ -113,30 +114,50 @@ def _analyze(path, delimiter, params, row_count, progress, cancelled, directory,
                 else:
                     spools[name].write((json.dumps([index, value], ensure_ascii=False) + '\n').encode('utf-8'))
 
-    quality = []
-    all_runs = {}
-    for position, name in enumerate(columns):
-        report(0.55 + 0.35 * position / len(columns), f'Calculating sensor statistics ({position + 1}/{len(columns)})')
-        sensor = {}
-        conflicts = set()
-        spool = spools[name]
-        spool.seek(0)
-        numeric = params['data_types'][name] == 'numeric'
-        def observations():
-            if numeric:
-                while chunk := spool.read(16 * 4096):
-                    yield from struct.iter_unpack('<qd', chunk)
-            else:
-                for line in spool:
-                    yield json.loads(line)
-        for n, (index, value) in enumerate(observations()):
-            if n % 10000 == 0 and cancelled():
-                raise AnalysisCancelled('Calculation cancelled.')
-            if index not in sensor:
-                sensor[index] = value
-            elif sensor[index] != value:
-                conflicts.add(index)
-        spool.close()
+    def sensors():
+        for position, name in enumerate(columns):
+            report(0.55 + 0.35 * position / len(columns), f'Processing sensor ({position + 1}/{len(columns)})')
+            sensor = {}
+            conflicts = set()
+            spool = spools[name]
+            spool.seek(0)
+            numeric = params['data_types'][name] == 'numeric'
+            def observations():
+                if numeric:
+                    while chunk := spool.read(16 * 4096):
+                        yield from struct.iter_unpack('<qd', chunk)
+                else:
+                    for line in spool:
+                        yield json.loads(line)
+            for n, (index, value) in enumerate(observations()):
+                if n % 10000 == 0 and cancelled():
+                    raise AnalysisCancelled('Calculation cancelled.')
+                if index not in sensor:
+                    sensor[index] = value
+                elif sensor[index] != value:
+                    conflicts.add(index)
+            spool.close()
+            yield name, sensor, invalid[name], len(conflicts)
+    metadata = dict(grid_start=grid_start.isoformat(), grid_count=count, interval_seconds=params['interval_seconds'],
+                    present_timepoints=len(present), duplicate_timestamps=duplicates,
+                    non_monotone_timestamps=backwards, invalid_timestamps=invalid_time, off_grid_rows=offgrid)
+    return metadata, sensors()
+
+
+def analyze(path: Path, delimiter: str, params: dict, row_count: int, progress=lambda *args: None, cancelled=lambda: False):
+    with normalized_csv(path, delimiter, params, row_count, progress, cancelled) as (metadata, sensors):
+        return _quality_from_normalized(metadata, sensors, params, progress, cancelled)
+
+
+def _quality_from_normalized(metadata, sensors, params, progress, cancelled):
+    def report(value, stage):
+        if cancelled():
+            raise AnalysisCancelled('Calculation cancelled.')
+        progress(value, stage)
+    count = metadata['grid_count']
+    columns = params['selected_columns']
+    quality, all_runs = [], {}
+    for name, sensor, invalid_n, conflict_n in sensors:
         runs = missing_runs(list(sensor), count)
         all_runs[name] = runs
         valid = len(sensor)
@@ -146,7 +167,7 @@ def _analyze(path, delimiter, params, row_count, progress, cancelled, directory,
                     missing_percent=(count - valid) / count * 100,
                     longest_gap_minutes=max((b - a for a, b in runs), default=0) * params['interval_seconds'] / 60,
                     unique=unique, constant=valid >= 2 and unique == 1,
-                    invalid_n=invalid[name], conflict_n=len(conflicts),
+                    invalid_n=invalid_n, conflict_n=conflict_n,
                     min=None, q01=None, median=None, q99=None, max=None, iqr=None, std=None)
         if numeric and valid:
             array = np.array(list(sensor.values()), dtype=float)
@@ -160,14 +181,14 @@ def _analyze(path, delimiter, params, row_count, progress, cancelled, directory,
         quality.append(item)
     report(0.92, 'Preparing missingness heatmap')
     result = dict(summary=dict(start_timestamp=params['start_timestamp'], end_timestamp=params['end_timestamp'],
-                  interval_seconds=params['interval_seconds'], expected_timepoints=count, present_timepoints=len(present),
-                  missing_timepoints=count - len(present), coverage_percent=len(present) / count * 100,
-                  duplicate_timestamps=duplicates, non_monotone_timestamps=backwards, invalid_timestamps=invalid_time,
-                  off_grid_rows=offgrid, variable_count=len(columns),
+                  interval_seconds=params['interval_seconds'], expected_timepoints=count, present_timepoints=metadata['present_timepoints'],
+                  missing_timepoints=count - metadata['present_timepoints'], coverage_percent=metadata['present_timepoints'] / count * 100,
+                  duplicate_timestamps=metadata['duplicate_timestamps'], non_monotone_timestamps=metadata['non_monotone_timestamps'], invalid_timestamps=metadata['invalid_timestamps'],
+                  off_grid_rows=metadata['off_grid_rows'], variable_count=len(columns),
                   variables_with_missing=sum(x['valid_n'] < count for x in quality),
                   constant_variables=sum(x['constant'] for x in quality),
                   duplicate_conflicts=sum(x['conflict_n'] for x in quality)), quality=quality,
-                  grid_start=grid_start.isoformat(), grid_count=count, interval_seconds=params['interval_seconds'])
+                  grid_start=metadata['grid_start'], grid_count=count, interval_seconds=params['interval_seconds'])
     report(0.97, 'Saving results')
     return result, all_runs
 
