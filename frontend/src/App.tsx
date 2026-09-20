@@ -1,4 +1,4 @@
-import { AppShell, Box, Button, Group, Stack, Text, Title, Tooltip, ActionIcon } from '@mantine/core';
+import { AppShell, Box, Button, Group, Stack, Text, Title, Tooltip, ActionIcon, SegmentedControl } from '@mantine/core';
 import {
   Archive,
   Activity,
@@ -29,12 +29,14 @@ import { AnalysisPage } from './pages/AnalysisPage';
 import { AnomalyDetectionPage } from './pages/AnomalyDetectionPage';
 import { DataManagerPage } from './pages/DataManagerPage';
 import { CsvMergePage } from './pages/CsvMergePage';
+import { TimeSeriesPage } from './pages/TimeSeriesPage';
 import { DataQualityAnalysisPage } from './pages/DataQualityAnalysisPage';
 import { RedundancyAnalysisPage } from './pages/RedundancyAnalysisPage';
 import { ThresholdPage } from './pages/ThresholdPage';
 import { DatasetsPage } from './pages/DatasetsPage';
 import { InspectPage } from './pages/InspectPage';
 import { ImageDistributionPage } from './pages/ImageDistributionPage';
+import { RepresentationAnalysisPage } from './pages/RepresentationAnalysisPage';
 import { ResolutionSensitivityPage } from './pages/ResolutionSensitivityPage';
 import { SpatialSensitivityPage } from './pages/SpatialSensitivityPage';
 import { EvaluationPage } from './pages/EvaluationPage';
@@ -50,6 +52,8 @@ import { getProject, setActiveProject } from './api';
 import type { Project } from './types';
 
 type Page =
+  | 'time-series-datasets'
+  | 'time-series-splits'
   | 'datasets'
   | 'training-datasets'
   | 'preprocessing'
@@ -60,6 +64,7 @@ type Page =
   | 'optimization'
   | 'analysis'
   | 'image-distribution'
+  | 'dinov3-analysis'
   | 'resolution-sensitivity'
   | 'spatial-sensitivity'
   | 'evaluation'
@@ -80,9 +85,11 @@ export function App() {
   setActiveProject(projectId);
   const requestedPage = match?.[2] as Page | undefined;
   const page: Page = requestedPage && [
+    'time-series-datasets', 'time-series-splits',
     'datasets', 'training-datasets', 'preprocessing', 'methods', 'training-pipelines', 'testing',
-    'inspect', 'optimization', 'analysis', 'image-distribution', 'resolution-sensitivity', 'spatial-sensitivity', 'evaluation', 'anomaly-detection', 'csv-merge', 'redundancy-analysis', 'data-quality-analysis', 'threshold', 'scheduler', 'data-manager',
+    'inspect', 'optimization', 'analysis', 'dinov3-analysis', 'image-distribution', 'resolution-sensitivity', 'spatial-sensitivity', 'evaluation', 'anomaly-detection', 'csv-merge', 'redundancy-analysis', 'data-quality-analysis', 'threshold', 'scheduler', 'data-manager',
   ].includes(requestedPage) ? requestedPage : 'datasets';
+  const timeSeriesMode = page.startsWith('time-series-');
   const [project, setProject] = useState<Project | null>(null);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
 
@@ -120,7 +127,10 @@ export function App() {
     return <ProjectsPage onOpen={(selected) => navigate(`/projects/${selected.id}/datasets`)} />;
   }
 
-  const navItems: Array<{ id: Page; label: string; icon: React.ReactNode }> = [
+  const navItems: Array<{ id: Page; label: string; icon: React.ReactNode }> = timeSeriesMode ? [
+    { id: 'time-series-datasets', label: 'Datenbasis', icon: <Database size={18} /> },
+    { id: 'time-series-splits', label: 'Splits', icon: <ListChecks size={18} /> },
+  ] : [
     { id: 'datasets', label: 'Datasets', icon: <Database size={18} /> },
     { id: 'training-datasets', label: 'Train/Test Datasets', icon: <ListChecks size={18} /> },
     { id: 'preprocessing', label: 'Preprocessing', icon: <Workflow size={18} /> },
@@ -131,6 +141,7 @@ export function App() {
     { id: 'optimization', label: 'Optimization', icon: <SlidersHorizontal size={18} /> },
     { id: 'analysis', label: 'Model Analysis', icon: <BarChart3 size={18} /> },
     { id: 'image-distribution', label: 'Image Distribution', icon: <LineChart size={18} /> },
+    { id: 'dinov3-analysis', label: 'DINOv3-Repräsentationsanalyse', icon: <BrainCircuit size={18} /> },
     { id: 'resolution-sensitivity', label: 'Resolution Sensitivity', icon: <ScanSearch size={18} /> },
     { id: 'spatial-sensitivity', label: 'Spatial ROI Sensitivity', icon: <ScanSearch size={18} /> },
     { id: 'evaluation', label: 'Evaluation', icon: <ClipboardCheck size={18} /> },
@@ -157,18 +168,26 @@ export function App() {
               {project?.name ?? 'Loading project…'}
             </Text>
           </Box>
+          <Group>
+          <SegmentedControl
+            aria-label="Arbeitsbereich"
+            value={timeSeriesMode ? 'time-series' : 'images'}
+            data={[{ value: 'images', label: 'Bilddaten' }, { value: 'time-series', label: 'Zeitreihen' }]}
+            onChange={(value) => setPage(value === 'time-series' ? 'time-series-datasets' : 'datasets')}
+          />
           <Button variant="subtle" onClick={() => { setActiveProject(null); navigate('/'); }}>
             Leave project
           </Button>
+          </Group>
         </Group>
       </AppShell.Header>
 
-      <AppShell.Navbar p="md">
+      <AppShell.Navbar p="md" style={{ overflowY: 'auto' }}>
         <Stack gap="xs">
           <Group justify={sidebarCollapsed ? 'center' : 'space-between'} mb="xs">
             {!sidebarCollapsed && (
               <Text size="xs" fw={700} c="dimmed" tt="uppercase">
-                Navigation
+                {timeSeriesMode ? 'Zeitreihen' : 'Navigation'}
               </Text>
             )}
             <Tooltip label={sidebarCollapsed ? 'Expand sidebar' : 'Collapse sidebar'} position="right">
@@ -200,6 +219,7 @@ export function App() {
                 leftSection={item.icon}
                 variant={page === item.id ? 'filled' : 'subtle'}
                 justify="flex-start"
+                styles={item.id === 'dinov3-analysis' ? { label: { whiteSpace: 'normal', textAlign: 'left' }, root: { height: 'auto', minHeight: 36, paddingTop: 7, paddingBottom: 7 } } : undefined}
                 onClick={() => setPage(item.id)}
               >
                 {item.label}
@@ -210,6 +230,14 @@ export function App() {
       </AppShell.Navbar>
 
       <AppShell.Main>
+        <Box display={timeSeriesMode ? 'block' : 'none'}>
+          <PageErrorBoundary label="Zeitreihen">
+            <TimeSeriesPage key={projectId} active={timeSeriesMode} section={page === 'time-series-splits' ? 'splits' : 'datasets'} />
+          </PageErrorBoundary>
+        </Box>
+        <Box display={page === 'dinov3-analysis' ? 'block' : 'none'}>
+          <PageErrorBoundary label="DINOv3"><RepresentationAnalysisPage key={projectId} active={page === 'dinov3-analysis'} /></PageErrorBoundary>
+        </Box>
         <Box display={page === 'datasets' ? 'block' : 'none'}>
           <DatasetsPage active={page === 'datasets'} />
         </Box>

@@ -1687,12 +1687,12 @@ export function updateSchedulerSettings(payload: { max_gpu_slots: number; only_g
   });
 }
 
-export function moveSchedulerJob(kind: 'train' | 'test' | 'heatmap' | 'image_distribution' | 'resolution_sensitivity' | 'spatial_sensitivity', runId: number, direction: 'up' | 'down', projectId?: string): Promise<{
-  kind: 'train' | 'test' | 'heatmap' | 'image_distribution' | 'resolution_sensitivity';
+export function moveSchedulerJob(kind: 'train' | 'test' | 'heatmap' | 'image_distribution' | 'resolution_sensitivity' | 'spatial_sensitivity' | 'dinov3_analysis', runId: number, direction: 'up' | 'down', projectId?: string): Promise<{
+  kind: 'train' | 'test' | 'heatmap' | 'image_distribution' | 'resolution_sensitivity' | 'spatial_sensitivity' | 'dinov3_analysis';
   run_id: number;
   queue_rank: number | null;
 }> {
-  return request<{ kind: 'train' | 'test' | 'heatmap' | 'image_distribution' | 'resolution_sensitivity'; run_id: number; queue_rank: number | null }>(`/api/scheduler/jobs/${kind}/${runId}/move`, {
+  return request<{ kind: 'train' | 'test' | 'heatmap' | 'image_distribution' | 'resolution_sensitivity' | 'spatial_sensitivity' | 'dinov3_analysis'; run_id: number; queue_rank: number | null }>(`/api/scheduler/jobs/${kind}/${runId}/move`, {
     method: 'POST',
     body: JSON.stringify({ direction }),
   }, undefined, projectId).then((response) => {
@@ -1944,3 +1944,57 @@ export function getCharacterizationSeries(id: number, sensor: string, range: [st
 export function characterizationExportUrl(id: number, search: string, dataType: string, sort: string, descending: boolean) {
   return projectMediaUrl(`/api/data-quality/analyses/${id}/characterization/export?${new URLSearchParams({ search, data_type: dataType, sort, descending: String(descending) })}`);
 }
+
+export function previewRepresentation(payload: import('./types').RepresentationConfig) {
+  return request<import('./types').RepresentationPreview>('/api/dinov3-analysis/preview', { method: 'POST', body: JSON.stringify(payload) });
+}
+export function createRepresentationRun(payload: import('./types').RepresentationConfig) {
+  return request<import('./types').RepresentationRun>('/api/dinov3-analysis/runs', { method: 'POST', body: JSON.stringify(payload) });
+}
+export function listRepresentationRuns() {
+  return request<import('./types').RepresentationRun[]>('/api/dinov3-analysis/runs');
+}
+export function getRepresentationRun(id: number) {
+  return request<import('./types').RepresentationRun>(`/api/dinov3-analysis/runs/${id}`);
+}
+export function getRepresentationResults(id: number) {
+  return request<import('./types').RepresentationResults>(`/api/dinov3-analysis/runs/${id}/results`);
+}
+export function getRepresentationLog(id: number, projectId?: string) {
+  return request<{ log: string }>(`/api/dinov3-analysis/runs/${id}/log`, undefined, undefined, projectId);
+}
+export function abortRepresentationRun(id: number, projectId?: string) {
+  return request<import('./types').RepresentationRun>(`/api/dinov3-analysis/runs/${id}/abort`, { method: 'POST' }, undefined, projectId);
+}
+export function deleteRepresentationRun(id: number, projectId?: string) {
+  return request<void>(`/api/dinov3-analysis/runs/${id}`, { method: 'DELETE' }, undefined, projectId);
+}
+export function representationArtifactUrl(id: number, name: string) {
+  return projectMediaUrl(`/api/dinov3-analysis/runs/${id}/artifacts/${name}`);
+}
+
+// Time series use the same project request context as image datasets.
+export const timeSeriesApi = {
+  datasets: () => request<import('./timeSeries/types').TimeSeriesDataset[]>('/api/time-series/datasets'),
+  dataset: (id: number) => request<import('./timeSeries/types').TimeSeriesDataset>(`/api/time-series/datasets/${id}`),
+  preview: (file: File, timestampColumn?: string, timestampFormat = 'ISO8601') => {
+    const form = new FormData();
+    form.append('file', file);
+    if (timestampColumn) form.append('timestamp_column', timestampColumn);
+    form.append('timestamp_format', timestampFormat);
+    return request<import('./timeSeries/types').CsvPreview>('/api/time-series/preview', { method: 'POST', body: form });
+  },
+  createDataset: (file: File, payload: import('./timeSeries/types').DatasetPayload) => {
+    const form = new FormData();
+    form.append('file', file);
+    form.append('metadata', JSON.stringify(payload));
+    return request<import('./timeSeries/types').TimeSeriesDataset>('/api/time-series/datasets', { method: 'POST', body: form });
+  },
+  updateDataset: (id: number, payload: { name: string; selected_columns: string[] }) =>
+    request<import('./timeSeries/types').TimeSeriesDataset>(`/api/time-series/datasets/${id}`, { method: 'PUT', body: JSON.stringify(payload) }),
+  deleteDataset: (id: number) => request<void>(`/api/time-series/datasets/${id}`, { method: 'DELETE' }),
+  splits: () => request<import('./timeSeries/types').TimeSeriesSplit[]>('/api/time-series/splits'),
+  saveSplit: (payload: import('./timeSeries/types').SplitPayload, id?: number) =>
+    request<import('./timeSeries/types').TimeSeriesSplit>(`/api/time-series/splits${id ? `/${id}` : ''}`, { method: id ? 'PUT' : 'POST', body: JSON.stringify(payload) }),
+  deleteSplit: (id: number) => request<void>(`/api/time-series/splits/${id}`, { method: 'DELETE' }),
+};

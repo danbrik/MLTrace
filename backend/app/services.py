@@ -620,6 +620,10 @@ def delete_training_dataset(db: Session, training_dataset_id: int) -> bool:
         raise ValueError(
             "Train/test dataset is used by saved training pipelines. Delete those training pipelines first."
         )
+    if db.scalar(select(func.count(models.RepresentationRun.id)).where(
+        models.RepresentationRun.training_dataset_id == training_dataset_id
+    )):
+        raise ValueError("Dataset is used by representation analyses. Delete those analyses first.")
     db.delete(training_dataset)
     db.commit()
     return True

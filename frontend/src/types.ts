@@ -61,9 +61,9 @@ export type GpuSnapshot = {
 export type SchedulerJobWithProject = {
   project_id: string;
   project_name: string;
-  kind: 'train' | 'test' | 'heatmap' | 'image_distribution' | 'resolution_sensitivity' | 'spatial_sensitivity';
+  kind: 'train' | 'test' | 'heatmap' | 'image_distribution' | 'resolution_sensitivity' | 'spatial_sensitivity' | 'dinov3_analysis';
   queue_rank: number | null;
-  run: TrainingRun | TestingRun | HeatmapRangeRun | ImageDistributionRun | ResolutionSensitivityRun | SpatialSensitivityRun;
+  run: TrainingRun | TestingRun | HeatmapRangeRun | ImageDistributionRun | ResolutionSensitivityRun | SpatialSensitivityRun | RepresentationRun;
 };
 
 export type Dataset = {
@@ -2262,3 +2262,41 @@ export type CharacterizationSeries = {
   aggregated: boolean; interval_seconds: number;
   points: { time: string; end: string; valid_n: number; q25: number | null; value: number | null; q75: number | null; connect_previous: boolean; has_internal_gap: boolean }[];
 };
+
+export type RepresentationLabel = 'normal' | 'anomaly' | 'buffer';
+export type RepresentationInterval = {
+  id: string; name: string; label: RepresentationLabel; start: string; end: string;
+  sampling_rate: number; random: boolean; event_id: string | null;
+};
+export type RepresentationConfig = {
+  training_dataset_id: number; preprocessing_pipeline_id: number;
+  intervals: RepresentationInterval[]; cluster_count: number; pca_variance: number; seed: number;
+};
+export type RepresentationPreview = {
+  intervals: Array<{ id: string; name: string; label: RepresentationLabel; event_id: string | null;
+    available: number; selected: number; remainder: number }>;
+  label_counts: Record<RepresentationLabel, number>; total: number; errors: string[];
+  image: string | null; model_image: string | null; timestamp: string | null;
+};
+export type RepresentationMetrics = {
+  sample_count: number; feature_dimension: number; pca_2d_variance: number[];
+  pca_components: number; pca_retained_variance: number; cluster_count: number;
+  ari: number; nmi: number; label_counts: Record<RepresentationLabel, number>;
+  contingency: Array<Record<RepresentationLabel, number> & { cluster: number }>;
+};
+export type RepresentationRun = {
+  id: number; training_dataset_id: number; training_dataset_name: string;
+  status: string; current_step: string; processed_images: number; total_images: number | null;
+  config: RepresentationConfig; pipeline_snapshot: { id: number; name: string; graph: PreprocessingGraph };
+  dataset_snapshot: Record<string, unknown>; model_snapshot: Record<string, unknown> | null;
+  result: RepresentationMetrics | null; error_message: string | null; cancel_requested: boolean;
+  queue_rank: number | null; enqueued_at: string | null; started_at: string | null; ended_at: string | null;
+  duration_seconds: number | null; heartbeat_at: string | null; device: string | null;
+  gpu_index: number | null; created_at: string;
+};
+export type RepresentationPoint = {
+  file_path: string; timestamp: string; interval_id: string; interval_name: string;
+  label: RepresentationLabel; event_id: string | null;
+  pca_x: number; pca_y: number; umap_x: number; umap_y: number; cluster: number;
+};
+export type RepresentationResults = { metrics: RepresentationMetrics; points: RepresentationPoint[] };

@@ -5,6 +5,7 @@ import { methodLabel } from '../methods/utils';
 import { orderedGraphNodes, stepDetail, formatResolution } from './graph';
 import { formatDuration } from './runStatus';
 import type {
+  RepresentationRun,
   HeatmapRangeRun,
   ImageDistributionRun,
   ResolutionSensitivityRun,
@@ -18,6 +19,7 @@ import type {
 } from '../types';
 
 export type SchedulerJob =
+  | { kind: 'dinov3_analysis'; run: RepresentationRun }
   | { kind: 'train'; run: TrainingRun }
   | { kind: 'test'; run: TestingRun }
   | { kind: 'heatmap'; run: HeatmapRangeRun }
@@ -116,7 +118,7 @@ export function SchedulerDetailsModal({
   trainingRunById: Map<number, TrainingRun>;
 }) {
   const title = job
-    ? job.kind === 'train'
+    ? job.kind === 'dinov3_analysis' ? `DINOv3 · ${job.run.training_dataset_name}` : job.kind === 'train'
       ? job.run.training_pipeline_name
       : job.kind === 'heatmap'
         ? `Heatmap video · ${job.run.testing_run_name}`
@@ -295,7 +297,9 @@ export function SchedulerDetailsModal({
   return (
     <Modal opened={job !== null} onClose={onClose} title={title} size="xl">
       {job &&
-        (job.kind === 'train'
+        (job.kind === 'dinov3_analysis'
+          ? <Stack><Row label="Dataset">{job.run.training_dataset_name}</Row><Row label="Preprocessing">{job.run.pipeline_snapshot.name}</Row><Row label="Configuration">k={job.run.config.cluster_count} · PCA {job.run.config.pca_variance * 100}% · Seed {job.run.config.seed}</Row><Row label="Progress">{job.run.current_step} · {job.run.processed_images} / {job.run.total_images ?? '—'}</Row>{job.run.error_message && <Text c="red">{job.run.error_message}</Text>}</Stack>
+          : job.kind === 'train'
           ? renderTraining(job.run)
           : job.kind === 'heatmap'
             ? renderHeatmap(job.run)

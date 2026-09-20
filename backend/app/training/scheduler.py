@@ -50,6 +50,7 @@ _POLL_INTERVAL_SECONDS = 2.0
 
 # Per job-kind configuration: ORM model, worker module, and log/artifact subdir.
 _KINDS: dict[str, dict] = {
+    "dinov3_analysis": {"model": models.RepresentationRun, "module": "app.analysis.dinov3_worker", "subdir": "representation_runs"},
     "train": {"model": models.TrainingRun, "module": "app.training.worker", "subdir": "runs"},
     "test": {"model": models.TestingRun, "module": "app.testing.worker", "subdir": "testing_runs"},
     "heatmap": {"model": models.HeatmapRangeRun, "module": "app.heatmap.worker", "subdir": "heatmap_ranges"},
@@ -615,6 +616,8 @@ class JobScheduler:
         env["DATABASE_URL"] = _worker_database_url(project.database_url)
         env["MLTRACE_PROJECT_ID"] = project.id
         env["MLTRACE_ARTIFACT_DIR"] = project.artifact_dir
+        if kind == "dinov3_analysis":
+            env.setdefault("MLTRACE_MODEL_CACHE_DIR", str(ROOT_DIR / "model_cache" / "huggingface"))
 
         with open(log_path, "a", encoding="utf-8") as parent_log:
             parent_log.write(

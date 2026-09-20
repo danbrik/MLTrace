@@ -1,6 +1,6 @@
 from datetime import UTC, datetime
 
-from sqlalchemy import BigInteger, Boolean, DateTime, Float, ForeignKey, Index, Integer, String, Text, UniqueConstraint, func
+from sqlalchemy import BigInteger, Boolean, DateTime, Float, ForeignKey, Index, Integer, LargeBinary, String, Text, UniqueConstraint, func
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from sqlalchemy.types import JSON
@@ -14,6 +14,38 @@ def json_type():
 
 def utc_now() -> datetime:
     return datetime.now(UTC).replace(tzinfo=None)
+
+
+class TimeSeriesDataset(Base):
+    __tablename__ = "time_series_datasets"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    name: Mapped[str] = mapped_column(String(255))
+    filename: Mapped[str] = mapped_column(Text)
+    source_csv: Mapped[bytes] = mapped_column(LargeBinary, deferred=True)
+    columns: Mapped[list] = mapped_column(json_type())
+    selected_columns: Mapped[list] = mapped_column(json_type())
+    timestamp_column: Mapped[str] = mapped_column(Text)
+    timestamp_format: Mapped[str] = mapped_column(Text)
+    row_count: Mapped[int] = mapped_column(Integer)
+    start: Mapped[str] = mapped_column(String(64))
+    end: Mapped[str] = mapped_column(String(64))
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
+    splits: Mapped[list["TimeSeriesSplit"]] = relationship(back_populates="dataset", cascade="all, delete-orphan")
+
+
+class TimeSeriesSplit(Base):
+    __tablename__ = "time_series_splits"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    dataset_id: Mapped[int] = mapped_column(ForeignKey("time_series_datasets.id", ondelete="CASCADE"), index=True)
+    name: Mapped[str] = mapped_column(String(255))
+    tags: Mapped[list] = mapped_column(json_type())
+    intervals: Mapped[list] = mapped_column(json_type())
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
+    dataset: Mapped[TimeSeriesDataset] = relationship(back_populates="splits")
 
 
 class Dataset(Base):
@@ -1557,3 +1589,36 @@ class CharacterizationRun(Base):
     artifact_path: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime(), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime(), server_default=func.now(), onupdate=func.now())
+
+
+class RepresentationRun(Base):
+    """Frozen configuration and lifecycle of an exploratory representation run."""
+    __tablename__ = "representation_runs"
+    __table_args__ = (Index("ix_representation_runs_status", "status"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    training_dataset_id: Mapped[int] = mapped_column(ForeignKey("training_datasets.id", ondelete="RESTRICT"))
+    training_dataset_name: Mapped[str] = mapped_column(String(255))
+    config: Mapped[dict] = mapped_column(json_type())
+    dataset_snapshot: Mapped[dict] = mapped_column(json_type())
+    pipeline_snapshot: Mapped[dict] = mapped_column(json_type())
+    model_snapshot: Mapped[dict | None] = mapped_column(json_type())
+    result: Mapped[dict | None] = mapped_column(json_type())
+    status: Mapped[str] = mapped_column(String(32), default="queued")
+    current_step: Mapped[str] = mapped_column(String(64), default="queued")
+    processed_images: Mapped[int] = mapped_column(Integer, default=0)
+    total_images: Mapped[int | None] = mapped_column(Integer)
+    cancel_requested: Mapped[bool] = mapped_column(Boolean, default=False)
+    error_message: Mapped[str | None] = mapped_column(Text)
+    queue_rank: Mapped[int | None] = mapped_column(Integer)
+    enqueued_at: Mapped[datetime | None] = mapped_column(DateTime)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime)
+    ended_at: Mapped[datetime | None] = mapped_column(DateTime)
+    duration_seconds: Mapped[float | None] = mapped_column(Float)
+    heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime)
+    device: Mapped[str | None] = mapped_column(String(32))
+    gpu_index: Mapped[int | None] = mapped_column(Integer)
+    pid: Mapped[int | None] = mapped_column(Integer)
+    log_path: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
