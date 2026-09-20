@@ -12,6 +12,10 @@ Im Arbeitsbereich **Zeitreihen** folgen auf Datenbasis und Splits die Seiten **M
 
 Bei fünf Minuten Sampling bedeutet **L=36**: 180 Minuten nominale Historie, aber 175 Minuten zwischen erstem und letztem Zeitstempel. Schrittweite ist ein Sample. Ein Fenster liefert sein Ergebnis am letzten Zeitstempel. Zeitstempel bleiben in den Artefakten und API-Antworten nanosekundengenau in UTC; die Diagrammdarstellung verwendet die Zeitauflösung des Browsers.
 
+Results berechnet beim Öffnen keine neuen Modelloutputs: Scores, Endpoint-Rekonstruktionen und Repräsentationen wurden bereits bei der Auswertung nach dem Training gespeichert. Pro Anfrage werden Eingabearrays einmal entpackt und nur die für die angeforderte Seite benötigten Ergebnisblöcke geladen. Die Gesamtanzahl wird aus dem gespeicherten Endpunktindex bestimmt, ohne sämtliche Ergebniszeilen aufzubauen. Die Optimierung verwendet die bestehenden Artefakte; alte Runs benötigen weder Migration noch erneutes Training. CSV- und Latentexport bleiben vollständig.
+
+Die Oberfläche unterscheidet das Laden der Laufkonfiguration vom Laden der Ergebnisreihe. Wechsel zwischen Läufen, Sensoren und Seiten brechen überholte Anfragen ab. Nach 60 Sekunden ohne Antwort erscheint statt eines endlosen Ladezustands eine Fehlermeldung mit einer Möglichkeit zum erneuten Laden.
+
 ## Datenvertrag
 
 Die gemeinsame Aufbereitung liegt in `backend/app/time_series/data.py`. Sie sortiert nach Zeit, erhält die ausgewählte Sensorreihenfolge und bestimmt Min/Max ausschließlich auf zugeordneten Train-Zeilen **vor** der Fensterbildung. Validation und Test nutzen dieselben Parameter. Kein Clipping: Werte kleiner 0 oder größer 1 bleiben erhalten. Konstante Train-Spalten erhalten Nenner 1; Namen und Parameter stehen im Snapshot und in der Preview.

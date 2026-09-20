@@ -2011,10 +2011,10 @@ export const sensorApi = {
   deletePipeline: (id: number) => request<void>(`/api/time-series/pipelines/${id}`, { method: 'DELETE' }),
   start: (id: number) => request<import('./timeSeries/types').SensorRun>(`/api/time-series/pipelines/${id}/runs`, { method: 'POST' }),
   runs: () => request<import('./timeSeries/types').SensorRun[]>('/api/time-series/runs'),
-  run: (id: number) => request<import('./timeSeries/types').SensorRun>(`/api/time-series/runs/${id}`),
+  run: (id: number, signal?: AbortSignal) => request<import('./timeSeries/types').SensorRun>(`/api/time-series/runs/${id}`, { signal }),
   abort: (id: number, projectId?: string) => request<import('./timeSeries/types').SensorRun>(`/api/time-series/runs/${id}/abort`, { method: 'POST' }, undefined, projectId),
   deleteRun: (id: number, projectId?: string) => request<void>(`/api/time-series/runs/${id}`, { method: 'DELETE' }, undefined, projectId),
   logs: (id: number, projectId?: string) => request<{ text: string }>(`/api/time-series/runs/${id}/logs`, undefined, undefined, projectId),
-  series: (id: number, subset: string, sensor: number, scaled: boolean, offset = 0) => request<import('./timeSeries/types').ResultSeries>(`/api/time-series/runs/${id}/series?${new URLSearchParams({ subset, sensor: String(sensor), scaled: String(scaled), offset: String(offset), limit: '5000' })}`),
+  series: (id: number, subset: string, sensor: number, scaled: boolean, offset = 0, signal?: AbortSignal) => request<import('./timeSeries/types').ResultSeries>(`/api/time-series/runs/${id}/series?${new URLSearchParams({ subset, sensor: String(sensor), scaled: String(scaled), offset: String(offset), limit: '5000' })}`, { signal }),
   exportUrl: (id: number, artifact: string) => projectMediaUrl(`/api/time-series/runs/${id}/${artifact}`),
 };

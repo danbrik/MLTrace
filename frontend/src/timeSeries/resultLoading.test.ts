@@ -1,0 +1,60 @@
+import { afterEach, expect, it, vi } from 'vitest';
+import { loadResults } from './resultLoading';
+afterEach(() => vi.useRealTimers());
+const callbacks = () => ({ success: vi.fn(), error: vi.fn(), settled: vi.fn() });
+
+it('delivers results and clears loading when successful', async () => {
+  vi.useFakeTimers();
+  const cb = callbacks();
+  const stop = loadResults(async () => ({ rows: [1], total: 1 }), cb);
+  await vi.advanceTimersByTimeAsync(1);
+  expect(cb.success).toHaveBeenCalledWith({ rows: [1], total: 1 });
+  expect(cb.settled).toHaveBeenCalledTimes(1);
+  expect(cb.error).not.toHaveBeenCalled();
+  expect(vi.getTimerCount()).toBe(0);
+  stop();
+});
+it('shows a recoverable error instead of spinning forever', async () => {
+  vi.useFakeTimers();
+  const cb = callbacks();
+  let signal!: AbortSignal;
+  let finish!: (v: number) => void;
+  const stop = loadResults<number>(s => { signal = s; return new Promise(resolve => { finish = resolve; }); }, cb);
+  await vi.advanceTimersByTimeAsync(60000);
+  expect(signal.aborted).toBe(true);
+  expect(cb.error.mock.calls[0][0]).toContain('60 Sekunden');
+  expect(cb.settled).toHaveBeenCalledTimes(1);
+  finish(1);
+  await vi.advanceTimersByTimeAsync(1);
+  expect(cb.success).not.toHaveBeenCalled();
+  expect(cb.settled).toHaveBeenCalledTimes(1);
+  stop();
+});
+it('cancels old sensor/page requests without overwriting newer results', async () => {
+  vi.useFakeTimers();
+  const cb = callbacks();
+  let finish!: (v: string) => void;
+  let signal!: AbortSignal;
+  const old = loadResults<string>(s => { signal = s; return new Promise(resolve => { finish = resolve; }); }, cb);
+  old();
+  const current = loadResults(async () => 'new page', cb);
+  finish('old page');
+  await vi.advanceTimersByTimeAsync(1);
+  expect(signal.aborted).toBe(true);
+  expect(cb.success).toHaveBeenCalledExactlyOnceWith('new page');
+  expect(cb.settled).toHaveBeenCalledTimes(1);
+  current();
+});
+it('ends loading on a failed request and allows retry', async () => {
+  vi.useFakeTimers();
+  const cb = callbacks();
+  const stop = loadResults(() => Promise.reject(new Error('Ergebnisdatei fehlt')), cb);
+  await vi.advanceTimersByTimeAsync(1);
+  expect(cb.error).toHaveBeenCalledWith('Ergebnisdatei fehlt');
+  expect(cb.settled).toHaveBeenCalledTimes(1);
+  stop();
+  const retry = loadResults(async () => 'result', cb);
+  await vi.advanceTimersByTimeAsync(1);
+  expect(cb.success).toHaveBeenCalledWith('result');
+  retry();
+});
