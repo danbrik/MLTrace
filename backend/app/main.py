@@ -157,6 +157,7 @@ from app.analysis import dinov3_service
 from app.analysis.dinov3_api import router as dinov3_router
 from app.time_series.api import router as time_series_router
 from app.analysis import resolution_sensitivity as resolution_sensitivity_service
+from app.time_series import training_service as time_series_training_service
 from app.analysis import spatial_sensitivity as spatial_sensitivity_service
 from app.heatmap import service as heatmap_service
 from app.registry import service as registry_service
@@ -2171,12 +2172,13 @@ def create_app() -> FastAPI:
                         ("image_distribution", image_distribution_service.list_runs(db)),
                         ("resolution_sensitivity", resolution_sensitivity_service.list_runs(db)),
                         ("dinov3_analysis", dinov3_service.list_runs(db)),
+                        ("time_series_train", time_series_training_service.list_runs(db)),
                         ("spatial_sensitivity", spatial_sensitivity_service.list_runs(db)),
                     )
                     for kind, runs in groups:
                         for run in runs:
                             payload = run.model_dump() if hasattr(run, "model_dump") else run
-                            rank = global_ranks.get((project.id, kind, run.id))
+                            rank = global_ranks.get((project.id, kind, payload["id"]))
                             if rank is not None and isinstance(payload, dict):
                                 payload["queue_rank"] = rank
                             jobs.append({

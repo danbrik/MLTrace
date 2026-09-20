@@ -32,3 +32,5 @@ Gespeicherte Splits werden in separaten Boxen für **Train**, **Test** und **Val
 - Die Projektzuordnung nutzt den vorhandenen Header `X-MLTrace-Project-ID`.
 - Transaktionale Speicherung hält Originaldatei, Metadaten und Änderungen konsistent. Listen laden die CSV-Blobs nicht mit.
 - Tests: `pytest backend/tests/test_time_series.py` und `npm test -- src/timeSeries/intervals.test.ts` (im Frontend-Verzeichnis).
+
+Architekturvorlagen, gemeinsame Fensterbildung, Training und Ergebnisse sind unter [Zeitreihen-Training](time_series_training.md) dokumentiert.

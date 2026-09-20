@@ -15,7 +15,7 @@ _CACHE_SECONDS = 60
 _cache: dict | None = None
 _cache_time = 0.0
 _lock = threading.Lock()
-_JOB_MODELS = (models.TrainingRun, models.TestingRun, models.HeatmapRangeRun)
+_JOB_MODELS = (models.TrainingRun, models.TestingRun, models.HeatmapRangeRun, models.TimeSeriesRun)
 
 
 def invalidate_gpu_snapshot() -> None:

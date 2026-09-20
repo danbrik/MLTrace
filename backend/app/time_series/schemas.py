@@ -35,3 +35,24 @@ class SplitInput(BaseModel):
         if len(value) != len(set(value)):
             raise ValueError("Tags müssen eindeutig sein.")
         return value
+
+
+class ModelInput(BaseModel):
+    model_config = {"extra": "forbid"}
+    name: Name
+    kind: Literal["usad", "tcn_ae", "lstm_vae"]
+    config: dict = Field(default_factory=dict)
+
+
+class PipelinePreview(BaseModel):
+    model_config = {"extra": "forbid"}
+    split_id: int = Field(gt=0)
+    model_id: int | None = Field(default=None, gt=0)
+    window_length: int | None = Field(default=None, ge=1, le=100000)
+    training: dict = Field(default_factory=dict)
+
+
+class PipelineInput(PipelinePreview):
+    name: Name
+    model_id: int = Field(gt=0)
+    window_length: int = Field(ge=1, le=100000)

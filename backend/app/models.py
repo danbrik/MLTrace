@@ -1622,3 +1622,73 @@ class RepresentationRun(Base):
     log_path: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
+
+
+class TimeSeriesModel(Base):
+    __tablename__ = "time_series_models"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    name: Mapped[str] = mapped_column(String(255))
+    kind: Mapped[str] = mapped_column(String(32))
+    config: Mapped[dict] = mapped_column(json_type())
+    provenance: Mapped[dict] = mapped_column(json_type())
+    template_key: Mapped[str | None] = mapped_column(String(32), unique=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
+
+
+class TimeSeriesPipeline(Base):
+    __tablename__ = "time_series_pipelines"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    name: Mapped[str] = mapped_column(String(255))
+    dataset_id: Mapped[int] = mapped_column(ForeignKey("time_series_datasets.id", ondelete="RESTRICT"))
+    split_id: Mapped[int] = mapped_column(ForeignKey("time_series_splits.id", ondelete="RESTRICT"))
+    model_id: Mapped[int] = mapped_column(ForeignKey("time_series_models.id", ondelete="RESTRICT"))
+    window_length: Mapped[int] = mapped_column(Integer)
+    training: Mapped[dict] = mapped_column(json_type())
+    snapshot: Mapped[dict] = mapped_column(json_type())
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
+
+
+class TimeSeriesRun(Base):
+    __tablename__ = "time_series_runs"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    pipeline_id: Mapped[int] = mapped_column(ForeignKey("time_series_pipelines.id", ondelete="RESTRICT"))
+    name: Mapped[str] = mapped_column(String(255))
+    kind: Mapped[str] = mapped_column(String(32))
+    snapshot: Mapped[dict] = mapped_column(json_type())
+    status: Mapped[str] = mapped_column(String(32), default="queued", index=True)
+    current_step: Mapped[str] = mapped_column(String(64), default="queued")
+    epoch: Mapped[int] = mapped_column(Integer, default=0)
+    epochs: Mapped[int] = mapped_column(Integer)
+    train_loss: Mapped[float | None] = mapped_column(Float)
+    val_loss: Mapped[float | None] = mapped_column(Float)
+    checkpoint_selection: Mapped[str] = mapped_column(String(64))
+    selected_epoch: Mapped[int | None] = mapped_column(Integer)
+    selected_metric: Mapped[float | None] = mapped_column(Float)
+    checkpoint: Mapped[dict | None] = mapped_column(json_type())
+    result: Mapped[dict | None] = mapped_column(json_type())
+    cancel_requested: Mapped[bool] = mapped_column(Boolean, default=False)
+    processed_windows: Mapped[int] = mapped_column(Integer, default=0)
+    total_windows: Mapped[int | None] = mapped_column(Integer)
+    error_message: Mapped[str | None] = mapped_column(Text)
+    queue_rank: Mapped[int | None] = mapped_column(Integer)
+    enqueued_at: Mapped[datetime | None] = mapped_column(DateTime)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime)
+    ended_at: Mapped[datetime | None] = mapped_column(DateTime)
+    heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime)
+    duration_seconds: Mapped[float | None] = mapped_column(Float)
+    device: Mapped[str | None] = mapped_column(String(32))
+    gpu_index: Mapped[int | None] = mapped_column(Integer)
+    pid: Mapped[int | None] = mapped_column(Integer)
+    log_path: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+
+class TimeSeriesEpochMetric(Base):
+    __tablename__ = "time_series_epoch_metrics"
+    run_id: Mapped[int] = mapped_column(ForeignKey("time_series_runs.id", ondelete="CASCADE"), primary_key=True)
+    epoch: Mapped[int] = mapped_column(Integer, primary_key=True)
+    train_loss: Mapped[float] = mapped_column(Float)
+    val_loss: Mapped[float | None] = mapped_column(Float)
+    details: Mapped[dict] = mapped_column(json_type())

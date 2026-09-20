@@ -61,9 +61,9 @@ export type GpuSnapshot = {
 export type SchedulerJobWithProject = {
   project_id: string;
   project_name: string;
-  kind: 'train' | 'test' | 'heatmap' | 'image_distribution' | 'resolution_sensitivity' | 'spatial_sensitivity' | 'dinov3_analysis';
+  kind: 'train' | 'test' | 'heatmap' | 'image_distribution' | 'resolution_sensitivity' | 'spatial_sensitivity' | 'dinov3_analysis' | 'time_series_train';
   queue_rank: number | null;
-  run: TrainingRun | TestingRun | HeatmapRangeRun | ImageDistributionRun | ResolutionSensitivityRun | SpatialSensitivityRun | RepresentationRun;
+  run: TrainingRun | TestingRun | HeatmapRangeRun | ImageDistributionRun | ResolutionSensitivityRun | SpatialSensitivityRun | RepresentationRun | import('./timeSeries/types').SensorRun;
 };
 
 export type Dataset = {

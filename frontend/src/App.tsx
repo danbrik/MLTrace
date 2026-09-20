@@ -30,6 +30,9 @@ import { AnomalyDetectionPage } from './pages/AnomalyDetectionPage';
 import { DataManagerPage } from './pages/DataManagerPage';
 import { CsvMergePage } from './pages/CsvMergePage';
 import { TimeSeriesPage } from './pages/TimeSeriesPage';
+import { TimeSeriesModelsPage } from './pages/TimeSeriesModelsPage';
+import { TimeSeriesPipelinesPage } from './pages/TimeSeriesPipelinesPage';
+import { TimeSeriesResultsPage } from './pages/TimeSeriesResultsPage';
 import { DataQualityAnalysisPage } from './pages/DataQualityAnalysisPage';
 import { RedundancyAnalysisPage } from './pages/RedundancyAnalysisPage';
 import { ThresholdPage } from './pages/ThresholdPage';
@@ -54,6 +57,9 @@ import type { Project } from './types';
 type Page =
   | 'time-series-datasets'
   | 'time-series-splits'
+  | 'time-series-models'
+  | 'time-series-pipelines'
+  | 'time-series-results'
   | 'datasets'
   | 'training-datasets'
   | 'preprocessing'
@@ -85,7 +91,7 @@ export function App() {
   setActiveProject(projectId);
   const requestedPage = match?.[2] as Page | undefined;
   const page: Page = requestedPage && [
-    'time-series-datasets', 'time-series-splits',
+    'time-series-datasets', 'time-series-splits', 'time-series-models', 'time-series-pipelines', 'time-series-results',
     'datasets', 'training-datasets', 'preprocessing', 'methods', 'training-pipelines', 'testing',
     'inspect', 'optimization', 'analysis', 'dinov3-analysis', 'image-distribution', 'resolution-sensitivity', 'spatial-sensitivity', 'evaluation', 'anomaly-detection', 'csv-merge', 'redundancy-analysis', 'data-quality-analysis', 'threshold', 'scheduler', 'data-manager',
   ].includes(requestedPage) ? requestedPage : 'datasets';
@@ -130,6 +136,9 @@ export function App() {
   const navItems: Array<{ id: Page; label: string; icon: React.ReactNode }> = timeSeriesMode ? [
     { id: 'time-series-datasets', label: 'Datenbasis', icon: <Database size={18} /> },
     { id: 'time-series-splits', label: 'Splits', icon: <ListChecks size={18} /> },
+    { id: 'time-series-models', label: 'Models', icon: <Database size={18} /> },
+    { id: 'time-series-pipelines', label: 'Training Pipelines', icon: <ListChecks size={18} /> },
+    { id: 'time-series-results', label: 'Results', icon: <ListChecks size={18} /> },
   ] : [
     { id: 'datasets', label: 'Datasets', icon: <Database size={18} /> },
     { id: 'training-datasets', label: 'Train/Test Datasets', icon: <ListChecks size={18} /> },
@@ -232,7 +241,10 @@ export function App() {
       <AppShell.Main>
         <Box display={timeSeriesMode ? 'block' : 'none'}>
           <PageErrorBoundary label="Zeitreihen">
-            <TimeSeriesPage key={projectId} active={timeSeriesMode} section={page === 'time-series-splits' ? 'splits' : 'datasets'} />
+            <Box display={page === 'time-series-datasets' || page === 'time-series-splits' ? 'block' : 'none'}><TimeSeriesPage key={projectId} active={page === 'time-series-datasets' || page === 'time-series-splits'} section={page === 'time-series-splits' ? 'splits' : 'datasets'} /></Box>
+            <TimeSeriesModelsPage key={`models-${projectId}`} active={page === 'time-series-models'} />
+            <TimeSeriesPipelinesPage key={`pipelines-${projectId}`} active={page === 'time-series-pipelines'} />
+            <TimeSeriesResultsPage key={`results-${projectId}`} active={page === 'time-series-results'} />
           </PageErrorBoundary>
         </Box>
         <Box display={page === 'dinov3-analysis' ? 'block' : 'none'}>

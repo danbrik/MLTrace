@@ -4,7 +4,7 @@ MLTrace is a local, single-user platform for isolated image anomaly-detection pr
 
 Images stay at their original filesystem paths. MLTrace stores metadata, rules, configurations, run records, logs, and generated artifacts.
 
-The project header also provides a **Zeitreihen** workspace for CSV time series: persist named datasets with selectable columns and create tagged, non-overlapping Train/Test/Validation intervals. See [Time series datasets and splits](docs/time_series.md).
+The project header also provides a **Zeitreihen** workspace for CSV time series: persist named datasets with selectable columns and create tagged, non-overlapping Train/Test/Validation intervals. It also includes USAD, adapted TCN-AE and LSTM-VAE architecture templates, train-only Min-Max pipelines with shared windows, scheduled training, and reconstruction/score/latent results. See [Time series datasets and splits](docs/time_series.md) and [Time series training](docs/time_series_training.md).
 
 Project goals and requirements are documented in [docs/project_doc.md](docs/project_doc.md). Preprocessing module development is documented in [docs/preprocessing_modules.md](docs/preprocessing_modules.md). Method/model extension is documented in [backend/app/modeling/README.md](backend/app/modeling/README.md) and [frontend/src/methods/README.md](frontend/src/methods/README.md).
 

@@ -50,6 +50,7 @@ _POLL_INTERVAL_SECONDS = 2.0
 
 # Per job-kind configuration: ORM model, worker module, and log/artifact subdir.
 _KINDS: dict[str, dict] = {
+    "time_series_train": {"model": models.TimeSeriesRun, "module": "app.time_series.worker", "subdir": "time_series_runs"},
     "dinov3_analysis": {"model": models.RepresentationRun, "module": "app.analysis.dinov3_worker", "subdir": "representation_runs"},
     "train": {"model": models.TrainingRun, "module": "app.training.worker", "subdir": "runs"},
     "test": {"model": models.TestingRun, "module": "app.testing.worker", "subdir": "testing_runs"},
@@ -652,6 +653,29 @@ class JobScheduler:
                 db.commit()
                 if not changed.rowcount:
                     proc.kill()  # Our own child lost the queued/abort race; never run it.
+                    proc.wait(timeout=10)
+                    return
+                db.refresh(run)
+            except Exception:
+                db.rollback()
+                if proc.poll() is None:
+                    proc.kill()
+                    proc.wait(timeout=10)
+                raise
+            remove_queue_entry(project.id, kind, run.id)
+            with self._lock:
+                self._processes[(project.id, kind, run.id)] = proc
+            return
+
+        if kind == "time_series_train":
+            try:
+                changed = db.execute(update(models.TimeSeriesRun).where(
+                    models.TimeSeriesRun.id == run.id, models.TimeSeriesRun.status == "queued"
+                ).values(status="running", started_at=datetime.utcnow(), gpu_index=gpu_index,
+                         device=device_label, pid=proc.pid, log_path=str(log_path), error_message=None))
+                db.commit()
+                if not changed.rowcount:
+                    proc.kill()
                     proc.wait(timeout=10)
                     return
                 db.refresh(run)

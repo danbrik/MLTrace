@@ -1687,12 +1687,12 @@ export function updateSchedulerSettings(payload: { max_gpu_slots: number; only_g
   });
 }
 
-export function moveSchedulerJob(kind: 'train' | 'test' | 'heatmap' | 'image_distribution' | 'resolution_sensitivity' | 'spatial_sensitivity' | 'dinov3_analysis', runId: number, direction: 'up' | 'down', projectId?: string): Promise<{
-  kind: 'train' | 'test' | 'heatmap' | 'image_distribution' | 'resolution_sensitivity' | 'spatial_sensitivity' | 'dinov3_analysis';
+export function moveSchedulerJob(kind: 'train' | 'test' | 'heatmap' | 'image_distribution' | 'resolution_sensitivity' | 'spatial_sensitivity' | 'dinov3_analysis' | 'time_series_train', runId: number, direction: 'up' | 'down', projectId?: string): Promise<{
+  kind: 'train' | 'test' | 'heatmap' | 'image_distribution' | 'resolution_sensitivity' | 'spatial_sensitivity' | 'dinov3_analysis' | 'time_series_train';
   run_id: number;
   queue_rank: number | null;
 }> {
-  return request<{ kind: 'train' | 'test' | 'heatmap' | 'image_distribution' | 'resolution_sensitivity' | 'spatial_sensitivity' | 'dinov3_analysis'; run_id: number; queue_rank: number | null }>(`/api/scheduler/jobs/${kind}/${runId}/move`, {
+  return request<{ kind: 'train' | 'test' | 'heatmap' | 'image_distribution' | 'resolution_sensitivity' | 'spatial_sensitivity' | 'dinov3_analysis' | 'time_series_train'; run_id: number; queue_rank: number | null }>(`/api/scheduler/jobs/${kind}/${runId}/move`, {
     method: 'POST',
     body: JSON.stringify({ direction }),
   }, undefined, projectId).then((response) => {
@@ -1997,4 +1997,23 @@ export const timeSeriesApi = {
   saveSplit: (payload: import('./timeSeries/types').SplitPayload, id?: number) =>
     request<import('./timeSeries/types').TimeSeriesSplit>(`/api/time-series/splits${id ? `/${id}` : ''}`, { method: id ? 'PUT' : 'POST', body: JSON.stringify(payload) }),
   deleteSplit: (id: number) => request<void>(`/api/time-series/splits/${id}`, { method: 'DELETE' }),
+};
+
+export const sensorApi = {
+  definitions: () => request<import('./timeSeries/types').ModelDefinition[]>('/api/time-series/model-definitions'),
+  models: () => request<import('./timeSeries/types').SensorModel[]>('/api/time-series/models'),
+  saveModel: (payload: { name: string; kind: string; config: import('./timeSeries/types').Parameters }, id?: number) => request<import('./timeSeries/types').SensorModel>(`/api/time-series/models${id ? `/${id}` : ''}`, { method: id ? 'PUT' : 'POST', body: JSON.stringify(payload) }),
+  deleteModel: (id: number) => request<void>(`/api/time-series/models/${id}`, { method: 'DELETE' }),
+  pipelines: () => request<import('./timeSeries/types').SensorPipeline[]>('/api/time-series/pipelines'),
+  preview: (payload: { split_id: number; model_id?: number; window_length?: number; training?: import('./timeSeries/types').Parameters }) => request<import('./timeSeries/types').PipelinePreview>('/api/time-series/pipelines/preview', { method: 'POST', body: JSON.stringify(payload) }),
+  savePipeline: (payload: import('./timeSeries/types').PipelinePayload, id?: number) => request<import('./timeSeries/types').SensorPipeline>(`/api/time-series/pipelines${id ? `/${id}` : ''}`, { method: id ? 'PUT' : 'POST', body: JSON.stringify(payload) }),
+  deletePipeline: (id: number) => request<void>(`/api/time-series/pipelines/${id}`, { method: 'DELETE' }),
+  start: (id: number) => request<import('./timeSeries/types').SensorRun>(`/api/time-series/pipelines/${id}/runs`, { method: 'POST' }),
+  runs: () => request<import('./timeSeries/types').SensorRun[]>('/api/time-series/runs'),
+  run: (id: number) => request<import('./timeSeries/types').SensorRun>(`/api/time-series/runs/${id}`),
+  abort: (id: number, projectId?: string) => request<import('./timeSeries/types').SensorRun>(`/api/time-series/runs/${id}/abort`, { method: 'POST' }, undefined, projectId),
+  deleteRun: (id: number, projectId?: string) => request<void>(`/api/time-series/runs/${id}`, { method: 'DELETE' }, undefined, projectId),
+  logs: (id: number, projectId?: string) => request<{ text: string }>(`/api/time-series/runs/${id}/logs`, undefined, undefined, projectId),
+  series: (id: number, subset: string, sensor: number, scaled: boolean, offset = 0) => request<import('./timeSeries/types').ResultSeries>(`/api/time-series/runs/${id}/series?${new URLSearchParams({ subset, sensor: String(sensor), scaled: String(scaled), offset: String(offset), limit: '5000' })}`),
+  exportUrl: (id: number, artifact: string) => projectMediaUrl(`/api/time-series/runs/${id}/${artifact}`),
 };
