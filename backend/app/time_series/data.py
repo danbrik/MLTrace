@@ -57,11 +57,18 @@ def prepare(content: bytes, dataset: dict, intervals: list[dict], window_length:
             raise ValueError("Der Split enthält überlappende Zuordnungen.")
         groups[selected] = SUBSETS.index(entry["subset"])
         interval_indices[selected] = i
-    numeric = frame[columns].apply(pd.to_numeric, errors="coerce").to_numpy(dtype=np.float64)
+    # CSV quoting/delimiters are already resolved. Normalize only sensor cells,
+    # never the source bytes, timestamps or annotations. A comma is a decimal
+    # separator; mixed or repeated separators stay invalid (no grouping guesses).
+    numeric = frame[columns].apply(lambda values: pd.to_numeric(
+        values.str.strip().str.replace(",", ".", regex=False), errors="coerce"
+    )).to_numpy(dtype=np.float64)
     bad = np.argwhere(~np.isfinite(numeric))
     if len(bad):
         row, column = bad[0]
-        raise ValueError(f"Sensor {columns[column]} bei {iso(times[row])}: kein endlicher numerischer Wert.")
+        value = frame[columns[column]].iloc[row]
+        raise ValueError(f"Sensor {columns[column]} bei {iso(times[row])}: kein endlicher numerischer Wert ({value[:100]!r}). "
+                         "Erlaubt sind Dezimalpunkt oder Dezimalkomma ohne Tausendertrennzeichen.")
     # Unassigned cells never enter training or inference. Keep their positions to
     # prevent joining assigned windows across excluded source rows.
     train = groups == 0

@@ -65,13 +65,37 @@ def test_tag_changes_gap_and_excluded_rows():
     assert p.summary['counts']['train']['windows'] == 5
 
 
-@pytest.mark.parametrize('invalid', ['nan', 'inf', 'text'])
+@pytest.mark.parametrize('invalid', ['nan', 'inf', 'text', '', '1,2,3', '1.608,83', '1,608.83', '1608,83"'])
 def test_invalid_sensor_rejected(invalid):
     content, dataset, intervals = fixture_data()
     frame = pd.read_csv(io.BytesIO(content), dtype=str)
     frame.loc[1, 'sensor'] = invalid
     with pytest.raises(ValueError, match='sensor.*numerischer'):
         data.prepare(frame.to_csv(index=False).encode(), dataset, intervals, 36)
+
+
+@pytest.mark.parametrize('delimiter', [',', ';', '\t', '|'])
+def test_decimal_comma_sensor_values_preserve_scaling_windows_and_source(delimiter):
+    content, dataset, intervals = fixture_data()
+    frame = pd.read_csv(io.BytesIO(content), dtype=str, keep_default_na=False)
+    frame.loc[0, 'sensor'] = '65.67'
+    frame.loc[110, 'sensor'] = '1608.83'
+    frame.loc[111, 'sensor'] = '-2.5e1'
+    dotted = frame.to_csv(index=False).encode()
+    expected = data.prepare(dotted, dataset, intervals, 36)
+    # Mix both decimal conventions and whitespace in the same sensor column.
+    frame.loc[0, 'sensor'] = ' 65,67 '
+    frame.loc[110, 'sensor'] = '1608,83'
+    frame.loc[111, 'sensor'] = '-2,5e1'
+    comma_csv = frame.to_csv(index=False, sep=delimiter).encode()
+    actual = data.prepare(comma_csv, dataset, intervals, 36)
+    np.testing.assert_array_equal(actual.values, expected.values)
+    np.testing.assert_array_equal(actual.scaled, expected.scaled)
+    np.testing.assert_array_equal(actual.endpoints, expected.endpoints)
+    assert actual.summary['scaler'] == expected.summary['scaler']
+    assert actual.values[110, 0] == 1608.83
+    assert actual.scaled[110, 0] > 1  # Outlier cannot affect Train-only scaling.
+    assert data.read_csv(comma_csv).iloc[0]['sensor'] == ' 65,67 '
 
 
 def test_duplicates_and_short_validation():
@@ -119,6 +143,13 @@ def test_cpu_training_snapshots_exports_and_replay(client_db, tmp_path, monkeypa
     monkeypatch.setattr(service, 'data_dir', lambda: tmp_path)
     monkeypatch.setattr(results, 'artifact_dir', service.artifact_dir)
     content, dataset, intervals = fixture_data()
+    if kind == 'usad':
+        # Exercise import, preview, enqueue, real training, export and replay
+        # with quoted decimal-comma cells, not only the preparation helper.
+        frame = pd.read_csv(io.BytesIO(content), dtype=str)
+        for column in ['sensor', 'constant']:
+            frame[column] = frame[column].str.replace('.', ',', regex=False)
+        content = frame.to_csv(index=False).encode()
     dataset_id = upload(client, content, name='Sensors', **dataset).json()['id']
     response = client.post('/api/time-series/splits', json=dict(name='Temporal', dataset_id=dataset_id, tags=['Normal', 'Anomaly'], intervals=intervals))
     assert response.status_code == 201, response.text

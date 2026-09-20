@@ -68,3 +68,8 @@ Alle Endpunkte liegen unter `/api/time-series` und verwenden den vorhandenen Pro
 - `GET runs/{id}/representations.zip`: alle Gruppen und latenten Vektoren mit Metadaten.
 
 Die spätere Bild-Sensor-Fusion kann diese Repräsentationen anhand der Endzeitpunkte verknüpfen; ein Fusionsmodell ist nicht Bestandteil dieser Erweiterung.
+## Dezimalformate in Sensorwerten
+
+Sensorspalten unterstützen Dezimalpunkt und Dezimalkomma, etwa `65.67` beziehungsweise `65,67`, auch innerhalb derselben Spalte. Bei einer kommagetrennten CSV müssen Dezimalkomma-Werte wie üblich als CSV-Felder in Anführungszeichen stehen (`"65,67"`). Semikolon, Tab und Pipe als Feldtrenner bleiben ebenfalls unterstützt. Tausendertrennzeichen werden nicht automatisch interpretiert; leere, nichtendliche und fehlerhafte Werte bleiben Fehler mit Angabe von Sensor, Zeitpunkt und Originalwert.
+
+Die Umwandlung erfolgt ausschließlich für Sensorspalten bei Preview und Training. Original-CSV, Zeitstempel und Labels bleiben unverändert. Bereits importierte Datenbasen müssen nicht neu hochgeladen werden; die Pipeline-Vorschau kann erneut geprüft werden.
