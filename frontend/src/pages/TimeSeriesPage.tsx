@@ -8,7 +8,7 @@ import { useEffect, useRef, useState } from 'react';
 import { timeSeriesApi as api } from '../api';
 import { StepCard } from '../components/StepCard';
 import { displayTime, inputTime, intervalError, sortIntervals, utcTime } from '../timeSeries/intervals';
-import type { CsvPreview, Subset, TimeInterval, TimeSeriesDataset, TimeSeriesSplit } from '../timeSeries/types';
+import type { CsvPreview, LabelSplitPreview, Subset, TimeInterval, TimeSeriesDataset, TimeSeriesSplit } from '../timeSeries/types';
 
 const SUBSETS: { value: Subset; label: string; color: string }[] = [
   { value: 'train', label: 'Train', color: 'blue' },
@@ -79,6 +79,10 @@ export function TimeSeriesPage({ active, section }: { active: boolean; section: 
   const [format, setFormat] = useState('ISO8601');
   const [customFormat, setCustomFormat] = useState('%Y-%m-%d %H:%M:%S');
   const [timePreview, setTimePreview] = useState<{ start: string; end: string } | null>(null);
+  const [labelColumn, setLabelColumn] = useState<string | null>(null);
+  const [autoSplit, setAutoSplit] = useState(false);
+  const [importSplitName, setImportSplitName] = useState<string | null>(null);
+  const [labelPreview, setLabelPreview] = useState<LabelSplitPreview | null>(null);
   const [splitModal, setSplitModal] = useState(false);
   const [splitRecord, setSplitRecord] = useState<TimeSeriesSplit | null>(null);
   const [splitName, setSplitName] = useState('');
@@ -94,6 +98,8 @@ export function TimeSeriesPage({ active, section }: { active: boolean; section: 
   const fileGeneration = useRef(0);
   const selectedDataset = datasets.find((item) => String(item.id) === datasetId);
   const effectiveFormat = format === 'custom' ? customFormat : format;
+  const effectiveSplitName = importSplitName ?? `${name.trim().slice(0, 241)} – Label-Split`;
+  function invalidatePreview() { setTimePreview(null); setLabelPreview(null); }
   const candidate: TimeInterval = { id: editingId ?? 'new', start: utcTime(start), end: utcTime(end), subset, tags: intervalTags };
   const rangeError = selectedDataset ? intervalError(candidate, intervals, selectedDataset) : 'Bitte zuerst eine Datenbasis auswählen.';
 
@@ -121,10 +127,12 @@ export function TimeSeriesPage({ active, section }: { active: boolean; section: 
   function openImport() {
     setError(null); setDatasetRecord(null); setReadOnly(false); setFile(null); setPreview(null);
     setName(''); setColumns([]); setTimeColumn(null); setFormat('ISO8601'); setTimePreview(null); setDatasetModal(true);
+    setLabelColumn(null); setAutoSplit(false); setImportSplitName(null); setLabelPreview(null);
   }
   async function chooseFile(next: File | null) {
     const generation = ++fileGeneration.current;
     setFile(next); setPreview(null); setTimePreview(null); setTimeColumn(null); setColumns([]); setError(null);
+    setLabelColumn(null); setAutoSplit(false); setImportSplitName(null); setLabelPreview(null);
     if (!next) return;
     setName(next.name.replace(/\.csv$/i, ''));
     if (next.size > 50 * 1024 * 1024) { setError('Die CSV darf höchstens 50 MB groß sein.'); return; }
@@ -132,8 +140,10 @@ export function TimeSeriesPage({ active, section }: { active: boolean; section: 
     try {
       const result = await api.preview(next);
       if (generation !== fileGeneration.current) return;
-      setPreview(result); setColumns(result.columns);
-      setTimeColumn(result.columns.find((column) => /^(timestamp|time|datetime|date|zeit|zeitstempel)$/i.test(column)) ?? result.columns[0]);
+      const detectedLabel = result.detected_label_column ?? null;
+      setPreview(result); setColumns(result.columns.filter((column) => column !== detectedLabel));
+      setLabelColumn(detectedLabel); setAutoSplit(!!detectedLabel);
+      setTimeColumn(result.columns.find((column) => /^(timestamp|time|datetime|date|zeit|zeitstempel)$/i.test(column.trim())) ?? result.columns.find((column) => column !== detectedLabel) ?? null);
     } catch (err) { if (generation === fileGeneration.current) setError(err instanceof Error ? err.message : String(err)); }
     finally { if (generation === fileGeneration.current) setBusy(false); }
   }
@@ -142,6 +152,7 @@ export function TimeSeriesPage({ active, section }: { active: boolean; section: 
       const detail = await api.dataset(record.id);
       setDatasetRecord(detail); setReadOnly(view); setName(detail.name); setColumns(detail.selected_columns);
       setTimeColumn(detail.timestamp_column); setPreview(null); setFile(null); setDatasetModal(true);
+      setLabelColumn(detail.label_column ?? null); setAutoSplit(false); setLabelPreview(null);
     });
   }
   function openSplit(record: TimeSeriesSplit | null, view = false) {
@@ -195,31 +206,48 @@ export function TimeSeriesPage({ active, section }: { active: boolean; section: 
           <TextInput label="Name der Datenbasis" required maxLength={255} value={name} readOnly={readOnly} disabled={busy} onChange={(event) => setName(event.currentTarget.value)} />
           {!datasetRecord && <StepCard index={1} title="Zeitspalte festlegen">
             <SimpleGrid cols={{ base: 1, sm: 2 }}>
-              <Select label="Zeitspalte" required data={sourceColumns} value={timeColumn} disabled={busy} searchable onChange={(value) => { setTimeColumn(value); setTimePreview(null); if (value) setColumns((current) => [...new Set([...current, value])]); }} />
-              <Select label="Zeitformat" data={FORMATS} value={format} disabled={busy} onChange={(value) => { setFormat(value ?? 'ISO8601'); setTimePreview(null); }} />
+              <Select label="Zeitspalte" required data={sourceColumns.filter((column) => column !== labelColumn)} value={timeColumn} disabled={busy} searchable onChange={(value) => { setTimeColumn(value); invalidatePreview(); if (value) setColumns((current) => [...new Set([...current, value])]); }} />
+              <Select label="Zeitformat" data={FORMATS} value={format} disabled={busy} onChange={(value) => { setFormat(value ?? 'ISO8601'); invalidatePreview(); }} />
             </SimpleGrid>
-            {format === 'custom' && <TextInput label="Zeitformat" description="Beispiel: %d/%m/%Y %H:%M:%S" value={customFormat} disabled={busy} onChange={(event) => { setCustomFormat(event.currentTarget.value); setTimePreview(null); }} />}
+            {format === 'custom' && <TextInput label="Zeitformat" description="Beispiel: %d/%m/%Y %H:%M:%S" value={customFormat} disabled={busy} onChange={(event) => { setCustomFormat(event.currentTarget.value); invalidatePreview(); }} />}
             <Text size="xs" c="dimmed">Zeitangaben ohne Zeitzone werden als UTC übernommen. Angaben mit Zeitzone werden nach UTC umgerechnet.</Text>
             <Button variant="light" w="fit-content" loading={busy} disabled={!timeColumn || !effectiveFormat} onClick={() => void perform(async () => {
-              const result = await api.preview(file!, timeColumn!, effectiveFormat);
+              invalidatePreview();
+              const result = await api.preview(file!, timeColumn!, effectiveFormat, autoSplit ? labelColumn! : undefined);
               setTimePreview({ start: result.start!, end: result.end! });
-            })}>Zeitspalte prüfen</Button>
+              setLabelPreview(result.label_split ?? null);
+            })}>{autoSplit ? 'Zeitspalte und Label-Split prüfen' : 'Zeitspalte prüfen'}</Button>
             {timePreview && <Alert color="teal" title="Zeitspalte geprüft">{preview?.row_count.toLocaleString('de-DE')} Zeilen · {displayTime(timePreview.start)} bis {displayTime(timePreview.end)} UTC</Alert>}
           </StepCard>}
           {datasetRecord && <Text size="sm" c="dimmed">Zeitspalte: {datasetRecord.timestamp_column} · {datasetRecord.row_count.toLocaleString('de-DE')} Zeilen<br />{displayTime(datasetRecord.start)} bis {displayTime(datasetRecord.end)} UTC</Text>}
+          {labelColumn && <StepCard title="Labelspalte" subtitle={`„${labelColumn}“ wird als Annotation gespeichert und nicht als Sensor verwendet.`}>
+            {!datasetRecord && <>
+              <Checkbox label="Split aus Labelspalte erstellen" checked={autoSplit} disabled={busy} onChange={(event) => { setAutoSplit(event.currentTarget.checked); invalidatePreview(); setError(null); }} />
+              {autoSplit && <>
+                <Text size="sm">normal → Train (ohne Tag) · before_anomaly, anomaly und cooldown → Test mit dem jeweiligen Tag. Validation bleibt leer. Jeder Labelwechsel beginnt einen neuen Zeitraum.</Text>
+                <TextInput label="Name des automatisch erstellten Splits" required maxLength={255} value={effectiveSplitName} disabled={busy} onChange={(event) => setImportSplitName(event.currentTarget.value)} />
+                {!labelPreview && <Text size="sm" c="dimmed">Bitte oben „Zeitspalte und Label-Split prüfen“ ausführen, um die Zeiträume vor dem Speichern anzuzeigen.</Text>}
+                {labelPreview && <>
+                  <Group>{SUBSETS.map((group) => <Badge key={group.value} color={group.color} variant="light">{group.label}: {labelPreview.counts[group.value].rows.toLocaleString('de-DE')} Zeilen</Badge>)}</Group>
+                  <div style={{ maxHeight: 420, overflowY: 'auto' }}><IntervalBoxes intervals={labelPreview.intervals} /></div>
+                </>}
+              </>}
+            </>}
+            <DataPreview columns={[labelColumn]} rows={(datasetRecord?.source_rows ?? preview?.rows ?? []).map((row) => [row[sourceColumns.indexOf(labelColumn)]])} />
+          </StepCard>}
           {!readOnly && <StepCard index={datasetRecord ? undefined : 2} title="Spalten auswählen" subtitle="Die Zeitspalte bleibt ausgewählt. Mindestens eine weitere Spalte ist erforderlich.">
-            <Group><Button size="compact-xs" variant="subtle" disabled={busy} onClick={() => setColumns(sourceColumns)}>Alle auswählen</Button><Button size="compact-xs" variant="subtle" disabled={busy} onClick={() => setColumns(timeColumn ? [timeColumn] : [])}>Nur Zeitspalte</Button></Group>
-            <SimpleGrid cols={{ base: 1, sm: 3 }}>{sourceColumns.map((column) => <Checkbox key={column} label={column} checked={columns.includes(column)} disabled={busy || column === timeColumn} onChange={(event) => setColumns(event.currentTarget.checked ? [...columns, column] : columns.filter((item) => item !== column))} />)}</SimpleGrid>
+            <Group><Button size="compact-xs" variant="subtle" disabled={busy} onClick={() => setColumns(sourceColumns.filter((column) => column !== labelColumn))}>Alle auswählen</Button><Button size="compact-xs" variant="subtle" disabled={busy} onClick={() => setColumns(timeColumn ? [timeColumn] : [])}>Nur Zeitspalte</Button></Group>
+            <SimpleGrid cols={{ base: 1, sm: 3 }}>{sourceColumns.map((column) => <Checkbox key={column} label={column === labelColumn ? `${column} (Annotation)` : column} checked={columns.includes(column)} disabled={busy || column === timeColumn || column === labelColumn} onChange={(event) => setColumns(event.currentTarget.checked ? [...columns, column] : columns.filter((item) => item !== column))} />)}</SimpleGrid>
             {datasetRecord && <Text size="xs" c="dimmed">Die Spaltenauswahl gilt auch für vorhandene Splits. Die gespeicherte CSV bleibt erhalten, damit sich Spalten wieder aktivieren lassen.</Text>}
           </StepCard>}
           <DataPreview columns={shownColumns} rows={shownRows} />
           <Group justify="flex-end">
             <Button variant="default" disabled={busy} onClick={() => setDatasetModal(false)}>{readOnly ? 'Schließen' : 'Abbrechen'}</Button>
-            {readOnly ? <Button onClick={() => setReadOnly(false)}>Bearbeiten</Button> : <Button leftSection={<Save size={16} />} loading={busy} disabled={!name.trim() || columns.length < 2 || !timeColumn || (!datasetRecord && !timePreview)} onClick={() => void perform(async () => {
+            {readOnly ? <Button onClick={() => setReadOnly(false)}>Bearbeiten</Button> : <Button leftSection={<Save size={16} />} loading={busy} disabled={!name.trim() || columns.length < 2 || !timeColumn || (!datasetRecord && (!timePreview || (autoSplit && (!labelPreview || !effectiveSplitName.trim()))))} onClick={() => void perform(async () => {
               if (datasetRecord) await api.updateDataset(datasetRecord.id, { name, selected_columns: columns });
-              else await api.createDataset(file!, { name, selected_columns: columns, timestamp_column: timeColumn!, timestamp_format: effectiveFormat });
-              setDatasetModal(false); await reload(); notifications.show({ color: 'teal', message: 'Datenbasis gespeichert.' });
-            })}>Datenbasis speichern</Button>}
+              else await api.createDataset(file!, { name, selected_columns: columns, timestamp_column: timeColumn!, timestamp_format: effectiveFormat, label_column: labelColumn, auto_split: autoSplit, ...(autoSplit ? { split_name: effectiveSplitName } : {}) });
+              setDatasetModal(false); await reload(); notifications.show({ color: 'teal', message: !datasetRecord && autoSplit ? 'Datenbasis und Label-Split gespeichert. Der Split ist unter „Splits“ verfügbar.' : 'Datenbasis gespeichert.' });
+            })}>{!datasetRecord && autoSplit ? 'Datenbasis und Split speichern' : 'Datenbasis speichern'}</Button>}
           </Group>
         </>}
       </Stack>

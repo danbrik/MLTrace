@@ -69,7 +69,7 @@ def save_model(db, payload, record_id=None):
 
 
 def dataset_snapshot(dataset):
-    return record_dict(dataset, "id name filename selected_columns timestamp_column timestamp_format")
+    return record_dict(dataset, "id name filename selected_columns timestamp_column timestamp_format label_column")
 
 
 def resolve_preview(db, payload):

@@ -65,40 +65,98 @@ def iso(value: pd.Timestamp) -> str:
     return value.isoformat().replace("+00:00", "Z")
 
 
-def preview(content: bytes, column: str | None = None, fmt: str = "ISO8601") -> dict:
+def label_split(frame: pd.DataFrame, times: pd.DatetimeIndex, label_column: str) -> dict:
+    if label_column not in frame.columns:
+        raise ValueError("Bitte eine vorhandene Labelspalte auswählen.")
+    labels = frame[label_column].str.strip().str.casefold()
+    allowed = {"normal", "before_anomaly", "anomaly", "cooldown"}
+    invalid = ~labels.isin(allowed)
+    if invalid.any():
+        examples = ", ".join(f"{i + 2}: {frame[label_column].iloc[i]!r}" for i in range(len(frame)) if invalid.iloc[i])[:300]
+        raise ValueError(f"Ungültige oder leere Labels (CSV-Zeilen {examples}). Erlaubt: normal, before_anomaly, anomaly, cooldown.")
+    duplicates = times.duplicated(keep=False)
+    if duplicates.any():
+        examples = ", ".join(f"{i + 2}: {iso(times[i])}" for i in range(len(times)) if duplicates[i])[:300]
+        raise ValueError(f"Doppelte Zeitstempel verhindern den automatischen Split (CSV-Zeilen {examples}).")
+    order = times.argsort()
+    intervals = []
+    previous = None
+    for index in order:
+        label, timestamp = labels.iloc[index], iso(times[index])
+        if label != previous:
+            intervals.append({"id": f"label-{len(intervals) + 1}", "start": timestamp, "end": timestamp,
+                              "subset": "train" if label == "normal" else "test",
+                              "tags": [] if label == "normal" else [label], "row_count": 0})
+        intervals[-1]["end"] = timestamp
+        intervals[-1]["row_count"] += 1
+        previous = label
+    return {"tags": [label for label in ("before_anomaly", "anomaly", "cooldown") if label in set(labels)],
+            "intervals": intervals,
+            "counts": {subset: {"rows": sum(i["row_count"] for i in intervals if i["subset"] == subset),
+                                "intervals": sum(i["subset"] == subset for i in intervals)}
+                       for subset in ("train", "test", "validation")}}
+
+
+def preview(content: bytes, column: str | None = None, fmt: str = "ISO8601", label_column: str | None = None) -> dict:
     frame = read_csv(content)
     result = {"columns": list(frame.columns), "row_count": len(frame), "rows": frame.head(12).values.tolist()}
+    candidates = [c for c in frame.columns if c.strip().casefold() == "label"]
+    result["detected_label_column"] = candidates[0] if len(candidates) == 1 else None
     if column:
         times = parse_times(frame, column, fmt)
         result.update(start=iso(times.min()), end=iso(times.max()))
+        if label_column:
+            if label_column == column:
+                raise ValueError("Zeitspalte und Labelspalte müssen verschieden sein.")
+            result["label_split"] = label_split(frame, times, label_column)
+    elif label_column:
+        raise ValueError("Für die Split-Vorschau zuerst die Zeitspalte auswählen.")
     return result
 
 
-def validate_columns(columns: list[str], selected: list[str], timestamp: str):
+def validate_columns(columns: list[str], selected: list[str], timestamp: str, label_column: str | None = None):
     if len(selected) != len(set(selected)) or not set(selected) <= set(columns):
         raise ValueError("Die Spaltenauswahl enthält unbekannte oder doppelte Spalten.")
     if timestamp not in selected or len(selected) < 2:
         raise ValueError("Die Zeitspalte und mindestens eine Datenspalte müssen ausgewählt bleiben.")
+    if label_column is not None:
+        if label_column not in columns or label_column == timestamp:
+            raise ValueError("Die Labelspalte muss vorhanden und von der Zeitspalte verschieden sein.")
+        if label_column in selected:
+            raise ValueError("Die Labelspalte ist eine Annotation und darf nicht als Sensorspalte ausgewählt werden.")
 
 
 def create_dataset(db: Session, content: bytes, filename: str, payload: DatasetImport):
     frame = read_csv(content)
-    validate_columns(list(frame.columns), payload.selected_columns, payload.timestamp_column)
+    validate_columns(list(frame.columns), payload.selected_columns, payload.timestamp_column, payload.label_column)
     times = parse_times(frame, payload.timestamp_column, payload.timestamp_format)
+    if payload.auto_split and not payload.label_column:
+        raise ValueError("Für den automatischen Split ist eine Labelspalte erforderlich.")
+    generated = label_split(frame, times, payload.label_column) if payload.auto_split else None
     dataset = TimeSeriesDataset(
         name=payload.name, filename=filename, source_csv=content,
         columns=list(frame.columns), selected_columns=payload.selected_columns,
         timestamp_column=payload.timestamp_column, timestamp_format=payload.timestamp_format,
+        label_column=payload.label_column,
         row_count=len(frame), start=iso(times.min()), end=iso(times.max()),
     )
-    db.add(dataset)
-    db.commit()
+    try:
+        db.add(dataset)
+        db.flush()
+        if generated:
+            split_name = payload.split_name or f"{payload.name[:241]} – Label-Split"
+            save_split(db, dataset, SplitInput(name=split_name, dataset_id=dataset.id,
+                       tags=generated["tags"], intervals=generated["intervals"]), commit=False)
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
     db.refresh(dataset)
     return dataset
 
 
 def update_dataset(db: Session, dataset: TimeSeriesDataset, payload: DatasetUpdate):
-    validate_columns(dataset.columns, payload.selected_columns, dataset.timestamp_column)
+    validate_columns(dataset.columns, payload.selected_columns, dataset.timestamp_column, dataset.label_column)
     dataset.name = payload.name
     dataset.selected_columns = payload.selected_columns
     db.commit()
@@ -109,7 +167,7 @@ def update_dataset(db: Session, dataset: TimeSeriesDataset, payload: DatasetUpda
 def dataset_read(dataset: TimeSeriesDataset, *, detail=False):
     result = {key: getattr(dataset, key) for key in (
         "id", "name", "filename", "columns", "selected_columns", "timestamp_column", "timestamp_format",
-        "row_count", "start", "end", "created_at", "updated_at",
+        "row_count", "start", "end", "created_at", "updated_at", "label_column",
     )}
     result["split_count"] = len(dataset.splits)
     if detail:
@@ -133,7 +191,7 @@ def boundary(value: str) -> pd.Timestamp:
         raise ValueError("Ungültige Zeitraumgrenze.") from exc
 
 
-def save_split(db: Session, dataset: TimeSeriesDataset, payload: SplitInput, split: TimeSeriesSplit | None = None):
+def save_split(db: Session, dataset: TimeSeriesDataset, payload: SplitInput, split: TimeSeriesSplit | None = None, *, commit=True):
     if split and split.dataset_id != payload.dataset_id:
         raise ValueError("Die Datenbasis eines gespeicherten Splits kann nicht gewechselt werden.")
     frame = read_csv(dataset.source_csv)
@@ -163,8 +221,11 @@ def save_split(db: Session, dataset: TimeSeriesDataset, payload: SplitInput, spl
         split = TimeSeriesSplit(dataset_id=dataset.id)
         db.add(split)
     split.name, split.tags, split.intervals = payload.name, payload.tags, intervals
-    db.commit()
-    db.refresh(split)
+    if commit:
+        db.commit()
+        db.refresh(split)
+    else:
+        db.flush()
     return split
 
 

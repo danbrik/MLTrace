@@ -1,14 +1,16 @@
 export type Subset = 'train' | 'test' | 'validation';
-export type CsvPreview = { columns: string[]; row_count: number; rows: string[][]; start?: string; end?: string };
+export type LabelSplitPreview = { tags: string[]; intervals: TimeInterval[]; counts: Record<Subset, { rows: number; intervals: number }> };
+export type CsvPreview = { columns: string[]; row_count: number; rows: string[][]; start?: string; end?: string; detected_label_column?: string | null; label_split?: LabelSplitPreview };
 export type TimeSeriesDataset = {
   id: number; name: string; filename: string; columns: string[]; selected_columns: string[];
   timestamp_column: string; timestamp_format: string; row_count: number; start: string; end: string;
+  label_column?: string | null;
   split_count: number; created_at: string; updated_at: string; rows?: string[][]; source_rows?: string[][];
 };
 export type TimeInterval = { id: string; start: string; end: string; subset: Subset; tags: string[]; row_count?: number };
 export type SplitPayload = { name: string; dataset_id: number; tags: string[]; intervals: TimeInterval[] };
 export type TimeSeriesSplit = SplitPayload & { id: number; dataset_name: string; created_at: string; updated_at: string };
-export type DatasetPayload = { name: string; selected_columns: string[]; timestamp_column: string; timestamp_format: string };
+export type DatasetPayload = { name: string; selected_columns: string[]; timestamp_column: string; timestamp_format: string; label_column?: string | null; auto_split?: boolean; split_name?: string };
 export type Parameters = Record<string, number | boolean | number[]>;
 export type FieldDefinition = { label: string; default: number | boolean | number[]; origin: string; reference: string; adaptation: string; minimum: number | null; maximum: number | null };
 export type ModelDefinition = { kind: string; label: string; version: string; source: { reference: string; url: string }; adaptations: string[]; diagram: string[]; architecture: Record<string, FieldDefinition>; training: Record<string, FieldDefinition> };

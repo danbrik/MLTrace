@@ -13,6 +13,9 @@ class DatasetUpdate(BaseModel):
 class DatasetImport(DatasetUpdate):
     timestamp_column: str
     timestamp_format: str = "ISO8601"
+    label_column: str | None = None
+    auto_split: bool = False
+    split_name: Name | None = None
 
 
 class IntervalInput(BaseModel):

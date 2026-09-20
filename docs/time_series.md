@@ -10,6 +10,23 @@ Im Projektkopf lässt sich zwischen **Bilddaten** und **Zeitreihen** wechseln. D
 4. Nicht benötigte Spalten abwählen. Die Zeitspalte und mindestens eine weitere Spalte müssen aktiv bleiben.
 5. **Datenbasis speichern**.
 
+### Split aus CSV-Labels erstellen
+
+Eine Spalte namens `label` wird beim Import erkannt (unabhängig von Groß-/Kleinschreibung und äußeren Leerzeichen). Die sichtbare Option **Split aus Labelspalte erstellen** ist dann vorausgewählt und kann abgeschaltet werden. Die Labelspalte bleibt in der Originaldatei erhalten, wird dauerhaft als Annotation ausgewiesen und kann nicht als Sensorspalte aktiviert werden – auch nicht über **Alle auswählen** oder spätere Bearbeitungen.
+
+| Label | Gruppe | Tag |
+|---|---|---|
+| `normal` | Train | keiner |
+| `before_anomaly` | Test | `before_anomaly` |
+| `anomaly` | Test | `anomaly` |
+| `cooldown` | Test | `cooldown` |
+
+**Zeitspalte und Label-Split prüfen** wertet alle Zeilen chronologisch aus und zeigt Zeilenzahlen sowie die vorgeschlagenen Zeiträume. Jeder Labelwechsel beginnt einen neuen Zeitraum, auch zwischen Test-Tags. Wiederkehrende Labels bilden getrennte Zeiträume; einzelne Messpunkte sind erlaubt. Die Grenzen sind die tatsächlichen ersten und letzten Zeitstempel des jeweiligen Blocks, einschließlich Nanosekunden. Es erfolgt keine zusätzliche Lückenerkennung beim Import. Validation bleibt leer.
+
+Der Splitname ist editierbar; die Vorgabe lautet **<Datenbasisname> – Label-Split**. **Datenbasis und Split speichern** legt beide Einträge gemeinsam an. Der Split ist anschließend unter **Splits** normal bearbeitbar. Es gibt keine spätere automatische Neuzuordnung und keine Tag-Filterung im Training. Die bestehende Fensterbildung respektiert Train/Test-Grenzen und Zeitlücken, darf aber über Wechsel zwischen Test-Tags reichen.
+
+Leere/unbekannte Labels und doppelte Zeitstempel verhindern die automatische Split-Erstellung mit Zeilenangaben. Ohne automatische Split-Erstellung ist der normale CSV-Import weiterhin möglich. Bestehende Datenbasen und Splits werden nicht nachträglich verändert.
+
 Gespeicherte Datenbasen lassen sich anzeigen, umbenennen, in ihrer Spaltenauswahl bearbeiten und löschen. Die Original-CSV bleibt gespeichert, damit abgewählte Spalten später wieder aktiviert werden können. Die Vorschau zeigt ausschließlich aktive Spalten. Spaltenänderungen gelten auch für bestehende Splits. Zeitspalte und Zeitformat bleiben nach dem Import fest, damit bestehende Zeiträume gültig bleiben. Für eine andere Zeitinterpretation eine neue Datenbasis importieren.
 
 ## Splits definieren
@@ -29,6 +46,7 @@ Gespeicherte Splits werden in separaten Boxen für **Train**, **Test** und **Val
 
 - Migration `0058_time_series` ergänzt `time_series_datasets` und `time_series_splits`. Die normale Projektmigration beim Backend-Start übernimmt das Update.
 - API: `/api/time-series/preview`, `/api/time-series/datasets` und `/api/time-series/splits`; Detail-, Bearbeitungs- und Löschoperationen über `/{id}`.
+- Label-Import: Migration `0060_time_series_labels` ergänzt die optionale `label_column`. Die Preview akzeptiert `label_column` und liefert `label_split` (Tags, Intervalle, Gruppenanzahlen) sowie `detected_label_column`. Import-Metadaten akzeptieren `label_column`, `auto_split` und `split_name`; ohne diese Angaben bleibt das bisherige API-Verhalten erhalten. Datenbasis und automatischer Split werden atomar gespeichert.
 - Die Projektzuordnung nutzt den vorhandenen Header `X-MLTrace-Project-ID`.
 - Transaktionale Speicherung hält Originaldatei, Metadaten und Änderungen konsistent. Listen laden die CSV-Blobs nicht mit.
 - Tests: `pytest backend/tests/test_time_series.py` und `npm test -- src/timeSeries/intervals.test.ts` (im Frontend-Verzeichnis).

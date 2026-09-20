@@ -27,6 +27,7 @@ class TimeSeriesDataset(Base):
     selected_columns: Mapped[list] = mapped_column(json_type())
     timestamp_column: Mapped[str] = mapped_column(Text)
     timestamp_format: Mapped[str] = mapped_column(Text)
+    label_column: Mapped[str | None] = mapped_column(Text, nullable=True)
     row_count: Mapped[int] = mapped_column(Integer)
     start: Mapped[str] = mapped_column(String(64))
     end: Mapped[str] = mapped_column(String(64))

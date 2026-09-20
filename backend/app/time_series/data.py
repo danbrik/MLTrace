@@ -37,6 +37,8 @@ class Prepared:
 
 def prepare(content: bytes, dataset: dict, intervals: list[dict], window_length: int | None) -> Prepared:
     frame = read_csv(content)
+    if dataset.get("label_column") in dataset["selected_columns"]:
+        raise ValueError("Die Labelspalte ist eine Annotation und darf nicht als Sensorspalte ausgewählt werden.")
     columns = [c for c in dataset["selected_columns"] if c != dataset["timestamp_column"]]
     if not columns:
         raise ValueError("Mindestens eine Sensorspalte muss ausgewählt sein.")

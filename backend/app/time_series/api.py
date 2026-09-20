@@ -39,9 +39,9 @@ def read_upload(file: UploadFile):
 
 
 @router.post("/preview")
-def preview(file: UploadFile = File(...), timestamp_column: str | None = Form(None), timestamp_format: str = Form("ISO8601")):
+def preview(file: UploadFile = File(...), timestamp_column: str | None = Form(None), timestamp_format: str = Form("ISO8601"), label_column: str | None = Form(None)):
     content = read_upload(file)
-    return checked(lambda: service.preview(content, timestamp_column, timestamp_format))
+    return checked(lambda: service.preview(content, timestamp_column, timestamp_format, label_column))
 
 
 @router.get("/datasets")

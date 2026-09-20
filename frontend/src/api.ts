@@ -1977,11 +1977,12 @@ export function representationArtifactUrl(id: number, name: string) {
 export const timeSeriesApi = {
   datasets: () => request<import('./timeSeries/types').TimeSeriesDataset[]>('/api/time-series/datasets'),
   dataset: (id: number) => request<import('./timeSeries/types').TimeSeriesDataset>(`/api/time-series/datasets/${id}`),
-  preview: (file: File, timestampColumn?: string, timestampFormat = 'ISO8601') => {
+  preview: (file: File, timestampColumn?: string, timestampFormat = 'ISO8601', labelColumn?: string) => {
     const form = new FormData();
     form.append('file', file);
     if (timestampColumn) form.append('timestamp_column', timestampColumn);
     form.append('timestamp_format', timestampFormat);
+    if (labelColumn) form.append('label_column', labelColumn);
     return request<import('./timeSeries/types').CsvPreview>('/api/time-series/preview', { method: 'POST', body: form });
   },
   createDataset: (file: File, payload: import('./timeSeries/types').DatasetPayload) => {
