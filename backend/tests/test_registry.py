@@ -35,7 +35,8 @@ def test_registry_summary_lists_all_types(tmp_path: Path) -> None:
         seed_finished_mean_image_run(db, tmp_path)
         summary = registry_service.registry_summary(db)
         keys = {t["key"] for t in summary["types"]}
-        assert len(keys) == 26
+        assert len(keys) == 27
+        assert "time_range_preset" in keys
         assert "reference_image_run" in keys
         assert "representation_run" in keys
         assert "data_quality_analysis" in keys

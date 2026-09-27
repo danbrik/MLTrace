@@ -1725,3 +1725,15 @@ class ReferenceImageRun(Base):
     log_path: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
+
+
+class TimeRangePreset(Base):
+    __tablename__ = "time_range_presets"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    name: Mapped[str] = mapped_column(String(255))
+    name_key: Mapped[str] = mapped_column(String(765), unique=True)
+    start: Mapped[datetime] = mapped_column(DateTime)
+    end: Mapped[datetime] = mapped_column(DateTime)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now, onupdate=utc_now)

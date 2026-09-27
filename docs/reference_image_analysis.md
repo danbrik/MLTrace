@@ -100,3 +100,11 @@ gespeichert; eine zusätzliche Datenbankmigration ist nicht erforderlich.
 
 Medienlinks führen die Projekt-ID als `project_id` mit. Fehlgeschlagene und
 abgebrochene Läufe veröffentlichen keine unvollständigen Artefakte.
+
+## Gespeicherte Zeiträume
+
+Referenz- und Anomaliezeitraum können benannte Vorlagen aus derselben
+Projektbibliothek übernehmen, speichern und verwalten. Dabei werden nur Beginn
+und Ende kopiert; jede Übernahme erfordert eine erneute Auswahlprüfung.
+Die wiederverwendbare Schnittstelle ist in [Projektweite Zeitraumvorlagen](time_range_presets.md)
+beschrieben.

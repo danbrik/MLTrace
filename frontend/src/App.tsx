@@ -251,7 +251,7 @@ export function App() {
           </PageErrorBoundary>
         </Box>
         <Box display={page === 'reference-image-analysis' ? 'block' : 'none'}>
-          <PageErrorBoundary label="Referenzbild-Analyse"><ReferenceImagePage key={projectId} active={page === 'reference-image-analysis'} /></PageErrorBoundary>
+          <PageErrorBoundary label="Referenzbild-Analyse"><ReferenceImagePage projectId={projectId} key={projectId} active={page === 'reference-image-analysis'} /></PageErrorBoundary>
         </Box>
         <Box display={page === 'dinov3-analysis' ? 'block' : 'none'}>
           <PageErrorBoundary label="DINOv3"><RepresentationAnalysisPage key={projectId} active={page === 'dinov3-analysis'} /></PageErrorBoundary>

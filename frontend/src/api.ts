@@ -2049,3 +2049,17 @@ export function deleteReferenceImageRun(id: number, projectId?: string) {
 export function referenceImageArtifactUrl(id: number, name: string, download = false) {
   return projectMediaUrl(`/api/reference-image-analysis/runs/${id}/artifacts/${encodeURIComponent(name)}?download=${download}`);
 }
+
+// Explicit project IDs keep pending requests bound to their originating project.
+export function listTimeRangePresets(projectId: string) {
+  return request<import('./timeRangePresets/types').TimeRangePreset[]>('/api/time-range-presets', undefined, undefined, projectId);
+}
+export function createTimeRangePreset(projectId: string, input: import('./timeRangePresets/types').TimeRangePresetInput) {
+  return request<import('./timeRangePresets/types').TimeRangePreset>('/api/time-range-presets', { method: 'POST', body: JSON.stringify(input) }, undefined, projectId);
+}
+export function updateTimeRangePreset(projectId: string, id: number, input: import('./timeRangePresets/types').TimeRangePresetInput) {
+  return request<import('./timeRangePresets/types').TimeRangePreset>(`/api/time-range-presets/${id}`, { method: 'PUT', body: JSON.stringify(input) }, undefined, projectId);
+}
+export function deleteTimeRangePreset(projectId: string, id: number) {
+  return request<void>(`/api/time-range-presets/${id}`, { method: 'DELETE' }, undefined, projectId);
+}

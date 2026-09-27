@@ -490,6 +490,13 @@ def _delete_reference_image(db: Session, entity_id: int) -> bool:
 
 
 ENTITY_SPECS: dict[str, EntitySpec] = {
+    "time_range_preset": EntitySpec(
+        key="time_range_preset", label="Gespeicherte Zeiträume", model=models.TimeRangePreset,
+        name_of=lambda r: r.name,
+        list_fields=["id", "name", "start", "end", "created_at", "updated_at"],
+        search_fields=["name"], filters=[_CREATED_FILTER],
+        deleter=_delete_row(models.TimeRangePreset), detail_exclude=frozenset({"name_key"}),
+    ),
     "reference_image_run": EntitySpec(
         key="reference_image_run", label="Referenzbild-Analysen", model=models.ReferenceImageRun,
         name_of=lambda r: f"Referenzbild #{r.id} · {r.training_dataset_name}",
@@ -835,6 +842,7 @@ ENTITY_SPECS: dict[str, EntitySpec] = {
 
 # Bottom-up deletion order for cascades: children before their parents.
 DELETE_ORDER: list[str] = [
+    "time_range_preset",
     "data_quality_analysis",
     "redundancy_analysis",
     "evaluation_separation_calculation",

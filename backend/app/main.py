@@ -155,6 +155,7 @@ from app.analysis import baseline as baseline_analysis_service
 from app.analysis import image_distribution as image_distribution_service
 from app.reference_image import service as reference_image_service
 from app.reference_image.api import router as reference_image_router
+from app.time_range_presets.api import router as time_range_presets_router
 from app.analysis import dinov3_service
 from app.analysis.dinov3_api import router as dinov3_router
 from app.time_series.api import router as time_series_router
@@ -273,6 +274,7 @@ def create_app() -> FastAPI:
     app = FastAPI(title="MLTrace API", version="0.1.0", lifespan=lifespan)
     app.include_router(dinov3_router)
     app.include_router(reference_image_router)
+    app.include_router(time_range_presets_router)
     app.include_router(time_series_router)
     app.add_middleware(
         CORSMiddleware,

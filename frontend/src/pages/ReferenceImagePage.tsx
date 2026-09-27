@@ -1,5 +1,7 @@
 import { Alert, Badge, Button, Group, Image, Loader, NumberInput, Paper, Progress, Select, SimpleGrid, Stack, Table, Text, Title } from '@mantine/core';
 import { useEffect, useRef, useState } from 'react';
+import { TimeRangePresetPicker } from '../timeRangePresets/TimeRangePresetPicker';
+import { copyTimeRange } from '../timeRangePresets/helpers';
 import { DateTime24Input } from '../components/DateTime24Input';
 import {
   abortReferenceImageRun, createReferenceImageRun, deleteReferenceImageRun, getReferenceImageLog,
@@ -12,7 +14,7 @@ import type { PreprocessingPipeline, ReferenceImageConfig, ReferenceImageLookup,
 const activeRun = (run: ReferenceImageRun | null) => !!run && ['queued', 'running'].includes(run.status);
 const errorText = (error: unknown) => error instanceof Error ? error.message : String(error);
 
-export function ReferenceImagePage({ active }: { active: boolean }) {
+export function ReferenceImagePage({ active, projectId }: { active: boolean; projectId: string }) {
   const [datasets, setDatasets] = useState<TrainingDataset[]>([]);
   const [pipelines, setPipelines] = useState<PreprocessingPipeline[]>([]);
   const [config, setConfig] = useState<ReferenceImageConfig>(initialConfig);
@@ -81,7 +83,7 @@ export function ReferenceImagePage({ active }: { active: boolean }) {
     try { await work(); } catch (reason) { setError(errorText(reason)); }
     finally { setBusy(false); }
   }
-  function update(values: Partial<ReferenceImageConfig>) { setConfig(current => ({ ...current, ...values })); }
+  function update(values: Partial<ReferenceImageConfig>) { setPreview(null); setConfig(current => ({ ...current, ...values })); }
   function useTemplate() {
     if (!run) return;
     setConfig({ ...initialConfig, ...structuredClone(run.config), processing_mode: 'shift_clip', scale_mode: 'auto', scale_limit: null }); setPreview(null);
@@ -111,6 +113,13 @@ export function ReferenceImagePage({ active }: { active: boolean }) {
     <SimpleGrid cols={{ base: 1, lg: 2 }}>
       {(['reference', 'anomaly'] as const).map(role => <Paper key={role} withBorder p="lg"><Stack>
         <Title order={4}>{role === 'reference' ? '2 · Referenzzeitraum' : '3 · Anomaliezeitraum'}</Title>
+        <TimeRangePresetPicker projectId={projectId} active={active} value={config[role]} disabled={busy}
+          min={dataset?.start_timestamp ?? undefined} max={dataset?.end_timestamp ?? undefined}
+          applyDisabledReason={!dataset ? 'Bitte zuerst einen Datensatz auswählen.' : undefined}
+          onApply={range => {
+            setPreview(null);
+            setConfig(current => ({ ...current, [role]: copyTimeRange(current[role], range) }));
+          }} />
         <DateTime24Input label="Beginn (einschließlich)" value={config[role].start} disabled={busy} min={dataset?.start_timestamp ?? undefined} max={dataset?.end_timestamp ?? undefined}
           onChange={start => update({ [role]: { ...config[role], start } })} />
         <DateTime24Input label="Ende (einschließlich)" value={config[role].end} disabled={busy} min={dataset?.start_timestamp ?? undefined} max={dataset?.end_timestamp ?? undefined}
