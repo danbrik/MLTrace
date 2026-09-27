@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from collections import deque
 from copy import deepcopy
-from datetime import datetime
 import json
 import logging
 from pathlib import Path
@@ -10,20 +9,18 @@ import shutil
 import threading
 import time
 
-import numpy as np
-from PIL import Image
 from sqlalchemy import select, update
 from sqlalchemy.orm import Session, sessionmaker
 
 from app import models
 from app.database import data_dir
-from app.preprocessing.pipeline import compile_pipeline, absolute_image_to_uint8
+from app.preprocessing.pipeline import compile_pipeline
 from app.schemas import PreprocessingGraph
 from app.image_selection import prepare, freeze_samples, read_frozen_image
 from app.training.scheduler import next_queue_rank, scheduler
-from app.reference_image.engine import grayscale, render_difference, shift_clip_difference, stamp_uint16, preview_uint16
-from app.reference_image.schemas import ReferenceImageConfig, ReferenceImageRunRead, stored_config
-from app.video import add_timestamp_watermark, write_mp4
+from app.reference_image.engine import grayscale
+from app.mean_variance.engine import OnlineMoments, difference_maps, render_heatmap
+from app.mean_variance.schemas import MeanVarianceConfig, MeanVarianceRunRead
 
 logger = logging.getLogger(__name__)
 
@@ -33,7 +30,7 @@ class AbortedError(Exception):
 
 
 def artifact_dir(run_id: int) -> Path:
-    return data_dir() / "reference_image_runs" / str(run_id)
+    return data_dir() / "mean_variance_runs" / str(run_id)
 
 
 def write_json(path: Path, value) -> None:
@@ -43,7 +40,7 @@ def write_json(path: Path, value) -> None:
     temporary.replace(path)
 
 
-def preview(db: Session, config: ReferenceImageConfig):
+def preview(db: Session, config: MeanVarianceConfig):
     _, pipeline, samples, result = prepare(db, config)
     compiled = compile_pipeline(PreprocessingGraph.model_validate(pipeline.graph))
     shape = None
@@ -51,13 +48,14 @@ def preview(db: Session, config: ReferenceImageConfig):
         if samples[role]:
             output = grayscale(compiled.run(samples[role][0]["file_path"]), shape)
             shape = output.shape
+    result.errors = [message.replace("Referenz:", "Normalphase:") for message in result.errors]
     return result
 
 
-def enqueue(db: Session, config: ReferenceImageConfig, *, wake_scheduler: bool = True):
+def enqueue(db: Session, config: MeanVarianceConfig, *, wake_scheduler: bool = True):
     dataset, pipeline, samples, selection = prepare(db, config)
     if selection.errors:
-        raise ValueError(" ".join(selection.errors))
+        raise ValueError(" ".join(selection.errors).replace("Referenz:", "Normalphase:"))
     # Freeze the selected file identities at enqueue time, not at worker dispatch.
     freeze_samples(samples)
     snapshot = {"id": dataset.id, "name": dataset.name, "rules": [{
@@ -66,7 +64,7 @@ def enqueue(db: Session, config: ReferenceImageConfig, *, wake_scheduler: bool =
         "root_path": rule.folder.dataset.root_path, "timestamp_regex": rule.folder.dataset.timestamp_regex,
         "timestamp_format": rule.folder.dataset.timestamp_format,
     } for rule in dataset.rules]}
-    run = models.ReferenceImageRun(
+    run = models.MeanVarianceRun(
         training_dataset_id=dataset.id, training_dataset_name=dataset.name,
         config=config.model_dump(mode="json"), dataset_snapshot=snapshot,
         pipeline_snapshot={"id": pipeline.id, "name": pipeline.name, "graph": deepcopy(pipeline.graph)},
@@ -87,41 +85,41 @@ def enqueue(db: Session, config: ReferenceImageConfig, *, wake_scheduler: bool =
     db.refresh(run)
     if wake_scheduler:
         scheduler.wake()
-    return ReferenceImageRunRead.model_validate(run)
+    return MeanVarianceRunRead.model_validate(run)
 
 
 def list_runs(db: Session):
-    return [ReferenceImageRunRead.model_validate(run) for run in db.scalars(
-        select(models.ReferenceImageRun).order_by(models.ReferenceImageRun.id.desc()))]
+    return [MeanVarianceRunRead.model_validate(run) for run in db.scalars(
+        select(models.MeanVarianceRun).order_by(models.MeanVarianceRun.id.desc()))]
 
 
 def get_run(db: Session, run_id: int):
-    run = db.get(models.ReferenceImageRun, run_id)
-    return ReferenceImageRunRead.model_validate(run) if run else None
+    run = db.get(models.MeanVarianceRun, run_id)
+    return MeanVarianceRunRead.model_validate(run) if run else None
 
 
 def abort_run(db: Session, run_id: int):
-    run = db.get(models.ReferenceImageRun, run_id)
+    run = db.get(models.MeanVarianceRun, run_id)
     if run is None:
         return None
     if run.status not in {"queued", "running"}:
         raise ValueError("Nur wartende oder laufende Analysen können abgebrochen werden.")
     # A persisted flag also covers cancellation racing with worker startup.
-    db.execute(update(models.ReferenceImageRun).where(
-        models.ReferenceImageRun.id == run_id, models.ReferenceImageRun.status.in_(["queued", "running"])
+    db.execute(update(models.MeanVarianceRun).where(
+        models.MeanVarianceRun.id == run_id, models.MeanVarianceRun.status.in_(["queued", "running"])
     ).values(cancel_requested=True))
-    db.execute(update(models.ReferenceImageRun).where(
-        models.ReferenceImageRun.id == run_id, models.ReferenceImageRun.status == "queued"
+    db.execute(update(models.MeanVarianceRun).where(
+        models.MeanVarianceRun.id == run_id, models.MeanVarianceRun.status == "queued"
     ).values(status="aborted", current_step="aborted", ended_at=models.utc_now()))
     db.commit()
     db.refresh(run)
     if run.status == "running" and run.pid is not None:
-        scheduler.request_abort("reference_image", run.id, run.pid)
-    return ReferenceImageRunRead.model_validate(run)
+        scheduler.request_abort("mean_variance", run.id, run.pid)
+    return MeanVarianceRunRead.model_validate(run)
 
 
 def delete_run(db: Session, run_id: int):
-    run = db.get(models.ReferenceImageRun, run_id)
+    run = db.get(models.MeanVarianceRun, run_id)
     if run is None:
         return False
     if run.status in {"running", "queued"}:
@@ -133,15 +131,10 @@ def delete_run(db: Session, run_id: int):
 
 
 def artifact_path(db: Session, run_id: int, name: str):
-    run = db.get(models.ReferenceImageRun, run_id)
+    run = db.get(models.MeanVarianceRun, run_id)
     if run is None or run.status != "finished":
         return None
-    allowed = name in {"reference.png", "video.mp4", "results.json"}
-    prefix = "preview_frame_" if name.startswith("preview_frame_") else "frame_"
-    if name.startswith(prefix) and name.endswith(".png"):
-        number = name[len(prefix):-4]
-        allowed = 1 <= len(number) <= 12 and number.isascii() and number.isdigit() and name == f"{prefix}{int(number):06d}.png" and int(number) < (run.result or {}).get("frame_count", 0)
-    if not allowed:
+    if name not in {"mean_difference.png", "variance_difference.png", "results.json"}:
         return None
     path = artifact_dir(run_id) / name
     return path if path.is_file() else None
@@ -153,7 +146,7 @@ def results(db: Session, run_id: int):
 
 
 def read_log(db: Session, run_id: int):
-    if db.get(models.ReferenceImageRun, run_id) is None:
+    if db.get(models.MeanVarianceRun, run_id) is None:
         return None
     path = artifact_dir(run_id) / "worker.log"
     if not path.is_file():
@@ -170,7 +163,7 @@ def run_scheduled(run_id: int, abort_event: threading.Event | None = None):
     stopped = threading.Event()
     heartbeat_thread = None
     try:
-        run = db.get(models.ReferenceImageRun, run_id)
+        run = db.get(models.MeanVarianceRun, run_id)
         if run is None or run.status not in {"queued", "running"}:
             return
         if run.cancel_requested or abort_event.is_set():
@@ -185,7 +178,7 @@ def run_scheduled(run_id: int, abort_event: threading.Event | None = None):
             while not stopped.wait(2):
                 try:
                     with factory() as session:
-                        current = session.get(models.ReferenceImageRun, run_id)
+                        current = session.get(models.MeanVarianceRun, run_id)
                         if current and current.status == "running":
                             if current.cancel_requested:
                                 abort_event.set()
@@ -210,9 +203,9 @@ def run_scheduled(run_id: int, abort_event: threading.Event | None = None):
             db.commit()
 
         result = calculate(run, report, abort_event)
-        report("finished", result["frame_count"], result["frame_count"])
-        db.execute(update(models.ReferenceImageRun).where(
-            models.ReferenceImageRun.id == run_id, models.ReferenceImageRun.cancel_requested.is_(False)
+        report("finished", result["total_images"], result["total_images"])
+        db.execute(update(models.MeanVarianceRun).where(
+            models.MeanVarianceRun.id == run_id, models.MeanVarianceRun.cancel_requested.is_(False)
         ).values(status="finished", result=result, ended_at=models.utc_now(),
                  duration_seconds=round(time.perf_counter() - started, 3)))
         db.commit()
@@ -221,7 +214,7 @@ def run_scheduled(run_id: int, abort_event: threading.Event | None = None):
             raise AbortedError()
     except Exception as exc:
         db.rollback()
-        run = db.get(models.ReferenceImageRun, run_id)
+        run = db.get(models.MeanVarianceRun, run_id)
         if run:
             aborted = isinstance(exc, AbortedError) or abort_event.is_set() or run.cancel_requested
             run.status = run.current_step = "aborted" if aborted else "failed"
@@ -230,7 +223,7 @@ def run_scheduled(run_id: int, abort_event: threading.Event | None = None):
             run.duration_seconds = round(time.perf_counter() - started, 3)
             db.commit()
             if not aborted:
-                logger.exception("Reference image analysis failed")
+                logger.exception("Mean/variance comparison failed")
     finally:
         stopped.set()
         if heartbeat_thread:
@@ -239,93 +232,48 @@ def run_scheduled(run_id: int, abort_event: threading.Event | None = None):
 
 
 def calculate(run, report, abort_event):
-    config = ReferenceImageConfig.model_validate(stored_config(run.config))
+    config = MeanVarianceConfig.model_validate(run.config)
     directory = artifact_dir(run.id)
-    temporary = directory / "differences"
-    temporary.mkdir(parents=True, exist_ok=True)
+    temporary = directory / "exporting"
     samples = json.loads((directory / "manifest.json").read_text(encoding="utf-8"))["samples"]
     pipeline = compile_pipeline(PreprocessingGraph.model_validate(run.pipeline_snapshot["graph"]))
+    counts = {role: len(samples[role]) for role in ("reference", "anomaly")}
+    total = sum(counts.values())
     shape = None
-    source_dtype = None
-
-    def load(sample):
-        nonlocal shape, source_dtype
-        raw = read_frozen_image(sample, pipeline)
-        array = grayscale(raw, shape)
-        shape = array.shape
-        source_dtype = source_dtype or raw.dtype
-        return array
-
+    done = 0
+    moments = {}
     try:
-        reference = None
-        count = len(samples["reference"])
-        report("reference", 0, count)
-        for index, sample in enumerate(samples["reference"]):
-            report("reference", index, count)
-            array = load(sample)
-            if reference is None:
-                reference = np.zeros(array.shape, dtype=np.float64)
-            reference += array / count
-        if reference is None or not np.isfinite(reference).all():
-            raise ValueError("Kein gültiges Referenzbild berechnet.")
-        np.save(directory / "reference.npy", reference)
-        # Preserve the input intensity range for display, without image-wise stretching.
-        if np.issubdtype(source_dtype, np.integer):
-            info = np.iinfo(source_dtype)
-            display = np.rint(np.clip((reference - info.min) / float(info.max - info.min), 0, 1) * 255).astype(np.uint8)
-        else:
-            display = absolute_image_to_uint8(reference)
-        Image.fromarray(display).save(directory / "reference.png")
-
-        frames = []
-        maximum = 0.0
-        count = len(samples["anomaly"])
-        if count == 0:
-            raise ValueError("Keine Anomaliebilder ausgewählt.")
-        for index, sample in enumerate(samples["anomaly"]):
-            report("difference", index, count)
-            difference = load(sample) - reference
-            if not np.isfinite(difference).all():
-                raise ValueError("Die Differenz enthält nicht endliche Pixelwerte.")
-            maximum = max(maximum, float(np.abs(difference).max()))
-            distance = float(np.mean(np.abs(difference)))
-            if not np.isfinite(distance):
-                raise ValueError("Der Bildabstand ist nicht endlich.")
-            np.save(temporary / f"{index}.npy", difference)
-            frames.append({"index": index, "timestamp": sample["timestamp"], "distance": distance})
-        limit = maximum if config.scale_mode == "auto" else config.scale_limit
-
-        def rendered_frames():
-            for frame in frames:
-                index = frame["index"]
-                report("rendering", index, count)
-                difference = np.load(temporary / f"{index}.npy", allow_pickle=False)
-                timestamp = datetime.fromisoformat(frame["timestamp"])
-                if config.processing_mode == "shift_clip":
-                    output = shift_clip_difference(difference, config.shift, config.clip_min, config.clip_max)
-                    output = np.pad(output, ((0, output.shape[0] % 2), (0, output.shape[1] % 2)), mode="edge")
-                    output = stamp_uint16(output, timestamp, config.clip_min, config.clip_max)
-                    Image.fromarray(output).save(directory / f"frame_{index:06d}.png")
-                    gray = preview_uint16(output, config.clip_min, config.clip_max)
-                    rgb = np.repeat(gray[:, :, None], 3, axis=2)
-                    Image.fromarray(gray).save(directory / f"preview_frame_{index:06d}.png")
-                else:
-                    gray = render_difference(difference, limit)
-                    rgb = np.repeat(gray[:, :, None], 3, axis=2)
-                    rgb = np.pad(rgb, ((0, rgb.shape[0] % 2), (0, rgb.shape[1] % 2), (0, 0)), mode="edge")
-                    rgb = add_timestamp_watermark(rgb, timestamp)
-                    Image.fromarray(rgb).save(directory / f"frame_{index:06d}.png")
-                (temporary / f"{index}.npy").unlink()
-                yield rgb
-            report("encoding", count, count)
-
-        write_mp4(directory / "video.mp4", rendered_frames(), config.fps, cancelled=abort_event.is_set)
-        result = {"frame_count": count, "reference_count": len(samples["reference"]),
-                  "scale_limit": limit, "maximum_difference": maximum, "fps": config.fps,
-                  "processing_mode": config.processing_mode,
-                  "output_bit_depth": 16 if config.processing_mode == "shift_clip" else 8,
-                  "shift": config.shift, "clip_min": config.clip_min, "clip_max": config.clip_max}
-        write_json(directory / "results.json", {"summary": result, "frames": frames})
+        temporary.mkdir(parents=True, exist_ok=True)
+        for role in ("reference", "anomaly"):
+            accumulator = OnlineMoments()
+            for sample in samples[role]:
+                report(role, done, total)
+                if abort_event.is_set():
+                    raise AbortedError()
+                array = grayscale(read_frozen_image(sample, pipeline), shape)
+                shape = array.shape
+                accumulator.add(array)
+                done += 1
+            moments[role] = accumulator.finish()
+        report("difference", total, total)
+        mean, variance = difference_maps(moments["reference"], moments["anomaly"])
+        del moments
+        maps = {}
+        for key, values, scale, signed in (
+            ("mean", mean, config.mean_scale, False),
+            ("variance", variance, config.variance_scale, True),
+        ):
+            report("rendering", total, total)
+            maps[key] = render_heatmap(values, scale, signed, temporary / f"{key}_difference.png",
+                                       config, counts, run.training_dataset_name)
+        report("exporting", total, total)
+        warnings = [f"{'Normalphase' if role == 'reference' else 'Anomaliephase'}: Nur ein Bild; Varianz 0, keine zeitliche Vergleichsbasis."
+                    for role, count in counts.items() if count == 1]
+        result = {"total_images": total, "reference_count": counts["reference"], "anomaly_count": counts["anomaly"],
+                  "width": shape[1], "height": shape[0], "ddof": 0, "maps": maps, "warnings": warnings}
+        write_json(temporary / "results.json", result)
+        for name in ("mean_difference.png", "variance_difference.png", "results.json"):
+            (temporary / name).replace(directory / name)
         return result
     finally:
         shutil.rmtree(temporary, ignore_errors=True)

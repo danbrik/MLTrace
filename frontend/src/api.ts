@@ -1687,12 +1687,12 @@ export function updateSchedulerSettings(payload: { max_gpu_slots: number; only_g
   });
 }
 
-export function moveSchedulerJob(kind: 'train' | 'test' | 'heatmap' | 'image_distribution' | 'resolution_sensitivity' | 'spatial_sensitivity' | 'dinov3_analysis' | 'time_series_train' | 'reference_image', runId: number, direction: 'up' | 'down', projectId?: string): Promise<{
-  kind: 'train' | 'test' | 'heatmap' | 'image_distribution' | 'resolution_sensitivity' | 'spatial_sensitivity' | 'dinov3_analysis' | 'time_series_train' | 'reference_image';
+export function moveSchedulerJob(kind: 'train' | 'test' | 'heatmap' | 'image_distribution' | 'resolution_sensitivity' | 'spatial_sensitivity' | 'dinov3_analysis' | 'time_series_train' | 'reference_image' | 'mean_variance', runId: number, direction: 'up' | 'down', projectId?: string): Promise<{
+  kind: 'train' | 'test' | 'heatmap' | 'image_distribution' | 'resolution_sensitivity' | 'spatial_sensitivity' | 'dinov3_analysis' | 'time_series_train' | 'reference_image' | 'mean_variance';
   run_id: number;
   queue_rank: number | null;
 }> {
-  return request<{ kind: 'train' | 'test' | 'heatmap' | 'image_distribution' | 'resolution_sensitivity' | 'spatial_sensitivity' | 'dinov3_analysis' | 'time_series_train' | 'reference_image'; run_id: number; queue_rank: number | null }>(`/api/scheduler/jobs/${kind}/${runId}/move`, {
+  return request<{ kind: 'train' | 'test' | 'heatmap' | 'image_distribution' | 'resolution_sensitivity' | 'spatial_sensitivity' | 'dinov3_analysis' | 'time_series_train' | 'reference_image' | 'mean_variance'; run_id: number; queue_rank: number | null }>(`/api/scheduler/jobs/${kind}/${runId}/move`, {
     method: 'POST',
     body: JSON.stringify({ direction }),
   }, undefined, projectId).then((response) => {
@@ -2062,4 +2062,32 @@ export function updateTimeRangePreset(projectId: string, id: number, input: impo
 }
 export function deleteTimeRangePreset(projectId: string, id: number) {
   return request<void>(`/api/time-range-presets/${id}`, { method: 'DELETE' }, undefined, projectId);
+}
+
+export function previewMeanVariance(payload: import('./meanVariance/types').MeanVarianceConfig, projectId?: string) {
+  return request<import('./meanVariance/types').MeanVariancePreview>('/api/mean-variance-analysis/preview', { method: 'POST', body: JSON.stringify(payload) }, undefined, projectId);
+}
+export function createMeanVarianceRun(payload: import('./meanVariance/types').MeanVarianceConfig, projectId?: string) {
+  return request<import('./meanVariance/types').MeanVarianceRun>('/api/mean-variance-analysis/runs', { method: 'POST', body: JSON.stringify(payload) }, undefined, projectId);
+}
+export function listMeanVarianceRuns(projectId?: string) {
+  return request<import('./meanVariance/types').MeanVarianceRun[]>('/api/mean-variance-analysis/runs', undefined, undefined, projectId);
+}
+export function getMeanVarianceRun(id: number, projectId?: string) {
+  return request<import('./meanVariance/types').MeanVarianceRun>(`/api/mean-variance-analysis/runs/${id}`, undefined, undefined, projectId);
+}
+export function getMeanVarianceResults(id: number, projectId?: string) {
+  return request<import('./meanVariance/types').MeanVarianceResults>(`/api/mean-variance-analysis/runs/${id}/results`, undefined, undefined, projectId);
+}
+export function getMeanVarianceLog(id: number, projectId?: string) {
+  return request<{ log: string }>(`/api/mean-variance-analysis/runs/${id}/log`, undefined, undefined, projectId);
+}
+export function abortMeanVarianceRun(id: number, projectId?: string) {
+  return request<import('./meanVariance/types').MeanVarianceRun>(`/api/mean-variance-analysis/runs/${id}/abort`, { method: 'POST' }, undefined, projectId);
+}
+export function deleteMeanVarianceRun(id: number, projectId?: string) {
+  return request<void>(`/api/mean-variance-analysis/runs/${id}`, { method: 'DELETE' }, undefined, projectId);
+}
+export function meanVarianceArtifactUrl(id: number, name: string, projectId: string, download = false) {
+  return `${API_BASE_URL}/api/mean-variance-analysis/runs/${id}/artifacts/${encodeURIComponent(name)}?download=${download}&project_id=${encodeURIComponent(projectId)}`;
 }

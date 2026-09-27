@@ -20,6 +20,7 @@ import type {
 } from '../types';
 
 export type SchedulerJob =
+  | { kind: 'mean_variance'; run: import('../meanVariance/types').MeanVarianceRun }
   | { kind: 'reference_image'; run: ReferenceImageRun }
   | { kind: 'time_series_train'; run: import('../timeSeries/types').SensorRun }
   | { kind: 'dinov3_analysis'; run: RepresentationRun }
@@ -121,7 +122,7 @@ export function SchedulerDetailsModal({
   trainingRunById: Map<number, TrainingRun>;
 }) {
   const title = job
-    ? job.kind === 'reference_image' ? `Referenzbild · ${job.run.training_dataset_name}` : job.kind === 'time_series_train' ? job.run.name : job.kind === 'dinov3_analysis' ? `DINOv3 · ${job.run.training_dataset_name}` : job.kind === 'train'
+    ? job.kind === 'mean_variance' ? `Mittelwert-/Varianz · ${job.run.training_dataset_name}` : job.kind === 'reference_image' ? `Referenzbild · ${job.run.training_dataset_name}` : job.kind === 'time_series_train' ? job.run.name : job.kind === 'dinov3_analysis' ? `DINOv3 · ${job.run.training_dataset_name}` : job.kind === 'train'
       ? job.run.training_pipeline_name
       : job.kind === 'heatmap'
         ? `Heatmap video · ${job.run.testing_run_name}`
@@ -300,7 +301,14 @@ export function SchedulerDetailsModal({
   return (
     <Modal opened={job !== null} onClose={onClose} title={title} size="xl">
       {job &&
-        (job.kind === 'reference_image' ? <Stack gap="sm">
+        (job.kind === 'mean_variance' ? <Stack gap="sm">
+          <Row label="Datensatz"><Text>{job.run.training_dataset_name}</Text></Row>
+          <Row label="Preprocessing"><Text>{job.run.pipeline_snapshot.name}</Text></Row>
+          <Row label="Normalphase"><Text>{job.run.config.reference.start} – {job.run.config.reference.end} · {job.run.config.reference.mode === 'random' ? `${job.run.config.reference.count} Zufallsbilder, Seed ${job.run.config.reference.seed}` : `jedes ${job.run.config.reference.sampling_rate}. Bild`}</Text></Row>
+          <Row label="Anomaliephase"><Text>{job.run.config.anomaly.start} – {job.run.config.anomaly.end} · jedes {job.run.config.anomaly.sampling_rate}. Bild</Text></Row>
+          <Row label="Farbskalen"><Text>Mittelwert: {job.run.config.mean_scale.mode === 'auto' ? 'automatisch' : job.run.config.mean_scale.limit} · Varianz: {job.run.config.variance_scale.mode === 'auto' ? 'automatisch' : `±${job.run.config.variance_scale.limit}`}</Text></Row>
+          {job.run.error_message && <Text c="red">{job.run.error_message}</Text>}
+        </Stack> : job.kind === 'reference_image' ? <Stack gap="sm">
           <Row label="Datensatz"><Text>{job.run.training_dataset_name}</Text></Row>
           <Row label="Preprocessing"><Text>{job.run.pipeline_snapshot.name}</Text></Row>
           <Row label="Referenz"><Text>{job.run.config.reference.start} – {job.run.config.reference.end} · {job.run.config.reference.mode === 'random' ? `${job.run.config.reference.count} Zufallsbilder, Seed ${job.run.config.reference.seed}` : `jedes ${job.run.config.reference.sampling_rate}. Bild`}</Text></Row>

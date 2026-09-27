@@ -108,6 +108,10 @@ def _training_dataset_dependents(db: Session, td_id: int) -> list[Dependent]:
         db, "reference_image_run", models.ReferenceImageRun, models.ReferenceImageRun.id,
         lambda r: f"Referenzbild #{r.id} · {r.training_dataset_name}", models.ReferenceImageRun.training_dataset_id == td_id,
     )
+    out += _named(
+        db, "mean_variance_run", models.MeanVarianceRun, models.MeanVarianceRun.id,
+        lambda r: f"Mittelwert-/Varianz #{r.id} · {r.training_dataset_name}", models.MeanVarianceRun.training_dataset_id == td_id,
+    )
     pipelines = db.scalars(
         select(models.TrainingPipeline)
         .join(
@@ -489,6 +493,11 @@ def _delete_reference_image(db: Session, entity_id: int) -> bool:
     return delete_run(db, entity_id)
 
 
+def _delete_mean_variance(db: Session, entity_id: int) -> bool:
+    from app.mean_variance.service import delete_run
+    return delete_run(db, entity_id)
+
+
 ENTITY_SPECS: dict[str, EntitySpec] = {
     "time_range_preset": EntitySpec(
         key="time_range_preset", label="Gespeicherte Zeiträume", model=models.TimeRangePreset,
@@ -504,6 +513,14 @@ ENTITY_SPECS: dict[str, EntitySpec] = {
         search_fields=["training_dataset_name"], filters=[_STATUS_FILTER, _CREATED_FILTER],
         artifacts=lambda db, row: [data_dir() / "reference_image_runs" / str(row.id)],
         deleter=_delete_reference_image, blockers=_job_blockers,
+    ),
+    "mean_variance_run": EntitySpec(
+        key="mean_variance_run", label="Mittelwert-/Varianz-Analysen", model=models.MeanVarianceRun,
+        name_of=lambda r: f"Mittelwert-/Varianz #{r.id} · {r.training_dataset_name}",
+        list_fields=["id", "training_dataset_name", "status", "current_step", "device", "created_at"],
+        search_fields=["training_dataset_name"], filters=[_STATUS_FILTER, _CREATED_FILTER],
+        artifacts=lambda db, row: [data_dir() / "mean_variance_runs" / str(row.id)],
+        deleter=_delete_mean_variance, blockers=_job_blockers,
     ),
     "representation_run": EntitySpec(
         key="representation_run", label="DINOv3-Repräsentationsanalysen", model=models.RepresentationRun,
@@ -842,6 +859,7 @@ ENTITY_SPECS: dict[str, EntitySpec] = {
 
 # Bottom-up deletion order for cascades: children before their parents.
 DELETE_ORDER: list[str] = [
+    "mean_variance_run",
     "time_range_preset",
     "data_quality_analysis",
     "redundancy_analysis",

@@ -2,6 +2,8 @@
 
 „Gespeicherte Zeiträume“ ist eine gemeinsame Bibliothek pro Projekt. Die erste
 Einbindung befindet sich in der Referenzbild-Analyse bei beiden Zeiträumen.
+Auch der Mittelwert-/Varianzvergleich verwendet dieselbe Bibliothek für Normal-
+und Anomaliephase.
 Übernehmen kopiert ausschließlich Beginn und Ende. Sampling, Zufallsseed,
 Datensatz und Preprocessing bleiben erhalten. Überlappende Zeiträume sowie
 Beginn gleich Ende sind erlaubt.

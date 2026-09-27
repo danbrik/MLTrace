@@ -50,6 +50,7 @@ _POLL_INTERVAL_SECONDS = 2.0
 
 # Per job-kind configuration: ORM model, worker module, and log/artifact subdir.
 _KINDS: dict[str, dict] = {
+    "mean_variance": {"model": models.MeanVarianceRun, "module": "app.mean_variance.worker", "subdir": "mean_variance_runs", "force_cpu": True},
     "reference_image": {"model": models.ReferenceImageRun, "module": "app.reference_image.worker", "subdir": "reference_image_runs", "force_cpu": True},
     "time_series_train": {"model": models.TimeSeriesRun, "module": "app.time_series.worker", "subdir": "time_series_runs"},
     "dinov3_analysis": {"model": models.RepresentationRun, "module": "app.analysis.dinov3_worker", "subdir": "representation_runs"},
@@ -668,7 +669,7 @@ class JobScheduler:
                 self._processes[(project.id, kind, run.id)] = proc
             return
 
-        if kind in {"time_series_train", "reference_image"}:
+        if kind in {"time_series_train", "reference_image", "mean_variance"}:
             job_model = spec["model"]
             try:
                 changed = db.execute(update(job_model).where(
