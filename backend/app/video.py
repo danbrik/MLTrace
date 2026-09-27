@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from datetime import datetime
+from collections.abc import Callable, Iterable
+from itertools import chain
 from pathlib import Path
 import shutil
 import subprocess
@@ -32,7 +34,7 @@ def _ffmpeg_executable() -> str | None:
         return None
 
 
-def finalize_browser_mp4(path: Path) -> None:
+def finalize_browser_mp4(path: Path, *, cancelled: Callable[[], bool] | None = None) -> None:
     """Transcode an OpenCV MP4 to browser-safe H.264/YUV420p with faststart."""
     ffmpeg = _ffmpeg_executable()
     if ffmpeg is None:
@@ -64,10 +66,24 @@ def finalize_browser_mp4(path: Path) -> None:
             "+faststart",
             str(output),
         ]
-        result = subprocess.run(command, capture_output=True, text=True, check=False)
-        if result.returncode != 0:
+        process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        try:
+            while True:
+                if cancelled and cancelled():
+                    raise ValueError("Videoexport abgebrochen.")
+                try:
+                    _, stderr = process.communicate(timeout=0.2)
+                    break
+                except subprocess.TimeoutExpired:
+                    continue
+            if process.returncode != 0:
+                raise ValueError(f"Could not encode browser-compatible MP4: {stderr.strip()}")
+        except BaseException:
+            if process.poll() is None:
+                process.kill()
+            process.communicate()
             output.unlink(missing_ok=True)
-            raise ValueError(f"Could not encode browser-compatible MP4: {result.stderr.strip()}")
+            raise
         output.replace(path)
         marker.write_text("h264/yuv420p/faststart\n", encoding="utf-8")
 
@@ -107,20 +123,25 @@ def add_timestamp_watermark(image_rgb: np.ndarray, value: datetime) -> np.ndarra
     return np.asarray(Image.alpha_composite(image, overlay).convert("RGB"))
 
 
-def write_mp4(path: Path, frames: list[np.ndarray], fps: int) -> None:
-    if not frames:
+def write_mp4(path: Path, frames: Iterable[np.ndarray], fps: int, *,
+              cancelled: Callable[[], bool] | None = None) -> None:
+    iterator = iter(frames)
+    first = next(iterator, None)
+    if first is None:
         raise ValueError("Cannot create an MP4 without frames.")
-    height, width = frames[0].shape[:2]
+    height, width = first.shape[:2]
     writer = cv2.VideoWriter(
         str(path), cv2.VideoWriter_fourcc(*"mp4v"), float(max(1, fps)), (width, height)
     )
     if not writer.isOpened():
         raise ValueError("Could not open MP4 video writer.")
     try:
-        for frame in frames:
+        for frame in chain((first,), iterator):
+            if cancelled and cancelled():
+                raise ValueError("Videoexport abgebrochen.")
             if frame.shape[:2] != (height, width):
                 raise ValueError("All MP4 frames must have the same dimensions.")
             writer.write(cv2.cvtColor(np.asarray(frame, dtype=np.uint8), cv2.COLOR_RGB2BGR))
     finally:
         writer.release()
-    finalize_browser_mp4(path)
+    finalize_browser_mp4(path, cancelled=cancelled)

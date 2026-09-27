@@ -330,3 +330,11 @@ The project navigation includes exploratory DINOv3 analysis with Normal, Anomaly
 and Buffer labels, per-range sampling, PCA/UMAP plots and KMeans evaluation.
 The public timm checkpoint downloads without an account or token and is cached locally.
 See [configuration, model download and exports](docs/representation_analysis.md).
+
+### Reference image analysis
+
+The **Referenzbild-Analyse** page builds a mean reference from a selected time
+range, using regular or seeded random sampling. A second range is compared against
+that reference and exported as a signed grayscale MP4. Timestamp lookup, PNG frame
+and reference downloads, fixed automatic/manual contrast, and scheduled CPU runs
+are included. See [reference image analysis](docs/reference_image_analysis.md).

@@ -29,3 +29,30 @@ def test_timestamp_watermark_and_mp4(tmp_path: Path) -> None:
         assert round(capture.get(cv2.CAP_PROP_FPS)) == 7
     finally:
         capture.release()
+
+
+def test_streaming_video_cancellation_during_encoding_cleans_subprocess(tmp_path, monkeypatch):
+    import pytest
+    from app import video
+    calls = []
+    class Process:
+        def __init__(self, command, **kwargs):
+            self.returncode = None
+            Path(command[-1]).write_bytes(b"partial")
+        def poll(self):
+            return self.returncode
+        def kill(self):
+            calls.append("kill")
+            self.returncode = -9
+        def communicate(self, **kwargs):
+            calls.append("reap")
+            return "", ""
+    monkeypatch.setattr(video, "_ffmpeg_executable", lambda: "ffmpeg")
+    monkeypatch.setattr(video.subprocess, "Popen", Process)
+    path = tmp_path / "cancel.mp4"
+    path.write_bytes(b"source")
+    with pytest.raises(ValueError, match="abgebrochen"):
+        video.finalize_browser_mp4(path, cancelled=lambda: True)
+    assert calls == ["kill", "reap"]
+    assert not path.with_name("cancel.browser-tmp.mp4").exists()
+    assert not path.with_name("cancel.mp4.browser-ready").exists()

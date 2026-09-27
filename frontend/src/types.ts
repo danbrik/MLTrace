@@ -61,9 +61,9 @@ export type GpuSnapshot = {
 export type SchedulerJobWithProject = {
   project_id: string;
   project_name: string;
-  kind: 'train' | 'test' | 'heatmap' | 'image_distribution' | 'resolution_sensitivity' | 'spatial_sensitivity' | 'dinov3_analysis' | 'time_series_train';
+  kind: 'train' | 'test' | 'heatmap' | 'image_distribution' | 'resolution_sensitivity' | 'spatial_sensitivity' | 'dinov3_analysis' | 'time_series_train' | 'reference_image';
   queue_rank: number | null;
-  run: TrainingRun | TestingRun | HeatmapRangeRun | ImageDistributionRun | ResolutionSensitivityRun | SpatialSensitivityRun | RepresentationRun | import('./timeSeries/types').SensorRun;
+  run: TrainingRun | TestingRun | HeatmapRangeRun | ImageDistributionRun | ResolutionSensitivityRun | SpatialSensitivityRun | RepresentationRun | ReferenceImageRun | import('./timeSeries/types').SensorRun;
 };
 
 export type Dataset = {
@@ -2300,3 +2300,25 @@ export type RepresentationPoint = {
   pca_x: number; pca_y: number; umap_x: number; umap_y: number; cluster: number;
 };
 export type RepresentationResults = { metrics: RepresentationMetrics; points: RepresentationPoint[] };
+
+export type ReferenceImageInterval = { start: string; end: string; sampling_rate: number };
+export type ReferenceImageConfig = {
+  training_dataset_id: number; preprocessing_pipeline_id: number;
+  reference: ReferenceImageInterval & { mode: 'regular' | 'random'; count: number; seed: number };
+  anomaly: ReferenceImageInterval;
+  scale_mode: 'auto' | 'manual'; scale_limit: number | null; fps: number;
+};
+export type ReferenceImagePreview = {
+  reference: { available: number; selected: number; remainder: number };
+  anomaly: { available: number; selected: number; remainder: number };
+  errors: string[];
+};
+export type ReferenceImageSummary = {
+  frame_count: number; reference_count: number; scale_limit: number; maximum_difference: number; fps: number;
+};
+export type ReferenceImageRun = Omit<RepresentationRun, 'config' | 'result' | 'model_snapshot'> & {
+  config: ReferenceImageConfig; result: ReferenceImageSummary | null;
+};
+export type ReferenceImageFrame = { index: number; timestamp: string; distance: number };
+export type ReferenceImageResults = { summary: ReferenceImageSummary; frames: ReferenceImageFrame[] };
+export type ReferenceImageLookup = { requested_timestamp: string; exact: boolean; frame: ReferenceImageFrame };

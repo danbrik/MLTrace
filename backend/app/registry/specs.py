@@ -104,6 +104,10 @@ def _training_dataset_dependents(db: Session, td_id: int) -> list[Dependent]:
         db, "representation_run", models.RepresentationRun, models.RepresentationRun.id,
         lambda r: f"DINOv3 #{r.id} · {r.training_dataset_name}", models.RepresentationRun.training_dataset_id == td_id,
     )
+    out += _named(
+        db, "reference_image_run", models.ReferenceImageRun, models.ReferenceImageRun.id,
+        lambda r: f"Referenzbild #{r.id} · {r.training_dataset_name}", models.ReferenceImageRun.training_dataset_id == td_id,
+    )
     pipelines = db.scalars(
         select(models.TrainingPipeline)
         .join(
@@ -480,7 +484,20 @@ def _delete_representation(db: Session, entity_id: int) -> bool:
     return delete_run(db, entity_id)
 
 
+def _delete_reference_image(db: Session, entity_id: int) -> bool:
+    from app.reference_image.service import delete_run
+    return delete_run(db, entity_id)
+
+
 ENTITY_SPECS: dict[str, EntitySpec] = {
+    "reference_image_run": EntitySpec(
+        key="reference_image_run", label="Referenzbild-Analysen", model=models.ReferenceImageRun,
+        name_of=lambda r: f"Referenzbild #{r.id} · {r.training_dataset_name}",
+        list_fields=["id", "training_dataset_name", "status", "current_step", "device", "created_at"],
+        search_fields=["training_dataset_name"], filters=[_STATUS_FILTER, _CREATED_FILTER],
+        artifacts=lambda db, row: [data_dir() / "reference_image_runs" / str(row.id)],
+        deleter=_delete_reference_image, blockers=_job_blockers,
+    ),
     "representation_run": EntitySpec(
         key="representation_run", label="DINOv3-Repräsentationsanalysen", model=models.RepresentationRun,
         name_of=lambda r: f"DINOv3 #{r.id} · {r.training_dataset_name}",

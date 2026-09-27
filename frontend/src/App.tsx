@@ -39,6 +39,7 @@ import { ThresholdPage } from './pages/ThresholdPage';
 import { DatasetsPage } from './pages/DatasetsPage';
 import { InspectPage } from './pages/InspectPage';
 import { ImageDistributionPage } from './pages/ImageDistributionPage';
+import { ReferenceImagePage } from './pages/ReferenceImagePage';
 import { RepresentationAnalysisPage } from './pages/RepresentationAnalysisPage';
 import { ResolutionSensitivityPage } from './pages/ResolutionSensitivityPage';
 import { SpatialSensitivityPage } from './pages/SpatialSensitivityPage';
@@ -70,6 +71,7 @@ type Page =
   | 'optimization'
   | 'analysis'
   | 'image-distribution'
+  | 'reference-image-analysis'
   | 'dinov3-analysis'
   | 'resolution-sensitivity'
   | 'spatial-sensitivity'
@@ -93,7 +95,7 @@ export function App() {
   const page: Page = requestedPage && [
     'time-series-datasets', 'time-series-splits', 'time-series-models', 'time-series-pipelines', 'time-series-results',
     'datasets', 'training-datasets', 'preprocessing', 'methods', 'training-pipelines', 'testing',
-    'inspect', 'optimization', 'analysis', 'dinov3-analysis', 'image-distribution', 'resolution-sensitivity', 'spatial-sensitivity', 'evaluation', 'anomaly-detection', 'csv-merge', 'redundancy-analysis', 'data-quality-analysis', 'threshold', 'scheduler', 'data-manager',
+    'inspect', 'optimization', 'analysis', 'reference-image-analysis', 'dinov3-analysis', 'image-distribution', 'resolution-sensitivity', 'spatial-sensitivity', 'evaluation', 'anomaly-detection', 'csv-merge', 'redundancy-analysis', 'data-quality-analysis', 'threshold', 'scheduler', 'data-manager',
   ].includes(requestedPage) ? requestedPage : 'datasets';
   const timeSeriesMode = page.startsWith('time-series-');
   const [project, setProject] = useState<Project | null>(null);
@@ -150,6 +152,7 @@ export function App() {
     { id: 'optimization', label: 'Optimization', icon: <SlidersHorizontal size={18} /> },
     { id: 'analysis', label: 'Model Analysis', icon: <BarChart3 size={18} /> },
     { id: 'image-distribution', label: 'Image Distribution', icon: <LineChart size={18} /> },
+    { id: 'reference-image-analysis', label: 'Referenzbild-Analyse', icon: <Eye size={18} /> },
     { id: 'dinov3-analysis', label: 'DINOv3-Repräsentationsanalyse', icon: <BrainCircuit size={18} /> },
     { id: 'resolution-sensitivity', label: 'Resolution Sensitivity', icon: <ScanSearch size={18} /> },
     { id: 'spatial-sensitivity', label: 'Spatial ROI Sensitivity', icon: <ScanSearch size={18} /> },
@@ -246,6 +249,9 @@ export function App() {
             <TimeSeriesPipelinesPage key={`pipelines-${projectId}`} active={page === 'time-series-pipelines'} />
             <TimeSeriesResultsPage key={`results-${projectId}`} active={page === 'time-series-results'} />
           </PageErrorBoundary>
+        </Box>
+        <Box display={page === 'reference-image-analysis' ? 'block' : 'none'}>
+          <PageErrorBoundary label="Referenzbild-Analyse"><ReferenceImagePage key={projectId} active={page === 'reference-image-analysis'} /></PageErrorBoundary>
         </Box>
         <Box display={page === 'dinov3-analysis' ? 'block' : 'none'}>
           <PageErrorBoundary label="DINOv3"><RepresentationAnalysisPage key={projectId} active={page === 'dinov3-analysis'} /></PageErrorBoundary>

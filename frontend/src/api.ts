@@ -1687,12 +1687,12 @@ export function updateSchedulerSettings(payload: { max_gpu_slots: number; only_g
   });
 }
 
-export function moveSchedulerJob(kind: 'train' | 'test' | 'heatmap' | 'image_distribution' | 'resolution_sensitivity' | 'spatial_sensitivity' | 'dinov3_analysis' | 'time_series_train', runId: number, direction: 'up' | 'down', projectId?: string): Promise<{
-  kind: 'train' | 'test' | 'heatmap' | 'image_distribution' | 'resolution_sensitivity' | 'spatial_sensitivity' | 'dinov3_analysis' | 'time_series_train';
+export function moveSchedulerJob(kind: 'train' | 'test' | 'heatmap' | 'image_distribution' | 'resolution_sensitivity' | 'spatial_sensitivity' | 'dinov3_analysis' | 'time_series_train' | 'reference_image', runId: number, direction: 'up' | 'down', projectId?: string): Promise<{
+  kind: 'train' | 'test' | 'heatmap' | 'image_distribution' | 'resolution_sensitivity' | 'spatial_sensitivity' | 'dinov3_analysis' | 'time_series_train' | 'reference_image';
   run_id: number;
   queue_rank: number | null;
 }> {
-  return request<{ kind: 'train' | 'test' | 'heatmap' | 'image_distribution' | 'resolution_sensitivity' | 'spatial_sensitivity' | 'dinov3_analysis' | 'time_series_train'; run_id: number; queue_rank: number | null }>(`/api/scheduler/jobs/${kind}/${runId}/move`, {
+  return request<{ kind: 'train' | 'test' | 'heatmap' | 'image_distribution' | 'resolution_sensitivity' | 'spatial_sensitivity' | 'dinov3_analysis' | 'time_series_train' | 'reference_image'; run_id: number; queue_rank: number | null }>(`/api/scheduler/jobs/${kind}/${runId}/move`, {
     method: 'POST',
     body: JSON.stringify({ direction }),
   }, undefined, projectId).then((response) => {
@@ -2018,3 +2018,34 @@ export const sensorApi = {
   series: (id: number, subset: string, sensor: number, scaled: boolean, offset = 0, signal?: AbortSignal) => request<import('./timeSeries/types').ResultSeries>(`/api/time-series/runs/${id}/series?${new URLSearchParams({ subset, sensor: String(sensor), scaled: String(scaled), offset: String(offset), limit: '5000' })}`, { signal }),
   exportUrl: (id: number, artifact: string) => projectMediaUrl(`/api/time-series/runs/${id}/${artifact}`),
 };
+
+export function previewReferenceImage(payload: import('./types').ReferenceImageConfig) {
+  return request<import('./types').ReferenceImagePreview>('/api/reference-image-analysis/preview', { method: 'POST', body: JSON.stringify(payload) });
+}
+export function createReferenceImageRun(payload: import('./types').ReferenceImageConfig) {
+  return request<import('./types').ReferenceImageRun>('/api/reference-image-analysis/runs', { method: 'POST', body: JSON.stringify(payload) });
+}
+export function listReferenceImageRuns() {
+  return request<import('./types').ReferenceImageRun[]>('/api/reference-image-analysis/runs');
+}
+export function getReferenceImageRun(id: number) {
+  return request<import('./types').ReferenceImageRun>(`/api/reference-image-analysis/runs/${id}`);
+}
+export function getReferenceImageResults(id: number) {
+  return request<import('./types').ReferenceImageResults>(`/api/reference-image-analysis/runs/${id}/results`);
+}
+export function lookupReferenceImageFrame(id: number, timestamp: string) {
+  return request<import('./types').ReferenceImageLookup>(`/api/reference-image-analysis/runs/${id}/frame?timestamp=${encodeURIComponent(timestamp)}`);
+}
+export function getReferenceImageLog(id: number, projectId?: string) {
+  return request<{ log: string }>(`/api/reference-image-analysis/runs/${id}/log`, undefined, undefined, projectId);
+}
+export function abortReferenceImageRun(id: number, projectId?: string) {
+  return request<import('./types').ReferenceImageRun>(`/api/reference-image-analysis/runs/${id}/abort`, { method: 'POST' }, undefined, projectId);
+}
+export function deleteReferenceImageRun(id: number, projectId?: string) {
+  return request<void>(`/api/reference-image-analysis/runs/${id}`, { method: 'DELETE' }, undefined, projectId);
+}
+export function referenceImageArtifactUrl(id: number, name: string, download = false) {
+  return projectMediaUrl(`/api/reference-image-analysis/runs/${id}/artifacts/${encodeURIComponent(name)}?download=${download}`);
+}

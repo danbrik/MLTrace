@@ -32,6 +32,7 @@ import { ArrowDown, ArrowUp, FileText, Info, RotateCcw, Search, StopCircle, Tras
 import { useEffect, useMemo, useRef, useState } from 'react';
 
 import {
+  abortReferenceImageRun, deleteReferenceImageRun, getReferenceImageLog, listReferenceImageRuns,
   abortRepresentationRun, deleteRepresentationRun, getRepresentationLog, listRepresentationRuns,
   abortHeatmapRange,
   abortImageDistributionRun,
@@ -76,9 +77,11 @@ import {
 import { SchedulerDetailsModal } from '../training/SchedulerDetailsModal';
 import type { SchedulerJob } from '../training/SchedulerDetailsModal';
 import { formatDuration, runStatusColor } from '../training/runStatus';
+import { PHASES as REFERENCE_IMAGE_PHASES } from '../referenceImage/helpers';
 import { PHASES as REPRESENTATION_PHASES } from '../representation/helpers';
 import type {
   RepresentationRun,
+  ReferenceImageRun,
   HeatmapRangeRun,
   ImageDistributionRun,
   ResolutionSensitivityRun,
@@ -121,6 +124,7 @@ function jobKey(job: DisplayJob): string {
 }
 
 function jobName(job: SchedulerJob): string {
+  if (job.kind === 'reference_image') return `Referenzbild · ${job.run.training_dataset_name}`;
   if (job.kind === 'dinov3_analysis') return `DINOv3 · ${job.run.training_dataset_name}`;
   if (job.kind === 'train') return job.run.training_pipeline_name;
   if (job.kind === 'heatmap') return `Heatmap video · ${job.run.testing_run_name}`;
@@ -131,6 +135,7 @@ function jobName(job: SchedulerJob): string {
 }
 
 function jobMethodType(job: SchedulerJob): string {
+  if (job.kind === 'reference_image') return 'Referenzbild-Analyse';
   if (job.kind === 'time_series_train') return job.run.kind;
   if (job.kind === 'dinov3_analysis') return 'DINOv3 representation';
   if (job.kind === 'heatmap') return 'heatmap video';
@@ -174,12 +179,12 @@ function summarizeHeatmaps(heatmaps: HeatmapRunSummary[]): HeatmapGroup[] {
 
 function ProgressCell({ job }: { job: SchedulerJob }) {
   if (job.kind === 'time_series_train') return <Stack gap={2}><Text size="xs">{job.run.current_step} · {job.run.epoch}/{job.run.epochs} epochs</Text><Progress value={100 * job.run.epoch / job.run.epochs} /></Stack>;
-  if (job.kind === 'dinov3_analysis' || job.kind === 'image_distribution' || job.kind === 'resolution_sensitivity' || job.kind === 'spatial_sensitivity') {
+  if (job.kind === 'reference_image' || job.kind === 'dinov3_analysis' || job.kind === 'image_distribution' || job.kind === 'resolution_sensitivity' || job.kind === 'spatial_sensitivity') {
     const done = job.run.processed_images;
     const total = job.run.total_images;
     return (
       <Stack gap={2}>
-        <Text size="xs">{job.kind === 'dinov3_analysis' ? REPRESENTATION_PHASES[job.run.current_step] ?? job.run.current_step : job.run.current_step.replaceAll('_', ' ')}{total != null ? ` · ${done}/${total} images` : ''}</Text>
+        <Text size="xs">{job.kind === 'reference_image' ? REFERENCE_IMAGE_PHASES[job.run.current_step] ?? job.run.current_step : job.kind === 'dinov3_analysis' ? REPRESENTATION_PHASES[job.run.current_step] ?? job.run.current_step : job.run.current_step.replaceAll('_', ' ')}{total != null ? ` · ${done}/${total} images` : ''}</Text>
         {total != null && total > 0 && <Progress value={Math.min(100, done / total * 100)} size="sm" radius="sm" color={runStatusColor(job.run.status)} />}
         {job.kind === 'image_distribution' && job.run.throughput_images_per_second != null && (
           <Text size="xs" c="dimmed">
@@ -246,7 +251,7 @@ function LogModal({ job, onClose }: { job: DisplayJob | null; onClose: () => voi
     if (!job) return undefined;
     let cancelled = false;
     const load = () => {
-      const fetcher = job.kind === 'time_series_train' ? (id: number, projectId?: string) => sensorApi.logs(id, projectId).then(r => ({ log: r.text })) : job.kind === 'dinov3_analysis' ? getRepresentationLog : job.kind === 'train'
+      const fetcher = job.kind === 'reference_image' ? getReferenceImageLog : job.kind === 'time_series_train' ? (id: number, projectId?: string) => sensorApi.logs(id, projectId).then(r => ({ log: r.text })) : job.kind === 'dinov3_analysis' ? getRepresentationLog : job.kind === 'train'
         ? getTrainingRunLog
         : job.kind === 'heatmap'
           ? getHeatmapRangeLog
@@ -297,6 +302,7 @@ export function SchedulerPage({ active = true }: { active?: boolean }) {
   const [imageDistributionRuns, setImageDistributionRuns] = useState<ImageDistributionRun[]>([]);
   const [resolutionSensitivityRuns, setResolutionSensitivityRuns] = useState<ResolutionSensitivityRun[]>([]);
   const [sensorRuns, setSensorRuns] = useState<SensorRun[]>([]);
+  const [referenceImageRuns, setReferenceImageRuns] = useState<ReferenceImageRun[]>([]);
   const [representationRuns, setRepresentationRuns] = useState<RepresentationRun[]>([]);
   const [spatialSensitivityRuns, setSpatialSensitivityRuns] = useState<SpatialSensitivityRun[]>([]);
   const [schedulerSettings, setSchedulerSettings] = useState<SchedulerSettings | null>(null);
@@ -323,7 +329,7 @@ export function SchedulerPage({ active = true }: { active?: boolean }) {
       setGlobalJobs(await listSchedulerJobs('all'));
       return;
     }
-    const [nextTraining, nextTesting, nextHeatmaps, nextHeatmapRanges, nextImageDistributionRuns, nextResolutionSensitivityRuns, nextSpatialSensitivityRuns, nextRepresentationRuns, nextSensorRuns] = await Promise.all([
+    const [nextTraining, nextTesting, nextHeatmaps, nextHeatmapRanges, nextImageDistributionRuns, nextResolutionSensitivityRuns, nextSpatialSensitivityRuns, nextRepresentationRuns, nextSensorRuns, nextReferenceImageRuns] = await Promise.all([
       listTrainingRuns(),
       listTestingRuns(),
       listHeatmaps(),
@@ -333,6 +339,7 @@ export function SchedulerPage({ active = true }: { active?: boolean }) {
       listSpatialSensitivityRuns(),
       listRepresentationRuns(),
       sensorApi.runs(),
+      listReferenceImageRuns(),
     ]);
     setTrainingRuns(nextTraining);
     setTestingRuns(nextTesting);
@@ -343,6 +350,7 @@ export function SchedulerPage({ active = true }: { active?: boolean }) {
     setSpatialSensitivityRuns(nextSpatialSensitivityRuns);
     setRepresentationRuns(nextRepresentationRuns);
     setSensorRuns(nextSensorRuns);
+    setReferenceImageRuns(nextReferenceImageRuns);
   }
 
   async function refreshGpu(force = false) {
@@ -407,6 +415,7 @@ export function SchedulerPage({ active = true }: { active?: boolean }) {
       ...imageDistributionRuns.map((run) => ({ kind: 'image_distribution' as const, run })),
       ...resolutionSensitivityRuns.map((run) => ({ kind: 'resolution_sensitivity' as const, run })),
       ...sensorRuns.map((run) => ({ kind: 'time_series_train' as const, run })),
+      ...referenceImageRuns.map((run) => ({ kind: 'reference_image' as const, run })),
       ...representationRuns.map((run) => ({ kind: 'dinov3_analysis' as const, run })),
       ...spatialSensitivityRuns.map((run) => ({ kind: 'spatial_sensitivity' as const, run })),
     ];
@@ -422,7 +431,7 @@ export function SchedulerPage({ active = true }: { active?: boolean }) {
       if (aQueued !== bQueued) return aQueued ? -1 : 1;
       return (b.run.created_at ?? '').localeCompare(a.run.created_at ?? '');
     });
-  }, [trainingRuns, testingRuns, heatmapRanges, imageDistributionRuns, resolutionSensitivityRuns, spatialSensitivityRuns, representationRuns, sensorRuns, globalJobs, scope]);
+  }, [trainingRuns, testingRuns, heatmapRanges, imageDistributionRuns, resolutionSensitivityRuns, spatialSensitivityRuns, representationRuns, referenceImageRuns, sensorRuns, globalJobs, scope]);
 
   const queuedJobs = useMemo(() => jobs.filter((job) => job.run.status === 'queued'), [jobs]);
   const queueIndexByKey = useMemo(
@@ -474,6 +483,7 @@ export function SchedulerPage({ active = true }: { active?: boolean }) {
   }
 
   function handleAbort(job: DisplayJob) {
+    if (job.kind === 'reference_image') { withRefresh(`abort:${jobKey(job)}`, () => abortReferenceImageRun(job.run.id, job.project_id), 'Could not abort'); return; }
     if (job.kind === 'time_series_train') { withRefresh(`abort:${jobKey(job)}`, () => sensorApi.abort(job.run.id, job.project_id), 'Could not abort'); return; }
     if (job.kind === 'dinov3_analysis') {
       withRefresh(`abort:${jobKey(job)}`, () => abortRepresentationRun(job.run.id, job.project_id), 'Could not abort');
@@ -501,7 +511,7 @@ export function SchedulerPage({ active = true }: { active?: boolean }) {
   }
 
   function handleRestart(job: DisplayJob, mode: 'complete' | 'checkpoint' = 'complete') {
-    if (job.kind === 'time_series_train' || job.kind === 'heatmap' || job.kind === 'dinov3_analysis' || job.kind === 'image_distribution' || job.kind === 'resolution_sensitivity' || job.kind === 'spatial_sensitivity') return;
+    if (job.kind === 'reference_image' || job.kind === 'time_series_train' || job.kind === 'heatmap' || job.kind === 'dinov3_analysis' || job.kind === 'image_distribution' || job.kind === 'resolution_sensitivity' || job.kind === 'spatial_sensitivity') return;
     if (mode === 'complete' && (job.kind === 'test' || job.kind === 'train') && !window.confirm(
       `Restart ${job.kind === 'train' ? 'training' : 'inference'} "${jobName(job)}" completely? Existing progress and its checkpoint will be removed.`,
     )) return;
@@ -517,9 +527,9 @@ export function SchedulerPage({ active = true }: { active?: boolean }) {
   }
 
   function handleDelete(job: DisplayJob) {
-    const label = job.kind === 'dinov3_analysis' ? 'DINOv3 analysis' : job.kind === 'train' ? 'training run' : job.kind === 'heatmap' ? 'heatmap video' : job.kind === 'image_distribution' ? 'image distribution analysis' : job.kind === 'resolution_sensitivity' ? 'resolution sensitivity analysis' : job.kind === 'spatial_sensitivity' ? 'spatial sensitivity analysis' : 'inference';
+    const label = job.kind === 'reference_image' ? 'Referenzbild-Analyse' : job.kind === 'dinov3_analysis' ? 'DINOv3 analysis' : job.kind === 'train' ? 'training run' : job.kind === 'heatmap' ? 'heatmap video' : job.kind === 'image_distribution' ? 'image distribution analysis' : job.kind === 'resolution_sensitivity' ? 'resolution sensitivity analysis' : job.kind === 'spatial_sensitivity' ? 'spatial sensitivity analysis' : 'inference';
     if (!window.confirm(`Remove ${label} "${jobName(job)}"?`)) return;
-    const action = job.kind === 'time_series_train' ? () => sensorApi.deleteRun(job.run.id, job.project_id) : job.kind === 'dinov3_analysis'
+    const action = job.kind === 'reference_image' ? () => deleteReferenceImageRun(job.run.id, job.project_id) : job.kind === 'time_series_train' ? () => sensorApi.deleteRun(job.run.id, job.project_id) : job.kind === 'dinov3_analysis'
       ? () => deleteRepresentationRun(job.run.id, job.project_id)
       : job.kind === 'spatial_sensitivity'
       ? () => deleteSpatialSensitivityRun(job.run.id, job.project_id)
@@ -575,7 +585,7 @@ export function SchedulerPage({ active = true }: { active?: boolean }) {
       <div>
         <Title order={2}>Scheduler</Title>
         <Text c="dimmed" size="sm">
-          Training, inference, heatmap and image-distribution jobs — queued, running, finished, failed or aborted.
+          Training, inference, heatmap, reference-image and image-distribution jobs — queued, running, finished, failed or aborted.
         </Text>
       </div>
 
@@ -632,7 +642,7 @@ export function SchedulerPage({ active = true }: { active?: boolean }) {
             <div>
               <Title order={3}>Scheduler settings</Title>
               <Text size="sm" c="dimmed">
-                Controls the shared worker slots. Image-distribution analyses run on CPU and remain visible in the same queue.
+                Controls the shared worker slots. Reference-image and image-distribution analyses run on CPU and remain visible in the same queue.
               </Text>
             </div>
             <Badge variant="light" color={schedulerSettings?.detected_gpu_count ? 'grape' : 'gray'}>
@@ -698,6 +708,7 @@ export function SchedulerPage({ active = true }: { active?: boolean }) {
                 { value: 'resolution_sensitivity', label: 'Resolution sensitivity' },
                 { value: 'spatial_sensitivity', label: 'Spatial sensitivity' },
                 { value: 'time_series_train', label: 'Zeitreihen-Training' },
+                { value: 'reference_image', label: 'Referenzbild-Analyse' },
                 { value: 'dinov3_analysis', label: 'DINOv3 representation' },
               ]}
               value={typeFilter}
@@ -756,7 +767,7 @@ export function SchedulerPage({ active = true }: { active?: boolean }) {
                           color={job.kind === 'train' ? 'blue' : job.kind === 'heatmap' ? 'teal' : job.kind === 'image_distribution' ? 'cyan' : job.kind === 'resolution_sensitivity' ? 'indigo' : job.kind === 'spatial_sensitivity' ? 'orange' : 'grape'}
                           variant="light"
                         >
-                          {job.kind === 'time_series_train' ? 'Zeitreihen' : job.kind === 'dinov3_analysis' ? 'DINOv3' : job.kind === 'train' ? 'Training' : job.kind === 'heatmap' ? 'Heatmap' : job.kind === 'image_distribution' ? 'Image distribution' : job.kind === 'resolution_sensitivity' ? 'Resolution sensitivity' : job.kind === 'spatial_sensitivity' ? 'Spatial sensitivity' : 'Inference'}
+                          {job.kind === 'reference_image' ? 'Referenzbild' : job.kind === 'time_series_train' ? 'Zeitreihen' : job.kind === 'dinov3_analysis' ? 'DINOv3' : job.kind === 'train' ? 'Training' : job.kind === 'heatmap' ? 'Heatmap' : job.kind === 'image_distribution' ? 'Image distribution' : job.kind === 'resolution_sensitivity' ? 'Resolution sensitivity' : job.kind === 'spatial_sensitivity' ? 'Spatial sensitivity' : 'Inference'}
                         </Badge>
                       </Table.Td>
                       {scope === 'all' && <Table.Td><Badge variant="outline">{job.project_name}</Badge></Table.Td>}

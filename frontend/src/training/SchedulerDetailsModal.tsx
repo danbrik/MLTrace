@@ -6,6 +6,7 @@ import { orderedGraphNodes, stepDetail, formatResolution } from './graph';
 import { formatDuration } from './runStatus';
 import type {
   RepresentationRun,
+  ReferenceImageRun,
   HeatmapRangeRun,
   ImageDistributionRun,
   ResolutionSensitivityRun,
@@ -19,6 +20,7 @@ import type {
 } from '../types';
 
 export type SchedulerJob =
+  | { kind: 'reference_image'; run: ReferenceImageRun }
   | { kind: 'time_series_train'; run: import('../timeSeries/types').SensorRun }
   | { kind: 'dinov3_analysis'; run: RepresentationRun }
   | { kind: 'train'; run: TrainingRun }
@@ -119,7 +121,7 @@ export function SchedulerDetailsModal({
   trainingRunById: Map<number, TrainingRun>;
 }) {
   const title = job
-    ? job.kind === 'time_series_train' ? job.run.name : job.kind === 'dinov3_analysis' ? `DINOv3 · ${job.run.training_dataset_name}` : job.kind === 'train'
+    ? job.kind === 'reference_image' ? `Referenzbild · ${job.run.training_dataset_name}` : job.kind === 'time_series_train' ? job.run.name : job.kind === 'dinov3_analysis' ? `DINOv3 · ${job.run.training_dataset_name}` : job.kind === 'train'
       ? job.run.training_pipeline_name
       : job.kind === 'heatmap'
         ? `Heatmap video · ${job.run.testing_run_name}`
@@ -298,7 +300,14 @@ export function SchedulerDetailsModal({
   return (
     <Modal opened={job !== null} onClose={onClose} title={title} size="xl">
       {job &&
-        (job.kind === 'time_series_train' ? <Stack><Text>{job.run.name} · {job.run.kind}</Text><Text>Epoche {job.run.epoch}/{job.run.epochs} · {job.run.current_step}</Text><Text>Checkpoint: {job.run.checkpoint_selection} · ausgewählte Epoche {job.run.selected_epoch ?? '–'}</Text><Text>L={job.run.snapshot.window_length} · {job.run.snapshot.split.name}</Text></Stack> : job.kind === 'dinov3_analysis'
+        (job.kind === 'reference_image' ? <Stack gap="sm">
+          <Row label="Datensatz"><Text>{job.run.training_dataset_name}</Text></Row>
+          <Row label="Preprocessing"><Text>{job.run.pipeline_snapshot.name}</Text></Row>
+          <Row label="Referenz"><Text>{job.run.config.reference.start} – {job.run.config.reference.end} · {job.run.config.reference.mode === 'random' ? `${job.run.config.reference.count} Zufallsbilder, Seed ${job.run.config.reference.seed}` : `jedes ${job.run.config.reference.sampling_rate}. Bild`}</Text></Row>
+          <Row label="Anomalie"><Text>{job.run.config.anomaly.start} – {job.run.config.anomaly.end} · jedes {job.run.config.anomaly.sampling_rate}. Bild</Text></Row>
+          <Row label="Video"><Text>{job.run.config.fps} FPS · Kontrast {job.run.config.scale_mode}</Text></Row>
+          {job.run.error_message && <Text c="red">{job.run.error_message}</Text>}
+        </Stack> : job.kind === 'time_series_train' ? <Stack><Text>{job.run.name} · {job.run.kind}</Text><Text>Epoche {job.run.epoch}/{job.run.epochs} · {job.run.current_step}</Text><Text>Checkpoint: {job.run.checkpoint_selection} · ausgewählte Epoche {job.run.selected_epoch ?? '–'}</Text><Text>L={job.run.snapshot.window_length} · {job.run.snapshot.split.name}</Text></Stack> : job.kind === 'dinov3_analysis'
           ? <Stack><Row label="Dataset">{job.run.training_dataset_name}</Row><Row label="Preprocessing">{job.run.pipeline_snapshot.name}</Row><Row label="Configuration">k={job.run.config.cluster_count} · PCA {job.run.config.pca_variance * 100}% · Seed {job.run.config.seed}</Row><Row label="Progress">{job.run.current_step} · {job.run.processed_images} / {job.run.total_images ?? '—'}</Row>{job.run.error_message && <Text c="red">{job.run.error_message}</Text>}</Stack>
           : job.kind === 'train'
           ? renderTraining(job.run)

@@ -1693,3 +1693,35 @@ class TimeSeriesEpochMetric(Base):
     train_loss: Mapped[float] = mapped_column(Float)
     val_loss: Mapped[float | None] = mapped_column(Float)
     details: Mapped[dict] = mapped_column(json_type())
+
+
+class ReferenceImageRun(Base):
+    """Frozen configuration and lifecycle of an reference-image analysis run."""
+    __tablename__ = "reference_image_runs"
+    __table_args__ = (Index("ix_reference_image_runs_status", "status"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    training_dataset_id: Mapped[int] = mapped_column(ForeignKey("training_datasets.id", ondelete="RESTRICT"))
+    training_dataset_name: Mapped[str] = mapped_column(String(255))
+    config: Mapped[dict] = mapped_column(json_type())
+    dataset_snapshot: Mapped[dict] = mapped_column(json_type())
+    pipeline_snapshot: Mapped[dict] = mapped_column(json_type())
+    result: Mapped[dict | None] = mapped_column(json_type())
+    status: Mapped[str] = mapped_column(String(32), default="queued")
+    current_step: Mapped[str] = mapped_column(String(64), default="queued")
+    processed_images: Mapped[int] = mapped_column(Integer, default=0)
+    total_images: Mapped[int | None] = mapped_column(Integer)
+    cancel_requested: Mapped[bool] = mapped_column(Boolean, default=False)
+    error_message: Mapped[str | None] = mapped_column(Text)
+    queue_rank: Mapped[int | None] = mapped_column(Integer)
+    enqueued_at: Mapped[datetime | None] = mapped_column(DateTime)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime)
+    ended_at: Mapped[datetime | None] = mapped_column(DateTime)
+    duration_seconds: Mapped[float | None] = mapped_column(Float)
+    heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime)
+    device: Mapped[str | None] = mapped_column(String(32))
+    gpu_index: Mapped[int | None] = mapped_column(Integer)
+    pid: Mapped[int | None] = mapped_column(Integer)
+    log_path: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())

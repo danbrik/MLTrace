@@ -50,6 +50,7 @@ _POLL_INTERVAL_SECONDS = 2.0
 
 # Per job-kind configuration: ORM model, worker module, and log/artifact subdir.
 _KINDS: dict[str, dict] = {
+    "reference_image": {"model": models.ReferenceImageRun, "module": "app.reference_image.worker", "subdir": "reference_image_runs", "force_cpu": True},
     "time_series_train": {"model": models.TimeSeriesRun, "module": "app.time_series.worker", "subdir": "time_series_runs"},
     "dinov3_analysis": {"model": models.RepresentationRun, "module": "app.analysis.dinov3_worker", "subdir": "representation_runs"},
     "train": {"model": models.TrainingRun, "module": "app.training.worker", "subdir": "runs"},
@@ -667,10 +668,11 @@ class JobScheduler:
                 self._processes[(project.id, kind, run.id)] = proc
             return
 
-        if kind == "time_series_train":
+        if kind in {"time_series_train", "reference_image"}:
+            job_model = spec["model"]
             try:
-                changed = db.execute(update(models.TimeSeriesRun).where(
-                    models.TimeSeriesRun.id == run.id, models.TimeSeriesRun.status == "queued"
+                changed = db.execute(update(job_model).where(
+                    job_model.id == run.id, job_model.status == "queued"
                 ).values(status="running", started_at=datetime.utcnow(), gpu_index=gpu_index,
                          device=device_label, pid=proc.pid, log_path=str(log_path), error_message=None))
                 db.commit()
