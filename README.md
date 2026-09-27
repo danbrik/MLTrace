@@ -335,6 +335,7 @@ See [configuration, model download and exports](docs/representation_analysis.md)
 
 The **Referenzbild-Analyse** page builds a mean reference from a selected time
 range, using regular or seeded random sampling. A second range is compared against
-that reference and exported as a signed grayscale MP4. Timestamp lookup, PNG frame
-and reference downloads, fixed automatic/manual contrast, and scheduled CPU runs
-are included. See [reference image analysis](docs/reference_image_analysis.md).
+that reference, shifted and clipped with configurable limits (defaults: +10000,
+0–12000), and saved as 16-bit grayscale PNG frames. MP4 and browser previews use
+a fixed 8-bit display mapping. Timestamp lookup, reference downloads, legacy
+signed contrast rendering, and scheduled CPU runs are included. See [reference image analysis](docs/reference_image_analysis.md).

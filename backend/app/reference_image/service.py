@@ -21,8 +21,8 @@ from app.preprocessing.pipeline import compile_pipeline, absolute_image_to_uint8
 from app.schemas import PreprocessingGraph
 from app.training.data import enumerate_training_dataset_image_records
 from app.training.scheduler import next_queue_rank, scheduler
-from app.reference_image.engine import select_records, grayscale, render_difference
-from app.reference_image.schemas import ReferenceImageConfig, ReferenceImageRunRead
+from app.reference_image.engine import select_records, grayscale, render_difference, shift_clip_difference, stamp_uint16, preview_uint16
+from app.reference_image.schemas import ReferenceImageConfig, ReferenceImageRunRead, stored_config
 from app.video import add_timestamp_watermark, write_mp4
 
 logger = logging.getLogger(__name__)
@@ -158,9 +158,10 @@ def artifact_path(db: Session, run_id: int, name: str):
     if run is None or run.status != "finished":
         return None
     allowed = name in {"reference.png", "video.mp4", "results.json"}
-    if name.startswith("frame_") and name.endswith(".png"):
-        number = name[6:-4]
-        allowed = 1 <= len(number) <= 12 and number.isascii() and number.isdigit() and name == f"frame_{int(number):06d}.png" and int(number) < (run.result or {}).get("frame_count", 0)
+    prefix = "preview_frame_" if name.startswith("preview_frame_") else "frame_"
+    if name.startswith(prefix) and name.endswith(".png"):
+        number = name[len(prefix):-4]
+        allowed = 1 <= len(number) <= 12 and number.isascii() and number.isdigit() and name == f"{prefix}{int(number):06d}.png" and int(number) < (run.result or {}).get("frame_count", 0)
     if not allowed:
         return None
     path = artifact_dir(run_id) / name
@@ -259,7 +260,7 @@ def run_scheduled(run_id: int, abort_event: threading.Event | None = None):
 
 
 def calculate(run, report, abort_event):
-    config = ReferenceImageConfig.model_validate(run.config)
+    config = ReferenceImageConfig.model_validate(stored_config(run.config))
     directory = artifact_dir(run.id)
     temporary = directory / "differences"
     temporary.mkdir(parents=True, exist_ok=True)
@@ -327,19 +328,31 @@ def calculate(run, report, abort_event):
                 index = frame["index"]
                 report("rendering", index, count)
                 difference = np.load(temporary / f"{index}.npy", allow_pickle=False)
-                gray = render_difference(difference, limit)
-                rgb = np.repeat(gray[:, :, None], 3, axis=2)
-                # Pad before saving so PNG and MP4 use the same even-sized canvas.
-                rgb = np.pad(rgb, ((0, rgb.shape[0] % 2), (0, rgb.shape[1] % 2), (0, 0)), mode="edge")
-                rgb = add_timestamp_watermark(rgb, datetime.fromisoformat(frame["timestamp"]))
-                Image.fromarray(rgb).save(directory / f"frame_{index:06d}.png")
+                timestamp = datetime.fromisoformat(frame["timestamp"])
+                if config.processing_mode == "shift_clip":
+                    output = shift_clip_difference(difference, config.shift, config.clip_min, config.clip_max)
+                    output = np.pad(output, ((0, output.shape[0] % 2), (0, output.shape[1] % 2)), mode="edge")
+                    output = stamp_uint16(output, timestamp, config.clip_min, config.clip_max)
+                    Image.fromarray(output).save(directory / f"frame_{index:06d}.png")
+                    gray = preview_uint16(output, config.clip_min, config.clip_max)
+                    rgb = np.repeat(gray[:, :, None], 3, axis=2)
+                    Image.fromarray(gray).save(directory / f"preview_frame_{index:06d}.png")
+                else:
+                    gray = render_difference(difference, limit)
+                    rgb = np.repeat(gray[:, :, None], 3, axis=2)
+                    rgb = np.pad(rgb, ((0, rgb.shape[0] % 2), (0, rgb.shape[1] % 2), (0, 0)), mode="edge")
+                    rgb = add_timestamp_watermark(rgb, timestamp)
+                    Image.fromarray(rgb).save(directory / f"frame_{index:06d}.png")
                 (temporary / f"{index}.npy").unlink()
                 yield rgb
             report("encoding", count, count)
 
         write_mp4(directory / "video.mp4", rendered_frames(), config.fps, cancelled=abort_event.is_set)
         result = {"frame_count": count, "reference_count": len(samples["reference"]),
-                  "scale_limit": limit, "maximum_difference": maximum, "fps": config.fps}
+                  "scale_limit": limit, "maximum_difference": maximum, "fps": config.fps,
+                  "processing_mode": config.processing_mode,
+                  "output_bit_depth": 16 if config.processing_mode == "shift_clip" else 8,
+                  "shift": config.shift, "clip_min": config.clip_min, "clip_max": config.clip_max}
         write_json(directory / "results.json", {"summary": result, "frames": frames})
         return result
     finally:

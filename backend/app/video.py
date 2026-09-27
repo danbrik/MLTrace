@@ -103,7 +103,14 @@ def timestamp_label(value: datetime) -> str:
 def add_timestamp_watermark(image_rgb: np.ndarray, value: datetime) -> np.ndarray:
     """Return an RGB frame with a readable timestamp baked into its top-right."""
     image = Image.fromarray(np.asarray(image_rgb, dtype=np.uint8), mode="RGB").convert("RGBA")
-    overlay = Image.new("RGBA", image.size, (0, 0, 0, 0))
+    overlay = timestamp_overlay(image.width, image.height, value)
+    return np.asarray(Image.alpha_composite(image, overlay).convert("RGB"))
+
+
+def timestamp_overlay(width: int, height: int, value: datetime) -> Image.Image:
+    """Reusable timestamp layer; callers choose the output pixel depth."""
+    image = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+    overlay = image
     draw = ImageDraw.Draw(overlay)
     font = ImageFont.load_default(size=max(11, min(image.width, image.height) // 32))
     label = timestamp_label(value)
@@ -120,7 +127,7 @@ def add_timestamp_watermark(image_rgb: np.ndarray, value: datetime) -> np.ndarra
         fill=(0, 0, 0, 155),
     )
     draw.text((left + padding, top + padding - box[1]), label, font=font, fill=(255, 255, 255, 255))
-    return np.asarray(Image.alpha_composite(image, overlay).convert("RGB"))
+    return overlay
 
 
 def write_mp4(path: Path, frames: Iterable[np.ndarray], fps: int, *,

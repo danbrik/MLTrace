@@ -2,7 +2,7 @@
 from datetime import datetime
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from app.schemas import _dataset_local_naive
 
@@ -34,13 +34,19 @@ class ReferenceImageConfig(BaseModel):
     preprocessing_pipeline_id: int = Field(ge=1)
     reference: ReferenceInterval
     anomaly: Interval
+    processing_mode: Literal["shift_clip", "signed"] = "shift_clip"
+    shift: float = Field(default=10000, allow_inf_nan=False)
+    clip_min: int = Field(default=0, ge=0, le=65535)
+    clip_max: int = Field(default=12000, ge=0, le=65535)
     scale_mode: Literal["auto", "manual"] = "auto"
     scale_limit: float | None = Field(default=None, gt=0, allow_inf_nan=False)
     fps: int = Field(default=10, ge=1, le=120)
 
     @model_validator(mode="after")
     def validate_scale(self):
-        if self.scale_mode == "manual" and self.scale_limit is None:
+        if self.clip_min >= self.clip_max:
+            raise ValueError("Clip-Minimum muss kleiner als Clip-Maximum sein (0 bis 65535).")
+        if self.processing_mode == "signed" and self.scale_mode == "manual" and self.scale_limit is None:
             raise ValueError("Für manuellen Kontrast ist ein positiver Grenzwert erforderlich.")
         return self
 
@@ -57,8 +63,21 @@ class SelectionPreview(BaseModel):
     errors: list[str]
 
 
+def stored_config(value):
+    """Old frozen runs retain their original signed rendering."""
+    if isinstance(value, dict) and "processing_mode" not in value:
+        value = {**value, "processing_mode": "signed"}
+    return value
+
+
 class ReferenceImageRunRead(BaseModel):
     model_config = ConfigDict(from_attributes=True)
+
+    @field_validator("config", mode="before")
+    @classmethod
+    def read_stored_config(cls, value):
+        return stored_config(value)
+
     id: int
     training_dataset_id: int
     training_dataset_name: str

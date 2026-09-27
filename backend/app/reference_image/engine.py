@@ -63,3 +63,27 @@ def resolve_frame(frames: list[dict], timestamp: datetime):
     times = [datetime.fromisoformat(frame["timestamp"]) for frame in frames]
     index = min(bisect_left(times, timestamp), len(frames) - 1)
     return {"requested_timestamp": timestamp, "exact": times[index] == timestamp, "frame": frames[index]}
+
+
+def shift_clip_difference(difference, shift: float, clip_min: int, clip_max: int):
+    """Clip in floating point before conversion to avoid unsigned wraparound.
+
+    Fractional reference differences are rounded to nearest, ties to even.
+    Stored intensities are not stretched to fill the uint16 range.
+    """
+    shifted = np.asarray(difference, dtype=np.float64) + shift
+    return np.rint(np.clip(shifted, clip_min, clip_max)).astype(np.uint16)
+
+
+def stamp_uint16(image, timestamp: datetime, clip_min: int, clip_max: int):
+    from app.video import timestamp_overlay
+    overlay = np.asarray(timestamp_overlay(image.shape[1], image.shape[0], timestamp))
+    alpha = overlay[:, :, 3].astype(np.float64) / 255
+    ink = clip_min + overlay[:, :, 0].astype(np.float64) / 255 * (clip_max - clip_min)
+    return np.rint(image.astype(np.float64) * (1 - alpha) + ink * alpha).astype(np.uint16)
+
+
+def preview_uint16(image, clip_min: int, clip_max: int):
+    """A fixed display mapping, separate from the lossless 16-bit pixels."""
+    values = (image.astype(np.float64) - clip_min) / (clip_max - clip_min)
+    return np.rint(np.clip(values, 0, 1) * 255).astype(np.uint8)

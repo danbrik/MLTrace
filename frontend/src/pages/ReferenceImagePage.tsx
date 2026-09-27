@@ -84,7 +84,7 @@ export function ReferenceImagePage({ active }: { active: boolean }) {
   function update(values: Partial<ReferenceImageConfig>) { setConfig(current => ({ ...current, ...values })); }
   function useTemplate() {
     if (!run) return;
-    setConfig(structuredClone(run.config)); setPreview(null);
+    setConfig({ ...initialConfig, ...structuredClone(run.config), processing_mode: 'shift_clip', scale_mode: 'auto', scale_limit: null }); setPreview(null);
   }
 
   return <Stack gap="lg">
@@ -130,12 +130,23 @@ export function ReferenceImagePage({ active }: { active: boolean }) {
     </SimpleGrid>
     <Paper withBorder p="lg"><Stack>
       <Title order={4}>4 · Darstellung und Berechnung</Title>
-      <Text size="sm">Grau = unverändert · Weiß = heller · Schwarz = dunkler als die Referenz. Eine gemeinsame Skala gilt für das gesamte Video.</Text>
+      <Select label="Bildverarbeitung" value={config.processing_mode} allowDeselect={false} disabled={busy}
+        data={[{ value: 'shift_clip', label: 'Shift und Clipping · 16-Bit-PNG' }, { value: 'signed', label: 'Bisherige Vorzeichen-Darstellung · 8-Bit-PNG' }]}
+        onChange={value => update({ processing_mode: value as 'shift_clip' | 'signed', scale_mode: 'auto', scale_limit: null })} />
+      {config.processing_mode === 'shift_clip' ? <>
+        <Text size="sm">Ergebnis = clip(Bild − Referenzbild + Shift, Minimum, Maximum). Der PNG-Download speichert diese Werte als 16-Bit-Graustufenbild.</Text>
+        <SimpleGrid cols={{ base: 1, md: 3 }}>
+          <NumberInput label="Shift" value={Number.isFinite(config.shift) ? config.shift : ''} disabled={busy} onChange={value => update({ shift: value === '' ? NaN : Number(value) })} />
+          <NumberInput label="Clip-Minimum" min={0} max={65535} allowDecimal={false} value={Number.isFinite(config.clip_min) ? config.clip_min : ''} disabled={busy} onChange={value => update({ clip_min: value === '' ? NaN : Number(value) })} />
+          <NumberInput label="Clip-Maximum" min={0} max={65535} allowDecimal={false} value={Number.isFinite(config.clip_max) ? config.clip_max : ''} disabled={busy} onChange={value => update({ clip_max: value === '' ? NaN : Number(value) })} />
+        </SimpleGrid>
+        <Text size="sm" c="dimmed">Vorschau und MP4 bilden den Clip-Bereich auf Schwarz bis Weiß ab (8 Bit). Unveränderte Pixel haben vor Clipping den Wert des Shifts; der Zeitstempel wird oben rechts eingeblendet.</Text>
+      </> : <Text size="sm">Grau = unverändert · Weiß = heller · Schwarz = dunkler als die Referenz. Eine gemeinsame Skala gilt für das gesamte Video.</Text>}
       <SimpleGrid cols={{ base: 1, md: 3 }}>
-        <Select label="Kontrast" value={config.scale_mode} allowDeselect={false} disabled={busy}
+        {config.processing_mode === 'signed' && <Select label="Kontrast" value={config.scale_mode} allowDeselect={false} disabled={busy}
           data={[{ value: 'auto', label: 'Automatisch für den gesamten Lauf' }, { value: 'manual', label: 'Manueller Grenzwert' }]}
-          onChange={value => update({ scale_mode: value as 'auto' | 'manual', scale_limit: value === 'auto' ? null : config.scale_limit })} />
-        {config.scale_mode === 'manual' && <NumberInput label="Differenz für Schwarz / Weiß" description="In Einheiten der Pipeline-Ausgabe; größere Werte werden abgeschnitten."
+          onChange={value => update({ scale_mode: value as 'auto' | 'manual', scale_limit: value === 'auto' ? null : config.scale_limit })} />}
+        {config.processing_mode === 'signed' && config.scale_mode === 'manual' && <NumberInput label="Differenz für Schwarz / Weiß" description="In Einheiten der Pipeline-Ausgabe; größere Werte werden abgeschnitten."
           min={0} value={config.scale_limit ?? ''} disabled={busy} onChange={value => update({ scale_limit: value === '' ? null : Number(value) })} />}
         <NumberInput label="Videogeschwindigkeit (FPS)" min={1} max={120} allowDecimal={false} value={config.fps} disabled={busy} onChange={value => update({ fps: Number(value) })} />
       </SimpleGrid>
@@ -175,7 +186,7 @@ export function ReferenceImagePage({ active }: { active: boolean }) {
         {run.error_message && <Alert color="red">{run.error_message}</Alert>}
         {log !== null && <Paper p="sm" withBorder><pre style={{ whiteSpace: 'pre-wrap', maxHeight: 240, overflow: 'auto' }}>{log || 'Noch keine Log-Einträge.'}</pre></Paper>}
         {results && run.status === 'finished' && <>
-          <Text size="sm">{results.summary.reference_count} Referenzbilder · {results.summary.frame_count} Frames · {results.summary.fps} FPS · Kontrastgrenze ±{results.summary.scale_limit.toPrecision(5)}</Text>
+          <Text size="sm">{results.summary.reference_count} Referenzbilder · {results.summary.frame_count} Frames · {results.summary.fps} FPS · {results.summary.output_bit_depth === 16 ? `16 Bit · Shift ${results.summary.shift} · Clip ${results.summary.clip_min} bis ${results.summary.clip_max}` : `Kontrastgrenze ±${results.summary.scale_limit.toPrecision(5)}`}</Text>
           <video key={run.id} ref={video} controls preload="metadata" src={referenceImageArtifactUrl(run.id, 'video.mp4')} style={{ width: '100%', maxHeight: 600 }} />
           <Group><Button component="a" href={referenceImageArtifactUrl(run.id, 'video.mp4', true)}>MP4 herunterladen</Button></Group>
           <Title order={4}>Einzelbild nach Aufnahmezeitpunkt</Title>
@@ -188,8 +199,8 @@ export function ReferenceImagePage({ active }: { active: boolean }) {
           {lookup && <>
             {!lookup.exact && <Alert color="blue">Für {displayTime(lookup.requested_timestamp)} liegt kein Frame vor. Angezeigt wird {displayTime(lookup.frame.timestamp)}.</Alert>}
             <Text>Aufnahmezeitpunkt: {displayTime(lookup.frame.timestamp)} · Mittlere absolute Differenz: {lookup.frame.distance.toPrecision(6)}</Text>
-            <Image src={referenceImageArtifactUrl(run.id, frameFilename(lookup.frame.index))} fit="contain" mah={600} alt={`Differenzbild ${displayTime(lookup.frame.timestamp)}`} />
-            <Button component="a" w="fit-content" href={referenceImageArtifactUrl(run.id, frameFilename(lookup.frame.index), true)}>Einzelbild als PNG herunterladen</Button>
+            <Image src={referenceImageArtifactUrl(run.id, `${results.summary.output_bit_depth === 16 ? 'preview_' : ''}${frameFilename(lookup.frame.index)}`)} fit="contain" mah={600} alt={`Differenzbild ${displayTime(lookup.frame.timestamp)}`} />
+            <Button component="a" w="fit-content" href={referenceImageArtifactUrl(run.id, frameFilename(lookup.frame.index), true)}>{results.summary.output_bit_depth === 16 ? 'Einzelbild als 16-Bit-PNG herunterladen' : 'Einzelbild als PNG herunterladen'}</Button>
           </>}
           <Title order={4}>Referenzbild</Title>
           <Image src={referenceImageArtifactUrl(run.id, 'reference.png')} fit="contain" mah={360} alt="Gemitteltes Referenzbild" />

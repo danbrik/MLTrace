@@ -2306,6 +2306,7 @@ export type ReferenceImageConfig = {
   training_dataset_id: number; preprocessing_pipeline_id: number;
   reference: ReferenceImageInterval & { mode: 'regular' | 'random'; count: number; seed: number };
   anomaly: ReferenceImageInterval;
+  processing_mode: 'shift_clip' | 'signed'; shift: number; clip_min: number; clip_max: number;
   scale_mode: 'auto' | 'manual'; scale_limit: number | null; fps: number;
 };
 export type ReferenceImagePreview = {
@@ -2315,6 +2316,7 @@ export type ReferenceImagePreview = {
 };
 export type ReferenceImageSummary = {
   frame_count: number; reference_count: number; scale_limit: number; maximum_difference: number; fps: number;
+  processing_mode?: 'shift_clip' | 'signed'; output_bit_depth?: number; shift?: number; clip_min?: number; clip_max?: number;
 };
 export type ReferenceImageRun = Omit<RepresentationRun, 'config' | 'result' | 'model_snapshot'> & {
   config: ReferenceImageConfig; result: ReferenceImageSummary | null;

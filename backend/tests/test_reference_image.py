@@ -26,7 +26,7 @@ def interval(start, end, rate=1):
 
 def config(**changes):
     return ReferenceImageConfig.model_validate({"training_dataset_id": 1, "preprocessing_pipeline_id": 1,
-        "reference": interval(0, 6), "anomaly": interval(8, 22), "fps": 7, **changes})
+        "reference": interval(0, 6), "anomaly": interval(8, 22), "fps": 7, "processing_mode": "signed", **changes})
 
 
 def records(count):
@@ -339,3 +339,80 @@ def test_encoder_failure_hides_partial_files(source, monkeypatch):
     assert service.artifact_path(db, queued.id, "video.mp4") is None
     assert service.artifact_path(db, queued.id, "frame_000000.png") is None
     assert not (service.artifact_dir(queued.id) / "differences").exists()
+
+
+def test_shift_clip_defaults_and_exact_uint16_values():
+    payload = config().model_dump()
+    payload.pop("processing_mode")
+    cfg = ReferenceImageConfig.model_validate(payload)
+    assert cfg.processing_mode == "shift_clip"
+    assert (cfg.shift, cfg.clip_min, cfg.clip_max) == (10000, 0, 12000)
+    diff = np.array([[-20000, -10001, -10000, -9999, 0, 1, 2000, 3000]], dtype=np.float64)
+    output = engine.shift_clip_difference(diff, cfg.shift, cfg.clip_min, cfg.clip_max)
+    assert output.dtype == np.uint16
+    np.testing.assert_array_equal(output, [[0, 0, 0, 1, 10000, 10001, 12000, 12000]])
+    np.testing.assert_array_equal(engine.shift_clip_difference(np.array([[-20, -1.5, 0, 1.5, 100000.]]), 10, 5, 17), [[5, 8, 10, 12, 17]])
+
+
+@pytest.mark.parametrize("fields", [{"shift": float("nan")}, {"shift": float("inf")}, {"clip_min": -1},
+    {"clip_max": 65536}, {"clip_min": 12000}, {"clip_min": 13000}, {"clip_max": 12.5}])
+def test_invalid_shift_clip_fields(fields):
+    with pytest.raises(ValidationError):
+        config(processing_mode="shift_clip", **fields)
+
+
+@pytest.mark.parametrize("limits", [(10000, 0, 12000), (10000, 9000, 10500), (-5, 0, 65535)])
+def test_shift_clip_png_is_16bit_and_preview_matches_video(source, limits):
+    db, cfg, _ = source
+    cfg.processing_mode = "shift_clip"
+    cfg.shift, cfg.clip_min, cfg.clip_max = limits
+    cfg.reference.start = START + timedelta(seconds=8)
+    cfg.reference.end = START + timedelta(seconds=16)
+    cfg.anomaly.start = START
+    queued = service.enqueue(db, cfg, wake_scheduler=False)
+    service.run_scheduled(queued.id)
+    db.expire_all()
+    run = service.get_run(db, queued.id)
+    assert run.status == "finished", run.error_message
+    assert run.config.shift == limits[0] and run.config.clip_max == limits[2]
+    assert run.result["output_bit_depth"] == 16
+    assert run.result["processing_mode"] == "shift_clip"
+    directory = service.artifact_dir(queued.id)
+    for i in (0, 6, 11):
+        path = service.artifact_path(db, queued.id, f"frame_{i:06d}.png")
+        # PNG IHDR stores bit depth at offset 24, color type at 25 (0 = grayscale).
+        assert path.read_bytes()[24:26] == bytes([16, 0])
+        image = np.asarray(Image.open(path))
+        assert image.dtype == np.uint16 and image.shape == (182, 322)
+        diff = 1000 + i * 200 - 2200
+        expected = round(np.clip(diff + limits[0], limits[1], limits[2]))
+        np.testing.assert_array_equal(image[100:, :100], expected)
+        assert image.min() >= limits[1] and image.max() <= limits[2]
+        preview_path = service.artifact_path(db, queued.id, f"preview_frame_{i:06d}.png")
+        preview = np.asarray(Image.open(preview_path))
+        assert preview_path.read_bytes()[24] == 8
+        np.testing.assert_array_equal(preview, engine.preview_uint16(image, limits[1], limits[2]))
+    # Distance is measured before shift/clipping, so an unchanged image still scores zero.
+    assert service.results(db, queued.id)["frames"][6]["distance"] == pytest.approx(0)
+    video = cv2.VideoCapture(str(directory / "video.mp4"))
+    try:
+        ok, frame = video.read()
+        assert ok and frame.shape == (182, 322, 3)
+        preview = np.asarray(Image.open(directory / "preview_frame_000000.png"))
+        assert np.abs(frame[100:, :100, 0].astype(float) - preview[100:, :100]).mean() < 5
+    finally:
+        video.release()
+
+
+def test_old_saved_configuration_retains_signed_output(source):
+    db, cfg, _ = source
+    queued = service.enqueue(db, cfg, wake_scheduler=False)
+    row = db.get(models.ReferenceImageRun, queued.id)
+    old_config = {key: value for key, value in row.config.items() if key not in {"processing_mode", "shift", "clip_min", "clip_max"}}
+    row.config = old_config
+    db.commit()
+    assert service.get_run(db, row.id).config.processing_mode == "signed"
+    service.run_scheduled(row.id)
+    db.expire_all()
+    assert service.get_run(db, row.id).status == "finished"
+    assert service.artifact_path(db, row.id, "frame_000000.png").read_bytes()[24] == 8

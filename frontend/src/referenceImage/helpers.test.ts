@@ -28,7 +28,7 @@ describe('reference image configuration', () => {
     expect(validateConfig(config)).toBeTruthy();
     config.reference.seed = 42; config.anomaly.sampling_rate = 1.5;
     expect(validateConfig(config)).toBeTruthy();
-    config.anomaly.sampling_rate = 1; config.scale_mode = 'manual';
+    config.anomaly.sampling_rate = 1; config.processing_mode = 'signed'; config.scale_mode = 'manual';
     expect(validateConfig(config)).toBeTruthy();
     config.scale_limit = 100;
     expect(validateConfig(config)).toBeNull();
@@ -39,4 +39,20 @@ describe('reference image configuration', () => {
     expect(frameFilename(0)).toBe('frame_000000.png');
     expect(frameFilename(1234567)).toBe('frame_1234567.png');
   });
+});
+
+it('defaults to shift/clipping and validates the uint16 limits', () => {
+  const config = valid();
+  expect(config.processing_mode).toBe('shift_clip');
+  expect([config.shift, config.clip_min, config.clip_max]).toEqual([10000, 0, 12000]);
+  config.clip_max = 65536;
+  expect(validateConfig(config)).toBeTruthy();
+  config.clip_max = 12000; config.clip_min = 12000;
+  expect(validateConfig(config)).toBeTruthy();
+  config.clip_min = -1;
+  expect(validateConfig(config)).toBeTruthy();
+  config.clip_min = 0; config.shift = NaN;
+  expect(validateConfig(config)).toBeTruthy();
+  config.shift = -100;
+  expect(validateConfig(config)).toBeNull();
 });
