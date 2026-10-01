@@ -875,6 +875,8 @@ export function getTestingRunResults(runId: number, maxPoints?: number): Promise
 
 export function getTestingRunPlotSeriesPage(runId: number, options: {
   score_series: string;
+  projectId?: string;
+  signal?: AbortSignal;
   start_timestamp?: string | null;
   end_timestamp?: string | null;
   after_timestamp?: string | null;
@@ -891,14 +893,17 @@ export function getTestingRunPlotSeriesPage(runId: number, options: {
   if (options.after_timestamp) query.set('after_timestamp', options.after_timestamp);
   if (options.after_position !== null && options.after_position !== undefined) query.set('after_position', String(options.after_position));
   if (options.expected_result_revision !== null && options.expected_result_revision !== undefined) query.set('expected_result_revision', String(options.expected_result_revision));
-  return request<TestingRunPlotSeriesPage>(`/api/testing-runs/${runId}/plot-series?${query.toString()}`);
+  return request<TestingRunPlotSeriesPage>(`/api/testing-runs/${runId}/plot-series?${query.toString()}`, { signal: options.signal }, undefined, options.projectId);
 }
 
 export async function getFullTestingRunPlotSeries(runId: number, options: {
   score_series: string;
+  projectId?: string;
+  signal?: AbortSignal;
   start_timestamp?: string | null;
   end_timestamp?: string | null;
 }): Promise<TestingRunPlotSeriesPage> {
+  const projectId = options.projectId ?? getActiveProject() ?? undefined;
   const points: TestingRunPlotSeriesPage['points'] = [];
   let afterTimestamp: string | null = null;
   let afterPosition: number | null = null;
@@ -907,6 +912,7 @@ export async function getFullTestingRunPlotSeries(runId: number, options: {
   do {
     const page = await getTestingRunPlotSeriesPage(runId, {
       ...options,
+      projectId,
       after_timestamp: afterTimestamp,
       after_position: afterPosition,
       expected_result_revision: resultRevision,

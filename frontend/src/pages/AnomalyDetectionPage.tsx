@@ -24,7 +24,7 @@ import {
   Tooltip,
 } from '@mantine/core';
 import { notifications } from '@mantine/notifications';
-import { Activity, ChevronDown, ChevronRight, Download, Info, Play, RefreshCw, Search, SlidersHorizontal, Trash2 } from 'lucide-react';
+import { Activity, ChevronDown, ChevronRight, Download, Info, Play, RefreshCw, Search, Trash2 } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 
 import {
@@ -42,6 +42,8 @@ import {
   previewAnomalyDetectionSimpleThreshold,
   previewAnomalyDetectionThreshold,
 } from '../api';
+import { InferenceSourceSelector } from '../components/InferenceSourceSelector';
+import { inferenceFacetRecord } from '../testing/inferenceSource';
 import { DateTime24Input } from '../components/DateTime24Input';
 import { PlotlyChart, type PlotlyChartSelection } from '../components/PlotlyChart';
 import { DEFAULT_TABLE_PAGE_SIZE, TablePagination } from '../components/TablePagination';
@@ -56,10 +58,6 @@ import {
   type FacetRecord,
 } from '../testing/facetFilters';
 import {
-  aggregationKeyForRun,
-  aggregationLabel,
-  metricKeyForRun,
-  metricLabel,
   roiKeyForRun,
   roiLabelForRun,
 } from '../testing/inferenceRunMetadata';
@@ -374,34 +372,6 @@ function compatibleThresholdRun(
   return true;
 }
 
-function inferenceFacetRecord(run: TestingRun): FacetRecord {
-  return {
-    id: String(run.id),
-    facets: {
-      model: [String(run.training_run_id)],
-      trainingDataset: run.model_training_dataset_names ?? [],
-      dataset: [String(run.training_dataset_id)],
-      roi: [roiKeyForRun(run)],
-      metric: [metricKeyForRun(run)],
-      aggregation: [aggregationKeyForRun(run)],
-      preprocessing: run.preprocessing_pipeline_name ? [run.preprocessing_pipeline_name] : [],
-      method: run.method_type ? [run.method_type] : [],
-    },
-    searchableValues: [
-      run.name,
-      run.training_run_name,
-      run.training_pipeline_name,
-      ...(run.model_training_dataset_names ?? []),
-      run.training_dataset_name,
-      roiLabelForRun(run),
-      run.preprocessing_pipeline_name,
-      run.method_type,
-      metricLabel(metricKeyForRun(run)),
-      aggregationLabel(aggregationKeyForRun(run)),
-    ].filter(Boolean),
-  };
-}
-
 function progressToken(): string {
   return globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(36).slice(2)}`;
 }
@@ -467,17 +437,6 @@ function DetectionProgressPanel({
 export function AnomalyDetectionPage({ active }: { active: boolean }) {
   const [testingRuns, setTestingRuns] = useState<TestingRun[]>([]);
   const [savedRuns, setSavedRuns] = useState<AnomalyDetectionRunSummary[]>([]);
-  const [sourceFiltersOpen, setSourceFiltersOpen] = useState(true);
-  const [sourceSearch, setSourceSearch] = useState('');
-  const [sourceModelFilters, setSourceModelFilters] = useState<string[]>([]);
-  const [sourceTrainingDatasetFilters, setSourceTrainingDatasetFilters] = useState<string[]>([]);
-  const [sourceDatasetFilters, setSourceDatasetFilters] = useState<string[]>([]);
-  const [sourceRoiFilters, setSourceRoiFilters] = useState<string[]>([]);
-  const [sourceMetricFilters, setSourceMetricFilters] = useState<string[]>([]);
-  const [sourceAggregationFilters, setSourceAggregationFilters] = useState<string[]>([]);
-  const [sourcePreprocessingFilters, setSourcePreprocessingFilters] = useState<string[]>([]);
-  const [sourceMethodFilters, setSourceMethodFilters] = useState<string[]>([]);
-  const [sourcePage, setSourcePage] = useState(1);
   const [testingRunId, setTestingRunId] = useState<string | null>(null);
   const [previewResults, setPreviewResults] = useState<TestingRunResult[]>([]);
   const [previewDecimated, setPreviewDecimated] = useState(false);
@@ -621,62 +580,7 @@ export function AnomalyDetectionPage({ active }: { active: boolean }) {
     testingRunId,
   ]);
   const calibrationStale = calibrationResult !== null && calibrationResultSignature !== calibrationSignature;
-  const inferenceFacetRecords = useMemo(() => testingRuns.map(inferenceFacetRecord), [testingRuns]);
-  const sourceFacetState = useMemo<FacetFilterState>(() => ({
-    query: sourceSearch,
-    selections: {
-      model: sourceModelFilters,
-      trainingDataset: sourceTrainingDatasetFilters,
-      dataset: sourceDatasetFilters,
-      roi: sourceRoiFilters,
-      metric: sourceMetricFilters,
-      aggregation: sourceAggregationFilters,
-      preprocessing: sourcePreprocessingFilters,
-      method: sourceMethodFilters,
-    },
-  }), [sourceAggregationFilters, sourceDatasetFilters, sourceMethodFilters, sourceMetricFilters, sourceModelFilters, sourcePreprocessingFilters, sourceRoiFilters, sourceSearch, sourceTrainingDatasetFilters]);
-  const filteredRunRecords = useMemo(
-    () => matchingFacetRecords(inferenceFacetRecords, sourceFacetState),
-    [inferenceFacetRecords, sourceFacetState],
-  );
   const testingRunById = useMemo(() => new Map(testingRuns.map((run) => [run.id, run])), [testingRuns]);
-  const filteredRuns = useMemo(
-    () => filteredRunRecords.map((record) => testingRunById.get(Number(record.id))).filter((run): run is TestingRun => Boolean(run)),
-    [filteredRunRecords, testingRunById],
-  );
-  const pagedFilteredRuns = useMemo(
-    () => filteredRuns.slice((sourcePage - 1) * DEFAULT_TABLE_PAGE_SIZE, sourcePage * DEFAULT_TABLE_PAGE_SIZE),
-    [filteredRuns, sourcePage],
-  );
-  const sourceFacetCounts = useMemo(() => ({
-    model: countFacetValues(inferenceFacetRecords, sourceFacetState, 'model'),
-    trainingDataset: countFacetValues(inferenceFacetRecords, sourceFacetState, 'trainingDataset'),
-    dataset: countFacetValues(inferenceFacetRecords, sourceFacetState, 'dataset'),
-    roi: countFacetValues(inferenceFacetRecords, sourceFacetState, 'roi'),
-    metric: countFacetValues(inferenceFacetRecords, sourceFacetState, 'metric'),
-    aggregation: countFacetValues(inferenceFacetRecords, sourceFacetState, 'aggregation'),
-    preprocessing: countFacetValues(inferenceFacetRecords, sourceFacetState, 'preprocessing'),
-    method: countFacetValues(inferenceFacetRecords, sourceFacetState, 'method'),
-  }), [inferenceFacetRecords, sourceFacetState]);
-  const sourceModelOptions = useMemo(() => {
-    const labels = new Map(testingRuns.map((run) => [String(run.training_run_id), run.training_pipeline_name || run.training_run_name || `Training run #${run.training_run_id}`]));
-    return [...labels].map(([value, label]) => facetOption(value, label, sourceFacetCounts.model, sourceModelFilters)).sort((a, b) => a.label.localeCompare(b.label));
-  }, [sourceFacetCounts.model, sourceModelFilters, testingRuns]);
-  const sourceTrainingDatasetOptions = useMemo(() => [...new Set(testingRuns.flatMap((run) => run.model_training_dataset_names ?? []))]
-    .map((value) => facetOption(value, value, sourceFacetCounts.trainingDataset, sourceTrainingDatasetFilters))
-    .sort((a, b) => a.label.localeCompare(b.label)), [sourceFacetCounts.trainingDataset, sourceTrainingDatasetFilters, testingRuns]);
-  const sourceDatasetOptions = useMemo(() => {
-    const labels = new Map(testingRuns.map((run) => [String(run.training_dataset_id), run.training_dataset_name || `Inference dataset #${run.training_dataset_id}`]));
-    return [...labels].map(([value, label]) => facetOption(value, label, sourceFacetCounts.dataset, sourceDatasetFilters)).sort((a, b) => a.label.localeCompare(b.label));
-  }, [sourceDatasetFilters, sourceFacetCounts.dataset, testingRuns]);
-  const sourceRoiOptions = useMemo(() => {
-    const labels = new Map(testingRuns.map((run) => [roiKeyForRun(run), roiLabelForRun(run)]));
-    return [...labels].map(([value, label]) => facetOption(value, label, sourceFacetCounts.roi, sourceRoiFilters)).sort((a, b) => a.label.localeCompare(b.label));
-  }, [sourceFacetCounts.roi, sourceRoiFilters, testingRuns]);
-  const sourceMetricOptions = useMemo(() => [...new Set(testingRuns.map(metricKeyForRun))].map((value) => facetOption(value, metricLabel(value), sourceFacetCounts.metric, sourceMetricFilters)), [sourceFacetCounts.metric, sourceMetricFilters, testingRuns]);
-  const sourceAggregationOptions = useMemo(() => [...new Set(testingRuns.map(aggregationKeyForRun))].map((value) => facetOption(value, aggregationLabel(value), sourceFacetCounts.aggregation, sourceAggregationFilters)), [sourceAggregationFilters, sourceFacetCounts.aggregation, testingRuns]);
-  const sourcePreprocessingOptions = useMemo(() => [...new Set(testingRuns.map((run) => run.preprocessing_pipeline_name).filter(Boolean))].map((value) => facetOption(value, value, sourceFacetCounts.preprocessing, sourcePreprocessingFilters)).sort((a, b) => a.label.localeCompare(b.label)), [sourceFacetCounts.preprocessing, sourcePreprocessingFilters, testingRuns]);
-  const sourceMethodOptions = useMemo(() => [...new Set(testingRuns.map((run) => run.method_type).filter(Boolean))].map((value) => facetOption(value, value, sourceFacetCounts.method, sourceMethodFilters)).sort((a, b) => a.label.localeCompare(b.label)), [sourceFacetCounts.method, sourceMethodFilters, testingRuns]);
   const compatibleThresholdRuns = useMemo(
     () => selectedRun
       ? testingRuns.filter((run) => compatibleThresholdRun(selectedRun, run, scoreSeries))
@@ -759,8 +663,6 @@ export function AnomalyDetectionPage({ active }: { active: boolean }) {
   }, [savedFacetCounts.roi, savedRoiFilters, testingRuns]);
   const savedScoreOptions = useMemo(() => [...new Set(savedRuns.map((run) => run.score_series))].map((value) => facetOption(value, value.replaceAll('_', ' ').toUpperCase(), savedFacetCounts.score, savedScoreFilters)), [savedFacetCounts.score, savedRuns, savedScoreFilters]);
 
-  useEffect(() => setSourcePage(1), [sourceSearch, sourceModelFilters, sourceTrainingDatasetFilters, sourceDatasetFilters, sourceRoiFilters, sourceMetricFilters, sourceAggregationFilters, sourcePreprocessingFilters, sourceMethodFilters]);
-  useEffect(() => setSourcePage((page) => Math.min(page, Math.max(1, Math.ceil(filteredRuns.length / DEFAULT_TABLE_PAGE_SIZE)))), [filteredRuns.length]);
   useEffect(() => setThresholdRunPage(1), [thresholdRunSearch, thresholdDatasetFilters, selectedRun?.id, scoreSeries]);
   useEffect(() => setThresholdRunPage((page) => Math.min(page, Math.max(1, Math.ceil(filteredThresholdRuns.length / DEFAULT_TABLE_PAGE_SIZE)))), [filteredThresholdRuns.length]);
   useEffect(() => setSavedPage(1), [savedSearch, savedAlgorithmFilters, savedModelFilters, savedDatasetFilters, savedRoiFilters, savedScoreFilters]);
@@ -1498,80 +1400,12 @@ export function AnomalyDetectionPage({ active }: { active: boolean }) {
         <Button variant="subtle" leftSection={<RefreshCw size={16} />} onClick={() => refresh()}>Refresh</Button>
       </Group>
 
-      <Paper withBorder p="md">
-        <Stack gap="md">
-          <Group justify="space-between" wrap="wrap">
-            <Text fw={700}>1. Select inference source</Text>
-            <Badge variant="light">{filteredRuns.length} matching inference{filteredRuns.length === 1 ? '' : 's'}</Badge>
-          </Group>
-          <Group justify="space-between" wrap="wrap">
-            <Button variant="subtle" size="compact-sm" leftSection={<SlidersHorizontal size={16} />} rightSection={sourceFiltersOpen ? <ChevronDown size={14} /> : <ChevronRight size={14} />} onClick={() => setSourceFiltersOpen((open) => !open)}>Filters</Button>
-            {(sourceSearch.trim() || sourceModelFilters.length || sourceTrainingDatasetFilters.length || sourceDatasetFilters.length || sourceRoiFilters.length || sourceMetricFilters.length || sourceAggregationFilters.length || sourcePreprocessingFilters.length || sourceMethodFilters.length) ? (
-              <Button variant="subtle" color="gray" size="compact-sm" onClick={() => {
-                setSourceSearch('');
-                setSourceModelFilters([]);
-                setSourceTrainingDatasetFilters([]);
-                setSourceDatasetFilters([]);
-                setSourceRoiFilters([]);
-                setSourceMetricFilters([]);
-                setSourceAggregationFilters([]);
-                setSourcePreprocessingFilters([]);
-                setSourceMethodFilters([]);
-              }}>Reset filters</Button>
-            ) : null}
-          </Group>
-          <Collapse in={sourceFiltersOpen}>
-            <Stack gap="sm">
-              <TextInput placeholder="Search inference, model, pipeline or dataset" leftSection={<Search size={16} />} value={sourceSearch} onChange={(event) => setSourceSearch(event.currentTarget.value)} />
-              <SimpleGrid cols={{ base: 1, sm: 2, lg: 4 }}>
-                <MultiSelect label="Models" searchable clearable data={sourceModelOptions} value={sourceModelFilters} onChange={setSourceModelFilters} />
-                <MultiSelect label="Training datasets" searchable clearable data={sourceTrainingDatasetOptions} value={sourceTrainingDatasetFilters} onChange={setSourceTrainingDatasetFilters} />
-                <MultiSelect label="Inference datasets" searchable clearable data={sourceDatasetOptions} value={sourceDatasetFilters} onChange={setSourceDatasetFilters} />
-                <MultiSelect label="ROI" searchable clearable data={sourceRoiOptions} value={sourceRoiFilters} onChange={setSourceRoiFilters} />
-                <MultiSelect label="Metrics" searchable clearable data={sourceMetricOptions} value={sourceMetricFilters} onChange={setSourceMetricFilters} />
-                <MultiSelect label="Score aggregation" searchable clearable data={sourceAggregationOptions} value={sourceAggregationFilters} onChange={setSourceAggregationFilters} />
-                <MultiSelect label="Preprocessing" searchable clearable data={sourcePreprocessingOptions} value={sourcePreprocessingFilters} onChange={setSourcePreprocessingFilters} />
-                <MultiSelect label="Methods" searchable clearable data={sourceMethodOptions} value={sourceMethodFilters} onChange={setSourceMethodFilters} />
-              </SimpleGrid>
-              <Text size="xs" c="dimmed">Counts show finished inferences available after the search and all other categories. Multiple values inside one category use OR.</Text>
-            </Stack>
-          </Collapse>
-          <ScrollArea.Autosize mah={360} type="auto">
-            <Table striped highlightOnHover miw={1040}>
-              <Table.Thead><Table.Tr><Table.Th>Inference</Table.Th><Table.Th>Model</Table.Th><Table.Th>Dataset</Table.Th><Table.Th>ROI</Table.Th><Table.Th>Score configuration</Table.Th><Table.Th>Frames</Table.Th><Table.Th>Finished</Table.Th><Table.Th /></Table.Tr></Table.Thead>
-              <Table.Tbody>
-                {pagedFilteredRuns.map((run) => {
-                  const selected = testingRunId === String(run.id);
-                  return <Table.Tr key={run.id} bg={selected ? 'var(--mantine-color-green-light)' : undefined}>
-                    <Table.Td><Text fw={selected ? 700 : 500}>{run.name}</Text></Table.Td>
-                    <Table.Td>{run.training_pipeline_name || run.training_run_name || `Training run #${run.training_run_id}`}</Table.Td>
-                    <Table.Td>{run.training_dataset_name || `Inference dataset #${run.training_dataset_id}`}</Table.Td>
-                    <Table.Td>{roiLabelForRun(run)}</Table.Td>
-                    <Table.Td>{metricLabel(metricKeyForRun(run))} · {aggregationLabel(aggregationKeyForRun(run))}</Table.Td>
-                    <Table.Td>{(run.image_count ?? 0).toLocaleString()}</Table.Td>
-                    <Table.Td>{formatTimestamp(run.ended_at)}</Table.Td>
-                    <Table.Td><Button size="compact-sm" variant={selected ? 'filled' : 'light'} color={selected ? 'green' : 'blue'} disabled={running || thresholdCalculating || previewLoading} onClick={() => setTestingRunId(String(run.id))}>{selected ? 'Selected' : 'Use'}</Button></Table.Td>
-                  </Table.Tr>;
-                })}
-                {filteredRuns.length === 0 && <Table.Tr><Table.Td colSpan={8}><Stack align="center" gap="xs" py="md"><Text size="sm" c="dimmed">No finished inference matches the combined filters.</Text><Button variant="light" size="compact-sm" onClick={() => { setSourceSearch(''); setSourceModelFilters([]); setSourceTrainingDatasetFilters([]); setSourceDatasetFilters([]); setSourceRoiFilters([]); setSourceMetricFilters([]); setSourceAggregationFilters([]); setSourcePreprocessingFilters([]); setSourceMethodFilters([]); }}>Reset filters</Button></Stack></Table.Td></Table.Tr>}
-              </Table.Tbody>
-            </Table>
-          </ScrollArea.Autosize>
-          <TablePagination totalItems={filteredRuns.length} page={sourcePage} onChange={setSourcePage} />
-          {selectedRun && (
-            <Alert color="green" title="Selected inference">
-              <Group gap="xs">
-              <Badge variant="light">{selectedRun.name}</Badge>
-              <Badge variant="light">{selectedRun.training_pipeline_name || selectedRun.training_run_name}</Badge>
-              <Badge variant="light" color="teal">{selectedRun.training_dataset_name}</Badge>
-              <Badge variant="light" color="violet">{roiLabelForRun(selectedRun)}</Badge>
-              <Badge variant="light" color="gray">{selectedRun.image_count ?? 0} frames</Badge>
-              {!filteredRuns.some((run) => run.id === selectedRun.id) && <Badge variant="light" color="yellow">Hidden by current filters</Badge>}
-              </Group>
-            </Alert>
-          )}
-        </Stack>
-      </Paper>
+      <InferenceSourceSelector
+        runs={testingRuns}
+        selectedIds={testingRunId ? [testingRunId] : []}
+        onSelectionChange={(ids) => setTestingRunId(ids[0] ?? null)}
+        disabled={running || thresholdCalculating || previewLoading}
+      />
 
       {testingRunId && (
         <Paper withBorder p="md">

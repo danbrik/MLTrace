@@ -27,6 +27,7 @@ import type React from 'react';
 import { PageErrorBoundary } from './components/PageErrorBoundary';
 import { AnalysisPage } from './pages/AnalysisPage';
 import { AnomalyDetectionPage } from './pages/AnomalyDetectionPage';
+import { InferenceExportPage } from './pages/InferenceExportPage';
 import { DataManagerPage } from './pages/DataManagerPage';
 import { CsvMergePage } from './pages/CsvMergePage';
 import { TimeSeriesPage } from './pages/TimeSeriesPage';
@@ -79,6 +80,7 @@ type Page =
   | 'spatial-sensitivity'
   | 'evaluation'
   | 'anomaly-detection'
+  | 'inference-export'
   | 'csv-merge'
   | 'data-quality-analysis'
   | 'redundancy-analysis'
@@ -97,7 +99,7 @@ export function App() {
   const page: Page = requestedPage && [
     'time-series-datasets', 'time-series-splits', 'time-series-models', 'time-series-pipelines', 'time-series-results',
     'datasets', 'training-datasets', 'preprocessing', 'methods', 'training-pipelines', 'testing',
-    'inspect', 'optimization', 'analysis', 'reference-image-analysis', 'mean-variance-analysis', 'dinov3-analysis', 'image-distribution', 'resolution-sensitivity', 'spatial-sensitivity', 'evaluation', 'anomaly-detection', 'csv-merge', 'redundancy-analysis', 'data-quality-analysis', 'threshold', 'scheduler', 'data-manager',
+    'inspect', 'optimization', 'analysis', 'reference-image-analysis', 'mean-variance-analysis', 'dinov3-analysis', 'image-distribution', 'resolution-sensitivity', 'spatial-sensitivity', 'evaluation', 'anomaly-detection', 'inference-export', 'csv-merge', 'redundancy-analysis', 'data-quality-analysis', 'threshold', 'scheduler', 'data-manager',
   ].includes(requestedPage) ? requestedPage : 'datasets';
   const timeSeriesMode = page.startsWith('time-series-');
   const [project, setProject] = useState<Project | null>(null);
@@ -161,6 +163,7 @@ export function App() {
     { id: 'spatial-sensitivity', label: 'Spatial ROI Sensitivity', icon: <ScanSearch size={18} /> },
     { id: 'evaluation', label: 'Evaluation', icon: <ClipboardCheck size={18} /> },
     { id: 'anomaly-detection', label: 'Anomaly Detection', icon: <Activity size={18} /> },
+    { id: 'inference-export', label: 'Inference CSV Export', icon: <FileSpreadsheet size={18} /> },
     { id: 'csv-merge', label: 'CSV Merge', icon: <FileSpreadsheet size={18} /> },
     { id: 'data-quality-analysis', label: 'Data Quality Analysis', icon: <Network size={18} /> },
     { id: 'redundancy-analysis', label: 'Redundancy Analysis', icon: <Network size={18} /> },
@@ -318,6 +321,11 @@ export function App() {
         <Box display={page === 'anomaly-detection' ? 'block' : 'none'}>
           <PageErrorBoundary label="Anomaly Detection">
             <AnomalyDetectionPage active={page === 'anomaly-detection'} />
+          </PageErrorBoundary>
+        </Box>
+        <Box display={page === 'inference-export' ? 'block' : 'none'}>
+          <PageErrorBoundary label="Inference CSV Export">
+            <InferenceExportPage key={projectId} active={page === 'inference-export'} projectId={projectId} />
           </PageErrorBoundary>
         </Box>
         <Box display={page === 'csv-merge' ? 'block' : 'none'}>
