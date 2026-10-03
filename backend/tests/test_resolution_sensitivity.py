@@ -81,6 +81,7 @@ def test_pipeline_mapping_and_enqueue_snapshot() -> None:
         assert run.status == "queued"
         assert [item["resolution"] for item in run.pipeline_snapshot] == [840, 512, 256, 128]
         assert run.config["samples_per_interval"] == 2
+        assert run.config["interval_end_inclusive"] is True
     finally:
         db.close()
 
@@ -132,3 +133,53 @@ def test_calculation_keeps_sources_paired_and_computes_retention(tmp_path, monke
     assert by_resolution[840]["retention"] == pytest.approx(1.0)
     assert by_resolution[512]["retention"] == pytest.approx(512 / 840)
     assert result["overview"][0]["ssim"]["median"] == pytest.approx(1.0)
+
+
+def test_new_runs_allow_single_points_but_reject_shared_boundaries():
+    payload = _payload()
+    values = payload.model_dump(mode='json')
+    values['intervals'][0]['end'] = values['intervals'][0]['start']
+    assert ResolutionSensitivityRunCreate(**values).intervals[0].start == payload.intervals[0].start
+    values = payload.model_dump(mode='json')
+    values['intervals'][1]['start'] = values['intervals'][0]['end']
+    with pytest.raises(ValidationError, match='overlap'):
+        ResolutionSensitivityRunCreate(**values)
+    values['intervals'][0]['end'] = '2025-12-31T23:00:00'
+    with pytest.raises(ValidationError, match='before start'):
+        ResolutionSensitivityRunCreate(**values)
+
+
+def test_inclusive_boundaries_single_point_and_legacy_sampling():
+    start = datetime(2026, 1, 1)
+    end = start + timedelta(seconds=10)
+    images = [_record('/first.tif', start), _record('/last.tif', end)]
+    interval = {'id': 'normal', 'name': 'Normal', 'type': 'normal', 'start': start.isoformat(), 'end': end.isoformat()}
+    sampled = resolution_sensitivity.sample_intervals(images, [interval], 2)
+    assert [row['image'].file_path for row in sampled] == ['/first.tif', '/last.tif']
+    old = resolution_sensitivity.sample_intervals(images, [interval], 2, end_inclusive=False)
+    assert [row['image'].file_path for row in old] == ['/first.tif', '/first.tif']
+    point = {**interval, 'start': end.isoformat()}
+    sampled = resolution_sensitivity.sample_intervals(images, [point], 3)
+    assert [row['image'].file_path for row in sampled] == ['/last.tif'] * 3
+    assert [row['duplicate'] for row in sampled] == [False, True, True]
+    with pytest.raises(ValueError, match='no available image'):
+        resolution_sensitivity.sample_intervals(images, [point], 1, end_inclusive=False)
+    missing = {**point, 'start': (end + timedelta(seconds=1)).isoformat(), 'end': (end + timedelta(seconds=1)).isoformat()}
+    with pytest.raises(ValueError, match='no available image'):
+        resolution_sensitivity.sample_intervals(images, [missing], 1)
+
+
+@pytest.mark.parametrize('stored_flag, expected', [(None, False), (True, True), (False, False)])
+def test_worker_preserves_legacy_rule_and_honors_new_marker(monkeypatch, stored_flag, expected):
+    config = _payload().model_dump(mode='json')
+    if stored_flag is not None:
+        config['interval_end_inclusive'] = stored_flag
+    run = models.ResolutionSensitivityRun(config=config)
+    monkeypatch.setattr(resolution_sensitivity, 'enumerate_training_dataset_image_records', lambda _: [])
+    class SamplingReached(Exception): pass
+    def capture(*args, **kwargs):
+        assert kwargs['end_inclusive'] is expected
+        raise SamplingReached()
+    monkeypatch.setattr(resolution_sensitivity, 'sample_intervals', capture)
+    with pytest.raises(SamplingReached):
+        resolution_sensitivity.calculate(run, object(), __import__('threading').Event(), lambda *args: None)

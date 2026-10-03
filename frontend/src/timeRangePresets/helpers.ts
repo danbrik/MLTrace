@@ -26,3 +26,23 @@ export const formatPresetTime = (value: string) => value.replace('T', ' ');
 export function copyTimeRange<T extends TimeRangeValue>(current: T, source: TimeRangeValue): T {
   return { ...current, start: source.start, end: source.end };
 }
+
+/** Local wall-clock ordering, with no timezone conversion and microsecond precision. */
+export function compareLocalTimes(a: string, b: string): number {
+  return (localKey(a) ?? '').localeCompare(localKey(b) ?? '');
+}
+
+export function formatRangeDuration(range: TimeRangeValue): string {
+  if (rangeProblem(range)) return '—';
+  const micros = (value: string) => {
+    const key = localKey(value)!;
+    return BigInt(Date.parse(`${key.slice(0, 19)}Z`)) * 1000n + BigInt(key.slice(20));
+  };
+  let remaining = micros(range.end) - micros(range.start);
+  const days = remaining / 86400000000n; remaining %= 86400000000n;
+  const hours = remaining / 3600000000n; remaining %= 3600000000n;
+  const minutes = remaining / 60000000n; remaining %= 60000000n;
+  const seconds = remaining / 1000000n;
+  const fraction = (remaining % 1000000n).toString().padStart(6, '0').replace(/0+$/, '');
+  return [days ? `${days} d` : '', hours ? `${hours} h` : '', minutes ? `${minutes} min` : '', `${seconds}${fraction ? `,${fraction}` : ''} s`].filter(Boolean).join(' ');
+}

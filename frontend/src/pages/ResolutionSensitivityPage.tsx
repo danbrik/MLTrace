@@ -1,5 +1,5 @@
 import {
-  ActionIcon, Alert, Badge, Button, Group, Loader, MultiSelect, NumberInput, Paper,
+  Alert, Badge, Button, Group, Loader, MultiSelect, NumberInput, Paper,
   Progress, ScrollArea, Select, SimpleGrid, Stack, Switch, Table, Text, TextInput, Title,
 } from '@mantine/core';
 import { notifications } from '@mantine/notifications';
@@ -11,6 +11,7 @@ import {
   listPreprocessingPipelines, listResolutionSensitivityRuns, listTrainingDatasets,
   resolutionSensitivityExportUrl,
 } from '../api';
+import { TimeRangePresetPicker } from '../timeRangePresets/TimeRangePresetPicker';
 import { DateTime24Input } from '../components/DateTime24Input';
 import { PlotlyChart } from '../components/PlotlyChart';
 import type { Data } from '../lib/plotly';
@@ -19,10 +20,10 @@ import type {
   ResolutionSensitivityRun, TrainingDataset,
 } from '../types';
 import {
-  hasRequiredPipelineMapping, mapSelectedPipelines, REQUIRED_RESOLUTIONS, targetIntervalsFromLabelSet,
+  hasRequiredPipelineMapping, mapSelectedPipelines, REQUIRED_RESOLUTIONS, targetIntervalsFromLabelSet, validateResolutionIntervals,
 } from '../resolutionSensitivity/helpers';
 
-type Props = { active: boolean };
+type Props = { active: boolean; projectId: string };
 type Feature = 'mean_intensity' | 'q95_intensity' | 'spatial_std_intensity';
 const RESOLUTIONS: number[] = [...REQUIRED_RESOLUTIONS];
 const FEATURE_LABELS: Record<Feature, string> = {
@@ -43,7 +44,7 @@ function fmt(value: number | null | undefined, digits = 4): string {
   return value == null || !Number.isFinite(value) ? '—' : value.toLocaleString('de-DE', { maximumFractionDigits: digits });
 }
 
-export function ResolutionSensitivityPage({ active }: Props) {
+export function ResolutionSensitivityPage({ active, projectId }: Props) {
   const [datasets, setDatasets] = useState<TrainingDataset[]>([]);
   const [pipelines, setPipelines] = useState<PreprocessingPipeline[]>([]);
   const [labelSets, setLabelSets] = useState<EvaluationLabelSet[]>([]);
@@ -65,7 +66,7 @@ export function ResolutionSensitivityPage({ active }: Props) {
     if (!active) return;
     let cancelled = false;
     setLoading(true);
-    Promise.all([listTrainingDatasets(), listPreprocessingPipelines(), listEvaluationLabelSets(), listResolutionSensitivityRuns()])
+    Promise.all([listTrainingDatasets(), listPreprocessingPipelines(), listEvaluationLabelSets(), listResolutionSensitivityRuns(projectId)])
       .then(([nextDatasets, nextPipelines, nextLabels, nextRuns]) => {
         if (cancelled) return;
         setDatasets(nextDatasets); setPipelines(nextPipelines); setLabelSets(nextLabels); setRuns(nextRuns);
@@ -75,13 +76,13 @@ export function ResolutionSensitivityPage({ active }: Props) {
       .catch((reason) => { if (!cancelled) setError(reason instanceof Error ? reason.message : String(reason)); })
       .finally(() => { if (!cancelled) setLoading(false); });
     return () => { cancelled = true; };
-  }, [active]);
+  }, [active, projectId]);
 
   useEffect(() => {
     if (!active || !run || !['queued', 'running'].includes(run.status)) return undefined;
     let cancelled = false;
     const timer = window.setInterval(() => {
-      getResolutionSensitivityRun(run.id).then((next) => {
+      getResolutionSensitivityRun(run.id, projectId).then((next) => {
         if (cancelled) return;
         setRun(next);
         setRuns((current) => current.map((item) => item.id === next.id ? next : item));
@@ -89,7 +90,7 @@ export function ResolutionSensitivityPage({ active }: Props) {
       }).catch(() => undefined);
     }, 1500);
     return () => { cancelled = true; window.clearInterval(timer); };
-  }, [active, run?.id, run?.status]);
+  }, [active, projectId, run?.id, run?.status]);
 
   const eligiblePipelines = useMemo(() => pipelines.filter((pipeline) => (
     pipeline.output_width === pipeline.output_height && RESOLUTIONS.includes(pipeline.output_width ?? 0)
@@ -98,6 +99,11 @@ export function ResolutionSensitivityPage({ active }: Props) {
   const validMapping = hasRequiredPipelineMapping(selectedMapping);
   const availableLabelSets = labelSets.filter((item) => String(item.training_dataset_id) === datasetId);
   const activeProgress = run?.total_images ? Math.min(100, run.processed_images / run.total_images * 100) : 0;
+
+  const dataset = datasets.find(item => String(item.id) === datasetId);
+  const min = dataset?.start_timestamp ?? undefined;
+  const max = dataset?.end_timestamp ?? undefined;
+  const validation = validateResolutionIntervals(intervals, min, max);
 
   function addInterval(type: 'normal' | 'event') {
     setIntervals((current) => [...current, { id: uid(type), name: type === 'normal' ? `Normal ${current.filter((i) => i.type === type).length + 1}` : `Ereignis ${current.filter((i) => i.type === type).length + 1}`, type, start: '', end: '' }]);
@@ -118,14 +124,14 @@ export function ResolutionSensitivityPage({ active }: Props) {
   async function start() {
     setError(null);
     const sampleCount = Number(samples);
-    if (!datasetId || !validMapping || !Number.isInteger(sampleCount) || sampleCount < 1) return;
+    if (!datasetId || !validMapping || !validation.valid || !Number.isInteger(sampleCount) || sampleCount < 1 || sampleCount > 10000) return;
     setStarting(true);
     try {
       const next = await createResolutionSensitivityRun({
         training_dataset_id: Number(datasetId), pipeline_ids: pipelineIds.map(Number), intervals,
         samples_per_interval: sampleCount, label_set_id: labelSetId ? Number(labelSetId) : null,
         ssim_data_range: overrideEnabled ? Number(dataRange) : null,
-      });
+      }, projectId);
       setRun(next); setRuns((current) => [next, ...current]);
       notifications.show({ color: 'blue', title: 'Analyse eingeplant', message: 'Der CPU-Lauf ist jetzt im Scheduler sichtbar.' });
     } catch (reason) {
@@ -151,13 +157,29 @@ export function ResolutionSensitivityPage({ active }: Props) {
       </SimpleGrid>
       <Group gap="xs">{RESOLUTIONS.map((resolution) => <Badge key={resolution} color={selectedMapping.get(resolution) ? 'green' : 'gray'}>{resolution}: {selectedMapping.get(resolution)?.name ?? 'fehlt'}</Badge>)}</Group>
       <Group align="flex-end"><Switch label="SSIM data_range manuell setzen" checked={overrideEnabled} onChange={(event) => setOverrideEnabled(event.currentTarget.checked)} />{overrideEnabled && <NumberInput label="data_range" min={Number.EPSILON} value={dataRange} onChange={setDataRange} />}</Group>
-      <Group justify="space-between"><Group><Button variant="light" leftSection={<Plus size={16} />} onClick={() => addInterval('normal')}>Normalzeitraum</Button><Button variant="light" color="orange" leftSection={<Plus size={16} />} onClick={() => addInterval('event')}>Ereigniszeitraum</Button></Group><Button leftSection={starting ? <Loader size={16} color="white" /> : <Play size={16} />} disabled={!datasetId || !validMapping || intervals.length < 2 || starting} onClick={start}>Analyse starten</Button></Group>
-      {intervals.map((interval) => <Paper key={interval.id} withBorder p="sm"><SimpleGrid cols={{ base: 1, lg: 4 }}>
-        <TextInput label={interval.type === 'normal' ? 'Normalzeitraum' : 'Ereignis'} value={interval.name} onChange={(event) => updateInterval(interval.id, { name: event.currentTarget.value })} />
-        <DateTime24Input label="Start" value={interval.start} onChange={(value) => updateInterval(interval.id, { start: value })} />
-        <DateTime24Input label="Ende" value={interval.end} onChange={(value) => updateInterval(interval.id, { end: value })} />
-        <Group align="flex-end" justify="flex-end"><Badge color={interval.type === 'normal' ? 'blue' : 'orange'}>{interval.type === 'normal' ? 'Normal' : 'Event'}</Badge><ActionIcon color="red" variant="light" onClick={() => setIntervals((current) => current.filter((item) => item.id !== interval.id))}><Trash2 size={17} /></ActionIcon></Group>
-      </SimpleGrid></Paper>)}
+      <Group justify="space-between"><Group><Button variant="light" leftSection={<Plus size={16} />} onClick={() => addInterval('normal')}>Normalzeitraum</Button><Button variant="light" color="orange" leftSection={<Plus size={16} />} onClick={() => addInterval('event')}>Anomalie-/Ereigniszeitraum</Button></Group><Button leftSection={starting ? <Loader size={16} color="white" /> : <Play size={16} />} disabled={!datasetId || !validMapping || !validation.valid || !Number.isInteger(Number(samples)) || Number(samples) < 1 || Number(samples) > 10000 || starting} onClick={start}>Analyse starten</Button></Group>
+      <Text size="sm" c="dimmed">Beginn und Ende zählen einschließlich. Einzelzeitpunkte sind erlaubt; Zeiträume dürfen sich auch an den Grenzen nicht überschneiden.</Text>
+      {dataset && <Text size="sm">Datensatzgrenzen: {min?.replace('T', ' ') ?? '—'} bis {max?.replace('T', ' ') ?? '—'}</Text>}
+      {validation.formError && <Text size="sm" c="dimmed">{validation.formError}</Text>}
+      {intervals.map((interval) => <Paper key={interval.id} withBorder p="sm"><Stack gap="sm">
+        <SimpleGrid cols={{ base: 1, lg: 3 }}>
+          <TextInput label={interval.type === 'normal' ? 'Normalzeitraum' : 'Anomalie-/Ereigniszeitraum'} value={interval.name} disabled={starting}
+            onChange={(event) => updateInterval(interval.id, { name: event.currentTarget.value })} />
+          <DateTime24Input label="Start (einschließlich)" value={interval.start} min={min} max={max} disabled={starting}
+            onChange={(value) => updateInterval(interval.id, { start: value })} />
+          <DateTime24Input label="Ende (einschließlich)" value={interval.end} min={min} max={max} disabled={starting}
+            onChange={(value) => updateInterval(interval.id, { end: value })} />
+        </SimpleGrid>
+        <TimeRangePresetPicker projectId={projectId} active={active} value={interval} min={min} max={max} disabled={starting}
+          applyDisabledReason={!dataset ? 'Bitte zuerst einen Datensatz auswählen.' : undefined}
+          onApply={range => updateInterval(interval.id, range)} />
+        {(validation.errors[interval.id] ?? []).map(message => <Alert key={message} color="red">{message}</Alert>)}
+        <Group justify="space-between">
+          <Badge color={interval.type === 'normal' ? 'blue' : 'orange'}>{interval.type === 'normal' ? 'Normal' : 'Anomalie / Ereignis'}</Badge>
+          <Button color="red" variant="subtle" leftSection={<Trash2 size={17} />} disabled={starting}
+            onClick={() => setIntervals((current) => current.filter((item) => item.id !== interval.id))}>Aus Analyse entfernen</Button>
+        </Group>
+      </Stack></Paper>)}
     </Stack></Paper>
     {error && <Alert color="red" title="Analyse nicht möglich">{error}</Alert>}
 

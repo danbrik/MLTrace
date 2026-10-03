@@ -408,6 +408,7 @@ export type ResolutionSensitivityRun = {
     training_dataset_id: number;
     pipeline_ids: number[];
     intervals: ResolutionSensitivityInterval[];
+    interval_end_inclusive?: boolean;
     samples_per_interval: number;
     label_set_id: number | null;
     ssim_data_range: number | null;

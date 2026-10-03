@@ -91,7 +91,7 @@ def enqueue(db: Session, payload: ResolutionSensitivityRunCreate, *, wake_schedu
         current_step="queued",
         enqueued_at=models.utc_now(),
         queue_rank=next_queue_rank(db),
-        config=payload.model_dump(mode="json"),
+        config={**payload.model_dump(mode="json"), "interval_end_inclusive": True},
         pipeline_snapshot=snapshot,
     )
     db.add(run)
@@ -166,7 +166,7 @@ def export_path(db: Session, run_id: int, kind: str) -> Path | None:
 
 
 def sample_intervals(
-    images: list[ResolvedDatasetImage], intervals: list[dict], samples_per_interval: int
+    images: list[ResolvedDatasetImage], intervals: list[dict], samples_per_interval: int, *, end_inclusive: bool = True
 ) -> list[dict]:
     ordered = sorted(images, key=lambda image: (image.timestamp_parsed, image.file_path))
     timestamps = [image.timestamp_parsed for image in ordered]
@@ -176,7 +176,7 @@ def sample_intervals(
         start = datetime.fromisoformat(str(interval["start"]))
         end = datetime.fromisoformat(str(interval["end"]))
         left = bisect.bisect_left(timestamps, start)
-        right = bisect.bisect_left(timestamps, end)
+        right = (bisect.bisect_right if end_inclusive else bisect.bisect_left)(timestamps, end)
         candidates = ordered[left:right]
         candidate_times = timestamps[left:right]
         if not candidates:
@@ -234,7 +234,9 @@ def calculate(run: models.ResolutionSensitivityRun, dataset: models.TrainingData
     config = run.config
     report("resolving_images", 0, None)
     images = enumerate_training_dataset_image_records(dataset)
-    samples = sample_intervals(images, config["intervals"], int(config["samples_per_interval"]))
+    # Existing queued runs retain their original half-open time windows.
+    samples = sample_intervals(images, config["intervals"], int(config["samples_per_interval"]),
+                               end_inclusive=config.get("interval_end_inclusive", False))
     unique = {sample["image"].file_path: sample["image"] for sample in samples}
     snapshots = {int(item["resolution"]): item for item in run.pipeline_snapshot}
     compiled = {resolution: compile_pipeline(PreprocessingGraph.model_validate(item["graph"]))

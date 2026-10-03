@@ -495,14 +495,14 @@ export function createResolutionSensitivityRun(payload: {
   samples_per_interval: number;
   label_set_id?: number | null;
   ssim_data_range?: number | null;
-}): Promise<ResolutionSensitivityRun> {
+}, projectId?: string): Promise<ResolutionSensitivityRun> {
   return request<ResolutionSensitivityRun>('/api/resolution-sensitivity-runs', {
     method: 'POST', body: JSON.stringify(payload),
-  });
+  }, undefined, projectId);
 }
 
-export function listResolutionSensitivityRuns(): Promise<ResolutionSensitivityRun[]> {
-  return request<ResolutionSensitivityRun[]>('/api/resolution-sensitivity-runs');
+export function listResolutionSensitivityRuns(projectId?: string): Promise<ResolutionSensitivityRun[]> {
+  return request<ResolutionSensitivityRun[]>('/api/resolution-sensitivity-runs', undefined, undefined, projectId);
 }
 
 export function getResolutionSensitivityRun(runId: number, projectId?: string): Promise<ResolutionSensitivityRun> {

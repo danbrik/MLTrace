@@ -43,6 +43,7 @@ import { ImageDistributionPage } from './pages/ImageDistributionPage';
 import { MeanVariancePage } from './pages/MeanVariancePage';
 import { ReferenceImagePage } from './pages/ReferenceImagePage';
 import { RepresentationAnalysisPage } from './pages/RepresentationAnalysisPage';
+import { TimeRangePresetsPage } from './pages/TimeRangePresetsPage';
 import { ResolutionSensitivityPage } from './pages/ResolutionSensitivityPage';
 import { SpatialSensitivityPage } from './pages/SpatialSensitivityPage';
 import { EvaluationPage } from './pages/EvaluationPage';
@@ -65,6 +66,7 @@ type Page =
   | 'time-series-results'
   | 'datasets'
   | 'training-datasets'
+  | 'time-range-presets'
   | 'preprocessing'
   | 'methods'
   | 'training-pipelines'
@@ -98,7 +100,7 @@ export function App() {
   const requestedPage = match?.[2] as Page | undefined;
   const page: Page = requestedPage && [
     'time-series-datasets', 'time-series-splits', 'time-series-models', 'time-series-pipelines', 'time-series-results',
-    'datasets', 'training-datasets', 'preprocessing', 'methods', 'training-pipelines', 'testing',
+    'datasets', 'training-datasets', 'time-range-presets', 'preprocessing', 'methods', 'training-pipelines', 'testing',
     'inspect', 'optimization', 'analysis', 'reference-image-analysis', 'mean-variance-analysis', 'dinov3-analysis', 'image-distribution', 'resolution-sensitivity', 'spatial-sensitivity', 'evaluation', 'anomaly-detection', 'inference-export', 'csv-merge', 'redundancy-analysis', 'data-quality-analysis', 'threshold', 'scheduler', 'data-manager',
   ].includes(requestedPage) ? requestedPage : 'datasets';
   const timeSeriesMode = page.startsWith('time-series-');
@@ -148,6 +150,7 @@ export function App() {
   ] : [
     { id: 'datasets', label: 'Datasets', icon: <Database size={18} /> },
     { id: 'training-datasets', label: 'Train/Test Datasets', icon: <ListChecks size={18} /> },
+    { id: 'time-range-presets', label: 'Gespeicherte Zeiträume', icon: <CalendarClock size={18} /> },
     { id: 'preprocessing', label: 'Preprocessing', icon: <Workflow size={18} /> },
     { id: 'methods', label: 'Methods', icon: <BrainCircuit size={18} /> },
     { id: 'training-pipelines', label: 'Training Pipelines', icon: <Route size={18} /> },
@@ -271,6 +274,9 @@ export function App() {
         <Box display={page === 'training-datasets' ? 'block' : 'none'}>
           <TrainingDatasetsPage active={page === 'training-datasets'} />
         </Box>
+        <Box display={page === 'time-range-presets' ? 'block' : 'none'}>
+          <PageErrorBoundary label="Gespeicherte Zeiträume"><TimeRangePresetsPage key={projectId} projectId={projectId} active={page === 'time-range-presets'} /></PageErrorBoundary>
+        </Box>
         <Box display={page === 'preprocessing' ? 'block' : 'none'}>
           <PreprocessingPipelinesPage active={page === 'preprocessing'} />
         </Box>
@@ -305,7 +311,7 @@ export function App() {
         </Box>
         <Box display={page === 'resolution-sensitivity' ? 'block' : 'none'}>
           <PageErrorBoundary label="Resolution Sensitivity">
-            <ResolutionSensitivityPage active={page === 'resolution-sensitivity'} />
+            <ResolutionSensitivityPage key={projectId} projectId={projectId} active={page === 'resolution-sensitivity'} />
           </PageErrorBoundary>
         </Box>
         <Box display={page === 'spatial-sensitivity' ? 'block' : 'none'}>

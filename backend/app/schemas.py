@@ -2576,8 +2576,8 @@ class ResolutionSensitivityInterval(BaseModel):
     def validate_interval(self):
         self.start = _dataset_local_naive(self.start)
         self.end = _dataset_local_naive(self.end)
-        if self.end <= self.start:
-            raise ValueError("Interval end must be after start.")
+        if self.end < self.start:
+            raise ValueError("Interval end must not be before start.")
         return self
 
 
@@ -2602,7 +2602,7 @@ class ResolutionSensitivityRunCreate(BaseModel):
             raise ValueError("At least one event interval is required.")
         ordered = sorted(self.intervals, key=lambda interval: (interval.start, interval.end))
         for previous, current in zip(ordered, ordered[1:]):
-            if current.start < previous.end:
+            if current.start <= previous.end:
                 raise ValueError(f"Intervals '{previous.name}' and '{current.name}' overlap.")
         return self
 
