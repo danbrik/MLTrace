@@ -159,7 +159,7 @@ export function App() {
     { id: 'optimization', label: 'Optimization', icon: <SlidersHorizontal size={18} /> },
     { id: 'analysis', label: 'Model Analysis', icon: <BarChart3 size={18} /> },
     { id: 'image-distribution', label: 'Image Distribution', icon: <LineChart size={18} /> },
-    { id: 'mean-variance-analysis', label: 'Mittelwert-/Varianzvergleich', icon: <Eye size={18} /> },
+    { id: 'mean-variance-analysis', label: 'Varianzvergleich', icon: <Eye size={18} /> },
     { id: 'reference-image-analysis', label: 'Referenzbild-Analyse', icon: <Eye size={18} /> },
     { id: 'dinov3-analysis', label: 'DINOv3-Repräsentationsanalyse', icon: <BrainCircuit size={18} /> },
     { id: 'resolution-sensitivity', label: 'Resolution Sensitivity', icon: <ScanSearch size={18} /> },
@@ -260,7 +260,7 @@ export function App() {
           </PageErrorBoundary>
         </Box>
         <Box display={page === 'mean-variance-analysis' ? 'block' : 'none'}>
-          <PageErrorBoundary label="Mittelwert-/Varianzvergleich"><MeanVariancePage projectId={projectId} key={projectId} active={page === 'mean-variance-analysis'} /></PageErrorBoundary>
+          <PageErrorBoundary label="Varianzvergleich"><MeanVariancePage projectId={projectId} key={projectId} active={page === 'mean-variance-analysis'} /></PageErrorBoundary>
         </Box>
         <Box display={page === 'reference-image-analysis' ? 'block' : 'none'}>
           <PageErrorBoundary label="Referenzbild-Analyse"><ReferenceImagePage projectId={projectId} key={projectId} active={page === 'reference-image-analysis'} /></PageErrorBoundary>

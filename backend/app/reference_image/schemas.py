@@ -34,6 +34,7 @@ class ReferenceImageConfig(BaseModel):
     preprocessing_pipeline_id: int = Field(ge=1)
     reference: ReferenceInterval
     anomaly: Interval
+    start_offset_minutes: int = Field(default=0, ge=0)
     processing_mode: Literal["shift_clip", "signed"] = "shift_clip"
     shift: float = Field(default=10000, allow_inf_nan=False)
     clip_min: int = Field(default=0, ge=0, le=65535)
@@ -61,6 +62,10 @@ class SelectionPreview(BaseModel):
     reference: SelectionCount
     anomaly: SelectionCount
     errors: list[str]
+
+
+class ReferenceImageSelectionPreview(SelectionPreview):
+    effective_anomaly_start: datetime
 
 
 def stored_config(value):

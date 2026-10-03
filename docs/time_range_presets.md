@@ -1,11 +1,11 @@
 # Projektweite Zeitraumvorlagen
 
 „Gespeicherte Zeiträume“ ist eine gemeinsame Bibliothek pro Projekt. Sie wird in
-der Referenzbild-Analyse, im Mittelwert-/Varianzvergleich und in jeder Normal-
+der Referenzbild-Analyse, im Varianzvergleich und in jeder Normal-
 und Anomalie-/Ereigniszeile von Resolution Sensitivity verwendet.
 Übernehmen kopiert ausschließlich Beginn und Ende. Sampling, Zufallsseed,
 Datensatz und Preprocessing bleiben erhalten. Beide Grenzen zählen einschließlich;
-Beginn gleich Ende ist erlaubt. Referenzbild-Analyse und Mittelwert-/Varianzvergleich
+Beginn gleich Ende ist erlaubt. Referenzbild-Analyse und Varianzvergleich
 erlauben überlappende Phasen; Resolution Sensitivity verbietet Überschneidungen,
 einschließlich eines gemeinsamen End-/Startzeitpunkts.
 

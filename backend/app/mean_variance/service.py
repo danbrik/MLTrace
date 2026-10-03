@@ -8,6 +8,7 @@ from pathlib import Path
 import shutil
 import threading
 import time
+import numpy as np
 
 from sqlalchemy import select, update
 from sqlalchemy.orm import Session, sessionmaker
@@ -16,11 +17,11 @@ from app import models
 from app.database import data_dir
 from app.preprocessing.pipeline import compile_pipeline
 from app.schemas import PreprocessingGraph
-from app.image_selection import prepare, freeze_samples, read_frozen_image
+from app.image_selection import prepare, resolve_source, select_prepared, freeze_samples, read_frozen_image
 from app.training.scheduler import next_queue_rank, scheduler
 from app.reference_image.engine import grayscale
-from app.mean_variance.engine import OnlineMoments, difference_maps, render_heatmap
-from app.mean_variance.schemas import MeanVarianceConfig, MeanVarianceRunRead
+from app.mean_variance.engine import OnlineMoments, difference_maps, render_heatmap, render_comparison, map_statistics
+from app.mean_variance.schemas import MeanVarianceConfig, MeanVarianceRunRead, VarianceConfig, VariancePreview, StoredConfig, parse_config
 
 logger = logging.getLogger(__name__)
 
@@ -40,11 +41,27 @@ def write_json(path: Path, value) -> None:
     temporary.replace(path)
 
 
-def preview(db: Session, config: MeanVarianceConfig):
-    _, pipeline, samples, result = prepare(db, config)
+def prepare_comparison(db, config):
+    if not isinstance(config, VarianceConfig):
+        return prepare(db, config)
+    dataset, pipeline, records = resolve_source(db, config)
+    samples, previews, errors = {}, [], []
+    for index, pair in enumerate(config.pairs):
+        try:
+            selected, preview = select_prepared(dataset, records, config.selection_config(pair))
+        except ValueError as exc:
+            raise ValueError(f"u{index + 1}: {exc}") from exc
+        previews.append(preview)
+        errors.extend(f"u{index + 1}: {message.replace('Referenz:', 'Normalzustand:')}" for message in preview.errors)
+        samples.update({f"{index}_{role}": group for role, group in selected.items()})
+    return dataset, pipeline, samples, VariancePreview(pairs=previews, errors=errors)
+
+
+def preview(db: Session, config):
+    _, pipeline, samples, result = prepare_comparison(db, config)
     compiled = compile_pipeline(PreprocessingGraph.model_validate(pipeline.graph))
     shape = None
-    for role in ("reference", "anomaly"):
+    for role in samples:
         if samples[role]:
             output = grayscale(compiled.run(samples[role][0]["file_path"]), shape)
             shape = output.shape
@@ -52,8 +69,8 @@ def preview(db: Session, config: MeanVarianceConfig):
     return result
 
 
-def enqueue(db: Session, config: MeanVarianceConfig, *, wake_scheduler: bool = True):
-    dataset, pipeline, samples, selection = prepare(db, config)
+def enqueue(db: Session, config: StoredConfig, *, wake_scheduler: bool = True):
+    dataset, pipeline, samples, selection = prepare_comparison(db, config)
     if selection.errors:
         raise ValueError(" ".join(selection.errors).replace("Referenz:", "Normalphase:"))
     # Freeze the selected file identities at enqueue time, not at worker dispatch.
@@ -134,7 +151,7 @@ def artifact_path(db: Session, run_id: int, name: str):
     run = db.get(models.MeanVarianceRun, run_id)
     if run is None or run.status != "finished":
         return None
-    if name not in {"mean_difference.png", "variance_difference.png", "results.json"}:
+    if name not in {"mean_difference.png", "variance_difference.png", "variance_comparison.png", "results.json"}:
         return None
     path = artifact_dir(run_id) / name
     return path if path.is_file() else None
@@ -223,7 +240,7 @@ def run_scheduled(run_id: int, abort_event: threading.Event | None = None):
             run.duration_seconds = round(time.perf_counter() - started, 3)
             db.commit()
             if not aborted:
-                logger.exception("Mean/variance comparison failed")
+                logger.exception("Variance comparison failed")
     finally:
         stopped.set()
         if heartbeat_thread:
@@ -232,7 +249,9 @@ def run_scheduled(run_id: int, abort_event: threading.Event | None = None):
 
 
 def calculate(run, report, abort_event):
-    config = MeanVarianceConfig.model_validate(run.config)
+    config = parse_config(run.config)
+    if isinstance(config, VarianceConfig):
+        return calculate_pairs(run, config, report, abort_event)
     directory = artifact_dir(run.id)
     temporary = directory / "exporting"
     samples = json.loads((directory / "manifest.json").read_text(encoding="utf-8"))["samples"]
@@ -273,6 +292,69 @@ def calculate(run, report, abort_event):
                   "width": shape[1], "height": shape[0], "ddof": 0, "maps": maps, "warnings": warnings}
         write_json(temporary / "results.json", result)
         for name in ("mean_difference.png", "variance_difference.png", "results.json"):
+            (temporary / name).replace(directory / name)
+        return result
+    finally:
+        shutil.rmtree(temporary, ignore_errors=True)
+
+
+def calculate_pairs(run, config, report, abort_event):
+    directory = artifact_dir(run.id)
+    temporary = directory / "exporting"
+    samples = json.loads((directory / "manifest.json").read_text(encoding="utf-8"))["samples"]
+    pipeline = compile_pipeline(PreprocessingGraph.model_validate(run.pipeline_snapshot["graph"]))
+    total = sum(len(group) for group in samples.values())
+    done, shape = 0, None
+    pairs, warnings = [], []
+    def check_abort():
+        if abort_event.is_set():
+            raise AbortedError()
+    try:
+        temporary.mkdir(parents=True, exist_ok=True)
+        for index, pair in enumerate(config.pairs):
+            check_abort()
+            maps, counts = {}, {}
+            for role, sample_role in (("normal", "reference"), ("anomaly", "anomaly")):
+                accumulator = OnlineMoments()
+                group = samples[f"{index}_{sample_role}"]
+                for sample in group:
+                    check_abort()
+                    report(f"u{index + 1}_{role}", done, total)
+                    array = grayscale(read_frozen_image(sample, pipeline), shape)
+                    shape = array.shape
+                    accumulator.add(array)
+                    done += 1
+                _, values = accumulator.finish()
+                counts[role] = len(group)
+                path = temporary / f"{index}_{role}.npy"
+                np.save(path, values)
+                maps[role] = {**map_statistics(values), "path": str(path)}
+                del accumulator, values, array, _
+                if len(group) == 1:
+                    warnings.append(f"u{index + 1} {'Normalzustand' if role == 'normal' else 'Anomaliephase'}: Nur ein Bild; Varianz 0, keine zeitliche Vergleichsbasis.")
+            normal = np.load(maps["normal"]["path"], mmap_mode="r")
+            anomaly = np.load(maps["anomaly"]["path"], mmap_mode="r")
+            with np.errstate(over="ignore", invalid="ignore"):
+                difference = anomaly - normal
+            if not np.isfinite(difference).all():
+                raise ValueError(f"u{index + 1}: Die Differenz enthält nicht endliche Werte.")
+            path = temporary / f"{index}_difference.npy"
+            np.save(path, difference)
+            maps["difference"] = {**map_statistics(difference), "path": str(path)}
+            for role, stats in maps.items():
+                if stats["all_zero"]:
+                    warnings.append(f"u{index + 1} {dict(normal='Normalzustand', anomaly='Anomaliephase', difference='Differenz')[role]}: Alle Pixelwerte sind 0.")
+            pairs.append({"label": f"u{index + 1}", "periods": pair.model_dump(mode="json"), "counts": counts, "maps": maps})
+            del normal, anomaly, difference
+        check_abort()
+        report("rendering", total, total)
+        result = render_comparison(pairs, config, temporary / "variance_comparison.png",
+                                   run.training_dataset_name, run.pipeline_snapshot["name"], shape, check_abort)
+        result.update(total_images=total, warnings=warnings)
+        write_json(temporary / "results.json", result)
+        check_abort()
+        report("exporting", total, total)
+        for name in ("variance_comparison.png", "results.json"):
             (temporary / name).replace(directory / name)
         return result
     finally:

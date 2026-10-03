@@ -179,7 +179,7 @@ def test_abort_scheduler_dependencies_and_registry_cleanup(comparison, monkeypat
     assert service.get_run(db, queued.id).queue_rank == 1
     assert cfg.training_dataset_id in _used_ids(db, 'training_dataset')
     assert any(item.entity_type == 'mean_variance_run' for item in ENTITY_SPECS['training_dataset'].dependents(db, cfg.training_dataset_id))
-    with pytest.raises(ValueError, match='mean/variance'):
+    with pytest.raises(ValueError, match='variance comparisons'):
         services.delete_training_dataset(db, cfg.training_dataset_id)
     with pytest.raises(ValueError):
         service.delete_run(db, queued.id)
@@ -233,13 +233,20 @@ def test_api_reopen_downloads_and_validation(comparison, monkeypatch):
     assert client.get(url).status_code == 404
 
 
-def test_migration_project_isolation_scheduler_and_reopen(tmp_path, monkeypatch):
+@pytest.mark.parametrize("version", [1, 2])
+def test_migration_project_isolation_scheduler_and_reopen(tmp_path, monkeypatch, version):
     from app import database, projects
     from app.main import app
     from tests.test_projects import configure_catalog
     configure_catalog(monkeypatch, tmp_path); projects.initialize_catalog()
     first, second = [projects.create_project(name, 'Testing') for name in ['Mean one', 'Mean two']]
     cfg = MeanVarianceConfig(training_dataset_id=1, preprocessing_pipeline_id=1, reference=interval(0, 2), anomaly=interval(4, 6))
+    if version == 2:
+        from app.mean_variance.schemas import VarianceConfig
+        cfg = VarianceConfig(training_dataset_id=1, preprocessing_pipeline_id=1, pairs=[{
+            'normal': cfg.reference.model_dump(include={'start', 'end'}),
+            'anomaly': cfg.anomaly.model_dump(include={'start', 'end'}),
+        }])
     with database.project_context(first.database_url, first.artifact_dir):
         with database.SessionLocal() as db:
             dataset = models.TrainingDataset(name='Only first project', usage_label='test')

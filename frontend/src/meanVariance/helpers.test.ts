@@ -1,48 +1,39 @@
 import { describe, expect, it } from 'vitest';
-import { initialConfig, validateConfig } from './helpers';
-import { copyTimeRange } from '../timeRangePresets/helpers';
+import { emptyPair, initialConfig, templateConfig, validateConfig } from './helpers';
+import type { LegacyMeanVarianceConfig } from './types';
 const valid = () => ({ ...structuredClone(initialConfig), training_dataset_id: 1, preprocessing_pipeline_id: 2,
-  reference: { ...initialConfig.reference, start: '2026-01-01T10:00:00', end: '2026-01-01T11:00:00' },
-  anomaly: { ...initialConfig.anomaly, start: '2026-01-01T10:00:00', end: '2026-01-01T11:00:00' } });
-describe('mean/variance configuration', () => {
-  it('defaults to automatic independent scales, sampling 1 and seed 42', () => {
-    expect(validateConfig(valid())).toBeNull();
-    expect(initialConfig.reference.seed).toBe(42);
-    expect(initialConfig.reference.sampling_rate).toBe(1);
-    expect(initialConfig.anomaly.sampling_rate).toBe(1);
-    expect(initialConfig.mean_scale).not.toBe(initialConfig.variance_scale);
-    expect(initialConfig).not.toHaveProperty('shift');
-    expect(initialConfig).not.toHaveProperty('fps');
+  pairs: [{ normal: { start: '2026-01-01T10:00:00', end: '2026-01-01T11:00:00' }, anomaly: { start: '2026-01-01T10:00:00', end: '2026-01-01T11:00:00' } }] });
+describe('variance pairs configuration', () => {
+  it('uses shared sampling and independent automatic scales, with no mean or random configuration', () => {
+    expect(validateConfig(valid())).toBeNull(); expect(initialConfig.sampling_rate).toBe(1);
+    expect(initialConfig.pairs).toHaveLength(1); expect(initialConfig.variance_scale).not.toBe(initialConfig.difference_scale);
+    expect(initialConfig).not.toHaveProperty('mean_scale'); expect(initialConfig).not.toHaveProperty('reference');
   });
-  it('validates each manual scale without linking them', () => {
-    for (const key of ['mean_scale', 'variance_scale'] as const) {
-      const cfg = valid(); cfg[key].mode = 'manual';
-      for (const limit of [null, 0, -1, Infinity, NaN]) {
-        cfg[key].limit = limit; expect(validateConfig(cfg)).toContain('Grenzwert');
-      }
-      cfg[key].limit = .1; expect(validateConfig(cfg)).toBeNull();
+  it('validates pair count, completion, inclusive bounds, sampling and independent limits', () => {
+    const cfg = valid(); cfg.pairs[0].normal.end = cfg.pairs[0].normal.start;
+    expect(validateConfig(cfg)).toBeNull(); cfg.pairs = Array.from({ length: 6 }, () => structuredClone(cfg.pairs[0]));
+    expect(validateConfig(cfg)).toBeNull(); cfg.pairs.push(emptyPair()); expect(validateConfig(cfg)).toContain('sechs');
+    cfg.pairs = []; expect(validateConfig(cfg)).toContain('sechs'); cfg.pairs = [emptyPair()]; expect(validateConfig(cfg)).toContain('u1');
+    for (const n of [0, -1, 1.5, NaN]) { const c = valid(); c.sampling_rate = n; expect(validateConfig(c)).toContain('Sampling'); }
+    expect(validateConfig(valid(), '2026-01-02T00:00:00')).toContain('Datensatz');
+    for (const key of ['variance_scale', 'difference_scale'] as const) {
+      const c = valid(); c[key].mode = 'manual';
+      for (const limit of [null, 0, -1, Infinity, NaN]) { c[key].limit = limit; expect(validateConfig(c)).toContain('Grenzwert'); }
+      c[key].limit = .1; expect(validateConfig(c)).toBeNull();
     }
   });
-  it('rejects invalid intervals and sampling, accepts equal and overlapping bounds', () => {
-    const cfg = valid(); cfg.reference.end = cfg.reference.start;
-    expect(validateConfig(cfg)).toBeNull();
-    cfg.anomaly.sampling_rate = 1.5; expect(validateConfig(cfg)).toContain('Sampling');
-    cfg.anomaly.sampling_rate = 1; cfg.anomaly.start = '2026-01-02T00:00:00';
-    expect(validateConfig(cfg)).toContain('Beginn');
+  it('copies stored settings without linking them to new edits', () => {
+    const stored = valid(), draft = templateConfig(stored);
+    draft.pairs[0].normal.start = 'changed'; draft.variance_scale.limit = 5;
+    expect(stored.pairs[0].normal.start).not.toBe('changed'); expect(stored.variance_scale.limit).toBeNull();
   });
-  it('validates random count and seed', () => {
-    const cfg = valid(); cfg.reference.mode = 'random'; cfg.reference.count = 0;
-    expect(validateConfig(cfg)).toContain('Zufallsanzahl');
-    cfg.reference.count = 15; cfg.reference.seed = -1;
-    expect(validateConfig(cfg)).toContain('Seed');
-  });
-  it('copies a shared preset to either role while retaining sampling and scales', () => {
-    const cfg = valid(); cfg.reference.mode = 'random'; cfg.reference.count = 9; cfg.anomaly.sampling_rate = 15;
-    const range = { start: '2026-01-01T10:01:00', end: '2026-01-01T10:02:00' };
-    const next = { ...cfg, reference: copyTimeRange(cfg.reference, range), anomaly: copyTimeRange(cfg.anomaly, range) };
-    expect(next.reference).toEqual({ ...cfg.reference, ...range });
-    expect(next.anomaly).toEqual({ ...cfg.anomaly, ...range });
-    expect(next.mean_scale).toEqual(cfg.mean_scale);
-    expect(JSON.stringify(next)).not.toBe(JSON.stringify(cfg));
+  it('converts legacy periods and difference scale, requiring sampling choice when incompatible', () => {
+    const old: LegacyMeanVarianceConfig = { training_dataset_id: 1, preprocessing_pipeline_id: 2,
+      reference: { ...valid().pairs[0].normal, sampling_rate: 3, mode: 'regular', count: 2, seed: 42 },
+      anomaly: { ...valid().pairs[0].anomaly, sampling_rate: 3 }, mean_scale: { mode: 'auto', limit: null }, variance_scale: { mode: 'manual', limit: 5 } };
+    expect(templateConfig(old).sampling_rate).toBe(3); expect(templateConfig(old).difference_scale.limit).toBe(5);
+    expect(templateConfig(old).pairs[0].normal).toEqual(valid().pairs[0].normal);
+    old.reference.mode = 'random'; expect(templateConfig(old).sampling_rate).toBe(0);
+    old.reference.mode = 'regular'; old.anomaly.sampling_rate = 4; expect(templateConfig(old).sampling_rate).toBe(0);
   });
 });

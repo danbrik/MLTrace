@@ -265,7 +265,9 @@ def test_api_preview_lifecycle_lookup_and_download(source, monkeypatch):
     monkeypatch.setattr(service.scheduler, "wake", lambda: None)
     client = TestClient(app)
     base = "/api/reference-image-analysis"
-    assert client.post(base + "/preview", json=cfg.model_dump(mode="json")).json()["reference"]["selected"] == 4
+    preview = client.post(base + "/preview", json=cfg.model_dump(mode="json")).json()
+    assert preview["reference"]["selected"] == 4
+    assert preview["effective_anomaly_start"] == cfg.anomaly.start.isoformat()
     created = client.post(base + "/runs", json=cfg.model_dump(mode="json"))
     assert created.status_code == 200, created.text
     id = created.json()["id"]
@@ -408,11 +410,174 @@ def test_old_saved_configuration_retains_signed_output(source):
     db, cfg, _ = source
     queued = service.enqueue(db, cfg, wake_scheduler=False)
     row = db.get(models.ReferenceImageRun, queued.id)
-    old_config = {key: value for key, value in row.config.items() if key not in {"processing_mode", "shift", "clip_min", "clip_max"}}
+    old_config = {key: value for key, value in row.config.items() if key not in {"processing_mode", "shift", "clip_min", "clip_max", "start_offset_minutes"}}
     row.config = old_config
     db.commit()
     assert service.get_run(db, row.id).config.processing_mode == "signed"
+    assert service.get_run(db, row.id).config.start_offset_minutes == 0
     service.run_scheduled(row.id)
     db.expire_all()
     assert service.get_run(db, row.id).status == "finished"
     assert service.artifact_path(db, row.id, "frame_000000.png").read_bytes()[24] == 8
+
+
+@pytest.mark.parametrize('offset', [-1, 0.5, float('nan'), float('inf')])
+def test_invalid_start_offset(offset):
+    with pytest.raises(ValidationError):
+        config(start_offset_minutes=offset)
+
+
+def test_offset_extends_selection_without_mutating_original_or_reference():
+    cfg = config(anomaly={**interval(0, 0), 'start': '2025-09-15T21:15:00',
+                          'end': '2025-09-15T22:00:00'}, start_offset_minutes=30)
+    effective = engine.selection_config(cfg)
+    assert effective.anomaly.start == datetime(2025, 9, 15, 20, 45)
+    assert cfg.anomaly.start == datetime(2025, 9, 15, 21, 15)
+    assert effective.reference == cfg.reference
+    assert effective.anomaly.end == cfg.anomaly.end
+    cfg.anomaly.start = datetime(2025, 9, 16, 0, 15)
+    cfg.anomaly.end = datetime(2025, 9, 16, 1)
+    assert engine.selection_config(cfg).anomaly.start == datetime(2025, 9, 15, 23, 45)
+    cfg.start_offset_minutes = 0
+    assert engine.selection_config(cfg) == cfg
+    assert config().start_offset_minutes == 0
+    cfg.start_offset_minutes = 10**30
+    with pytest.raises(ValueError, match='Datumsbereich'):
+        engine.selection_config(cfg)
+
+
+@pytest.mark.parametrize('local, expected', [
+    ('2025-09-15T20:45:00', '2025-09-15 18:45:00 (UTC)'),
+    ('2025-01-15T20:45:00', '2025-01-15 19:45:00 (UTC)'),
+    ('2025-01-01T00:30:00', '2024-12-31 23:30:00 (UTC)'),
+    ('2025-03-30T01:59:59', '2025-03-30 00:59:59 (UTC)'),
+    ('2025-03-30T03:00:00', '2025-03-30 01:00:00 (UTC)'),
+    ('2025-10-26T01:59:59', '2025-10-25 23:59:59 (UTC)'),
+    ('2025-10-26T03:00:00', '2025-10-26 02:00:00 (UTC)'),
+    ('2025-10-26T02:30:00+01:00', '2025-10-26 01:30:00 (UTC)'),
+])
+def test_reference_timestamp_is_utc_with_explicit_suffix(local, expected):
+    assert engine.utc_timestamp_label(datetime.fromisoformat(local)) == expected
+
+
+@pytest.mark.parametrize('local, reason', [
+    ('2025-03-30T02:30:00', 'Nicht existente'),
+    ('2025-10-26T02:30:00', 'Mehrdeutige'),
+])
+def test_reference_timestamp_rejects_dst_gaps_and_folds(local, reason):
+    with pytest.raises(ValueError, match=reason) as caught:
+        engine.utc_timestamp_label(datetime.fromisoformat(local))
+    assert local.replace('T', ' ') in str(caught.value)
+
+
+def retime_source(source, start, step_seconds):
+    """Keep source pixels and dataset stride; move fixture images to a longer/local range."""
+    db, cfg, _ = source
+    dataset = db.get(models.TrainingDataset, cfg.training_dataset_id)
+    rule = dataset.rules[0]
+    root = Path(rule.folder.dataset.root_path)
+    for index, path in enumerate(sorted(root.glob('*.tif'))):
+        path.rename(root / f'{start + timedelta(seconds=index * step_seconds):%Y%m%d_%H%M%S}.tif')
+    rule.start_timestamp = start
+    rule.end_timestamp = start + timedelta(seconds=23 * step_seconds)
+    db.commit()
+    cfg.reference.start = start
+    cfg.reference.end = start + timedelta(seconds=3 * step_seconds)
+    cfg.anomaly.start = start + timedelta(seconds=15 * step_seconds)
+    cfg.anomaly.end = start + timedelta(seconds=22 * step_seconds)
+    return cfg
+
+
+@pytest.mark.parametrize('mode', ['signed', 'shift_clip'])
+def test_offset_full_run_freezes_sampled_preroll_and_stamps_all_outputs_in_utc(source, monkeypatch, mode):
+    from app import video
+    db, _, _ = source
+    cfg = retime_source(source, datetime(2025, 9, 15, 20), 300)
+    cfg.start_offset_minutes = 30
+    cfg.anomaly.sampling_rate = 2
+    cfg.processing_mode = mode
+    selected = service.preview(db, cfg)
+    assert selected.effective_anomaly_start == datetime(2025, 9, 15, 20, 45)
+    assert (selected.anomaly.available, selected.anomaly.selected, selected.anomaly.remainder) == (7, 3, 1)
+    assert selected.reference.selected == 2
+    queued = service.enqueue(db, cfg, wake_scheduler=False)
+    assert queued.config.anomaly.start == datetime(2025, 9, 15, 21, 15)
+    assert queued.config.start_offset_minutes == 30
+    directory = service.artifact_dir(queued.id)
+    manifest = json.loads((directory / 'manifest.json').read_text())
+    assert manifest['selection']['effective_anomaly_start'] == '2025-09-15T20:45:00'
+    samples = manifest['samples']['anomaly']
+    assert [sample['timestamp'] for sample in samples] == [
+        '2025-09-15T21:00:00', '2025-09-15T21:20:00', '2025-09-15T21:40:00',
+    ]
+    assert all('mtime_ns' in sample and 'size_bytes' in sample for sample in samples)
+    labels = []
+    original_overlay = video.timestamp_overlay
+    def record_overlay(width, height, timestamp, *, label=None):
+        labels.append(label)
+        return original_overlay(width, height, timestamp, label=label)
+    monkeypatch.setattr(video, 'timestamp_overlay', record_overlay)
+    service.run_scheduled(queued.id)
+    db.expire_all()
+    run = service.get_run(db, queued.id)
+    assert run.status == 'finished', run.error_message
+    assert run.processed_images == run.total_images == run.result['frame_count'] == 3
+    np.testing.assert_allclose(np.load(directory / 'reference.npy'), 1100)
+    result = service.results(db, run.id)
+    assert [frame['timestamp'] for frame in result['frames']] == [sample['timestamp'] for sample in samples]
+    assert labels == ['2025-09-15 19:00:00 (UTC)', '2025-09-15 19:20:00 (UTC)', '2025-09-15 19:40:00 (UTC)']
+    found = engine.resolve_frame(result['frames'], datetime(2025, 9, 15, 21))
+    assert found['exact'] and found['frame']['index'] == 0
+    png = np.asarray(Image.open(directory / 'frame_000000.png'))
+    if mode == 'shift_clip':
+        base = np.full((182, 322), 11100, dtype=np.uint16)
+        layer = np.asarray(original_overlay(322, 182, datetime(2025, 9, 15, 21), label=labels[0]))
+        alpha = layer[:, :, 3].astype(float) / 255
+        ink = layer[:, :, 0].astype(float) / 255 * 12000
+        np.testing.assert_array_equal(png, np.rint(base * (1 - alpha) + ink * alpha).astype(np.uint16))
+        display = np.asarray(Image.open(directory / 'preview_frame_000000.png'))
+        np.testing.assert_array_equal(display, engine.preview_uint16(png, 0, 12000))
+    else:
+        base = np.repeat(engine.render_difference(np.full((182, 322), 1100.), 1900)[:, :, None], 3, axis=2)
+        expected = video.add_timestamp_watermark(base, datetime(2025, 9, 15, 21), label=labels[0])
+        np.testing.assert_array_equal(png, expected)
+        display = png[:, :, 0]
+    capture = cv2.VideoCapture(str(directory / 'video.mp4'))
+    try:
+        assert int(capture.get(cv2.CAP_PROP_FRAME_COUNT)) == 3
+        ok, frame = capture.read()
+        assert ok
+        assert np.abs(frame[:50, :, 0].astype(float) - display[:50].astype(float)).mean() < 6
+    finally:
+        capture.release()
+
+
+def test_offset_outside_dataset_rejected_in_preview_and_enqueue_api(source):
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    from app.database import get_db
+    from app.reference_image.api import router
+    db, cfg, _ = source
+    cfg.start_offset_minutes = 30
+    app = FastAPI(); app.include_router(router)
+    app.dependency_overrides[get_db] = lambda: db
+    client = TestClient(app)
+    for path in ('preview', 'runs'):
+        response = client.post(f'/api/reference-image-analysis/{path}', json=cfg.model_dump(mode='json'))
+        assert response.status_code == 400
+        assert 'Datensatzgrenzen' in response.json()['detail']
+    assert service.list_runs(db) == []
+
+
+@pytest.mark.parametrize('start, reason', [
+    (datetime(2025, 3, 30, 2, 30), 'Nicht existente'),
+    (datetime(2025, 10, 26, 2, 30), 'Mehrdeutige'),
+])
+def test_dst_problem_reported_before_run_is_enqueued(source, start, reason):
+    db, _, _ = source
+    cfg = retime_source(source, start, 1)
+    result = service.preview(db, cfg)
+    assert any(reason in error for error in result.errors)
+    with pytest.raises(ValueError, match=reason):
+        service.enqueue(db, cfg, wake_scheduler=False)
+    assert service.list_runs(db) == []

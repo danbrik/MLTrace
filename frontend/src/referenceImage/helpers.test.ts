@@ -7,6 +7,16 @@ const valid = (): ReferenceImageConfig => ({ ...structuredClone(initialConfig), 
   anomaly: { start: '2026-01-01T02:00:00', end: '2026-01-01T03:00:00', sampling_rate: 15 },
 });
 describe('reference image configuration', () => {
+  it('defaults the start offset to zero and accepts only nonnegative whole minutes', () => {
+    const config = valid();
+    expect(config.start_offset_minutes).toBe(0);
+    config.start_offset_minutes = 30;
+    expect(validateConfig(config)).toBeNull();
+    for (const value of [-1, 0.5, NaN, Infinity, Number.MAX_SAFE_INTEGER + 1]) {
+      config.start_offset_minutes = value;
+      expect(validateConfig(config)).toContain('Offset Start');
+    }
+  });
   it('requires a dataset, pipeline and complete intervals', () => {
     expect(validateConfig(initialConfig)).toBeTruthy();
     expect(validateConfig(valid())).toBeNull();

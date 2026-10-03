@@ -623,7 +623,7 @@ def delete_training_dataset(db: Session, training_dataset_id: int) -> bool:
     if db.scalar(select(func.count(models.MeanVarianceRun.id)).where(
         models.MeanVarianceRun.training_dataset_id == training_dataset_id
     )):
-        raise ValueError("Dataset is used by mean/variance analyses. Delete those analyses first.")
+        raise ValueError("Dataset is used by variance comparisons. Delete those analyses first.")
     if db.scalar(select(func.count(models.ReferenceImageRun.id)).where(
         models.ReferenceImageRun.training_dataset_id == training_dataset_id
     )):

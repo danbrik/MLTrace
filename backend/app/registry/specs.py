@@ -110,7 +110,7 @@ def _training_dataset_dependents(db: Session, td_id: int) -> list[Dependent]:
     )
     out += _named(
         db, "mean_variance_run", models.MeanVarianceRun, models.MeanVarianceRun.id,
-        lambda r: f"Mittelwert-/Varianz #{r.id} · {r.training_dataset_name}", models.MeanVarianceRun.training_dataset_id == td_id,
+        lambda r: f"Varianz #{r.id} · {r.training_dataset_name}", models.MeanVarianceRun.training_dataset_id == td_id,
     )
     pipelines = db.scalars(
         select(models.TrainingPipeline)
@@ -515,8 +515,8 @@ ENTITY_SPECS: dict[str, EntitySpec] = {
         deleter=_delete_reference_image, blockers=_job_blockers,
     ),
     "mean_variance_run": EntitySpec(
-        key="mean_variance_run", label="Mittelwert-/Varianz-Analysen", model=models.MeanVarianceRun,
-        name_of=lambda r: f"Mittelwert-/Varianz #{r.id} · {r.training_dataset_name}",
+        key="mean_variance_run", label="Varianzvergleiche", model=models.MeanVarianceRun,
+        name_of=lambda r: f"Varianz #{r.id} · {r.training_dataset_name}",
         list_fields=["id", "training_dataset_name", "status", "current_step", "device", "created_at"],
         search_fields=["training_dataset_name"], filters=[_STATUS_FILTER, _CREATED_FILTER],
         artifacts=lambda db, row: [data_dir() / "mean_variance_runs" / str(row.id)],

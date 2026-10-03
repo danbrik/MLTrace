@@ -108,3 +108,30 @@ Projektbibliothek übernehmen, speichern und verwalten. Dabei werden nur Beginn
 und Ende kopiert; jede Übernahme erfordert eine erneute Auswahlprüfung.
 Die wiederverwendbare Schnittstelle ist in [Projektweite Zeitraumvorlagen](time_range_presets.md)
 beschrieben.
+
+## Vorlauf und UTC-Beschriftung
+
+Unter **Darstellung und Berechnung** erweitert **Offset Start (Minuten)** den
+Anomaliezeitraum nach vorne. Der Standard ist 0; erlaubt sind ganze Zahlen ab 0.
+Bei Beginn 21:15 und Offset 30 beginnt die Auswahl um 20:45. Referenzzeitraum und
+Anomalieende bleiben gleich. Das Datensatzsampling gilt zuerst, danach zählt das
+Anomalie-Sampling ab dem vorgezogenen Beginn neu (Bild n, 2n, 3n …). Der erste
+Videoframe kann deshalb später als der effektive Beginn liegen. Lücken werden
+nicht gefüllt. Ein Vorlauf außerhalb der Datensatzgrenzen wird als Fehler
+abgelehnt; er wird nicht gekürzt.
+
+**Auswahl prüfen** zeigt den effektiven Beginn und die Bildanzahl einschließlich
+Vorlauf. Offset-Änderungen erfordern eine neue Prüfung. Der Offset wird als
+`start_offset_minutes` in der Laufkonfiguration gespeichert und bei **Als Vorlage
+übernehmen** wiederhergestellt; ältere Konfigurationen erhalten 0. Die Vorschau
+liefert zusätzlich `effective_anomaly_start`. Eine Datenbankmigration ist nicht
+nötig.
+
+Neu berechnete Videos und Einzelbilder beschriften den Aufnahmezeitpunkt als UTC,
+z. B. `2025-09-15 18:45:00 (UTC)` für 20:45 in Europe/Berlin im Sommer. Dies gilt
+für beide Darstellungsarten und für PNG, Bildvorschau und MP4. Sommer- und
+Winterzeit werden berücksichtigt. Mehrdeutige oder nicht existente Ortszeiten
+bei einer Zeitumstellung verhindern die Auswahl eines solchen Videoframes; die
+Prüfung nennt den betroffenen Zeitpunkt. Eingaben, gespeicherte Frame-Zeitstempel
+und die Einzelbildsuche bleiben in Datensatz-Ortszeit (Europe/Berlin). Fertige
+bestehende Artefakte werden nicht nachträglich verändert.

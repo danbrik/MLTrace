@@ -1,5 +1,5 @@
 import type { MeanVarianceRun } from '../meanVariance/types';
-import { PHASES as MEAN_VARIANCE_PHASES } from '../meanVariance/helpers';
+import { phaseLabel as meanVariancePhaseLabel } from '../meanVariance/helpers';
 import { sensorApi } from '../api';
 import type { SensorRun } from '../timeSeries/types';
 import {
@@ -127,7 +127,7 @@ function jobKey(job: DisplayJob): string {
 }
 
 function jobName(job: SchedulerJob): string {
-  if (job.kind === 'mean_variance') return `Mittelwert-/Varianz · ${job.run.training_dataset_name}`;
+  if (job.kind === 'mean_variance') return `Varianz · ${job.run.training_dataset_name}`;
   if (job.kind === 'reference_image') return `Referenzbild · ${job.run.training_dataset_name}`;
   if (job.kind === 'dinov3_analysis') return `DINOv3 · ${job.run.training_dataset_name}`;
   if (job.kind === 'train') return job.run.training_pipeline_name;
@@ -139,7 +139,7 @@ function jobName(job: SchedulerJob): string {
 }
 
 function jobMethodType(job: SchedulerJob): string {
-  if (job.kind === 'mean_variance') return 'Mittelwert-/Varianzvergleich';
+  if (job.kind === 'mean_variance') return 'Varianzvergleich';
   if (job.kind === 'reference_image') return 'Referenzbild-Analyse';
   if (job.kind === 'time_series_train') return job.run.kind;
   if (job.kind === 'dinov3_analysis') return 'DINOv3 representation';
@@ -189,7 +189,7 @@ function ProgressCell({ job }: { job: SchedulerJob }) {
     const total = job.run.total_images;
     return (
       <Stack gap={2}>
-        <Text size="xs">{job.kind === 'mean_variance' ? MEAN_VARIANCE_PHASES[job.run.current_step] ?? job.run.current_step : job.kind === 'reference_image' ? REFERENCE_IMAGE_PHASES[job.run.current_step] ?? job.run.current_step : job.kind === 'dinov3_analysis' ? REPRESENTATION_PHASES[job.run.current_step] ?? job.run.current_step : job.run.current_step.replaceAll('_', ' ')}{total != null ? ` · ${done}/${total} images` : ''}</Text>
+        <Text size="xs">{job.kind === 'mean_variance' ? meanVariancePhaseLabel(job.run.current_step) : job.kind === 'reference_image' ? REFERENCE_IMAGE_PHASES[job.run.current_step] ?? job.run.current_step : job.kind === 'dinov3_analysis' ? REPRESENTATION_PHASES[job.run.current_step] ?? job.run.current_step : job.run.current_step.replaceAll('_', ' ')}{total != null ? ` · ${done}/${total} images` : ''}</Text>
         {total != null && total > 0 && <Progress value={Math.min(100, done / total * 100)} size="sm" radius="sm" color={runStatusColor(job.run.status)} />}
         {job.kind === 'image_distribution' && job.run.throughput_images_per_second != null && (
           <Text size="xs" c="dimmed">
@@ -537,7 +537,7 @@ export function SchedulerPage({ active = true }: { active?: boolean }) {
   }
 
   function handleDelete(job: DisplayJob) {
-    const label = job.kind === 'mean_variance' ? 'Mittelwert-/Varianzvergleich' : job.kind === 'reference_image' ? 'Referenzbild-Analyse' : job.kind === 'dinov3_analysis' ? 'DINOv3 analysis' : job.kind === 'train' ? 'training run' : job.kind === 'heatmap' ? 'heatmap video' : job.kind === 'image_distribution' ? 'image distribution analysis' : job.kind === 'resolution_sensitivity' ? 'resolution sensitivity analysis' : job.kind === 'spatial_sensitivity' ? 'spatial sensitivity analysis' : 'inference';
+    const label = job.kind === 'mean_variance' ? 'Varianzvergleich' : job.kind === 'reference_image' ? 'Referenzbild-Analyse' : job.kind === 'dinov3_analysis' ? 'DINOv3 analysis' : job.kind === 'train' ? 'training run' : job.kind === 'heatmap' ? 'heatmap video' : job.kind === 'image_distribution' ? 'image distribution analysis' : job.kind === 'resolution_sensitivity' ? 'resolution sensitivity analysis' : job.kind === 'spatial_sensitivity' ? 'spatial sensitivity analysis' : 'inference';
     if (!window.confirm(`Remove ${label} "${jobName(job)}"?`)) return;
     const action = job.kind === 'mean_variance' ? () => deleteMeanVarianceRun(job.run.id, job.project_id) : job.kind === 'reference_image' ? () => deleteReferenceImageRun(job.run.id, job.project_id) : job.kind === 'time_series_train' ? () => sensorApi.deleteRun(job.run.id, job.project_id) : job.kind === 'dinov3_analysis'
       ? () => deleteRepresentationRun(job.run.id, job.project_id)
@@ -718,7 +718,7 @@ export function SchedulerPage({ active = true }: { active?: boolean }) {
                 { value: 'resolution_sensitivity', label: 'Resolution sensitivity' },
                 { value: 'spatial_sensitivity', label: 'Spatial sensitivity' },
                 { value: 'time_series_train', label: 'Zeitreihen-Training' },
-                { value: 'mean_variance', label: 'Mittelwert-/Varianzvergleich' },
+                { value: 'mean_variance', label: 'Varianzvergleich' },
                 { value: 'reference_image', label: 'Referenzbild-Analyse' },
                 { value: 'dinov3_analysis', label: 'DINOv3 representation' },
               ]}
@@ -778,7 +778,7 @@ export function SchedulerPage({ active = true }: { active?: boolean }) {
                           color={job.kind === 'train' ? 'blue' : job.kind === 'heatmap' ? 'teal' : job.kind === 'image_distribution' ? 'cyan' : job.kind === 'resolution_sensitivity' ? 'indigo' : job.kind === 'spatial_sensitivity' ? 'orange' : 'grape'}
                           variant="light"
                         >
-                          {job.kind === 'mean_variance' ? 'Mittelwert-/Varianz' : job.kind === 'reference_image' ? 'Referenzbild' : job.kind === 'time_series_train' ? 'Zeitreihen' : job.kind === 'dinov3_analysis' ? 'DINOv3' : job.kind === 'train' ? 'Training' : job.kind === 'heatmap' ? 'Heatmap' : job.kind === 'image_distribution' ? 'Image distribution' : job.kind === 'resolution_sensitivity' ? 'Resolution sensitivity' : job.kind === 'spatial_sensitivity' ? 'Spatial sensitivity' : 'Inference'}
+                          {job.kind === 'mean_variance' ? 'Varianz' : job.kind === 'reference_image' ? 'Referenzbild' : job.kind === 'time_series_train' ? 'Zeitreihen' : job.kind === 'dinov3_analysis' ? 'DINOv3' : job.kind === 'train' ? 'Training' : job.kind === 'heatmap' ? 'Heatmap' : job.kind === 'image_distribution' ? 'Image distribution' : job.kind === 'resolution_sensitivity' ? 'Resolution sensitivity' : job.kind === 'spatial_sensitivity' ? 'Spatial sensitivity' : 'Inference'}
                         </Badge>
                       </Table.Td>
                       {scope === 'all' && <Table.Td><Badge variant="outline">{job.project_name}</Badge></Table.Td>}

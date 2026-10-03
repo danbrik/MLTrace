@@ -1,38 +1,42 @@
 import { Alert, Badge, Button, Group, Image, Loader, NumberInput, Paper, Progress, Select, SimpleGrid, Stack, Table, Text, Title } from '@mantine/core';
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { TimeRangePresetPicker } from '../timeRangePresets/TimeRangePresetPicker';
-import { copyTimeRange } from '../timeRangePresets/helpers';
 import { DateTime24Input } from '../components/DateTime24Input';
 import {
   abortMeanVarianceRun, createMeanVarianceRun, deleteMeanVarianceRun, getMeanVarianceLog,
   getMeanVarianceResults, getMeanVarianceRun, listPreprocessingPipelines, listMeanVarianceRuns,
   listTrainingDatasets, previewMeanVariance, meanVarianceArtifactUrl,
 } from '../api';
-import { displayTime, initialConfig, PHASES, validateConfig } from '../meanVariance/helpers';
+import { displayTime, emptyPair, initialConfig, phaseLabel, templateConfig, validateConfig } from '../meanVariance/helpers';
 import type { PreprocessingPipeline, TrainingDataset } from '../types';
-import type { MeanVarianceConfig, MeanVariancePreview, MeanVarianceResults, MeanVarianceRun } from '../meanVariance/types';
-
+import { isPairConfig, isPairResults, type MeanVarianceConfig, type MeanVariancePreview, type MeanVarianceResults, type MeanVarianceRun, type HeatmapScale } from '../meanVariance/types';
 const activeRun = (run: MeanVarianceRun | null) => !!run && ['queued', 'running'].includes(run.status);
 const errorText = (error: unknown) => error instanceof Error ? error.message : String(error);
+const periodText = (period: {start: string; end: string}) => `${displayTime(period.start)} – ${displayTime(period.end)}`;
+const scaleText = (scale: HeatmapScale) => scale.mode === 'auto' ? 'Automatisch' : `${scale.limit} gray value²`;
 
 export function MeanVariancePage({ active, projectId }: { active: boolean; projectId: string }) {
   const [datasets, setDatasets] = useState<TrainingDataset[]>([]);
   const [pipelines, setPipelines] = useState<PreprocessingPipeline[]>([]);
-  const [config, setConfig] = useState<MeanVarianceConfig>(initialConfig);
+  const [config, setConfig] = useState<MeanVarianceConfig>(() => structuredClone(initialConfig));
   const [preview, setPreview] = useState<{ signature: string; value: MeanVariancePreview } | null>(null);
   const [runs, setRuns] = useState<MeanVarianceRun[]>([]);
   const [run, setRun] = useState<MeanVarianceRun | null>(null);
   const [results, setResults] = useState<MeanVarianceResults | null>(null);
   const [log, setLog] = useState<string | null>(null);
-  const [busy, setBusy] = useState(false);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [pollError, setPollError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false), [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null), [pollError, setPollError] = useState<string | null>(null);
+  const initialized = useRef(false);
+  const viewRevision = useRef(0);
   const signature = JSON.stringify(config);
   const currentPreview = preview?.signature === signature ? preview.value : null;
-  const validation = validateConfig(config);
   const dataset = datasets.find(item => item.id === config.training_dataset_id);
-
+  const validation = validateConfig(config, dataset?.start_timestamp ?? undefined, dataset?.end_timestamp ?? undefined)
+    ?? (!datasets.some(item => item.id === config.training_dataset_id && !item.invalid_rule_count) ? 'Bitte einen verfügbaren Datensatz auswählen.' : null)
+    ?? (!pipelines.some(item => item.id === config.preprocessing_pipeline_id) ? 'Bitte eine verfügbare Preprocessing-Pipeline auswählen.' : null);
+  function openRun(next: MeanVarianceRun | null) {
+    viewRevision.current++; setRun(next); setResults(null); setPreview(null); setLog(null); setPollError(null); setError(null);
+  }
   useEffect(() => {
     if (!active) return;
     let cancelled = false;
@@ -41,171 +45,156 @@ export function MeanVariancePage({ active, projectId }: { active: boolean; proje
       .then(([nextDatasets, nextPipelines, nextRuns]) => {
         if (cancelled) return;
         setDatasets(nextDatasets); setPipelines(nextPipelines); setRuns(nextRuns);
-        setRun(current => nextRuns.find(item => item.id === current?.id) ?? nextRuns.find(item => activeRun(item)) ?? nextRuns[0] ?? null);
+        if (!initialized.current) {
+          initialized.current = true;
+          openRun(nextRuns.find(item => activeRun(item)) ?? nextRuns[0] ?? null);
+        }
       }).catch(reason => { if (!cancelled) setError(errorText(reason)); })
       .finally(() => { if (!cancelled) setLoading(false); });
     return () => { cancelled = true; };
   }, [active, projectId]);
-
   useEffect(() => {
     if (!active || !run || !activeRun(run)) return;
-    let cancelled = false;
-    let pending = false;
+    let cancelled = false, pending = false;
+    const revision = viewRevision.current;
     const timer = window.setInterval(async () => {
       if (pending) return;
       pending = true;
       try {
         const next = await getMeanVarianceRun(run.id, projectId);
-        if (!cancelled) { setPollError(null); setRun(next); setRuns(current => current.map(item => item.id === next.id ? next : item)); }
-      } catch (reason) { if (!cancelled) setPollError(errorText(reason)); }
+        if (!cancelled && revision === viewRevision.current) { setPollError(null); setRun(next); setRuns(current => current.map(item => item.id === next.id ? next : item)); }
+      } catch (reason) { if (!cancelled && revision === viewRevision.current) setPollError(errorText(reason)); }
       finally { pending = false; }
     }, 1500);
     return () => { cancelled = true; window.clearInterval(timer); };
   }, [active, projectId, run?.id, run?.status]);
-
   useEffect(() => {
-    setResults(null); setLog(null);
     if (!active || run?.status !== 'finished') return;
     let cancelled = false;
+    const revision = viewRevision.current;
     getMeanVarianceResults(run.id, projectId).then(next => {
-      if (cancelled) return;
-      setResults(next);
-    }).catch(reason => { if (!cancelled) setError(errorText(reason)); });
+      if (!cancelled && revision === viewRevision.current) setResults(next);
+    }).catch(reason => { if (!cancelled && revision === viewRevision.current) setError(errorText(reason)); });
     return () => { cancelled = true; };
   }, [active, projectId, run?.id, run?.status]);
-
   async function action(work: () => Promise<void>) {
     setBusy(true); setError(null);
     try { await work(); } catch (reason) { setError(errorText(reason)); }
     finally { setBusy(false); }
   }
   function update(values: Partial<MeanVarianceConfig>) { setPreview(null); setConfig(current => ({ ...current, ...values })); }
-  function useTemplate() {
-    if (!run) return;
-    setConfig(structuredClone(run.config)); setPreview(null);
+  function updatePeriod(index: number, role: 'normal' | 'anomaly', values: Partial<{ start: string; end: string }>) {
+    setPreview(null);
+    setConfig(current => ({ ...current, pairs: current.pairs.map((pair, i) => i === index ? { ...pair, [role]: { ...pair[role], ...values } } : pair) }));
   }
-
+  function newDraft(template?: MeanVarianceRun) {
+    initialized.current = true;
+    setConfig(template ? templateConfig(template.config) : structuredClone(initialConfig)); openRun(null);
+  }
   return <Stack gap="lg">
-    <div><Title order={2}>Mittelwert-/Varianzvergleich</Title><Text c="dimmed">Vergleich zweier Zeiträume anhand ihrer pixelweisen Mittelwerte und zeitlichen Varianzen.</Text></div>
+    <Group justify="space-between"><div><Title order={2}>Varianzvergleich</Title><Text c="dimmed">Zeitliche Varianzen für bis zu sechs Paare aus Normalzustand und Anomaliephase.</Text></div>
+      <Button variant="light" disabled={busy || loading} onClick={() => newDraft()}>Neuer Vergleich</Button></Group>
     {error && <Alert color="red" withCloseButton onClose={() => setError(null)}>{error}</Alert>}
     {loading && <Loader size="sm" />}
-    <Paper withBorder p="lg"><Stack>
-      <Title order={4}>1 · Datensatz und Preprocessing</Title>
-      <SimpleGrid cols={{ base: 1, md: 2 }}>
-        <Select label="Train/Test Dataset" searchable value={config.training_dataset_id ? String(config.training_dataset_id) : null} disabled={busy}
-          data={datasets.map(item => ({ value: String(item.id), label: item.name, disabled: item.invalid_rule_count > 0 }))}
-          onChange={value => {
-            const selected = datasets.find(item => item.id === Number(value));
-            const range = { start: selected?.start_timestamp ?? '', end: selected?.end_timestamp ?? '' };
-            update({ training_dataset_id: Number(value), reference: { ...config.reference, ...range }, anomaly: { ...config.anomaly, ...range } });
-          }} />
-        <Select label="Preprocessing-Pipeline" searchable value={config.preprocessing_pipeline_id ? String(config.preprocessing_pipeline_id) : null} disabled={busy}
-          data={pipelines.map(item => ({ value: String(item.id), label: item.name }))} onChange={value => update({ preprocessing_pipeline_id: Number(value) })}
-          description="Für beide Zeiträume identisch; Ausgabe muss ein Graustufenbild sein." />
-      </SimpleGrid>
-      {dataset && <Text size="sm">Verfügbarer Zeitraum: {displayTime(dataset.start_timestamp ?? '—')} bis {displayTime(dataset.end_timestamp ?? '—')}</Text>}
-      <Text size="sm" c="dimmed">Das gespeicherte Datensatzsampling gilt zuerst. Zeiträume sind einschließlich Beginn und Ende; Lücken werden nicht aufgefüllt.</Text>
-    </Stack></Paper>
-    <SimpleGrid cols={{ base: 1, lg: 2 }}>
-      {(['reference', 'anomaly'] as const).map(role => <Paper key={role} withBorder p="lg"><Stack>
-        <Title order={4}>{role === 'reference' ? '2 · Normalphase' : '3 · Anomaliezeitraum'}</Title>
-        <TimeRangePresetPicker projectId={projectId} active={active} value={config[role]} disabled={busy}
-          min={dataset?.start_timestamp ?? undefined} max={dataset?.end_timestamp ?? undefined}
-          applyDisabledReason={!dataset ? 'Bitte zuerst einen Datensatz auswählen.' : undefined}
-          onApply={range => {
-            setPreview(null);
-            setConfig(current => ({ ...current, [role]: copyTimeRange(current[role], range) }));
-          }} />
-        <DateTime24Input label="Beginn (einschließlich)" value={config[role].start} disabled={busy} min={dataset?.start_timestamp ?? undefined} max={dataset?.end_timestamp ?? undefined}
-          onChange={start => update({ [role]: { ...config[role], start } })} />
-        <DateTime24Input label="Ende (einschließlich)" value={config[role].end} disabled={busy} min={dataset?.start_timestamp ?? undefined} max={dataset?.end_timestamp ?? undefined}
-          onChange={end => update({ [role]: { ...config[role], end } })} />
-        {role === 'reference' && <Select label="Auswahlverfahren" value={config.reference.mode} allowDeselect={false} disabled={busy}
-          data={[{ value: 'regular', label: 'Jedes n-te Bild' }, { value: 'random', label: 'Zufällige Anzahl' }]}
-          onChange={mode => update({ reference: { ...config.reference, mode: mode as 'regular' | 'random' } })} />}
-        {role === 'reference' && config.reference.mode === 'random' ? <SimpleGrid cols={2}>
-          <NumberInput label="Anzahl Bilder" min={1} allowDecimal={false} value={config.reference.count} disabled={busy}
-            onChange={value => update({ reference: { ...config.reference, count: Number(value) } })} />
-          <NumberInput label="Seed" min={0} max={4294967295} allowDecimal={false} value={config.reference.seed} disabled={busy}
-            onChange={value => update({ reference: { ...config.reference, seed: Number(value) } })} />
-        </SimpleGrid> : <NumberInput label="Sampling: jedes n-te Bild" min={1} allowDecimal={false} value={config[role].sampling_rate} disabled={busy}
-          description="15 wählt Bild 15, 30, 45 …; unvollständige Restblöcke entfallen."
-          onChange={value => update({ [role]: { ...config[role], sampling_rate: Number(value) } })} />}
+    <Select label="Lauf öffnen" searchable disabled={busy || loading} value={run ? String(run.id) : null} allowDeselect={false}
+      data={runs.map(item => ({ value: String(item.id), label: `#${item.id} · ${item.training_dataset_name} · ${phaseLabel(item.status)}` }))}
+      onChange={value => openRun(runs.find(item => String(item.id) === value) ?? null)} />
+    {run ? <Paper withBorder p="lg"><Stack>
+      <Group><Title order={4}>Gespeicherte Einstellungen · Lauf #{run.id}</Title><Badge>{phaseLabel(run.status)}</Badge></Group>
+      <Text>Datensatz: {run.training_dataset_name} · Preprocessing: {run.pipeline_snapshot.name}</Text>
+      <Text size="sm" c="dimmed">Schreibgeschützt. Änderungen über „Als Vorlage übernehmen“ erzeugen einen neuen Lauf.</Text>
+      {isPairConfig(run.config) ? <>
+        <Text>Gemeinsames Sampling: jedes {run.config.sampling_rate}. Bild</Text>
+        <Text size="sm">Varianzskala: {scaleText(run.config.variance_scale)} · Differenzskala: {scaleText(run.config.difference_scale)}</Text>
+        <Table><Table.Thead><Table.Tr><Table.Th>Paar</Table.Th><Table.Th>Normalzustand (einschließlich)</Table.Th><Table.Th>Anomaliephase (einschließlich)</Table.Th></Table.Tr></Table.Thead>
+          <Table.Tbody>{run.config.pairs.map((pair, i) => <Table.Tr key={i}><Table.Td>u{i + 1}</Table.Td><Table.Td>{periodText(pair.normal)}</Table.Td><Table.Td>{periodText(pair.anomaly)}</Table.Td></Table.Tr>)}</Table.Tbody></Table>
+      </> : <>
+        <Alert color="blue">Bisheriger Einzelvergleich. Die gespeicherte Varianzdifferenz bleibt unverändert; es erfolgt keine Neuberechnung.</Alert>
+        <Text>Normalzustand: {periodText(run.config.reference)}</Text>
+        <Text size="sm">{run.config.reference.mode === 'random' ? `Zufall: ${run.config.reference.count} Bilder · Seed ${run.config.reference.seed}` : `Sampling: jedes ${run.config.reference.sampling_rate}. Bild`}</Text>
+        <Text>Anomaliephase: {periodText(run.config.anomaly)}</Text><Text size="sm">Sampling: jedes {run.config.anomaly.sampling_rate}. Bild · Differenzskala: {scaleText(run.config.variance_scale)}</Text>
+      </>}
+      <Group><Button disabled={busy} onClick={() => newDraft(run)}>Als Vorlage übernehmen</Button>
+        <Button variant="subtle" disabled={busy} onClick={() => void action(async () => {
+          const revision = viewRevision.current, next = await getMeanVarianceLog(run.id, projectId);
+          if (revision === viewRevision.current) setLog(next.log);
+        })}>Log anzeigen</Button>
+        {activeRun(run) ? <Button color="orange" disabled={busy || run.cancel_requested} onClick={() => void action(async () => {
+          const next = await abortMeanVarianceRun(run.id, projectId); setRun(next); setRuns(current => current.map(item => item.id === next.id ? next : item));
+        })}>{run.cancel_requested ? 'Abbruch angefordert' : 'Abbrechen'}</Button> : <Button color="red" variant="subtle" disabled={busy} onClick={() => void action(async () => {
+          await deleteMeanVarianceRun(run.id, projectId); setRuns(current => current.filter(item => item.id !== run.id)); openRun(null); setConfig(structuredClone(initialConfig));
+        })}>Lauf löschen</Button>}
+      </Group>
+      {activeRun(run) && <><Text size="sm">{phaseLabel(run.current_step)} · {run.processed_images}/{run.total_images ?? '…'}</Text><Progress value={run.total_images ? 100 * run.processed_images / run.total_images : 0} animated /></>}
+      {pollError && <Alert color="orange">{pollError}</Alert>}{run.error_message && <Alert color="red">{run.error_message}</Alert>}
+      {log !== null && <pre style={{ whiteSpace: 'pre-wrap', maxHeight: 240, overflow: 'auto' }}>{log || 'Noch keine Log-Einträge.'}</pre>}
+    </Stack></Paper> : <>
+      <Paper withBorder p="lg"><Stack>
+        <Title order={4}>Gemeinsame Einstellungen</Title>
+        <SimpleGrid cols={{ base: 1, md: 3 }}>
+          <Select label="Train/Test Dataset" searchable value={config.training_dataset_id ? String(config.training_dataset_id) : null} disabled={busy}
+            data={datasets.map(item => ({ value: String(item.id), label: item.name, disabled: item.invalid_rule_count > 0 }))}
+            onChange={value => update({ training_dataset_id: Number(value) })} />
+          <Select label="Preprocessing-Pipeline" searchable value={config.preprocessing_pipeline_id ? String(config.preprocessing_pipeline_id) : null} disabled={busy}
+            data={pipelines.map(item => ({ value: String(item.id), label: item.name }))} onChange={value => update({ preprocessing_pipeline_id: Number(value) })} />
+          <NumberInput label="Gemeinsames Sampling: jedes n-te Bild" min={1} allowDecimal={false} value={config.sampling_rate || ''} disabled={busy}
+            onChange={value => update({ sampling_rate: Number(value) })} />
+        </SimpleGrid>
+        {config.sampling_rate === 0 && <Alert color="yellow">Die bisherige Auswahl verwendet unterschiedliche Sampling-Werte oder Zufall. Bitte ein gemeinsames n ausdrücklich auswählen.</Alert>}
+        {dataset && <Text size="sm">Datensatzgrenzen: {displayTime(dataset.start_timestamp ?? '—')} bis {displayTime(dataset.end_timestamp ?? '—')}</Text>}
+        <Text size="sm" c="dimmed">Alle Paare teilen Datensatz, Pipeline und Sampling. Beide Zeitgrenzen zählen mit. Datensatzsampling gilt zuerst; jedes n-te Bild beginnt je Zeitraum neu. Überlappungen sind erlaubt.</Text>
+      </Stack></Paper>
+      {config.pairs.map((pair, index) => <Paper key={index} withBorder p="lg"><Stack>
+        <Group justify="space-between"><Title order={4}>u{index + 1}</Title><Button color="red" variant="subtle" disabled={busy || config.pairs.length === 1}
+          onClick={() => update({ pairs: config.pairs.filter((_, i) => i !== index) })}>Paar entfernen</Button></Group>
+        <SimpleGrid cols={{ base: 1, lg: 2 }}>{(['normal', 'anomaly'] as const).map(role => <Stack key={role}>
+          <Text fw={600}>{role === 'normal' ? 'Normalzustand' : 'Anomaliephase'}</Text>
+          <TimeRangePresetPicker projectId={projectId} active={active} value={pair[role]} disabled={busy}
+            min={dataset?.start_timestamp ?? undefined} max={dataset?.end_timestamp ?? undefined}
+            applyDisabledReason={!dataset ? 'Bitte zuerst einen Datensatz auswählen.' : undefined} onApply={range => updatePeriod(index, role, range)} />
+          <DateTime24Input label={`u${index + 1} ${role === 'normal' ? 'Normalzustand' : 'Anomaliephase'} Beginn (einschließlich)`} value={pair[role].start} disabled={busy}
+            min={dataset?.start_timestamp ?? undefined} max={dataset?.end_timestamp ?? undefined} onChange={start => updatePeriod(index, role, { start })} />
+          <DateTime24Input label={`u${index + 1} ${role === 'normal' ? 'Normalzustand' : 'Anomaliephase'} Ende (einschließlich)`} value={pair[role].end} disabled={busy}
+            min={dataset?.start_timestamp ?? undefined} max={dataset?.end_timestamp ?? undefined} onChange={end => updatePeriod(index, role, { end })} />
+        </Stack>)}</SimpleGrid>
       </Stack></Paper>)}
-    </SimpleGrid>
-    <Paper withBorder p="lg"><Stack>
-      <Title order={4}>4 · Darstellung und Berechnung</Title>
-      <Text size="sm">Mittelwertunterschied = |Mittelwert Normalphase − Mittelwert Anomaliephase|. Varianzdifferenz = Varianz Anomaliephase − Varianz Normalphase (Division durch die Bildanzahl).</Text>
-      <Text size="sm" c="dimmed">Blau = geringere Varianz · Weiß = unverändert · Rot = höhere Varianz in der Anomaliephase.</Text>
-      <SimpleGrid cols={{ base: 1, md: 2 }}>
-        {(['mean_scale', 'variance_scale'] as const).map(key => <Stack key={key} gap="xs">
-          <Select label={key === 'mean_scale' ? 'Farbskala Mittelwertunterschied' : 'Farbskala Varianzdifferenz'}
-            value={config[key].mode} disabled={busy} allowDeselect={false}
+      <Button variant="light" w="fit-content" disabled={busy || config.pairs.length >= 6} onClick={() => update({ pairs: [...config.pairs, emptyPair()] })}>Paar hinzufügen</Button>
+      <Paper withBorder p="lg"><Stack>
+        <Title order={4}>Darstellung und Berechnung</Title>
+        <Text size="sm">Differenz = Varianz Anomaliephase − Varianz Normalzustand (Populationsvarianz). Blau bedeutet geringere, Rot höhere Varianz. Die Farbskalen gelten für alle Paare.</Text>
+        <SimpleGrid cols={{ base: 1, md: 2 }}>{(['variance_scale', 'difference_scale'] as const).map(key => <Stack key={key} gap="xs">
+          <Select label={key === 'variance_scale' ? 'Farbskala Varianz' : 'Farbskala Differenz'} value={config[key].mode} disabled={busy} allowDeselect={false}
             data={[{ value: 'auto', label: 'Automatisch' }, { value: 'manual', label: 'Manueller Grenzwert' }]}
             onChange={mode => update({ [key]: { ...config[key], mode: mode as 'auto' | 'manual' } })} />
-          {config[key].mode === 'manual' && <NumberInput label={key === 'mean_scale' ? 'Obergrenze Mittelwertunterschied' : 'Grenze ± für die Varianzdifferenz'}
-            description={key === 'mean_scale' ? 'Pipeline-Einheiten; begrenzt nur die Farbdarstellung.' : 'Pipeline-Einheiten²; begrenzt nur die Farbdarstellung.'}
-            value={config[key].limit ?? ''} min={0} disabled={busy}
-            onChange={limit => update({ [key]: { ...config[key], limit: limit === '' ? null : Number(limit) } })} />}
-        </Stack>)}
-      </SimpleGrid>
-      {validation && <Text size="sm" c="dimmed">{validation}</Text>}
-      <Group>
-        <Button variant="light" disabled={!!validation || busy} onClick={() => void action(async () => setPreview({ signature, value: await previewMeanVariance(config, projectId) }))}>Auswahl prüfen</Button>
-        <Button disabled={busy || !!validation || !currentPreview || !!currentPreview.errors.length} onClick={() => void action(async () => {
-          const next = await createMeanVarianceRun(config, projectId); setRun(next); setRuns(current => [next, ...current]);
-        })}>Berechnung starten</Button>
-      </Group>
-      {currentPreview && <>
-        <Table><Table.Thead><Table.Tr><Table.Th>Zeitraum</Table.Th><Table.Th>Verfügbare Bilder</Table.Th><Table.Th>Ausgewählt</Table.Th><Table.Th>Restblock</Table.Th></Table.Tr></Table.Thead>
-          <Table.Tbody>{(['reference', 'anomaly'] as const).map(role => <Table.Tr key={role}><Table.Td>{role === 'reference' ? 'Normalphase' : 'Anomaliephase'}</Table.Td><Table.Td>{currentPreview[role].available}</Table.Td><Table.Td>{currentPreview[role].selected}</Table.Td><Table.Td>{currentPreview[role].remainder}</Table.Td></Table.Tr>)}</Table.Tbody></Table>
-        {(['reference', 'anomaly'] as const).filter(role => currentPreview[role].selected === 1).map(role => <Alert key={role} color="yellow">
-          {role === 'reference' ? 'Normalphase' : 'Anomaliephase'}: Nur ein Bild; Varianz 0, keine zeitliche Vergleichsbasis.
-        </Alert>)}
-        {currentPreview.errors.map(message => <Alert color="orange" key={message}>{message}</Alert>)}
-      </>}
-    </Stack></Paper>
-    <Paper withBorder p="lg"><Stack>
-      <Title order={4}>Gespeicherte Analysen</Title>
-      <Select label="Lauf öffnen" searchable disabled={busy} value={run ? String(run.id) : null} allowDeselect={false}
-        data={runs.map(item => ({ value: String(item.id), label: `#${item.id} · ${item.training_dataset_name} · ${PHASES[item.status] ?? item.status}` }))}
-        onChange={value => { setRun(runs.find(item => String(item.id) === value) ?? null); setPollError(null); }} />
-      {run && <>
-        <Group><Badge>{PHASES[run.status] ?? run.status}</Badge><Text>{run.training_dataset_name} · {run.pipeline_snapshot.name}</Text></Group>
-        <Group>
-          <Button variant="light" disabled={busy} onClick={useTemplate}>Als Vorlage übernehmen</Button>
-          <Button variant="subtle" disabled={busy} onClick={() => void action(async () => setLog((await getMeanVarianceLog(run.id, projectId)).log))}>Log anzeigen</Button>
-          {activeRun(run) ? <Button color="orange" disabled={busy || run.cancel_requested} onClick={() => void action(async () => {
-            const next = await abortMeanVarianceRun(run.id, projectId); setRun(next); setRuns(current => current.map(item => item.id === next.id ? next : item));
-          })}>{run.cancel_requested ? 'Abbruch angefordert' : 'Abbrechen'}</Button>
-            : <Button color="red" variant="subtle" disabled={busy} onClick={() => void action(async () => {
-              await deleteMeanVarianceRun(run.id, projectId); setRuns(current => current.filter(item => item.id !== run.id)); setRun(null);
-            })}>Lauf löschen</Button>}
-        </Group>
-        {activeRun(run) && <><Text size="sm">{PHASES[run.current_step] ?? run.current_step} · {run.processed_images}/{run.total_images ?? '…'}</Text>
-          <Progress value={run.total_images ? 100 * run.processed_images / run.total_images : 0} animated /></>}
-        {pollError && <Alert color="orange">Status konnte nicht aktualisiert werden: {pollError}</Alert>}
-        {run.error_message && <Alert color="red">{run.error_message}</Alert>}
-        {log !== null && <Paper p="sm" withBorder><pre style={{ whiteSpace: 'pre-wrap', maxHeight: 240, overflow: 'auto' }}>{log || 'Noch keine Log-Einträge.'}</pre></Paper>}
-        {results && run.status === 'finished' && <>
-          <Text size="sm">{results.reference_count} Normalbilder · {results.anomaly_count} Anomaliebilder · {results.width} × {results.height} Pixel · Populationsvarianz</Text>
-          <Text size="sm">Normalphase: {displayTime(run.config.reference.start)} – {displayTime(run.config.reference.end)}</Text>
-          <Text size="sm">Anomaliephase: {displayTime(run.config.anomaly.start)} – {displayTime(run.config.anomaly.end)}</Text>
-          {results.warnings.map(message => <Alert color="yellow" key={message}>{message}</Alert>)}
-          <SimpleGrid cols={{ base: 1, xl: 2 }}>
-            {(['mean', 'variance'] as const).map(key => {
-              const map = results.maps[key];
-              return <Stack key={key}>
-                <Title order={4}>{map.title}</Title>
-                {map.all_zero && <Alert color="blue">Keine Unterschiede: alle Pixelwerte sind 0.</Alert>}
-                <Image src={meanVarianceArtifactUrl(run.id, map.filename, projectId)} fit="contain" alt={map.title} />
-                <Text size="sm">Werte: {map.minimum.toPrecision(6)} bis {map.maximum.toPrecision(6)} {map.unit}</Text>
-                <Button component="a" w="fit-content" href={meanVarianceArtifactUrl(run.id, map.filename, projectId, true)}>{key === 'mean' ? 'Mittelwert-Heatmap als PNG herunterladen' : 'Varianz-Heatmap als PNG herunterladen'}</Button>
-              </Stack>;
-            })}
-          </SimpleGrid>
+          {config[key].mode === 'manual' && <NumberInput label={key === 'variance_scale' ? 'Obergrenze Varianz' : 'Grenze ± der Differenz'} description="gray value²; begrenzt nur die Farben."
+            value={config[key].limit ?? ''} min={0} disabled={busy} onChange={value => update({ [key]: { ...config[key], limit: value === '' ? null : Number(value) } })} />}
+        </Stack>)}</SimpleGrid>
+        {validation && <Text size="sm" c="dimmed">{validation}</Text>}
+        <Group><Button variant="light" disabled={busy || !!validation} onClick={() => void action(async () => setPreview({ signature, value: await previewMeanVariance(config, projectId) }))}>Auswahl prüfen</Button>
+          <Button disabled={busy || !!validation || !currentPreview || !!currentPreview.errors.length} onClick={() => void action(async () => {
+            const next = await createMeanVarianceRun(config, projectId); setRuns(current => [next, ...current]); openRun(next);
+          })}>Berechnung starten</Button></Group>
+        {currentPreview && <>
+          <Table><Table.Thead><Table.Tr><Table.Th>Paar / Zeitraum</Table.Th><Table.Th>Verfügbar</Table.Th><Table.Th>Ausgewählt</Table.Th><Table.Th>Restblock</Table.Th></Table.Tr></Table.Thead>
+            <Table.Tbody>{currentPreview.pairs.flatMap((pair, index) => (['reference', 'anomaly'] as const).map(role => <Table.Tr key={`${index}-${role}`}><Table.Td>u{index + 1} {role === 'reference' ? 'Normalzustand' : 'Anomaliephase'}</Table.Td><Table.Td>{pair[role].available}</Table.Td><Table.Td>{pair[role].selected}</Table.Td><Table.Td>{pair[role].remainder}</Table.Td></Table.Tr>))}</Table.Tbody></Table>
+          {currentPreview.pairs.flatMap((pair, index) => (['reference', 'anomaly'] as const).filter(role => pair[role].selected === 1).map(role => <Alert key={`${index}-${role}`} color="yellow">u{index + 1} {role === 'reference' ? 'Normalzustand' : 'Anomaliephase'}: Nur ein Bild; Varianz 0, keine zeitliche Vergleichsbasis.</Alert>))}
+          {currentPreview.errors.map((message, i) => <Alert key={i} color="orange">{message}</Alert>)}
         </>}
+      </Stack></Paper>
+    </>}
+    {results && run?.status === 'finished' && <Paper withBorder p="lg"><Stack>
+      <Title order={4}>Ergebnis · Lauf #{run.id}</Title>
+      <Text size="sm">{results.width} × {results.height} Pixel · Populationsvarianz · {run.training_dataset_name} · {run.pipeline_snapshot.name}</Text>
+      {results.warnings.map((message, i) => <Alert color="yellow" key={i}>{message}</Alert>)}
+      {isPairResults(results) ? <>
+        {results.pairs.map(pair => <Text key={pair.label} size="sm">{pair.label}: {pair.counts.normal} Normalbilder ({periodText(pair.periods.normal)}) · {pair.counts.anomaly} Anomaliebilder ({periodText(pair.periods.anomaly)})</Text>)}
+        <Image src={meanVarianceArtifactUrl(run.id, results.filename, projectId)} fit="contain" alt="Varianzvergleich: Normalzustand, Unruhe und Differenz für alle Paare" />
+        <Button component="a" w="fit-content" href={meanVarianceArtifactUrl(run.id, results.filename, projectId, true)}>Vergleich als PNG herunterladen</Button>
+      </> : <>
+        <Text size="sm">{results.reference_count} Normalbilder · {results.anomaly_count} Anomaliebilder</Text>
+        <Image src={meanVarianceArtifactUrl(run.id, results.maps.variance.filename, projectId)} fit="contain" alt="Gespeicherte Varianzdifferenz des bisherigen Einzelvergleichs" />
+        <Button component="a" w="fit-content" href={meanVarianceArtifactUrl(run.id, results.maps.variance.filename, projectId, true)}>Varianzdifferenz als PNG herunterladen</Button>
       </>}
-    </Stack></Paper>
+    </Stack></Paper>}
   </Stack>;
 }

@@ -139,6 +139,11 @@ export function ReferenceImagePage({ active, projectId }: { active: boolean; pro
     </SimpleGrid>
     <Paper withBorder p="lg"><Stack>
       <Title order={4}>4 · Darstellung und Berechnung</Title>
+      <NumberInput label="Offset Start (Minuten)" min={0} allowDecimal={false}
+        value={Number.isFinite(config.start_offset_minutes) ? config.start_offset_minutes : ''} disabled={busy}
+        description="Startet die Berechnung vor dem Anomaliebeginn, z. B. 21:15 − 30 Minuten = 20:45. Das Anomalie-Sampling zählt ab diesem Beginn neu; der Vorlauf muss vollständig im Datensatz liegen."
+        onChange={value => update({ start_offset_minutes: value === '' ? NaN : Number(value) })} />
+      <Text size="sm" c="dimmed">Video und Einzelbilder zeigen die Aufnahmezeit oben rechts in UTC mit dem Zusatz (UTC). Eingaben und Zeitpunkt-Suche verwenden weiterhin Europe/Berlin.</Text>
       <Select label="Bildverarbeitung" value={config.processing_mode} allowDeselect={false} disabled={busy}
         data={[{ value: 'shift_clip', label: 'Shift und Clipping · 16-Bit-PNG' }, { value: 'signed', label: 'Bisherige Vorzeichen-Darstellung · 8-Bit-PNG' }]}
         onChange={value => update({ processing_mode: value as 'shift_clip' | 'signed', scale_mode: 'auto', scale_limit: null })} />
@@ -167,8 +172,9 @@ export function ReferenceImagePage({ active, projectId }: { active: boolean; pro
         })}>Berechnung starten</Button>
       </Group>
       {currentPreview && <>
+        <Text size="sm">Effektiver Berechnungsbeginn: {displayTime(currentPreview.effective_anomaly_start)} (Europe/Berlin) · einschließlich Vorlauf. Der erste Videoframe ergibt sich aus dem Sampling.</Text>
         <Table><Table.Thead><Table.Tr><Table.Th>Zeitraum</Table.Th><Table.Th>Verfügbare Bilder</Table.Th><Table.Th>Ausgewählt</Table.Th><Table.Th>Restblock</Table.Th></Table.Tr></Table.Thead>
-          <Table.Tbody>{(['reference', 'anomaly'] as const).map(role => <Table.Tr key={role}><Table.Td>{role === 'reference' ? 'Referenz' : 'Anomalie'}</Table.Td><Table.Td>{currentPreview[role].available}</Table.Td><Table.Td>{currentPreview[role].selected}</Table.Td><Table.Td>{currentPreview[role].remainder}</Table.Td></Table.Tr>)}</Table.Tbody></Table>
+          <Table.Tbody>{(['reference', 'anomaly'] as const).map(role => <Table.Tr key={role}><Table.Td>{role === 'reference' ? 'Referenz' : 'Anomalie einschließlich Vorlauf'}</Table.Td><Table.Td>{currentPreview[role].available}</Table.Td><Table.Td>{currentPreview[role].selected}</Table.Td><Table.Td>{currentPreview[role].remainder}</Table.Td></Table.Tr>)}</Table.Tbody></Table>
         {currentPreview.errors.map(message => <Alert color="orange" key={message}>{message}</Alert>)}
       </>}
     </Stack></Paper>
@@ -179,6 +185,7 @@ export function ReferenceImagePage({ active, projectId }: { active: boolean; pro
         onChange={value => { setRun(runs.find(item => String(item.id) === value) ?? null); setPollError(null); }} />
       {run && <>
         <Group><Badge>{PHASES[run.status] ?? run.status}</Badge><Text>{run.training_dataset_name} · {run.pipeline_snapshot.name}</Text></Group>
+        <Text size="sm">Offset Start: {run.config.start_offset_minutes ?? 0} Minuten · Anomaliebeginn: {displayTime(run.config.anomaly.start)} (Europe/Berlin) · Sampling: jedes {run.config.anomaly.sampling_rate}. Bild ab dem vorgezogenen Beginn.</Text>
         <Group>
           <Button variant="light" disabled={busy} onClick={useTemplate}>Als Vorlage übernehmen</Button>
           <Button variant="subtle" disabled={busy} onClick={() => void action(async () => setLog((await getReferenceImageLog(run.id)).log))}>Log anzeigen</Button>

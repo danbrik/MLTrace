@@ -2307,10 +2307,12 @@ export type ReferenceImageConfig = {
   training_dataset_id: number; preprocessing_pipeline_id: number;
   reference: ReferenceImageInterval & { mode: 'regular' | 'random'; count: number; seed: number };
   anomaly: ReferenceImageInterval;
+  start_offset_minutes: number;
   processing_mode: 'shift_clip' | 'signed'; shift: number; clip_min: number; clip_max: number;
   scale_mode: 'auto' | 'manual'; scale_limit: number | null; fps: number;
 };
 export type ReferenceImagePreview = {
+  effective_anomaly_start: string;
   reference: { available: number; selected: number; remainder: number };
   anomaly: { available: number; selected: number; remainder: number };
   errors: string[];

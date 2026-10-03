@@ -56,3 +56,19 @@ def test_streaming_video_cancellation_during_encoding_cleans_subprocess(tmp_path
     assert calls == ["kill", "reap"]
     assert not path.with_name("cancel.browser-tmp.mp4").exists()
     assert not path.with_name("cancel.mp4.browser-ready").exists()
+
+
+def test_optional_watermark_label_preserves_default_and_supports_utc(monkeypatch):
+    from app import video
+    labels = []
+    original = video.ImageDraw.ImageDraw.text
+    def record_text(self, xy, text, *args, **kwargs):
+        labels.append(text)
+        return original(self, xy, text, *args, **kwargs)
+    monkeypatch.setattr(video.ImageDraw.ImageDraw, 'text', record_text)
+    timestamp = datetime(2025, 9, 15, 20, 45)
+    blank = np.zeros((180, 320, 3), dtype=np.uint8)
+    video.add_timestamp_watermark(blank, timestamp)
+    stamped = video.add_timestamp_watermark(blank, timestamp, label='2025-09-15 18:45:00 (UTC)')
+    assert labels == ['2025-09-15 20:45:00', '2025-09-15 18:45:00 (UTC)']
+    assert np.any(stamped[:50] != 0)

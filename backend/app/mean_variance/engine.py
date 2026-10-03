@@ -95,3 +95,76 @@ def render_heatmap(values, scale, signed, path, config, counts, dataset_name):
     finally:
         fig.clear()
     return {**result, "filename": path.name, "title": title, "unit": unit}
+
+
+def map_statistics(values):
+    maximum_absolute = float(np.abs(values).max())
+    return {"minimum": float(values.min()), "maximum": float(values.max()),
+            "maximum_absolute": maximum_absolute, "all_zero": maximum_absolute == 0}
+
+
+def comparison_style(limit, signed):
+    from matplotlib.colors import LinearSegmentedColormap, Normalize
+    colors = ["#2166ac", "#ffffff", "#b2182b"] if signed else ["#ffffff", "#b2182b"]
+    cmap = LinearSegmentedColormap.from_list("variance_signed" if signed else "variance", colors, N=257)
+    return cmap, Normalize(vmin=-(limit or 1) if signed else 0, vmax=limit or 1, clip=True)
+
+
+def render_comparison(pairs, config, path, dataset_name, pipeline_name, shape, check_abort=lambda: None):
+    from matplotlib.figure import Figure
+    from matplotlib.backends.backend_agg import FigureCanvasAgg
+    from matplotlib.cm import ScalarMappable
+    maximum = max(pair["maps"][role]["maximum"] for pair in pairs for role in ("normal", "anomaly"))
+    difference_maximum = max(pair["maps"]["difference"]["maximum_absolute"] for pair in pairs)
+    variance_limit = maximum if config.variance_scale.mode == "auto" else config.variance_scale.limit
+    difference_limit = difference_maximum if config.difference_scale.mode == "auto" else config.difference_scale.limit
+    styles = [comparison_style(variance_limit, False), comparison_style(difference_limit, True)]
+    width, left, right, gap = 12.0, 1.3, .25, .22
+    cell_width = (width - left - right - 2 * gap) / 3
+    cell_height = cell_width * shape[0] / shape[1]
+    bottom, top = 1.5, .48
+    height = bottom + top + len(pairs) * cell_height + (len(pairs) - 1) * .22
+    result = {"version": 2, "filename": path.name, "unit": "gray value²", "ddof": 0,
+              "width": shape[1], "height": shape[0], "dataset_name": dataset_name, "pipeline_name": pipeline_name,
+              "origin": "upper", "interpolation": "nearest", "sampling_rate": config.sampling_rate,
+              "variance_scale_limit": variance_limit, "difference_scale_limit": difference_limit,
+              "pairs": [{**pair, "maps": {role: {k: v for k, v in stats.items() if k != "path"}
+                                         for role, stats in pair["maps"].items()}} for pair in pairs]}
+    fig = Figure(figsize=(width, height), dpi=180)
+    FigureCanvasAgg(fig)
+    try:
+        for row, pair in enumerate(pairs):
+            y = height - top - cell_height - row * (cell_height + .22)
+            fig.text(.025, (y + cell_height / 2) / height, pair["label"], va="center", fontsize=12)
+            for column, role in enumerate(("normal", "anomaly", "difference")):
+                check_abort()
+                ax = fig.add_axes(((left + column * (cell_width + gap)) / width, y / height,
+                                   cell_width / width, cell_height / height))
+                values = np.load(pair["maps"][role]["path"], mmap_mode="r")
+                cmap, norm = styles[1 if column == 2 else 0]
+                ax.imshow(values, cmap=cmap, norm=norm, origin="upper", interpolation="nearest", aspect="equal")
+                ax.tick_params(labelsize=9, labelleft=column == 0, left=column == 0,
+                               labelbottom=row == len(pairs) - 1, bottom=row == len(pairs) - 1)
+                if row == 0:
+                    ax.set_title(("Normalzustand", "Unruhe", "Differenz")[column], fontsize=14, pad=10)
+        fig.text(.065, (bottom + (height - bottom - top) / 2) / height, "y (Pixel)", rotation=90, va="center", ha="center", fontsize=11)
+        fig.text((left + (width - left - right) / 2) / width, 1.02 / height, "x (Pixel)", ha="center", fontsize=11)
+        for index, (x, bar_width, label, limit) in enumerate((
+            (left, cell_width * 2 + gap, "Variance (gray value²)", variance_limit),
+            (left + 2 * (cell_width + gap), cell_width, "Variance difference (gray value²)", difference_limit),
+        )):
+            cmap, norm = styles[index]
+            bar = fig.colorbar(ScalarMappable(norm=norm, cmap=cmap),
+                               cax=fig.add_axes((x / width, .6 / height, bar_width / width, .14 / height)), orientation="horizontal")
+            bar.set_label(label, fontsize=11)
+            bar.ax.tick_params(labelsize=9)
+            if limit == 0:
+                bar.set_ticks([0])
+            else:
+                bar.formatter.set_powerlimits((-3, 4)); bar.formatter.set_useMathText(True); bar.update_ticks()
+        check_abort()
+        fig.savefig(path, format="png", metadata={"Title": "Varianzvergleich", "Description": json.dumps(result, ensure_ascii=False)})
+        check_abort()
+    finally:
+        fig.clear()
+    return result

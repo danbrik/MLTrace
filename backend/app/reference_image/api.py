@@ -6,7 +6,7 @@ from sqlalchemy.orm import Session
 
 from app.database import get_db
 from app.reference_image import service
-from app.reference_image.schemas import ReferenceImageConfig, ReferenceImageRunRead, SelectionPreview, FrameLookup
+from app.reference_image.schemas import ReferenceImageConfig, ReferenceImageRunRead, ReferenceImageSelectionPreview, FrameLookup
 from app.reference_image.engine import resolve_frame
 from app.schemas import _dataset_local_naive
 
@@ -19,7 +19,7 @@ def required(value):
     return value
 
 
-@router.post("/preview", response_model=SelectionPreview)
+@router.post("/preview", response_model=ReferenceImageSelectionPreview)
 def preview(payload: ReferenceImageConfig, db: Session = Depends(get_db)):
     try:
         return service.preview(db, payload)

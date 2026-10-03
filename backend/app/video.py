@@ -100,20 +100,20 @@ def timestamp_label(value: datetime) -> str:
     return value.strftime("%Y-%m-%d %H:%M:%S")
 
 
-def add_timestamp_watermark(image_rgb: np.ndarray, value: datetime) -> np.ndarray:
+def add_timestamp_watermark(image_rgb: np.ndarray, value: datetime, *, label: str | None = None) -> np.ndarray:
     """Return an RGB frame with a readable timestamp baked into its top-right."""
     image = Image.fromarray(np.asarray(image_rgb, dtype=np.uint8), mode="RGB").convert("RGBA")
-    overlay = timestamp_overlay(image.width, image.height, value)
+    overlay = timestamp_overlay(image.width, image.height, value, label=label)
     return np.asarray(Image.alpha_composite(image, overlay).convert("RGB"))
 
 
-def timestamp_overlay(width: int, height: int, value: datetime) -> Image.Image:
+def timestamp_overlay(width: int, height: int, value: datetime, *, label: str | None = None) -> Image.Image:
     """Reusable timestamp layer; callers choose the output pixel depth."""
     image = Image.new("RGBA", (width, height), (0, 0, 0, 0))
     overlay = image
     draw = ImageDraw.Draw(overlay)
     font = ImageFont.load_default(size=max(11, min(image.width, image.height) // 32))
-    label = timestamp_label(value)
+    label = timestamp_label(value) if label is None else label
     box = draw.textbbox((0, 0), label, font=font)
     text_width = box[2] - box[0]
     text_height = box[3] - box[1]

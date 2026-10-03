@@ -21,8 +21,11 @@ from app.preprocessing.pipeline import compile_pipeline, absolute_image_to_uint8
 from app.schemas import PreprocessingGraph
 from app.image_selection import prepare, freeze_samples, read_frozen_image
 from app.training.scheduler import next_queue_rank, scheduler
-from app.reference_image.engine import grayscale, render_difference, shift_clip_difference, stamp_uint16, preview_uint16
-from app.reference_image.schemas import ReferenceImageConfig, ReferenceImageRunRead, stored_config
+from app.reference_image.engine import (
+    grayscale, render_difference, shift_clip_difference, stamp_uint16, preview_uint16,
+    selection_config, utc_timestamp_label,
+)
+from app.reference_image.schemas import ReferenceImageConfig, ReferenceImageRunRead, ReferenceImageSelectionPreview, stored_config
 from app.video import add_timestamp_watermark, write_mp4
 
 logger = logging.getLogger(__name__)
@@ -43,8 +46,23 @@ def write_json(path: Path, value) -> None:
     temporary.replace(path)
 
 
+def prepare_reference_images(db: Session, config: ReferenceImageConfig):
+    effective = selection_config(config)
+    dataset, pipeline, samples, selection = prepare(db, effective)
+    for sample in samples["anomaly"]:
+        try:
+            utc_timestamp_label(datetime.fromisoformat(sample["timestamp"]))
+        except ValueError as exc:
+            selection.errors.append(str(exc))
+            break
+    preview = ReferenceImageSelectionPreview(
+        **selection.model_dump(), effective_anomaly_start=effective.anomaly.start,
+    )
+    return dataset, pipeline, samples, preview
+
+
 def preview(db: Session, config: ReferenceImageConfig):
-    _, pipeline, samples, result = prepare(db, config)
+    _, pipeline, samples, result = prepare_reference_images(db, config)
     compiled = compile_pipeline(PreprocessingGraph.model_validate(pipeline.graph))
     shape = None
     for role in ("reference", "anomaly"):
@@ -55,7 +73,7 @@ def preview(db: Session, config: ReferenceImageConfig):
 
 
 def enqueue(db: Session, config: ReferenceImageConfig, *, wake_scheduler: bool = True):
-    dataset, pipeline, samples, selection = prepare(db, config)
+    dataset, pipeline, samples, selection = prepare_reference_images(db, config)
     if selection.errors:
         raise ValueError(" ".join(selection.errors))
     # Freeze the selected file identities at enqueue time, not at worker dispatch.
@@ -77,7 +95,7 @@ def enqueue(db: Session, config: ReferenceImageConfig, *, wake_scheduler: bool =
     try:
         db.flush()
         directory = artifact_dir(run.id)
-        write_json(directory / "manifest.json", {"samples": samples, "selection": selection.model_dump()})
+        write_json(directory / "manifest.json", {"samples": samples, "selection": selection.model_dump(mode="json")})
         db.commit()
     except Exception:
         db.rollback()
@@ -301,10 +319,11 @@ def calculate(run, report, abort_event):
                 report("rendering", index, count)
                 difference = np.load(temporary / f"{index}.npy", allow_pickle=False)
                 timestamp = datetime.fromisoformat(frame["timestamp"])
+                label = utc_timestamp_label(timestamp)
                 if config.processing_mode == "shift_clip":
                     output = shift_clip_difference(difference, config.shift, config.clip_min, config.clip_max)
                     output = np.pad(output, ((0, output.shape[0] % 2), (0, output.shape[1] % 2)), mode="edge")
-                    output = stamp_uint16(output, timestamp, config.clip_min, config.clip_max)
+                    output = stamp_uint16(output, timestamp, config.clip_min, config.clip_max, label=label)
                     Image.fromarray(output).save(directory / f"frame_{index:06d}.png")
                     gray = preview_uint16(output, config.clip_min, config.clip_max)
                     rgb = np.repeat(gray[:, :, None], 3, axis=2)
@@ -313,7 +332,7 @@ def calculate(run, report, abort_event):
                     gray = render_difference(difference, limit)
                     rgb = np.repeat(gray[:, :, None], 3, axis=2)
                     rgb = np.pad(rgb, ((0, rgb.shape[0] % 2), (0, rgb.shape[1] % 2), (0, 0)), mode="edge")
-                    rgb = add_timestamp_watermark(rgb, timestamp)
+                    rgb = add_timestamp_watermark(rgb, timestamp, label=label)
                     Image.fromarray(rgb).save(directory / f"frame_{index:06d}.png")
                 (temporary / f"{index}.npy").unlink()
                 yield rgb

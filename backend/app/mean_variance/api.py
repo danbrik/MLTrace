@@ -5,7 +5,7 @@ from sqlalchemy.orm import Session
 
 from app.database import get_db
 from app.mean_variance import service
-from app.mean_variance.schemas import MeanVarianceConfig, MeanVarianceRunRead, SelectionPreview
+from app.mean_variance.schemas import StoredConfig, MeanVarianceRunRead, SelectionPreview, VariancePreview
 
 router = APIRouter(prefix="/api/mean-variance-analysis", tags=["mean-variance"])
 
@@ -16,8 +16,8 @@ def required(value):
     return value
 
 
-@router.post("/preview", response_model=SelectionPreview)
-def preview(payload: MeanVarianceConfig, db: Session = Depends(get_db)):
+@router.post("/preview", response_model=VariancePreview | SelectionPreview)
+def preview(payload: StoredConfig, db: Session = Depends(get_db)):
     try:
         return service.preview(db, payload)
     except (ValueError, OSError) as exc:
@@ -25,7 +25,7 @@ def preview(payload: MeanVarianceConfig, db: Session = Depends(get_db)):
 
 
 @router.post("/runs", response_model=MeanVarianceRunRead)
-def enqueue(payload: MeanVarianceConfig, db: Session = Depends(get_db)):
+def enqueue(payload: StoredConfig, db: Session = Depends(get_db)):
     try:
         return service.enqueue(db, payload)
     except (ValueError, OSError) as exc:
@@ -71,7 +71,7 @@ def delete(run_id: int, db: Session = Depends(get_db)):
 
 @router.get("/runs/{run_id}/artifacts/{name}")
 def artifact(run_id: int, name: str, download: bool = False, db: Session = Depends(get_db)):
-    if name not in {"mean_difference.png", "variance_difference.png"}:
+    if name not in {"mean_difference.png", "variance_difference.png", "variance_comparison.png"}:
         raise HTTPException(404, "Heatmap nicht gefunden.")
     path = required(service.artifact_path(db, run_id, name))
     return FileResponse(path, filename=f"mean-variance-{run_id}-{name}",

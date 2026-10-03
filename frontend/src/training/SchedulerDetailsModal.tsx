@@ -1,3 +1,4 @@
+import { isPairConfig } from '../meanVariance/types';
 import { Badge, Group, Modal, Paper, ScrollArea, Stack, Table, Text } from '@mantine/core';
 import type { ReactNode } from 'react';
 
@@ -122,7 +123,7 @@ export function SchedulerDetailsModal({
   trainingRunById: Map<number, TrainingRun>;
 }) {
   const title = job
-    ? job.kind === 'mean_variance' ? `Mittelwert-/Varianz · ${job.run.training_dataset_name}` : job.kind === 'reference_image' ? `Referenzbild · ${job.run.training_dataset_name}` : job.kind === 'time_series_train' ? job.run.name : job.kind === 'dinov3_analysis' ? `DINOv3 · ${job.run.training_dataset_name}` : job.kind === 'train'
+    ? job.kind === 'mean_variance' ? `Varianz · ${job.run.training_dataset_name}` : job.kind === 'reference_image' ? `Referenzbild · ${job.run.training_dataset_name}` : job.kind === 'time_series_train' ? job.run.name : job.kind === 'dinov3_analysis' ? `DINOv3 · ${job.run.training_dataset_name}` : job.kind === 'train'
       ? job.run.training_pipeline_name
       : job.kind === 'heatmap'
         ? `Heatmap video · ${job.run.testing_run_name}`
@@ -304,15 +305,22 @@ export function SchedulerDetailsModal({
         (job.kind === 'mean_variance' ? <Stack gap="sm">
           <Row label="Datensatz"><Text>{job.run.training_dataset_name}</Text></Row>
           <Row label="Preprocessing"><Text>{job.run.pipeline_snapshot.name}</Text></Row>
-          <Row label="Normalphase"><Text>{job.run.config.reference.start} – {job.run.config.reference.end} · {job.run.config.reference.mode === 'random' ? `${job.run.config.reference.count} Zufallsbilder, Seed ${job.run.config.reference.seed}` : `jedes ${job.run.config.reference.sampling_rate}. Bild`}</Text></Row>
-          <Row label="Anomaliephase"><Text>{job.run.config.anomaly.start} – {job.run.config.anomaly.end} · jedes {job.run.config.anomaly.sampling_rate}. Bild</Text></Row>
-          <Row label="Farbskalen"><Text>Mittelwert: {job.run.config.mean_scale.mode === 'auto' ? 'automatisch' : job.run.config.mean_scale.limit} · Varianz: {job.run.config.variance_scale.mode === 'auto' ? 'automatisch' : `±${job.run.config.variance_scale.limit}`}</Text></Row>
+          {isPairConfig(job.run.config) ? <>
+            <Row label="Sampling"><Text>Jedes {job.run.config.sampling_rate}. Bild für alle Zeiträume</Text></Row>
+            {job.run.config.pairs.map((pair, i) => <Row key={i} label={`u${i + 1}`}><Text>Normalzustand: {pair.normal.start} – {pair.normal.end}<br />Anomaliephase: {pair.anomaly.start} – {pair.anomaly.end}</Text></Row>)}
+            <Row label="Farbskalen"><Text>Varianz: {job.run.config.variance_scale.mode === 'auto' ? 'automatisch' : job.run.config.variance_scale.limit} · Differenz: {job.run.config.difference_scale.mode === 'auto' ? 'automatisch' : `±${job.run.config.difference_scale.limit}`} gray value²</Text></Row>
+          </> : <>
+            <Row label="Normalphase"><Text>{job.run.config.reference.start} – {job.run.config.reference.end} · {job.run.config.reference.mode === 'random' ? `${job.run.config.reference.count} Zufallsbilder, Seed ${job.run.config.reference.seed}` : `jedes ${job.run.config.reference.sampling_rate}. Bild`}</Text></Row>
+            <Row label="Anomaliephase"><Text>{job.run.config.anomaly.start} – {job.run.config.anomaly.end} · jedes {job.run.config.anomaly.sampling_rate}. Bild</Text></Row>
+            <Row label="Differenzskala"><Text>{job.run.config.variance_scale.mode === 'auto' ? 'automatisch' : `±${job.run.config.variance_scale.limit}`}</Text></Row>
+          </>}
           {job.run.error_message && <Text c="red">{job.run.error_message}</Text>}
         </Stack> : job.kind === 'reference_image' ? <Stack gap="sm">
           <Row label="Datensatz"><Text>{job.run.training_dataset_name}</Text></Row>
           <Row label="Preprocessing"><Text>{job.run.pipeline_snapshot.name}</Text></Row>
           <Row label="Referenz"><Text>{job.run.config.reference.start} – {job.run.config.reference.end} · {job.run.config.reference.mode === 'random' ? `${job.run.config.reference.count} Zufallsbilder, Seed ${job.run.config.reference.seed}` : `jedes ${job.run.config.reference.sampling_rate}. Bild`}</Text></Row>
           <Row label="Anomalie"><Text>{job.run.config.anomaly.start} – {job.run.config.anomaly.end} · jedes {job.run.config.anomaly.sampling_rate}. Bild</Text></Row>
+          <Row label="Offset Start"><Text>{job.run.config.start_offset_minutes ?? 0} Minuten vor Anomaliebeginn · Sampling ab vorgezogenem Beginn</Text></Row>
           <Row label="Video"><Text>{job.run.config.fps} FPS · {job.run.config.processing_mode === 'shift_clip' ? `16 Bit · Shift ${job.run.config.shift} · Clip ${job.run.config.clip_min} bis ${job.run.config.clip_max}` : `Kontrast ${job.run.config.scale_mode}`}</Text></Row>
           {job.run.error_message && <Text c="red">{job.run.error_message}</Text>}
         </Stack> : job.kind === 'time_series_train' ? <Stack><Text>{job.run.name} · {job.run.kind}</Text><Text>Epoche {job.run.epoch}/{job.run.epochs} · {job.run.current_step}</Text><Text>Checkpoint: {job.run.checkpoint_selection} · ausgewählte Epoche {job.run.selected_epoch ?? '–'}</Text><Text>L={job.run.snapshot.window_length} · {job.run.snapshot.split.name}</Text></Stack> : job.kind === 'dinov3_analysis'

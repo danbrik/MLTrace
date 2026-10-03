@@ -9,6 +9,7 @@ export const initialConfig: ReferenceImageConfig = {
   training_dataset_id: 0, preprocessing_pipeline_id: 0,
   reference: { start: '', end: '', sampling_rate: 1, mode: 'regular', count: 1, seed: 42 },
   anomaly: { start: '', end: '', sampling_rate: 1 },
+  start_offset_minutes: 0,
   processing_mode: 'shift_clip', shift: 10000, clip_min: 0, clip_max: 12000,
   scale_mode: 'auto', scale_limit: null, fps: 10,
 };
@@ -16,6 +17,7 @@ export const frameFilename = (index: number) => `frame_${String(index).padStart(
 export const displayTime = (value: string) => value.replace('T', ' ');
 export function validateConfig(config: ReferenceImageConfig): string | null {
   if (!config.training_dataset_id || !config.preprocessing_pipeline_id) return 'Datensatz und Preprocessing auswählen.';
+  if (!Number.isSafeInteger(config.start_offset_minutes) || config.start_offset_minutes < 0) return 'Offset Start muss eine ganze Zahl ab 0 Minuten sein.';
   for (const role of ['reference', 'anomaly'] as const) {
     const interval = config[role];
     if (!interval.start || !interval.end || !Number.isFinite(Date.parse(interval.start)) || !Number.isFinite(Date.parse(interval.end))) return 'Beide Zeiträume vollständig angeben.';
