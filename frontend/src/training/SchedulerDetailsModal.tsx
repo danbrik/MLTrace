@@ -21,6 +21,8 @@ import type {
 } from '../types';
 
 export type SchedulerJob =
+  | { kind: 'temporal_difference'; run: import('../temporalDifference/types').Run }
+  | { kind: 'variance_roi'; run: import('../meanVariance/roiTypes').VarianceRoiJob }
   | { kind: 'mean_variance'; run: import('../meanVariance/types').MeanVarianceRun }
   | { kind: 'reference_image'; run: ReferenceImageRun }
   | { kind: 'time_series_train'; run: import('../timeSeries/types').SensorRun }
@@ -123,7 +125,7 @@ export function SchedulerDetailsModal({
   trainingRunById: Map<number, TrainingRun>;
 }) {
   const title = job
-    ? job.kind === 'mean_variance' ? `Varianz · ${job.run.training_dataset_name}` : job.kind === 'reference_image' ? `Referenzbild · ${job.run.training_dataset_name}` : job.kind === 'time_series_train' ? job.run.name : job.kind === 'dinov3_analysis' ? `DINOv3 · ${job.run.training_dataset_name}` : job.kind === 'train'
+    ? job.kind === 'temporal_difference' ? `Zeitabstand · ${job.run.training_dataset_name}` : job.kind === 'variance_roi' ? `ROI · Vergleich #${job.run.parent_run_id}` : job.kind === 'mean_variance' ? `Varianz · ${job.run.training_dataset_name}` : job.kind === 'reference_image' ? `Referenzbild · ${job.run.training_dataset_name}` : job.kind === 'time_series_train' ? job.run.name : job.kind === 'dinov3_analysis' ? `DINOv3 · ${job.run.training_dataset_name}` : job.kind === 'train'
       ? job.run.training_pipeline_name
       : job.kind === 'heatmap'
         ? `Heatmap video · ${job.run.testing_run_name}`
@@ -302,7 +304,20 @@ export function SchedulerDetailsModal({
   return (
     <Modal opened={job !== null} onClose={onClose} title={title} size="xl">
       {job &&
-        (job.kind === 'mean_variance' ? <Stack gap="sm">
+        (job.kind === 'temporal_difference' ? <Stack gap="sm">
+          <Row label="Datensatz"><Text size="sm">{job.run.training_dataset_name}</Text></Row>
+          <Row label="Preprocessing"><Text size="sm">{job.run.pipeline_snapshot.name}</Text></Row>
+          <Row label="Referenz"><Text size="sm">{job.run.config.reference.start.replace('T', ' ')} – {job.run.config.reference.end.replace('T', ' ')}</Text></Row>
+          <Row label="Vergleich"><Text size="sm">{job.run.config.comparison.start.replace('T', ' ')} – {job.run.config.comparison.end.replace('T', ' ')}</Text></Row>
+          <Row label="Zeitabstände"><Text size="sm">{job.run.config.deltas_seconds.join(', ')} Sekunden · exakte Bildpaare</Text></Row>
+          <Row label="Fortschritt"><Text size="sm">{job.run.processed_images}/{job.run.total_images ?? '…'} Paare</Text></Row>
+        </Stack> : job.kind === 'variance_roi' ? <Stack gap="sm">
+          <Row label="Vergleich"><Text>#{job.run.parent_run_id} · {job.run.training_dataset_name}</Text></Row>
+          <Row label="Auftrag"><Text>{job.run.operation === 'prepare' ? 'ROI-Daten nachberechnen' : 'ROI-Plot und Tabelle erstellen'}</Text></Row>
+          <Row label="Fortschritt"><Text>{job.run.processed_images} / {job.run.total_images ?? '—'} · {job.run.status}</Text></Row>
+          {job.run.operation === 'evaluate' && job.run.result?.roi && <Row label="ROI"><Text>x={job.run.result.roi.x}, y={job.run.result.roi.y} · {job.run.result.roi.width} × {job.run.result.roi.height} Pixel</Text></Row>}
+          {job.run.error_message && <Text c="red">{job.run.error_message}</Text>}
+        </Stack> : job.kind === 'mean_variance' ? <Stack gap="sm">
           <Row label="Datensatz"><Text>{job.run.training_dataset_name}</Text></Row>
           <Row label="Preprocessing"><Text>{job.run.pipeline_snapshot.name}</Text></Row>
           {isPairConfig(job.run.config) ? <>

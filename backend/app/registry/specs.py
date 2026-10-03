@@ -112,6 +112,10 @@ def _training_dataset_dependents(db: Session, td_id: int) -> list[Dependent]:
         db, "mean_variance_run", models.MeanVarianceRun, models.MeanVarianceRun.id,
         lambda r: f"Varianz #{r.id} · {r.training_dataset_name}", models.MeanVarianceRun.training_dataset_id == td_id,
     )
+    out += _named(
+        db, "temporal_difference_run", models.TemporalDifferenceRun, models.TemporalDifferenceRun.id,
+        lambda r: f"Zeitabstand #{r.id} · {r.training_dataset_name}", models.TemporalDifferenceRun.training_dataset_id == td_id,
+    )
     pipelines = db.scalars(
         select(models.TrainingPipeline)
         .join(
@@ -493,12 +497,35 @@ def _delete_reference_image(db: Session, entity_id: int) -> bool:
     return delete_run(db, entity_id)
 
 
+def _delete_temporal_difference(db: Session, entity_id: int) -> bool:
+    from app.temporal_difference.service import delete_run
+    return delete_run(db, entity_id)
+
+
 def _delete_mean_variance(db: Session, entity_id: int) -> bool:
     from app.mean_variance.service import delete_run
     return delete_run(db, entity_id)
 
 
+def _delete_variance_roi(db: Session, entity_id: int) -> bool:
+    from app.mean_variance.roi_service import delete_job
+    return delete_job(db, entity_id)
+
+
+def _variance_dependents(db: Session, parent_id: int) -> list[Dependent]:
+    return _named(db, "variance_roi_job", models.VarianceRoiJob, models.VarianceRoiJob.id,
+                  lambda r: f"ROI #{r.id} · Vergleich #{r.parent_run_id}", models.VarianceRoiJob.parent_run_id == parent_id)
+
+
 ENTITY_SPECS: dict[str, EntitySpec] = {
+    "variance_roi_job": EntitySpec(
+        key="variance_roi_job", label="Varianz-ROI-Auswertungen", model=models.VarianceRoiJob,
+        name_of=lambda r: f"ROI #{r.id} · Vergleich #{r.parent_run_id}",
+        list_fields=["id", "parent_run_id", "training_dataset_name", "operation", "status", "current_step", "created_at"],
+        search_fields=["training_dataset_name"], filters=[_STATUS_FILTER, _CREATED_FILTER],
+        artifacts=lambda db, row: [data_dir() / "variance_roi_jobs" / str(row.id)],
+        deleter=_delete_variance_roi, blockers=_job_blockers,
+    ),
     "time_range_preset": EntitySpec(
         key="time_range_preset", label="Gespeicherte Zeiträume", model=models.TimeRangePreset,
         name_of=lambda r: r.name,
@@ -514,13 +541,21 @@ ENTITY_SPECS: dict[str, EntitySpec] = {
         artifacts=lambda db, row: [data_dir() / "reference_image_runs" / str(row.id)],
         deleter=_delete_reference_image, blockers=_job_blockers,
     ),
+    "temporal_difference_run": EntitySpec(
+        key="temporal_difference_run", label="Zeitabstands-Analysen", model=models.TemporalDifferenceRun,
+        name_of=lambda r: f"Zeitabstand #{r.id} · {r.training_dataset_name}",
+        list_fields=["id", "training_dataset_name", "status", "current_step", "device", "created_at"],
+        search_fields=["training_dataset_name"], filters=[_STATUS_FILTER, _CREATED_FILTER],
+        artifacts=lambda db, row: [data_dir() / "temporal_difference_runs" / str(row.id)],
+        deleter=_delete_temporal_difference, blockers=_job_blockers,
+    ),
     "mean_variance_run": EntitySpec(
         key="mean_variance_run", label="Varianzvergleiche", model=models.MeanVarianceRun,
         name_of=lambda r: f"Varianz #{r.id} · {r.training_dataset_name}",
         list_fields=["id", "training_dataset_name", "status", "current_step", "device", "created_at"],
         search_fields=["training_dataset_name"], filters=[_STATUS_FILTER, _CREATED_FILTER],
         artifacts=lambda db, row: [data_dir() / "mean_variance_runs" / str(row.id)],
-        deleter=_delete_mean_variance, blockers=_job_blockers,
+        deleter=_delete_mean_variance, blockers=_job_blockers, dependents=_variance_dependents,
     ),
     "representation_run": EntitySpec(
         key="representation_run", label="DINOv3-Repräsentationsanalysen", model=models.RepresentationRun,
@@ -859,7 +894,9 @@ ENTITY_SPECS: dict[str, EntitySpec] = {
 
 # Bottom-up deletion order for cascades: children before their parents.
 DELETE_ORDER: list[str] = [
+    "variance_roi_job",
     "mean_variance_run",
+    "temporal_difference_run",
     "time_range_preset",
     "data_quality_analysis",
     "redundancy_analysis",

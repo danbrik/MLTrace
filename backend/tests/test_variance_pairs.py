@@ -74,7 +74,7 @@ def test_pairs_run_export_reopen_and_snapshot(comparison, count):
         assert metadata['pipeline_name'] == 'Original'
         assert metadata['pairs'][0]['periods'] == cfg.pairs[0].model_dump(mode='json')
     assert service.artifact_path(db, run.id, 'mean_difference.png') is None
-    assert sorted(p.name for p in service.artifact_dir(run.id).iterdir()) == ['manifest.json', 'results.json', 'variance_comparison.png']
+    assert sorted(p.name for p in service.artifact_dir(run.id).iterdir()) == ['manifest.json', 'results.json', 'roi_data', 'variance_comparison.png']
     assert saved.processed_images == saved.total_images == result['total_images']
 
 

@@ -1193,7 +1193,7 @@ class SchedulerJobMoveRequest(BaseModel):
 
 
 class SchedulerJobMoveResponse(BaseModel):
-    kind: Literal["train", "test", "heatmap", "image_distribution", "resolution_sensitivity", "spatial_sensitivity", "dinov3_analysis", "time_series_train", "reference_image", "mean_variance"]
+    kind: Literal["train", "test", "heatmap", "image_distribution", "resolution_sensitivity", "spatial_sensitivity", "dinov3_analysis", "time_series_train", "reference_image", "mean_variance", "variance_roi", "temporal_difference"]
     run_id: int
     queue_rank: int | None
 
@@ -2042,7 +2042,7 @@ class ImageDistributionRunRead(BaseModel):
 class SchedulerJobWithProjectRead(BaseModel):
     project_id: str
     project_name: str
-    kind: Literal["train", "test", "heatmap", "image_distribution", "resolution_sensitivity", "spatial_sensitivity", "dinov3_analysis", "time_series_train", "reference_image", "mean_variance"]
+    kind: Literal["train", "test", "heatmap", "image_distribution", "resolution_sensitivity", "spatial_sensitivity", "dinov3_analysis", "time_series_train", "reference_image", "mean_variance", "variance_roi", "temporal_difference"]
     queue_rank: int | None = None
     run: dict
 

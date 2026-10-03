@@ -1,4 +1,5 @@
-import { Alert, Badge, Button, Group, Image, Loader, NumberInput, Paper, Progress, Select, SimpleGrid, Stack, Table, Text, Title } from '@mantine/core';
+import { VarianceRoiPanel } from '../meanVariance/VarianceRoiPanel';
+import { Alert, Badge, Button, Group, Image, Loader, NumberInput, Paper, Progress, Select, SimpleGrid, Stack, Table, Tabs, Text, Title } from '@mantine/core';
 import { useEffect, useRef, useState } from 'react';
 import { TimeRangePresetPicker } from '../timeRangePresets/TimeRangePresetPicker';
 import { DateTime24Input } from '../components/DateTime24Input';
@@ -16,6 +17,7 @@ const periodText = (period: {start: string; end: string}) => `${displayTime(peri
 const scaleText = (scale: HeatmapScale) => scale.mode === 'auto' ? 'Automatisch' : `${scale.limit} gray value²`;
 
 export function MeanVariancePage({ active, projectId }: { active: boolean; projectId: string }) {
+  const [tab, setTab] = useState<string | null>("comparison");
   const [datasets, setDatasets] = useState<TrainingDataset[]>([]);
   const [pipelines, setPipelines] = useState<PreprocessingPipeline[]>([]);
   const [config, setConfig] = useState<MeanVarianceConfig>(() => structuredClone(initialConfig));
@@ -35,7 +37,7 @@ export function MeanVariancePage({ active, projectId }: { active: boolean; proje
     ?? (!datasets.some(item => item.id === config.training_dataset_id && !item.invalid_rule_count) ? 'Bitte einen verfügbaren Datensatz auswählen.' : null)
     ?? (!pipelines.some(item => item.id === config.preprocessing_pipeline_id) ? 'Bitte eine verfügbare Preprocessing-Pipeline auswählen.' : null);
   function openRun(next: MeanVarianceRun | null) {
-    viewRevision.current++; setRun(next); setResults(null); setPreview(null); setLog(null); setPollError(null); setError(null);
+    setTab("comparison"); viewRevision.current++; setRun(next); setResults(null); setPreview(null); setLog(null); setPollError(null); setError(null);
   }
   useEffect(() => {
     if (!active) return;
@@ -99,6 +101,9 @@ export function MeanVariancePage({ active, projectId }: { active: boolean; proje
     <Select label="Lauf öffnen" searchable disabled={busy || loading} value={run ? String(run.id) : null} allowDeselect={false}
       data={runs.map(item => ({ value: String(item.id), label: `#${item.id} · ${item.training_dataset_name} · ${phaseLabel(item.status)}` }))}
       onChange={value => openRun(runs.find(item => String(item.id) === value) ?? null)} />
+    <Tabs value={tab} onChange={setTab} keepMounted={false}>
+      {run?.status === 'finished' && <Tabs.List mb="lg"><Tabs.Tab value="comparison">Varianzvergleich</Tabs.Tab><Tabs.Tab value="roi">ROI-Auswertung</Tabs.Tab></Tabs.List>}
+      <Tabs.Panel value="comparison"><Stack gap="lg">
     {run ? <Paper withBorder p="lg"><Stack>
       <Group><Title order={4}>Gespeicherte Einstellungen · Lauf #{run.id}</Title><Badge>{phaseLabel(run.status)}</Badge></Group>
       <Text>Datensatz: {run.training_dataset_name} · Preprocessing: {run.pipeline_snapshot.name}</Text>
@@ -196,5 +201,8 @@ export function MeanVariancePage({ active, projectId }: { active: boolean; proje
         <Button component="a" w="fit-content" href={meanVarianceArtifactUrl(run.id, results.maps.variance.filename, projectId, true)}>Varianzdifferenz als PNG herunterladen</Button>
       </>}
     </Stack></Paper>}
+      </Stack></Tabs.Panel>
+      <Tabs.Panel value="roi">{run?.status === 'finished' && <VarianceRoiPanel key={`${projectId}-${run.id}`} runId={run.id} projectId={projectId} active={active} />}</Tabs.Panel>
+    </Tabs>
   </Stack>;
 }

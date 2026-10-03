@@ -1693,12 +1693,12 @@ export function updateSchedulerSettings(payload: { max_gpu_slots: number; only_g
   });
 }
 
-export function moveSchedulerJob(kind: 'train' | 'test' | 'heatmap' | 'image_distribution' | 'resolution_sensitivity' | 'spatial_sensitivity' | 'dinov3_analysis' | 'time_series_train' | 'reference_image' | 'mean_variance', runId: number, direction: 'up' | 'down', projectId?: string): Promise<{
-  kind: 'train' | 'test' | 'heatmap' | 'image_distribution' | 'resolution_sensitivity' | 'spatial_sensitivity' | 'dinov3_analysis' | 'time_series_train' | 'reference_image' | 'mean_variance';
+export function moveSchedulerJob(kind: 'train' | 'test' | 'heatmap' | 'image_distribution' | 'resolution_sensitivity' | 'spatial_sensitivity' | 'dinov3_analysis' | 'time_series_train' | 'reference_image' | 'mean_variance' | 'variance_roi' | 'temporal_difference', runId: number, direction: 'up' | 'down', projectId?: string): Promise<{
+  kind: 'train' | 'test' | 'heatmap' | 'image_distribution' | 'resolution_sensitivity' | 'spatial_sensitivity' | 'dinov3_analysis' | 'time_series_train' | 'reference_image' | 'mean_variance' | 'variance_roi' | 'temporal_difference';
   run_id: number;
   queue_rank: number | null;
 }> {
-  return request<{ kind: 'train' | 'test' | 'heatmap' | 'image_distribution' | 'resolution_sensitivity' | 'spatial_sensitivity' | 'dinov3_analysis' | 'time_series_train' | 'reference_image' | 'mean_variance'; run_id: number; queue_rank: number | null }>(`/api/scheduler/jobs/${kind}/${runId}/move`, {
+  return request<{ kind: 'train' | 'test' | 'heatmap' | 'image_distribution' | 'resolution_sensitivity' | 'spatial_sensitivity' | 'dinov3_analysis' | 'time_series_train' | 'reference_image' | 'mean_variance' | 'variance_roi' | 'temporal_difference'; run_id: number; queue_rank: number | null }>(`/api/scheduler/jobs/${kind}/${runId}/move`, {
     method: 'POST',
     body: JSON.stringify({ direction }),
   }, undefined, projectId).then((response) => {
@@ -2096,4 +2096,70 @@ export function deleteMeanVarianceRun(id: number, projectId?: string) {
 }
 export function meanVarianceArtifactUrl(id: number, name: string, projectId: string, download = false) {
   return `${API_BASE_URL}/api/mean-variance-analysis/runs/${id}/artifacts/${encodeURIComponent(name)}?download=${download}&project_id=${encodeURIComponent(projectId)}`;
+}
+
+export function getVarianceRoiState(id: number, projectId: string) {
+  return request<import('./meanVariance/roiTypes').RoiState>(`/api/mean-variance-analysis/runs/${id}/roi`, undefined, undefined, projectId);
+}
+export function prepareVarianceRoi(id: number, projectId: string) {
+  return request<import('./meanVariance/roiTypes').VarianceRoiJob>(`/api/mean-variance-analysis/runs/${id}/roi/prepare`, {method: 'POST'}, undefined, projectId);
+}
+export function evaluateVarianceRoi(id: number, payload: import('./meanVariance/roiTypes').RoiConfig, projectId: string) {
+  return request<import('./meanVariance/roiTypes').VarianceRoiJob>(`/api/mean-variance-analysis/runs/${id}/roi/evaluate`, {method: 'POST', body: JSON.stringify(payload)}, undefined, projectId);
+}
+export function listVarianceRoiJobs(projectId?: string) {
+  return request<import('./meanVariance/roiTypes').VarianceRoiJob[]>('/api/mean-variance-analysis/roi-jobs', undefined, undefined, projectId);
+}
+export function abortVarianceRoiJob(id: number, projectId?: string) {
+  return request<import('./meanVariance/roiTypes').VarianceRoiJob>(`/api/mean-variance-analysis/roi-jobs/${id}/abort`, {method: 'POST'}, undefined, projectId);
+}
+export function deleteVarianceRoiJob(id: number, projectId?: string) {
+  return request<void>(`/api/mean-variance-analysis/roi-jobs/${id}`, {method: 'DELETE'}, undefined, projectId);
+}
+export function getVarianceRoiLog(id: number, projectId?: string) {
+  return request<{log: string}>(`/api/mean-variance-analysis/roi-jobs/${id}/log`, undefined, undefined, projectId);
+}
+export function varianceRoiImageUrl(id: number, pair: number, layer: 'background' | 'heatmap', projectId: string) {
+  return `${API_BASE_URL}/api/mean-variance-analysis/runs/${id}/roi/images/${pair}/${layer}?project_id=${encodeURIComponent(projectId)}`;
+}
+export function varianceRoiArtifactUrl(id: number, jobId: number, name: string, projectId: string, download = false) {
+  return `${API_BASE_URL}/api/mean-variance-analysis/runs/${id}/roi/artifacts/${jobId}/${encodeURIComponent(name)}?project_id=${encodeURIComponent(projectId)}&download=${download}`;
+}
+
+// Exact temporal differences; all requests retain the explicit project context.
+export function previewTemporalDifference(payload: import('./temporalDifference/types').Config, projectId?: string) {
+  return request<import('./temporalDifference/types').Preview>('/api/temporal-difference/preview', { method: 'POST', body: JSON.stringify(payload) }, undefined, projectId);
+}
+export function createTemporalDifferenceRun(payload: import('./temporalDifference/types').Config, projectId?: string) {
+  return request<import('./temporalDifference/types').Run>('/api/temporal-difference/runs', { method: 'POST', body: JSON.stringify(payload) }, undefined, projectId);
+}
+export function listTemporalDifferenceRuns(projectId?: string) {
+  return request<import('./temporalDifference/types').Run[]>('/api/temporal-difference/runs', undefined, undefined, projectId);
+}
+export function getTemporalDifferenceRun(id: number, projectId?: string) {
+  return request<import('./temporalDifference/types').Run>(`/api/temporal-difference/runs/${id}`, undefined, undefined, projectId);
+}
+export function getTemporalDifferenceSummary(id: number, projectId?: string) {
+  return request<import('./temporalDifference/types').Summary[]>(`/api/temporal-difference/runs/${id}/summary`, undefined, undefined, projectId);
+}
+export function getTemporalDifferencePairs(id: number, offset: number, role: string | null, delta: string | null, projectId?: string) {
+  const params = new URLSearchParams({ offset: String(offset), limit: '50' });
+  if (role) params.set('role', role);
+  if (delta) params.set('delta', delta);
+  return request<import('./temporalDifference/types').PairPage>(`/api/temporal-difference/runs/${id}/pairs?${params}`, undefined, undefined, projectId);
+}
+export function saveTemporalDifferencePlot(id: number, settings: import('./temporalDifference/types').PlotSettings, projectId?: string) {
+  return request<import('./temporalDifference/types').PlotSettings>(`/api/temporal-difference/runs/${id}/plot-settings`, { method: 'PUT', body: JSON.stringify(settings) }, undefined, projectId);
+}
+export function getTemporalDifferenceLog(id: number, projectId?: string) {
+  return request<{ log: string }>(`/api/temporal-difference/runs/${id}/log`, undefined, undefined, projectId);
+}
+export function abortTemporalDifferenceRun(id: number, projectId?: string) {
+  return request<import('./temporalDifference/types').Run>(`/api/temporal-difference/runs/${id}/abort`, { method: 'POST' }, undefined, projectId);
+}
+export function deleteTemporalDifferenceRun(id: number, projectId?: string) {
+  return request<void>(`/api/temporal-difference/runs/${id}`, { method: 'DELETE' }, undefined, projectId);
+}
+export function temporalDifferenceCsvUrl(id: number, kind: 'summary' | 'pairs', projectId: string) {
+  return `${API_BASE_URL}/api/temporal-difference/runs/${id}/csv/${kind}?project_id=${encodeURIComponent(projectId)}`;
 }

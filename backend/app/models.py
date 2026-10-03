@@ -1,6 +1,6 @@
 from datetime import UTC, datetime
 
-from sqlalchemy import BigInteger, Boolean, DateTime, Float, ForeignKey, Index, Integer, LargeBinary, String, Text, UniqueConstraint, func
+from sqlalchemy import BigInteger, Boolean, DateTime, Float, ForeignKey, Index, Integer, LargeBinary, String, Text, UniqueConstraint, func, text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from sqlalchemy.types import JSON
@@ -1769,3 +1769,100 @@ class MeanVarianceRun(Base):
     log_path: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
+
+
+class VarianceRoiJob(Base):
+    """Post-processing job; successful revisions never mutate their parent comparison."""
+    __tablename__ = "variance_roi_jobs"
+    __table_args__ = (Index("ix_variance_roi_jobs_status", "status"),
+        Index("uq_variance_roi_active_parent", "parent_run_id", unique=True,
+              sqlite_where=text("status IN ('queued', 'running')"),
+              postgresql_where=text("status IN ('queued', 'running')")),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    parent_run_id: Mapped[int] = mapped_column(ForeignKey("mean_variance_runs.id", ondelete="RESTRICT"), index=True)
+    operation: Mapped[str] = mapped_column(String(16))
+    training_dataset_name: Mapped[str] = mapped_column(String(255))
+    config: Mapped[dict] = mapped_column(json_type())
+    result: Mapped[dict | None] = mapped_column(json_type())
+    status: Mapped[str] = mapped_column(String(32), default="queued")
+    current_step: Mapped[str] = mapped_column(String(64), default="queued")
+    processed_images: Mapped[int] = mapped_column(Integer, default=0)
+    total_images: Mapped[int | None] = mapped_column(Integer)
+    cancel_requested: Mapped[bool] = mapped_column(Boolean, default=False)
+    error_message: Mapped[str | None] = mapped_column(Text)
+    queue_rank: Mapped[int | None] = mapped_column(Integer)
+    enqueued_at: Mapped[datetime | None] = mapped_column(DateTime)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime)
+    ended_at: Mapped[datetime | None] = mapped_column(DateTime)
+    duration_seconds: Mapped[float | None] = mapped_column(Float)
+    heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime)
+    device: Mapped[str | None] = mapped_column(String(32))
+    gpu_index: Mapped[int | None] = mapped_column(Integer)
+    pid: Mapped[int | None] = mapped_column(Integer)
+    log_path: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
+
+
+class TemporalDifferenceRun(Base):
+    """Frozen configuration and lifecycle of an exact temporal difference run."""
+    __tablename__ = "temporal_difference_runs"
+    __table_args__ = (Index("ix_temporal_difference_runs_status", "status"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    training_dataset_id: Mapped[int] = mapped_column(ForeignKey("training_datasets.id", ondelete="RESTRICT"))
+    training_dataset_name: Mapped[str] = mapped_column(String(255))
+    config: Mapped[dict] = mapped_column(json_type())
+    dataset_snapshot: Mapped[dict] = mapped_column(json_type())
+    pipeline_snapshot: Mapped[dict] = mapped_column(json_type())
+    plot_settings: Mapped[dict] = mapped_column(json_type())
+    result: Mapped[dict | None] = mapped_column(json_type())
+    status: Mapped[str] = mapped_column(String(32), default="queued")
+    current_step: Mapped[str] = mapped_column(String(64), default="queued")
+    processed_images: Mapped[int] = mapped_column(Integer, default=0)
+    total_images: Mapped[int | None] = mapped_column(Integer)
+    cancel_requested: Mapped[bool] = mapped_column(Boolean, default=False)
+    error_message: Mapped[str | None] = mapped_column(Text)
+    queue_rank: Mapped[int | None] = mapped_column(Integer)
+    enqueued_at: Mapped[datetime | None] = mapped_column(DateTime)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime)
+    ended_at: Mapped[datetime | None] = mapped_column(DateTime)
+    duration_seconds: Mapped[float | None] = mapped_column(Float)
+    heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime)
+    device: Mapped[str | None] = mapped_column(String(32))
+    gpu_index: Mapped[int | None] = mapped_column(Integer)
+    pid: Mapped[int | None] = mapped_column(Integer)
+    log_path: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
+
+
+class TemporalDifferenceValue(Base):
+    __tablename__ = "temporal_difference_values"
+    __table_args__ = (Index("ix_temporal_values_run_role_delta", "run_id", "role", "delta_seconds", "id"),)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    run_id: Mapped[int] = mapped_column(ForeignKey("temporal_difference_runs.id", ondelete="CASCADE"))
+    role: Mapped[str] = mapped_column(String(16))
+    delta_seconds: Mapped[int] = mapped_column(BigInteger)
+    first_file: Mapped[str] = mapped_column(Text)
+    second_file: Mapped[str] = mapped_column(Text)
+    first_timestamp: Mapped[str] = mapped_column(String(40))
+    second_timestamp: Mapped[str] = mapped_column(String(40))
+    first_utc: Mapped[str] = mapped_column(String(40))
+    second_utc: Mapped[str] = mapped_column(String(40))
+    value: Mapped[float] = mapped_column(Float)
+
+
+class TemporalDifferenceSummary(Base):
+    __tablename__ = "temporal_difference_summaries"
+    __table_args__ = (UniqueConstraint("run_id", "role", "delta_seconds", name="uq_temporal_summary"),)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    run_id: Mapped[int] = mapped_column(ForeignKey("temporal_difference_runs.id", ondelete="CASCADE"))
+    role: Mapped[str] = mapped_column(String(16))
+    delta_seconds: Mapped[int] = mapped_column(BigInteger)
+    pair_count: Mapped[int] = mapped_column(Integer)
+    median: Mapped[float | None] = mapped_column(Float)
+    q1: Mapped[float | None] = mapped_column(Float)
+    q3: Mapped[float | None] = mapped_column(Float)
+    iqr: Mapped[float | None] = mapped_column(Float)

@@ -120,3 +120,73 @@ Download und Bereinigung. `test_mean_variance.py` erhält die Altformat-Regressi
 `test_reference_image.py` prüft die gemeinsam verwendete Bildauswahl.
 Frontendtests prüfen Validierung, globale Einstellungen, Kopieren alter/neuer
 Konfigurationen, erforderliche Sampling-Auswahl und projektgebundene API-Aufrufe.
+
+## ROI-Auswertung
+
+Nach einem fertigen Lauf öffnet der Unterreiter **ROI-Auswertung** eine gemeinsame,
+achsenparallele ROI für alle Paare. Der Editor zeigt je Paar das Normalmittelbild
+und die vorzeichenbehaftete Varianzdifferenz. Vier Eckpunkte und das Rechteck sind
+ziehbar; fokussierte Punkte lassen sich mit Pfeiltasten um einen Pixel, mit
+Umschalt um zehn Pixel bewegen. Die Anfangsauswahl umfasst das ganze Bild, die
+Heatmap-Deckkraft beträgt 50 %. Der Paarwechsel verändert die gemeinsame ROI
+nicht. Koordinaten bezeichnen Pixelgrenzen: `x, y, width, height` entspricht exakt
+`image[y:y+height, x:x+width]`.
+
+**Fertig** erstellt einen CPU-Auftrag für zwei separate PNG-Downloads: den Plot
+mit Gesamtbild/ROI-Rahmen und Ausschnitt je u1…u6 sowie eine Ergebnistabelle.
+Beide Ansichten verwenden dieselben Hintergrund- und Heatmap-Pixel, globale
+Graustufengrenzen, die gespeicherte Differenzskala und die gewählte Deckkraft.
+Der Ausschnitt wird weder entzerrt noch geglättet. Gemeinsame äußere Pixelachsen
+und die Legende `Variance difference (gray value²)` beschriften den Plot.
+Eckkoordinaten und Ausschnittgröße stehen nur in der Oberfläche und in den
+PNG-Metadaten. Metadaten enthalten außerdem die ursprüngliche Konfiguration,
+Datensatz, Pipeline, Zeiträume und Bildanzahlen.
+
+Die Tabelle misst **positive Varianzzunahme**, nicht die vorzeichenbehaftete
+Nettosumme: `Z = maximum(var_anomalie - var_normal, 0)` und
+`Anteil = sum(Z[roi]) / sum(Z)`. Der Flächenanteil ist
+`width * height / (Gesamtbreite * Gesamthöhe)`. Negative Werte bleiben in der
+Heatmap sichtbar, gehen aber nicht in diese Kennzahl ein. `Mean` ist das
+ungewichtete Mittel der gültigen paarweisen Anteile. Ohne positive Zunahme ist
+der Anteil undefiniert (`—`); diese Paare werden unter Angabe der gültigen
+Anzahl vom Mittelwert ausgeschlossen. Grenzen und Transparenz beeinflussen
+niemals die Kennzahlen. Es gibt keinen CSV- oder numerischen Rohdaten-Download.
+
+Neue Läufe bewahren pro Paar Normalmittelbild und Differenzkarte in `float64`
+auf. Für alte V1/V2-Läufe bietet **ROI-Daten nachberechnen** eine explizite
+Nachbereitung anhand des eingefrorenen Manifests und Pipelinegraphen, mit
+unveränderten Dateiidentitäts- und Größenprüfungen. Geänderte oder fehlende
+Dateien verursachen einen Fehler; Status, Konfiguration und ursprüngliche PNGs
+des Elternlaufs bleiben erhalten.
+
+Die Migration `0064_variance_roi` ergänzt projektlokale `VarianceRoiJob`-Datensätze.
+CPU-Aufträge der Scheduler-Art `variance_roi` führen `prepare` oder `evaluate`
+aus. Pro Elternlauf darf genau ein Auftrag aktiv sein; ein partieller eindeutiger
+Index sichert dies auch bei gleichzeitigen Anfragen. Exporte sind unveränderliche
+Revisionen. Öffnen zeigt die zuletzt erfolgreich abgeschlossene Auswertung samt
+ROI und Deckkraft. Abbruch und Fehler einer neuen Revision lassen das vorherige
+Ergebnis verfügbar. Beim Entfernen eines fertigen Nachbereitungsauftrags bleiben
+die numerischen Grundlagen beim Elternlauf. Aktive ROI-Aufträge blockieren das
+Löschen des Elternlaufs; Data-Manager-Kaskaden löschen Kinder zuerst und bereinigen
+alle Artefakte.
+
+### API
+
+Alle Endpunkte unter `/api/mean-variance-analysis` verwenden die bestehende
+Projektbindung (`X-MLTrace-Project-ID`, für Bilder alternativ `project_id`).
+
+- `GET /runs/{id}/roi`: Verfügbarkeit, Bild-/Paarbeschreibung, letzter Auftrag und
+  zuletzt erfolgreich gespeicherte Auswertung.
+- `POST /runs/{id}/roi/prepare`: Fehlende numerische Grundlagen nachberechnen.
+- `POST /runs/{id}/roi/evaluate`: Export mit
+  `{"roi":{"x":0,"y":0,"width":100,"height":80},"opacity":0.5}` starten.
+- `GET /runs/{id}/roi/images/{pair}/{layer}`: Nullbasierter Paarindex;
+  `layer` ist `background` oder `heatmap`.
+- `GET /runs/{id}/roi/artifacts/{job_id}/{name}`: Fertige `roi_comparison.png`
+  beziehungsweise `roi_table.png`; `download=true` erzwingt Download.
+- `GET /roi-jobs`, `GET /roi-jobs/{id}/log`, `POST /roi-jobs/{id}/abort`,
+  `DELETE /roi-jobs/{id}`: Scheduler- und Verwaltungsfunktionen.
+
+Ein PNG ist erst abrufbar, wenn seine Exportrevision vollständig abgeschlossen
+ist. Numerische Karten und interne JSON-Dateien sind über diese Artefakt-API
+nicht abrufbar.

@@ -141,6 +141,8 @@ def delete_run(db: Session, run_id: int):
         return False
     if run.status in {"running", "queued"}:
         raise ValueError("Analyse vor dem Löschen abbrechen und auf das Ende warten.")
+    from app.mean_variance.roi_service import delete_children
+    delete_children(db, run_id)
     db.delete(run)
     db.commit()
     shutil.rmtree(artifact_dir(run_id), ignore_errors=True)
@@ -172,7 +174,7 @@ def read_log(db: Session, run_id: int):
         return "".join(deque(handle, maxlen=400))
 
 
-def run_scheduled(run_id: int, abort_event: threading.Event | None = None):
+def run_scheduled(run_id: int, abort_event: threading.Event | None = None, *, job_model=models.MeanVarianceRun, calculator=None):
     from app.database import SessionLocal
     abort_event = abort_event or threading.Event()
     started = time.perf_counter()
@@ -180,7 +182,7 @@ def run_scheduled(run_id: int, abort_event: threading.Event | None = None):
     stopped = threading.Event()
     heartbeat_thread = None
     try:
-        run = db.get(models.MeanVarianceRun, run_id)
+        run = db.get(job_model, run_id)
         if run is None or run.status not in {"queued", "running"}:
             return
         if run.cancel_requested or abort_event.is_set():
@@ -195,7 +197,7 @@ def run_scheduled(run_id: int, abort_event: threading.Event | None = None):
             while not stopped.wait(2):
                 try:
                     with factory() as session:
-                        current = session.get(models.MeanVarianceRun, run_id)
+                        current = session.get(job_model, run_id)
                         if current and current.status == "running":
                             if current.cancel_requested:
                                 abort_event.set()
@@ -219,10 +221,10 @@ def run_scheduled(run_id: int, abort_event: threading.Event | None = None):
             run.heartbeat_at = models.utc_now()
             db.commit()
 
-        result = calculate(run, report, abort_event)
+        result = (calculator or calculate)(run, report, abort_event)
         report("finished", result["total_images"], result["total_images"])
-        db.execute(update(models.MeanVarianceRun).where(
-            models.MeanVarianceRun.id == run_id, models.MeanVarianceRun.cancel_requested.is_(False)
+        db.execute(update(job_model).where(
+            job_model.id == run_id, job_model.cancel_requested.is_(False)
         ).values(status="finished", result=result, ended_at=models.utc_now(),
                  duration_seconds=round(time.perf_counter() - started, 3)))
         db.commit()
@@ -231,7 +233,7 @@ def run_scheduled(run_id: int, abort_event: threading.Event | None = None):
             raise AbortedError()
     except Exception as exc:
         db.rollback()
-        run = db.get(models.MeanVarianceRun, run_id)
+        run = db.get(job_model, run_id)
         if run:
             aborted = isinstance(exc, AbortedError) or abort_event.is_set() or run.cancel_requested
             run.status = run.current_step = "aborted" if aborted else "failed"
@@ -276,6 +278,10 @@ def calculate(run, report, abort_event):
             moments[role] = accumulator.finish()
         report("difference", total, total)
         mean, variance = difference_maps(moments["reference"], moments["anomaly"])
+        roi_data = temporary / "roi_data"
+        roi_data.mkdir()
+        np.save(roi_data / "0_mean.npy", moments["reference"][0])
+        np.save(roi_data / "0_difference.npy", variance)
         del moments
         maps = {}
         for key, values, scale, signed in (
@@ -291,6 +297,10 @@ def calculate(run, report, abort_event):
         result = {"total_images": total, "reference_count": counts["reference"], "anomaly_count": counts["anomaly"],
                   "width": shape[1], "height": shape[0], "ddof": 0, "maps": maps, "warnings": warnings}
         write_json(temporary / "results.json", result)
+        from app.mean_variance.roi_engine import finish_basis
+        finish_basis(roi_data, run.config, result, run.training_dataset_name, run.pipeline_snapshot["name"],
+                     lambda: report("exporting", total, total))
+        roi_data.replace(directory / "roi_data")
         for name in ("mean_difference.png", "variance_difference.png", "results.json"):
             (temporary / name).replace(directory / name)
         return result
@@ -324,12 +334,15 @@ def calculate_pairs(run, config, report, abort_event):
                     shape = array.shape
                     accumulator.add(array)
                     done += 1
-                _, values = accumulator.finish()
+                mean, values = accumulator.finish()
+                if role == "normal":
+                    (temporary / "roi_data").mkdir(exist_ok=True)
+                    np.save(temporary / "roi_data" / f"{index}_mean.npy", mean)
                 counts[role] = len(group)
                 path = temporary / f"{index}_{role}.npy"
                 np.save(path, values)
                 maps[role] = {**map_statistics(values), "path": str(path)}
-                del accumulator, values, array, _
+                del accumulator, values, array, mean
                 if len(group) == 1:
                     warnings.append(f"u{index + 1} {'Normalzustand' if role == 'normal' else 'Anomaliephase'}: Nur ein Bild; Varianz 0, keine zeitliche Vergleichsbasis.")
             normal = np.load(maps["normal"]["path"], mmap_mode="r")
@@ -340,6 +353,7 @@ def calculate_pairs(run, config, report, abort_event):
                 raise ValueError(f"u{index + 1}: Die Differenz enthält nicht endliche Werte.")
             path = temporary / f"{index}_difference.npy"
             np.save(path, difference)
+            np.save(temporary / "roi_data" / f"{index}_difference.npy", difference)
             maps["difference"] = {**map_statistics(difference), "path": str(path)}
             for role, stats in maps.items():
                 if stats["all_zero"]:
@@ -354,6 +368,9 @@ def calculate_pairs(run, config, report, abort_event):
         write_json(temporary / "results.json", result)
         check_abort()
         report("exporting", total, total)
+        from app.mean_variance.roi_engine import finish_basis
+        finish_basis(temporary / "roi_data", run.config, result, run.training_dataset_name, run.pipeline_snapshot["name"], check_abort)
+        (temporary / "roi_data").replace(directory / "roi_data")
         for name in ("variance_comparison.png", "results.json"):
             (temporary / name).replace(directory / name)
         return result

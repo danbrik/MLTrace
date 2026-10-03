@@ -40,6 +40,7 @@ import { ThresholdPage } from './pages/ThresholdPage';
 import { DatasetsPage } from './pages/DatasetsPage';
 import { InspectPage } from './pages/InspectPage';
 import { ImageDistributionPage } from './pages/ImageDistributionPage';
+import { TemporalDifferencePage } from './pages/TemporalDifferencePage';
 import { MeanVariancePage } from './pages/MeanVariancePage';
 import { ReferenceImagePage } from './pages/ReferenceImagePage';
 import { RepresentationAnalysisPage } from './pages/RepresentationAnalysisPage';
@@ -76,6 +77,7 @@ type Page =
   | 'analysis'
   | 'image-distribution'
   | 'reference-image-analysis'
+  | 'temporal-difference'
   | 'mean-variance-analysis'
   | 'dinov3-analysis'
   | 'resolution-sensitivity'
@@ -101,7 +103,7 @@ export function App() {
   const page: Page = requestedPage && [
     'time-series-datasets', 'time-series-splits', 'time-series-models', 'time-series-pipelines', 'time-series-results',
     'datasets', 'training-datasets', 'time-range-presets', 'preprocessing', 'methods', 'training-pipelines', 'testing',
-    'inspect', 'optimization', 'analysis', 'reference-image-analysis', 'mean-variance-analysis', 'dinov3-analysis', 'image-distribution', 'resolution-sensitivity', 'spatial-sensitivity', 'evaluation', 'anomaly-detection', 'inference-export', 'csv-merge', 'redundancy-analysis', 'data-quality-analysis', 'threshold', 'scheduler', 'data-manager',
+    'inspect', 'optimization', 'analysis', 'reference-image-analysis', 'temporal-difference', 'mean-variance-analysis', 'dinov3-analysis', 'image-distribution', 'resolution-sensitivity', 'spatial-sensitivity', 'evaluation', 'anomaly-detection', 'inference-export', 'csv-merge', 'redundancy-analysis', 'data-quality-analysis', 'threshold', 'scheduler', 'data-manager',
   ].includes(requestedPage) ? requestedPage : 'datasets';
   const timeSeriesMode = page.startsWith('time-series-');
   const [project, setProject] = useState<Project | null>(null);
@@ -160,6 +162,7 @@ export function App() {
     { id: 'analysis', label: 'Model Analysis', icon: <BarChart3 size={18} /> },
     { id: 'image-distribution', label: 'Image Distribution', icon: <LineChart size={18} /> },
     { id: 'mean-variance-analysis', label: 'Varianzvergleich', icon: <Eye size={18} /> },
+    { id: 'temporal-difference', label: 'Zeitabstands-Analyse', icon: <Eye size={18} /> },
     { id: 'reference-image-analysis', label: 'Referenzbild-Analyse', icon: <Eye size={18} /> },
     { id: 'dinov3-analysis', label: 'DINOv3-Repräsentationsanalyse', icon: <BrainCircuit size={18} /> },
     { id: 'resolution-sensitivity', label: 'Resolution Sensitivity', icon: <ScanSearch size={18} /> },
@@ -258,6 +261,9 @@ export function App() {
             <TimeSeriesPipelinesPage key={`pipelines-${projectId}`} active={page === 'time-series-pipelines'} />
             <TimeSeriesResultsPage key={`results-${projectId}`} active={page === 'time-series-results'} />
           </PageErrorBoundary>
+        </Box>
+        <Box display={page === 'temporal-difference' ? 'block' : 'none'}>
+          <PageErrorBoundary label="Zeitabstands-Analyse"><TemporalDifferencePage projectId={projectId} key={projectId} active={page === 'temporal-difference'} /></PageErrorBoundary>
         </Box>
         <Box display={page === 'mean-variance-analysis' ? 'block' : 'none'}>
           <PageErrorBoundary label="Varianzvergleich"><MeanVariancePage projectId={projectId} key={projectId} active={page === 'mean-variance-analysis'} /></PageErrorBoundary>
