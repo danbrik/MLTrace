@@ -3,12 +3,14 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Literal
 
 import numpy as np
 from PIL import Image
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.mean_variance.engine import comparison_style
+from app.mean_variance.roi_geometry import RotatedRectangle, oriented_roi, selection_mask, aligned_crop
 
 
 class Rectangle(BaseModel):
@@ -27,10 +29,16 @@ class Rectangle(BaseModel):
         return (slice(self.y, self.y + self.height), slice(self.x, self.x + self.width))
 
 
-class RoiConfig(BaseModel):
+class HeatmapDisplay(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    roi: Rectangle
     opacity: float = Field(default=.5, ge=0, le=1, allow_inf_nan=False)
+    # Missing mode denotes an existing job and retains its original rendering.
+    heatmap_mode: Literal["global", "local"] = "global"
+    sensitivity: float = Field(default=1, ge=.25, le=4, allow_inf_nan=False)
+
+
+class RoiConfig(HeatmapDisplay):
+    roi: Rectangle | RotatedRectangle
 
 
 def load_basis(directory):
@@ -74,44 +82,61 @@ def finish_basis(directory, config, result, dataset_name, pipeline_name, check_a
     return basis
 
 
-def positive_metrics(difference, roi):
-    roi.validate_bounds(difference.shape[1], difference.shape[0])
+def positive_metrics(difference, roi, mask=None):
+    if mask is None:
+        mask = selection_mask(roi, difference.shape[1], difference.shape[0])
     positive = np.maximum(difference, 0)
     with np.errstate(over="ignore", invalid="ignore"):
         total = float(np.sum(positive, dtype=np.float64))
-        inside = float(np.sum(positive[roi.slices], dtype=np.float64))
+        inside = float(np.sum(positive[mask], dtype=np.float64))
     if not np.isfinite(total) or not np.isfinite(inside):
         raise ValueError("Die Summe der Varianzzunahme ist nicht endlich.")
     return {"positive_total": total, "positive_roi": inside,
-            "area_percent": roi.width * roi.height / difference.size * 100,
+            "selected_pixels": int(mask.sum()),
+            "area_percent": int(mask.sum()) / difference.size * 100,
             "increase_percent": inside / total * 100 if total > 0 else None}
 
 
-def composite(directory, index, opacity):
-    # Both browser layers and export use these exact quantized presentation pixels.
+def composite(directory, index, opacity, heatmap_mode="global", sensitivity=1):
+    """The editor preview and export share exactly the same presentation pixels."""
+    display = HeatmapDisplay(opacity=opacity, heatmap_mode=heatmap_mode, sensitivity=sensitivity)
+    alpha = display.opacity
+    if display.heatmap_mode == "local":
+        limit = load_basis(directory)["difference_scale_limit"]
+        difference = np.load(directory / f"{index}_difference.npy", mmap_mode="r")
+        if not np.isfinite(difference).all():
+            raise ValueError("ROI-Daten enthalten nicht endliche Werte.")
+        if limit > 0:
+            # Clip before division to avoid overflow for very small manual limits.
+            magnitude = np.minimum(np.abs(difference), limit) / limit
+            alpha = (display.opacity * np.power(magnitude, 1 / display.sensitivity))[..., None]
+        else:
+            alpha = 0
     with Image.open(directory / f"{index}_background.png") as background, Image.open(directory / f"{index}_heatmap.png") as heatmap:
-        return np.rint(np.asarray(background, dtype=np.float64) * (1 - opacity)
-                       + np.asarray(heatmap, dtype=np.float64) * opacity).astype(np.uint8)
+        return np.rint(np.asarray(background, dtype=np.float64) * (1 - alpha)
+                       + np.asarray(heatmap, dtype=np.float64) * alpha).astype(np.uint8)
 
 
 def export_roi(directory: Path, output: Path, config: RoiConfig, check_abort=lambda: None):
     from matplotlib.figure import Figure
     from matplotlib.backends.backend_agg import FigureCanvasAgg
     from matplotlib.cm import ScalarMappable
-    from matplotlib.patches import Rectangle as Patch
+    from matplotlib.patches import Polygon
 
     basis = load_basis(directory)
     roi = config.roi
-    roi.validate_bounds(basis["width"], basis["height"])
+    mask = selection_mask(roi, basis["width"], basis["height"])
     rows = []
     for index, pair in enumerate(basis["pairs"]):
         check_abort()
         values = np.load(directory / f"{index}_difference.npy", mmap_mode="r")
-        rows.append({"label": pair["label"], **positive_metrics(values, roi)})
+        rows.append({"label": pair["label"], **positive_metrics(values, roi, mask)})
     valid = [row["increase_percent"] for row in rows if row["increase_percent"] is not None]
-    result = {**basis, **config.model_dump(), "rows": rows, "valid_pairs": len(valid),
+    result = {**basis, **config.model_dump(), "roi": oriented_roi(roi).model_dump(), "rows": rows, "valid_pairs": len(valid),
               "area_percent": rows[0]["area_percent"], "mean_increase_percent": float(np.mean(valid)) if valid else None,
               "plot": "roi_comparison.png", "table": "roi_table.png",
+              "roi_corners": oriented_roi(roi).corners().tolist(), "selected_pixels": int(mask.sum()),
+              "output_width": roi.width, "output_height": roi.height, "resampling": "nearest",
               "warnings": [f"{row['label']}: Keine positive Varianzzunahme; nicht im Mittelwert enthalten." for row in rows if row["increase_percent"] is None]}
     metadata = {"Title": "ROI-Auswertung", "Description": json.dumps(result, ensure_ascii=False, allow_nan=False)}
     count = len(rows)
@@ -122,14 +147,14 @@ def export_roi(directory: Path, output: Path, config: RoiConfig, check_abort=lam
     try:
         for index, pair in enumerate(basis["pairs"]):
             check_abort()
-            pixels = composite(directory, index, config.opacity)
+            pixels = composite(directory, index, config.opacity, config.heatmap_mode, config.sensitivity)
             y = height - .5 - row_height - index * (row_height + .3)
             fig.text(.025, (y + row_height / 2) / height, pair["label"], va="center", fontsize=12)
-            for column, data in enumerate((pixels, pixels[roi.slices])):
+            for column, data in enumerate((pixels, aligned_crop(pixels, roi))):
                 ax = fig.add_axes(((1.2 + column * 5.25) / 12, y / height, 4.9 / 12, row_height / height))
                 ax.imshow(data, origin="upper", interpolation="nearest", aspect="equal")
                 if column == 0:
-                    ax.add_patch(Patch((roi.x - .5, roi.y - .5), roi.width, roi.height,
+                    ax.add_patch(Polygon(oriented_roi(roi).corners() - .5, closed=True,
                                        fill=False, edgecolor="#ff9800", linewidth=1.5, clip_on=False))
                 ax.tick_params(labelsize=9, labelleft=column == 0, left=column == 0,
                                labelbottom=index == count - 1, bottom=index == count - 1)

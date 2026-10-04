@@ -1,3 +1,4 @@
+import { roiCoordinates } from '../meanVariance/roiGeometry';
 import { isPairConfig } from '../meanVariance/types';
 import { Badge, Group, Modal, Paper, ScrollArea, Stack, Table, Text } from '@mantine/core';
 import type { ReactNode } from 'react';
@@ -315,7 +316,7 @@ export function SchedulerDetailsModal({
           <Row label="Vergleich"><Text>#{job.run.parent_run_id} · {job.run.training_dataset_name}</Text></Row>
           <Row label="Auftrag"><Text>{job.run.operation === 'prepare' ? 'ROI-Daten nachberechnen' : 'ROI-Plot und Tabelle erstellen'}</Text></Row>
           <Row label="Fortschritt"><Text>{job.run.processed_images} / {job.run.total_images ?? '—'} · {job.run.status}</Text></Row>
-          {job.run.operation === 'evaluate' && job.run.result?.roi && <Row label="ROI"><Text>x={job.run.result.roi.x}, y={job.run.result.roi.y} · {job.run.result.roi.width} × {job.run.result.roi.height} Pixel</Text></Row>}
+          {job.run.operation === 'evaluate' && job.run.result?.roi && <Row label="ROI"><Text>{roiCoordinates(job.run.result.roi)}</Text></Row>}
           {job.run.error_message && <Text c="red">{job.run.error_message}</Text>}
         </Stack> : job.kind === 'mean_variance' ? <Stack gap="sm">
           <Row label="Datensatz"><Text>{job.run.training_dataset_name}</Text></Row>

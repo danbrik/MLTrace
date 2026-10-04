@@ -14,6 +14,7 @@ from app.database import data_dir
 from app.image_selection import read_frozen_image
 from app.mean_variance import service
 from app.mean_variance.engine import OnlineMoments
+from app.mean_variance.roi_geometry import selection_mask, oriented_roi
 from app.mean_variance.roi_engine import RoiConfig, export_roi, finish_basis, load_basis
 from app.preprocessing.pipeline import compile_pipeline
 from app.reference_image.engine import grayscale
@@ -78,8 +79,8 @@ def enqueue(db, parent_id, operation, config=None, *, wake_scheduler=True):
     else:
         if not current["ready"]:
             raise ValueError("Bitte zuerst die ROI-Daten nachberechnen.")
-        config.roi.validate_bounds(current["basis"]["width"], current["basis"]["height"])
-        payload = config.model_dump()
+        selection_mask(config.roi, current["basis"]["width"], current["basis"]["height"])
+        payload = {**config.model_dump(), "roi": oriented_roi(config.roi).model_dump()}
     job = models.VarianceRoiJob(parent_run_id=parent_id, operation=operation,
                                training_dataset_name=parent.training_dataset_name, config=payload,
                                status="queued", current_step="queued", queue_rank=next_queue_rank(db), enqueued_at=models.utc_now())

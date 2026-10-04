@@ -1,11 +1,15 @@
-from fastapi import APIRouter, Depends, HTTPException
-from fastapi.responses import FileResponse
+from io import BytesIO
+from typing import Literal
+
+from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi.responses import FileResponse, Response
+from PIL import Image
 from sqlalchemy.orm import Session
 
 from app import models
 from app.database import get_db
 from app.mean_variance import roi_service as service
-from app.mean_variance.roi_engine import RoiConfig
+from app.mean_variance.roi_engine import RoiConfig, composite
 
 router = APIRouter(prefix="/api/mean-variance-analysis", tags=["variance-roi"])
 
@@ -40,10 +44,18 @@ def evaluate(run_id: int, payload: RoiConfig, db: Session = Depends(get_db)):
 
 
 @router.get("/runs/{run_id}/roi/images/{pair}/{layer}")
-def image(run_id: int, pair: int, layer: str, db: Session = Depends(get_db)):
+def image(run_id: int, pair: int, layer: str, db: Session = Depends(get_db),
+          opacity: float = Query(.5, ge=0, le=1, allow_inf_nan=False),
+          sensitivity: float = Query(1, ge=.25, le=4, allow_inf_nan=False),
+          heatmap_mode: Literal["global", "local"] = "local"):
     state = invoke(service.state, db, run_id)
-    if not state["ready"] or pair < 0 or pair >= len(state["basis"]["pairs"]) or layer not in {"background", "heatmap"}:
+    if not state["ready"] or pair < 0 or pair >= len(state["basis"]["pairs"]) or layer not in {"background", "heatmap", "composite"}:
         raise HTTPException(404, "ROI-Bild nicht gefunden.")
+    if layer == "composite":
+        pixels = invoke(composite, service.basis_dir(run_id, db), pair, opacity, heatmap_mode, sensitivity)
+        output = BytesIO()
+        Image.fromarray(pixels).save(output, format="PNG")
+        return Response(output.getvalue(), media_type="image/png", headers={"Cache-Control": "no-store"})
     return FileResponse(service.basis_dir(run_id, db) / f"{pair}_{layer}.png", media_type="image/png")
 
 

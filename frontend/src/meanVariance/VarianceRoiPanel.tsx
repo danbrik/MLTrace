@@ -1,15 +1,18 @@
-import { Alert, Button, Group, Image, Loader, Paper, Progress, Select, Slider, Stack, Table, Text, Title } from '@mantine/core';
+import { Alert, Button, Group, Image, Loader, NumberInput, Paper, Progress, Select, Slider, Stack, Table, Text, Title } from '@mantine/core';
 import { useEffect, useRef, useState } from 'react';
-import { abortVarianceRoiJob, evaluateVarianceRoi, getVarianceRoiState, prepareVarianceRoi, varianceRoiArtifactUrl, varianceRoiImageUrl } from '../api';
+import { abortVarianceRoiJob, evaluateVarianceRoi, getVarianceRoiState, prepareVarianceRoi, varianceRoiArtifactUrl, varianceRoiPreviewUrl } from '../api';
 import { RoiEditor } from './RoiEditor';
-import { roiCoordinates } from './roiGeometry';
+import { orientedRoi, roiCoordinates, roiValidation } from './roiGeometry';
 import { displayTime } from './helpers';
-import type { RoiConfig, RoiState } from './roiTypes';
+import type { RoiDraft, RoiState, RoiResult } from './roiTypes';
 const fmt = (value: number | null) => value === null ? '—' : value.toLocaleString('de-DE', {maximumFractionDigits: 2});
+const restored = (result: RoiResult): RoiDraft => ({roi: orientedRoi(result.roi), opacity: result.opacity,
+  heatmap_mode: result.heatmap_mode ?? 'global', sensitivity: result.sensitivity ?? 1});
 
 export function VarianceRoiPanel({runId, projectId, active}: {runId: number; projectId: string; active: boolean}) {
   const [state, setState] = useState<RoiState | null>(null);
-  const [config, setConfig] = useState<RoiConfig | null>(null);
+  const [config, setConfig] = useState<RoiDraft | null>(null);
+  const [angleInput, setAngleInput] = useState<string | number>(0);
   const [pair, setPair] = useState('0');
   const [editing, setEditing] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -44,12 +47,15 @@ export function VarianceRoiPanel({runId, projectId, active}: {runId: number; pro
     if (!basis) return;
     if (!initialized.current) {
       initialized.current = true;
-      setConfig(result ? {roi: result.roi, opacity: result.opacity} : {roi: {x: 0, y: 0, width: basis.width, height: basis.height}, opacity: .5});
+      setConfig(result ? restored(result) : {roi: {version: 2, center_x: basis.width / 2, center_y: basis.height / 2, width: basis.width, height: basis.height, angle_degrees: 0}, opacity: .5, heatmap_mode: 'local', sensitivity: 1});
       setEditing(!result);
     } else if (!editing && result) {
-      setConfig({roi: result.roi, opacity: result.opacity});
+      setConfig(restored(result));
     }
   }, [!!basis, saved?.id, editing]);
+  useEffect(() => {if (config) setAngleInput(config.roi.angle_degrees);}, [config?.roi.angle_degrees, editing]);
+  const angleValid = angleInput !== '' && Number.isFinite(Number(angleInput));
+  const validation = !angleValid ? 'Bitte einen gültigen Winkel eingeben.' : basis && config ? roiValidation(config.roi, basis.width, basis.height) : null;
   async function action(work: () => Promise<unknown>, finish = false) {
     setBusy(true); setError(null);
     try {
@@ -80,20 +86,31 @@ export function VarianceRoiPanel({runId, projectId, active}: {runId: number; pro
       {basis.pairs.map(item => <Text key={item.label} size="sm">{item.label}: Normalzustand {displayTime(item.periods.normal.start)} – {displayTime(item.periods.normal.end)} ({item.counts.normal} Bilder) · Anomaliephase {displayTime(item.periods.anomaly.start)} – {displayTime(item.periods.anomaly.end)} ({item.counts.anomaly} Bilder)</Text>)}
       {editing ? <>
         <Select label="Paar im Editor" value={pair} allowDeselect={false} disabled={busy || running} data={basis.pairs.map((item, i) => ({value: String(i), label: item.label}))} onChange={value => setPair(value ?? '0')} />
-        <Text size="sm">Deckkraft der Heatmap: {Math.round(config.opacity * 100)} %</Text>
-        <Slider thumbLabel="Deckkraft der Heatmap" value={config.opacity * 100} min={0} max={100} disabled={busy || running} onChange={value => setConfig({...config, opacity: value / 100})} />
-        <RoiEditor key={pair} width={basis.width} height={basis.height} value={config.roi} opacity={config.opacity} disabled={busy || running}
-          background={varianceRoiImageUrl(runId, Number(pair), 'background', projectId)} heatmap={varianceRoiImageUrl(runId, Number(pair), 'heatmap', projectId)}
+        <Text size="sm">Heatmap-Deckkraft: {Math.round(config.opacity * 100)} %</Text>
+        <Slider thumbLabel="Heatmap-Deckkraft" value={config.opacity * 100} min={0} max={100} disabled={busy || running} onChange={value => setConfig({...config, opacity: value / 100})} />
+        <Text size="sm">Empfindlichkeit: {fmt(config.sensitivity)}</Text>
+        <Slider thumbLabel="Empfindlichkeit" value={config.sensitivity} min={.25} max={4} step={.05} precision={2} disabled={busy || running} onChange={sensitivity => setConfig({...config, sensitivity})} />
+        <Text size="sm" c="dimmed">Rot zeigt Varianzzunahme, Blau Varianzabnahme. Ohne Änderung bleibt das Hintergrundbild unverändert. Höhere Empfindlichkeit hebt schwache Änderungen hervor; die Tabelle bleibt unverändert.</Text>
+        <Group align="end">
+          <NumberInput label="Winkel (°)" description="Positive Winkel drehen im Uhrzeigersinn." value={angleInput} step={1} disabled={busy || running}
+            onChange={value => {setAngleInput(value); if (value !== '' && Number.isFinite(Number(value))) setConfig({...config, roi: {...config.roi, angle_degrees: Number(value)}});}} />
+          <Button variant="light" disabled={busy || running} onClick={() => {setAngleInput(0); setConfig({...config, roi: {...config.roi, angle_degrees: 0}});}}>Drehung zurücksetzen</Button>
+        </Group>
+        {config.roi.width === basis.width && config.roi.height === basis.height && <Text size="sm" c="dimmed">Bei einer Vollbildauswahl bitte vor dem Drehen das Rechteck verkleinern, damit es innerhalb des Bildes bleibt.</Text>}
+        <Text size="sm" c="dimmed">Der Ausschnitt wird mit Nearest Neighbor gerade ausgerichtet, ohne Glättung oder Mischung benachbarter Pixelwerte. Die Tabelle verwendet die Originalpixel.</Text>
+        {validation && <Alert color="red">{validation}</Alert>}
+        <RoiEditor invalid={!!validation} key={`${projectId}-${runId}-${pair}`} width={basis.width} height={basis.height} value={config.roi} disabled={busy || running}
+          previewUrl={varianceRoiPreviewUrl(runId, Number(pair), projectId, config)}
           onChange={roi => setConfig({...config, roi})} />
         <Text size="sm">{roiCoordinates(config.roi)}</Text>
-        <Group><Button disabled={busy || running} onClick={() => void action(() => evaluateVarianceRoi(runId, config, projectId), true)}>Fertig</Button>
+        <Group><Button disabled={busy || running || !!validation} onClick={() => void action(() => evaluateVarianceRoi(runId, config, projectId), true)}>Fertig</Button>
           {result && <Button variant="subtle" disabled={busy || running} onClick={() => setEditing(false)}>Bearbeitung verwerfen</Button>}
         </Group>
       </> : <>
-        <Button w="fit-content" variant="light" disabled={busy || running} onClick={() => setEditing(true)}>ROI bearbeiten</Button>
+        <Button w="fit-content" variant="light" disabled={busy || running} onClick={() => {setConfig({...config, heatmap_mode: 'local'}); setEditing(true);}}>ROI bearbeiten</Button>
         {result && saved && <>
           {running && <Text size="sm" c="dimmed">Das bisher gespeicherte Ergebnis bleibt bis zum erfolgreichen Abschluss sichtbar.</Text>}
-          <Text size="sm">{roiCoordinates(result.roi)} · Deckkraft: {Math.round(result.opacity * 100)} %</Text>
+          <Text size="sm">{roiCoordinates(result.roi)} · Heatmap-Deckkraft: {Math.round(result.opacity * 100)} % · {result.heatmap_mode === 'local' ? `Empfindlichkeit: ${fmt(result.sensitivity ?? 1)}` : 'Bisherige flächige Darstellung'}</Text>
           {result.warnings.map(warning => <Alert key={warning} color="yellow">{warning}</Alert>)}
           {result.mean_increase_percent !== null ? <Text fw={600}>Die ROI umfasst {fmt(result.area_percent)} % der Bildfläche und enthält im Mittel {fmt(result.mean_increase_percent)} % der positiven Varianzzunahme.</Text>
             : <Text>Keine positive Varianzzunahme vorhanden; ein Anteil kann nicht berechnet werden.</Text>}

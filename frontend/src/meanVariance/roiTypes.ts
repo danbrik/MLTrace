@@ -1,5 +1,9 @@
-export type RoiRectangle = { x: number; y: number; width: number; height: number };
-export type RoiConfig = { roi: RoiRectangle; opacity: number };
+export type LegacyRoiRectangle = { x: number; y: number; width: number; height: number };
+export type RotatedRoiRectangle = { version: 2; center_x: number; center_y: number; width: number; height: number; angle_degrees: number };
+export type RoiRectangle = LegacyRoiRectangle | RotatedRoiRectangle;
+export type HeatmapDisplay = { opacity: number; heatmap_mode: 'global' | 'local'; sensitivity: number };
+export type RoiDraft = { roi: RotatedRoiRectangle } & HeatmapDisplay;
+export type RoiConfig = { roi: RoiRectangle; opacity: number; heatmap_mode?: HeatmapDisplay['heatmap_mode']; sensitivity?: number };
 export type RoiBasis = {
   version: number; width: number; height: number; difference_scale_limit: number;
   background_min: number; background_max: number; dataset_name: string; pipeline_name: string;
@@ -9,6 +13,7 @@ export type RoiResult = RoiBasis & RoiConfig & {
   rows: {label: string; area_percent: number; increase_percent: number | null; positive_roi: number; positive_total: number}[];
   area_percent: number; mean_increase_percent: number | null; valid_pairs: number; warnings: string[];
   plot: string; table: string;
+  roi_corners?: [number, number][]; selected_pixels?: number; output_width?: number; output_height?: number; resampling?: 'nearest';
 };
 type RoiJobBase = {
   id: number; parent_run_id: number; training_dataset_name: string;

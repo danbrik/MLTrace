@@ -36,7 +36,7 @@ def completed(setup, count=1, legacy=False):
 
 
 def config(**kwargs):
-    return engine.RoiConfig(roi={'x': 10, 'y': 20, 'width': 30, 'height': 40}, **kwargs)
+    return engine.RoiConfig(roi={'version': 2, 'center_x': 25, 'center_y': 40, 'width': 30, 'height': 40, 'angle_degrees': 0}, **kwargs)
 
 
 def test_positive_metrics_signed_cancellation_and_boundaries():

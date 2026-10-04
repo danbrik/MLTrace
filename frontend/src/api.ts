@@ -2122,6 +2122,10 @@ export function getVarianceRoiLog(id: number, projectId?: string) {
 export function varianceRoiImageUrl(id: number, pair: number, layer: 'background' | 'heatmap', projectId: string) {
   return `${API_BASE_URL}/api/mean-variance-analysis/runs/${id}/roi/images/${pair}/${layer}?project_id=${encodeURIComponent(projectId)}`;
 }
+export function varianceRoiPreviewUrl(id: number, pair: number, projectId: string, display: import('./meanVariance/roiTypes').HeatmapDisplay) {
+  const query = new URLSearchParams({project_id: projectId, opacity: String(display.opacity), sensitivity: String(display.sensitivity), heatmap_mode: display.heatmap_mode});
+  return `${API_BASE_URL}/api/mean-variance-analysis/runs/${id}/roi/images/${pair}/composite?${query}`;
+}
 export function varianceRoiArtifactUrl(id: number, jobId: number, name: string, projectId: string, download = false) {
   return `${API_BASE_URL}/api/mean-variance-analysis/runs/${id}/roi/artifacts/${jobId}/${encodeURIComponent(name)}?project_id=${encodeURIComponent(projectId)}&download=${download}`;
 }
