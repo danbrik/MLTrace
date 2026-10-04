@@ -2349,3 +2349,10 @@ export type ReferenceImageRun = Omit<RepresentationRun, 'config' | 'result' | 'm
 export type ReferenceImageFrame = { index: number; timestamp: string; distance: number };
 export type ReferenceImageResults = { summary: ReferenceImageSummary; frames: ReferenceImageFrame[] };
 export type ReferenceImageLookup = { requested_timestamp: string; exact: boolean; frame: ReferenceImageFrame };
+
+export type TrainingLossPlot = {
+  run_id: number;
+  metrics: TrainingRunMetric[];
+  has_validation: boolean;
+  image_data_url: string | null;
+};

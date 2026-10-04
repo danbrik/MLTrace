@@ -7,6 +7,8 @@ a single indexed table. Process control is delegated to the scheduler.
 
 from __future__ import annotations
 
+from app.training.loss_plot import finite_loss
+
 import shutil
 import uuid
 from datetime import datetime
@@ -385,9 +387,9 @@ def serialize_training_run(db: Session, run: models.TrainingRun) -> TrainingRunR
         device=run.device,
         epochs_total=run.epochs_total,
         epochs_completed=run.epochs_completed,
-        train_loss=run.train_loss,
-        val_loss=run.val_loss,
-        best_val_loss=run.best_val_loss,
+        train_loss=finite_loss(run.train_loss),
+        val_loss=finite_loss(run.val_loss),
+        best_val_loss=finite_loss(run.best_val_loss),
         image_count=run.image_count,
         artifact_kind=run.artifact_kind,
         artifact_path=run.artifact_path,
@@ -426,7 +428,7 @@ def serialize_training_run(db: Session, run: models.TrainingRun) -> TrainingRunR
         created_at=run.created_at,
         updated_at=run.updated_at,
         metrics=[
-            TrainingRunMetricRead(epoch=metric.epoch, train_loss=metric.train_loss, val_loss=metric.val_loss)
+            TrainingRunMetricRead(epoch=metric.epoch, train_loss=finite_loss(metric.train_loss), val_loss=finite_loss(metric.val_loss))
             for metric in sorted(run.metrics, key=lambda item: item.epoch)
         ],
     )

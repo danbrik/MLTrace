@@ -360,7 +360,7 @@ export function App() {
         </Box>
         <Box display={page === 'scheduler' ? 'block' : 'none'}>
           <PageErrorBoundary label="Scheduler">
-            <SchedulerPage active={page === 'scheduler'} />
+            <SchedulerPage key={projectId} active={page === 'scheduler'} />
           </PageErrorBoundary>
         </Box>
         <Box display={page === 'data-manager' ? 'block' : 'none'}>

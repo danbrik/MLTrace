@@ -2167,3 +2167,7 @@ export function deleteTemporalDifferenceRun(id: number, projectId?: string) {
 export function temporalDifferenceCsvUrl(id: number, kind: 'summary' | 'pairs', projectId: string) {
   return `${API_BASE_URL}/api/temporal-difference/runs/${id}/csv/${kind}?project_id=${encodeURIComponent(projectId)}`;
 }
+
+export function getTrainingLossPlot(runId: number, projectId?: string, signal?: AbortSignal) {
+  return request<import('./types').TrainingLossPlot>(`/api/training-runs/${runId}/loss-plot`, { signal }, undefined, projectId);
+}

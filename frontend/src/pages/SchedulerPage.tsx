@@ -35,7 +35,7 @@ import { notifications } from '@mantine/notifications';
 import { StepCard } from '../components/StepCard';
 import { DEFAULT_TABLE_PAGE_SIZE, TablePagination } from '../components/TablePagination';
 import { usePendingIds } from '../hooks/usePendingIds';
-import { ArrowDown, ArrowUp, FileText, Info, RotateCcw, Search, StopCircle, Trash2 } from 'lucide-react';
+import { ChartLine, ArrowDown, ArrowUp, FileText, Info, RotateCcw, Search, StopCircle, Trash2 } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState } from 'react';
 
 import {
@@ -82,6 +82,9 @@ import {
   restartTrainingRunFromCheckpoint,
   updateSchedulerSettings,
 } from '../api';
+import { TrainingLossModal } from '../training/TrainingLossModal';
+import { supportsLossPlot } from '../training/lossPlot';
+import { getActiveProject } from '../api';
 import { SchedulerDetailsModal } from '../training/SchedulerDetailsModal';
 import type { SchedulerJob } from '../training/SchedulerDetailsModal';
 import { formatDuration, runStatusColor } from '../training/runStatus';
@@ -339,6 +342,7 @@ export function SchedulerPage({ active = true }: { active?: boolean }) {
   const [heatmapsPage, setHeatmapsPage] = useState(1);
 
   const [logJob, setLogJob] = useState<DisplayJob | null>(null);
+  const [lossJobKey, setLossJobKey] = useState<string | null>(null);
   const [detailJob, setDetailJob] = useState<SchedulerJob | null>(null);
 
   async function refreshRuns() {
@@ -458,6 +462,8 @@ export function SchedulerPage({ active = true }: { active?: boolean }) {
       return (b.run.created_at ?? '').localeCompare(a.run.created_at ?? '');
     });
   }, [temporalDifferenceRuns, varianceRoiJobs, trainingRuns, testingRuns, heatmapRanges, imageDistributionRuns, resolutionSensitivityRuns, spatialSensitivityRuns, representationRuns, referenceImageRuns, meanVarianceRuns, sensorRuns, globalJobs, scope]);
+
+  const lossJob = jobs.find(job => jobKey(job) === lossJobKey);
 
   const queuedJobs = useMemo(() => jobs.filter((job) => job.run.status === 'queued'), [jobs]);
   const queueIndexByKey = useMemo(
@@ -849,6 +855,9 @@ export function SchedulerPage({ active = true }: { active?: boolean }) {
                               <Info size={18} />
                             </ActionIcon>
                           </Tooltip>
+                          {trainingRun && supportsLossPlot(trainingRun) && <Tooltip label="Loss-Plot">
+                            <ActionIcon variant="subtle" aria-label={`Loss-Plot Lauf ${trainingRun.id}`} onClick={() => setLossJobKey(jobKey(job))}><ChartLine size={18} /></ActionIcon>
+                          </Tooltip>}
                           <Tooltip label="Logs">
                             <ActionIcon variant="subtle" onClick={() => setLogJob(job)}>
                               <FileText size={18} />
@@ -1050,6 +1059,7 @@ export function SchedulerPage({ active = true }: { active?: boolean }) {
         </Stack>
       </Paper>
 
+      {active && lossJob?.kind === 'train' && <TrainingLossModal key={jobKey(lossJob)} run={lossJob.run} projectId={lossJob.project_id ?? getActiveProject() ?? undefined} onClose={() => setLossJobKey(null)} />}
       <LogModal job={logJob} onClose={() => setLogJob(null)} />
       <SchedulerDetailsModal
         job={detailJob}

@@ -1232,6 +1232,13 @@ class TrainingRunMetricRead(BaseModel):
     val_loss: float | None
 
 
+class TrainingLossPlotRead(BaseModel):
+    run_id: int
+    metrics: list[TrainingRunMetricRead]
+    has_validation: bool
+    image_data_url: str | None
+
+
 class TrainingRunRead(BaseModel):
     validation_mode: str = "legacy_fraction"
     validation_shuffle: bool = False

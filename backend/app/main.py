@@ -1700,6 +1700,19 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=404, detail="Training run not found.")
         return run
 
+    from app.schemas import TrainingLossPlotRead
+    from app.training.loss_plot import get_loss_plot
+
+    @app.get("/api/training-runs/{run_id}/loss-plot", response_model=TrainingLossPlotRead)
+    def api_training_loss_plot(run_id: int, db: Session = Depends(get_db)):
+        try:
+            result = get_loss_plot(db, run_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        if result is None:
+            raise HTTPException(status_code=404, detail="Training run not found.")
+        return result
+
     @app.get("/api/training-runs/{run_id}/log", response_model=TrainingRunLogResponse)
     def api_get_training_run_log(run_id: int, db: Session = Depends(get_db)):
         log = training_service.read_run_log(db, run_id)
