@@ -10,7 +10,7 @@ from PIL import Image
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.mean_variance.engine import comparison_style
-from app.mean_variance.roi_geometry import RotatedRectangle, oriented_roi, selection_mask, aligned_crop
+from app.image_geometry import RotatedRectangle, oriented_roi, selection_mask, aligned_crop
 
 
 class Rectangle(BaseModel):

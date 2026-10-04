@@ -72,7 +72,13 @@ For custom interactive controls, add `ui_control` to the step schema and make
 sure the frontend has a matching control registered. Existing controls include:
 
 - `point_picker`: writes a four-point `source_points` config.
-- `crop_box`: writes `x`, `y`, `width`, and `height`.
+- `crop_box`: writes a `roi` object with `version: 2`, `center_x`, `center_y`,
+  integer `width`/`height`, and clockwise `angle_degrees`. The crop step validates
+  this nested object, image bounds and presence of an original pixel center.
+  Missing `roi` preserves the legacy `x`, `y`, `width`, `height` behavior.
+  An explicit `roi` overrides all legacy coordinates. Shared geometry lives in
+  `app.image_geometry`; the step aligns with nearest neighbor, then optionally
+  resizes using the existing `output_size` and `interpolation` settings.
 
 ## Runtime Context
 

@@ -33,7 +33,11 @@ Existing controls live under `frontend/src/preprocessing/controls/` and are
 registered in `controls/index.ts`:
 
 - `point_picker`: edits `source_points`.
-- `crop_box`: edits `x`, `y`, `width`, `height`.
+- `crop_box`: edits `roi` (version 2: center, integer width/height, clockwise angle).
+  Old `x`, `y`, `width`, `height` configs stay unchanged until a geometry edit.
+  The shared `imageGeometry/RectangleEditor` provides four corners, translation
+  and a rotation handle for both crop and variance ROI. The control also supplies
+  an angle field, reset action, validation and pixel-coordinate readout.
 
 To add a new control:
 
@@ -56,6 +60,10 @@ Controls receive:
 
 Controls should only write their own `ownedKeys`. They should not call backend
 APIs directly. The page automatically reruns preview after config changes.
+Preview responses are tied to the graph, folder and loaded pipeline that requested
+them. Outputs from changed prefixes are hidden; an unchanged input prefix remains
+available for editing even when the crop itself is invalid. Only a successful
+preview of the current graph permits saving. Project changes remount the page.
 
 ## Preview, Save, Training
 

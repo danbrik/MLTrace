@@ -284,7 +284,7 @@ export function App() {
           <PageErrorBoundary label="Gespeicherte Zeiträume"><TimeRangePresetsPage key={projectId} projectId={projectId} active={page === 'time-range-presets'} /></PageErrorBoundary>
         </Box>
         <Box display={page === 'preprocessing' ? 'block' : 'none'}>
-          <PreprocessingPipelinesPage active={page === 'preprocessing'} />
+          <PreprocessingPipelinesPage key={projectId} active={page === 'preprocessing'} />
         </Box>
         <Box display={page === 'methods' ? 'block' : 'none'}>
           <MethodsPage active={page === 'methods'} />

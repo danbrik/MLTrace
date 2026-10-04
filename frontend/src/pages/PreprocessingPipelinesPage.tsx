@@ -27,7 +27,7 @@ import { notifications } from '@mantine/notifications';
 import { StepCard } from '../components/StepCard';
 import { DEFAULT_TABLE_PAGE_SIZE, TablePagination } from '../components/TablePagination';
 import { ArrowDown, ArrowUp, Eye, Info, Pencil, Plus, Save, Settings2, Trash2, Upload } from 'lucide-react';
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
 
 import {
@@ -41,6 +41,7 @@ import {
   updatePreprocessingPipeline,
 } from '../api';
 import { CONTROL_REGISTRY } from '../preprocessing/controls';
+import { fullImageCrop } from '../preprocessing/controls/cropGeometry';
 import { usePendingIds } from '../hooks/usePendingIds';
 import { snapshotsEqual } from '../lib/snapshots';
 import type {
@@ -199,6 +200,16 @@ export function PreprocessingPipelinesPage({ active = true }: { active?: boolean
       data: { label: 'Load image', stepType: 'load_image', config: {} },
     },
   ]);
+  const mounted = useRef(true);
+  const previewRequest = useRef(0), sourceRequest = useRef(0), loadRequest = useRef(0);
+  const contextKey = JSON.stringify([selectedFolderId, loadedPipelineId, nodes]);
+  const currentContext = useRef(contextKey);
+  currentContext.current = contextKey;
+  const currentFolder = useRef(selectedFolderId);
+  currentFolder.current = selectedFolderId;
+  const [previewContext, setPreviewContext] = useState<{key: string; folder: string; nodes: PipelineNode[]} | null>(null);
+  const previewCurrent = !!preview && previewContext?.key === contextKey;
+  useEffect(() => {mounted.current = true; return () => {mounted.current = false; previewRequest.current++; sourceRequest.current++; loadRequest.current++;};}, []);
 
   async function refresh() {
     const [nextSteps, nextDatasets, nextPipelines] = await Promise.all([
@@ -206,6 +217,7 @@ export function PreprocessingPipelinesPage({ active = true }: { active?: boolean
       listDatasets(),
       listPreprocessingPipelines(),
     ]);
+    if (!mounted.current) return;
     setSteps(nextSteps);
     setDatasets(nextDatasets.filter((dataset) => dataset.status === 'ready'));
     setPipelines(nextPipelines);
@@ -285,9 +297,12 @@ export function PreprocessingPipelinesPage({ active = true }: { active?: boolean
   function inputImageFor(index: number): PreprocessingPreviewImage | null {
     if (index <= 0) return null; // load_image has no image input
     const previousNode = nodes[index - 1];
-    const fromPreview = preview?.previews.find((item) => item.node_id === previousNode.id) ?? null;
+    const sameInput = previewContext?.folder === selectedFolderId &&
+      JSON.stringify(previewContext.nodes.slice(0, index)) === JSON.stringify(nodes.slice(0, index));
+    const fromPreview = sameInput ? preview?.previews.find((item) => item.node_id === previousNode.id) ?? null : null;
     if (fromPreview) return fromPreview;
-    if (index === 1) return sourceImage;
+    if (index === 1 && (previousNode.data.config.mode ?? 'unchanged') === 'unchanged' &&
+        (previousNode.data.config.dtype ?? 'source') === 'source') return sourceImage;
     return null;
   }
 
@@ -350,11 +365,19 @@ export function PreprocessingPipelinesPage({ active = true }: { active?: boolean
     // Seed size-like fields from the previous step's actual output, so a new crop/resize/warp
     // adopts the current pixel count instead of a fixed 128x128.
     const inputImage = inputImageFor(nodes.length);
+    if (step.type === 'crop' && !inputImage) {
+      notifications.show({color: 'yellow', title: 'Eingangsbild fehlt', message: 'Bitte zuerst eine gültige Vorschau der vorherigen Schritte abwarten.'});
+      return;
+    }
     const config: Record<string, unknown> = { ...step.default_config };
     if (inputImage) {
       for (const [key, property] of Object.entries(step.config_schema.properties)) {
         if (property.default_from === 'input_width') config[key] = inputImage.width;
         if (property.default_from === 'input_height') config[key] = inputImage.height;
+      }
+      if (step.type === 'crop') {
+        for (const key of ['x', 'y', 'width', 'height']) delete config[key];
+        config.roi = fullImageCrop(inputImage.width, inputImage.height);
       }
     }
 
@@ -411,6 +434,7 @@ export function PreprocessingPipelinesPage({ active = true }: { active?: boolean
   }
 
   function designResolutionFromPreview(): PipelineDesignResolution | null {
+    if (!previewCurrent || previewStale || previewError) return null;
     const first = preview?.previews[0];
     const last = preview?.previews[preview.previews.length - 1];
     if (!first || !last) return null;
@@ -476,9 +500,11 @@ export function PreprocessingPipelinesPage({ active = true }: { active?: boolean
     return `Pipeline tuned for ${designResolution.input_width}x${designResolution.input_height}, current preview image is ${sourceImage.width}x${sourceImage.height}.`;
   }, [sourceImage, designResolution]);
 
-  const canStoreDesignResolution = Boolean(preview && !previewStale && !previewError);
+  const canStoreDesignResolution = Boolean(previewCurrent && !previewStale && !previewError);
 
   function loadGraph(pipeline: PreprocessingPipeline) {
+    previewRequest.current++;
+    setLoading(false);
     const nextNodes: PipelineNode[] = pipeline.graph.nodes.map((node, index) => ({
       id: node.id,
       position: node.position ?? { x: index * 220, y: 0 },
@@ -508,8 +534,10 @@ export function PreprocessingPipelinesPage({ active = true }: { active?: boolean
   }
 
   async function handleLoadPipeline(pipelineId: number) {
+    const request = ++loadRequest.current;
     await rowActions.runPending(`load:${pipelineId}`, async () => {
-      loadGraph(await getPreprocessingPipeline(pipelineId));
+      const pipeline = await getPreprocessingPipeline(pipelineId);
+      if (mounted.current && request === loadRequest.current) loadGraph(pipeline);
     }).catch((error) => {
       notifications.show({
         color: 'red',
@@ -576,19 +604,26 @@ export function PreprocessingPipelinesPage({ active = true }: { active?: boolean
 
   async function runPreview(silent: boolean) {
     if (!selectedFolderId) return;
+    const request = ++previewRequest.current;
+    const requestedContext = contextKey;
+    const current = () => mounted.current && request === previewRequest.current && currentContext.current === requestedContext;
     setLoading(true);
     try {
-      setPreview(await previewPreprocessingPipeline({ folder_id: Number(selectedFolderId), graph: backendGraph() }));
+      const result = await previewPreprocessingPipeline({ folder_id: Number(selectedFolderId), graph: backendGraph() });
+      if (!current()) return;
+      setPreview(result);
+      setPreviewContext({key: requestedContext, folder: selectedFolderId, nodes});
       setPreviewStale(false);
       setPreviewError(null);
     } catch (error) {
+      if (!current()) return;
       const message = error instanceof Error ? error.message : 'Unknown error';
       setPreviewError(message);
       if (!silent || message.includes('Input size is locked')) {
         notifications.show({ color: 'red', title: 'Preview failed', message });
       }
     } finally {
-      setLoading(false);
+      if (current()) setLoading(false);
     }
   }
 
@@ -597,6 +632,8 @@ export function PreprocessingPipelinesPage({ active = true }: { active?: boolean
   }
 
   async function loadSourceImage(folderId: string) {
+    const request = ++sourceRequest.current;
+    const current = () => mounted.current && request === sourceRequest.current && currentFolder.current === folderId;
     setSourceLoading(true);
     setSourceImage(null);
     try {
@@ -607,8 +644,9 @@ export function PreprocessingPipelinesPage({ active = true }: { active?: boolean
           edges: [],
         },
       });
-      setSourceImage(result.previews[0] ?? null);
+      if (current()) setSourceImage(result.previews[0] ?? null);
     } catch (error) {
+      if (!current()) return;
       setSourceImage(null);
       notifications.show({
         color: 'red',
@@ -616,7 +654,7 @@ export function PreprocessingPipelinesPage({ active = true }: { active?: boolean
         message: error instanceof Error ? error.message : 'Unknown error',
       });
     } finally {
-      setSourceLoading(false);
+      if (current()) setSourceLoading(false);
     }
   }
 
@@ -643,6 +681,8 @@ export function PreprocessingPipelinesPage({ active = true }: { active?: boolean
   // available for every preprocessing block regardless of full-pipeline previews.
   useEffect(() => {
     if (!selectedFolderId) {
+      sourceRequest.current++;
+      setSourceLoading(false);
       setSourceImage(null);
       return;
     }
@@ -678,10 +718,10 @@ export function PreprocessingPipelinesPage({ active = true }: { active?: boolean
   // input image (the previous step's output) always reflects the current configuration.
   const [debouncedNodes] = useDebouncedValue(nodes, 400);
   useEffect(() => {
-    if (!selectedFolderId) return;
+    if (!selectedFolderId || nodes !== debouncedNodes) return;
     runPreview(true);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [debouncedNodes, selectedFolderId]);
+  }, [debouncedNodes, selectedFolderId, loadedPipelineId]);
 
   // Generic input -> output preview shown inside every step block. The input image is the
   // previous step's output (inputImageFor), the output is this node's preview. Steps that
@@ -689,7 +729,7 @@ export function PreprocessingPipelinesPage({ active = true }: { active?: boolean
   function renderStepPreview(node: PipelineNode, index: number) {
     const step = stepByType.get(node.data.stepType);
     if (!step) return null;
-    const outputPreview = preview?.previews.find((item) => item.node_id === node.id) ?? null;
+    const outputPreview = inputImageFor(index + 1);
     const inputImage = inputImageFor(index);
     const isLoad = node.data.stepType === 'load_image';
     const controlId = step.config_schema.ui_control;
@@ -748,7 +788,7 @@ export function PreprocessingPipelinesPage({ active = true }: { active?: boolean
             {outputPreview ? (
               <img src={outputPreview.image_data_url} alt="Step output" className="preview-image" />
             ) : (
-              <Alert color="blue">{selectedFolderId ? 'Running preview…' : 'Select a preview folder to see the output.'}</Alert>
+              <Alert color={previewError ? 'red' : 'blue'}>{previewError ? 'Keine gültige Ausgabe. Bitte die Einstellungen korrigieren.' : selectedFolderId ? 'Running preview…' : 'Select a preview folder to see the output.'}</Alert>
             )}
           </Stack>
         </SimpleGrid>
@@ -764,11 +804,12 @@ export function PreprocessingPipelinesPage({ active = true }: { active?: boolean
     const value = node.data.config[key] ?? property.default ?? '';
 
     if (property.enum) {
+      const outputLabels: Record<string, string> = {cropped: 'Ausschnittgröße', input: 'Eingangsgröße', source: 'Originalgröße'};
       return (
         <Select
           key={key}
           label={property.label ?? key}
-          data={property.enum}
+          data={node.data.stepType === 'crop' && key === 'output_size' ? property.enum.map(value => ({value, label: outputLabels[value]})) : property.enum}
           value={String(value)}
           disabled={loadedReadOnly}
           onChange={(next) => updateNodeConfig(node.id, key, next ?? property.default)}
@@ -849,6 +890,7 @@ export function PreprocessingPipelinesPage({ active = true }: { active?: boolean
     const ownedKeys = controlId ? CONTROL_REGISTRY[controlId]?.ownedKeys ?? [] : [];
     const fields = Object.entries(step.config_schema.properties)
       .filter(([key]) => !ownedKeys.includes(key))
+      .filter(([key]) => !(step.type === 'crop' && key === 'interpolation' && (node.data.config.output_size ?? 'cropped') === 'cropped'))
       .filter(([, property]) =>
         Object.entries(property.visible_when ?? {}).every(([dependency, expected]) => {
           const dependencyProperty = step.config_schema.properties[dependency];
@@ -1072,8 +1114,8 @@ export function PreprocessingPipelinesPage({ active = true }: { active?: boolean
               )}
               {nodes.map((node, index) => {
                 const step = stepByType.get(node.data.stepType);
-                const output = preview?.previews.find((item) => item.node_id === node.id);
-                const input = index === 0 ? undefined : preview?.previews.find((item) => item.node_id === nodes[index - 1].id);
+                const output = inputImageFor(index + 1) ?? undefined;
+                const input = inputImageFor(index) ?? undefined;
                 const open = Boolean(selectedFolderId) && node.id === selectedNodeId;
                 return (
                   <Paper key={node.id} withBorder p="sm" radius="sm" className={open ? 'pipeline-step selected' : 'pipeline-step'}>
@@ -1146,14 +1188,14 @@ export function PreprocessingPipelinesPage({ active = true }: { active?: boolean
           <Group justify="space-between" align="flex-start">
             <div>
               <Text size="sm" c="dimmed" className="path-text">
-                {preview ? `${preview.source_image_path} at ${previewText(preview.source_timestamp)}` : 'Select a folder and run preview.'}
+                {previewCurrent && preview ? `${preview.source_image_path} at ${previewText(preview.source_timestamp)}` : 'Select a folder and run preview.'}
               </Text>
             </div>
             <Button leftSection={<Eye size={18} />} variant="light" onClick={handlePreview} loading={loading} disabled={!selectedFolderId}>
               Preview
             </Button>
           </Group>
-          {preview ? (
+          {previewCurrent && preview ? (
             <SimpleGrid cols={{ base: 1, sm: 2, xl: 3 }}>
               {preview.previews.map((item, index) => (
                 <Paper key={item.node_id} withBorder p="sm" radius="sm">

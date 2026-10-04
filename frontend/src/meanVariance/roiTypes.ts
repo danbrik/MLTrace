@@ -1,6 +1,5 @@
-export type LegacyRoiRectangle = { x: number; y: number; width: number; height: number };
-export type RotatedRoiRectangle = { version: 2; center_x: number; center_y: number; width: number; height: number; angle_degrees: number };
-export type RoiRectangle = LegacyRoiRectangle | RotatedRoiRectangle;
+import type { RoiRectangle, RotatedRoiRectangle } from '../imageGeometry/rectangleGeometry';
+export type { RoiRectangle, RotatedRoiRectangle, LegacyRoiRectangle } from '../imageGeometry/rectangleGeometry';
 export type HeatmapDisplay = { opacity: number; heatmap_mode: 'global' | 'local'; sensitivity: number };
 export type RoiDraft = { roi: RotatedRoiRectangle } & HeatmapDisplay;
 export type RoiConfig = { roi: RoiRectangle; opacity: number; heatmap_mode?: HeatmapDisplay['heatmap_mode']; sensitivity?: number };

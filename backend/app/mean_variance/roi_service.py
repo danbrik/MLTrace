@@ -14,7 +14,7 @@ from app.database import data_dir
 from app.image_selection import read_frozen_image
 from app.mean_variance import service
 from app.mean_variance.engine import OnlineMoments
-from app.mean_variance.roi_geometry import selection_mask, oriented_roi
+from app.image_geometry import selection_mask, oriented_roi
 from app.mean_variance.roi_engine import RoiConfig, export_roi, finish_basis, load_basis
 from app.preprocessing.pipeline import compile_pipeline
 from app.reference_image.engine import grayscale

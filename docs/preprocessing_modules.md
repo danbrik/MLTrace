@@ -242,3 +242,52 @@ PYTHONPATH=backend pytest backend/tests/test_preprocessing.py -q
 - Interaktiver Picker, aber `point_picker`/`crop_box` reicht → **ja**, nur `ui_control` setzen (B1).
 - Komplett neues Bild-Werkzeug → **nein**: eine Control-Komponente + ein Registry-Eintrag (B2),
   aber weiterhin kein Eingriff in die Pipeline-Seite selbst.
+
+## Drehbarer Crop
+
+Der bestehende Crop-Schritt unterstützt ein frei drehbares Rechteck mit vier
+Eckgriffen, Verschieben, Drehgriff, Winkeleingabe und Zurücksetzen auf 0°.
+Neue Crops starten mit der gesamten aktuellen Eingangsbildfläche; vor dem Drehen
+muss die Auswahl gegebenenfalls verkleinert werden. Positive Winkel drehen im
+Uhrzeigersinn. Alle Ecken müssen innerhalb des Eingangsbildes liegen, und die
+Auswahl muss mindestens einen Originalpixelmittelpunkt enthalten. Ungültige
+Auswahlen sind rot; es gibt keine automatische Verkleinerung. Speichern erfordert
+eine erfolgreiche Vorschau der aktuellen Konfiguration.
+
+Die neue Geometrie wird im bisherigen Crop-Konfigurationsobjekt gespeichert:
+
+```json
+{
+  "roi": {"version": 2, "center_x": 100, "center_y": 80,
+          "width": 100, "height": 60, "angle_degrees": 30},
+  "output_size": "cropped",
+  "interpolation": "area"
+}
+```
+
+`app.image_geometry` und der gemeinsame Frontend-Rechteckeditor werden von Crop
+und Varianz-ROI verwendet. Der Ausschnitt wird mit Nearest Neighbor gerade
+gezogen. Ausgabepixelzentren werden ins Originalbild zurückgerechnet und der
+nächstgelegene Pixel übernommen; bei Gleichstand gewinnt rechts/unten. Es gibt
+keine Glättung, perspektivische Entzerrung oder Mischung von Pixelwerten durch die
+Drehung. Kanalzahl und Datentyp bleiben erhalten, einschließlich uint16.
+
+Standardmäßig liefert `cropped` exakt die gewählte Breite × Höhe. Optional
+skaliert `input` danach auf die Eingangsgröße dieses Schritts, `source` auf die
+Originalgröße der Pipeline. Nur diese nachgelagerte Skalierung verwendet die
+gewählte **Interpolation der Größenanpassung**. Ihr Feld ist bei Ausschnittgröße
+ausgeblendet. Koordinaten, Winkel und Ausschnittauflösung stehen außerhalb der
+Vorschaubilder.
+
+Alte Konfigurationen ohne `roi` behalten ihren bisherigen achsenparallelen
+Ausschnitt einschließlich Begrenzung am Bildrand. Öffnen verändert sie nicht.
+Bei der ersten Geometrieänderung wird der tatsächlich verwendete alte Ausschnitt
+mit Mittelpunkt und zunächst 0° übernommen. Ist `roi` vorhanden, sind alte
+Koordinatenfelder wirkungslos. Es ist keine Datenbankmigration erforderlich.
+
+Vorschauen werden weiterhin nach 400 ms gebündelt. Verspätete Antworten anderer
+Konfigurationen, Pipelines oder Projekte werden verworfen. Bereits erfolgreiche
+Vorschauen unveränderter vorheriger Schritte bleiben als Crop-Eingangsbild
+verwendbar; eine veraltete Crop-Ausgabe wird nicht als aktuelles Ergebnis gezeigt.
+Die Vorschau und die kompilierte Verarbeitung prüfen dieselben Grenzen auf dem
+jeweils tatsächlich eingehenden Bild.
