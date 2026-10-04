@@ -44,6 +44,7 @@ def _used_ids(db: Session, entity_type: str) -> set[int]:
     columns = {
         "training_dataset": [
             m.TrainingPipelineDataset.training_dataset_id,
+            m.TrainingPipelineValidationDataset.training_dataset_id,
             m.ReferenceImageRun.training_dataset_id,
             m.MeanVarianceRun.training_dataset_id,
             m.TemporalDifferenceRun.training_dataset_id,

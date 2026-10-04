@@ -108,6 +108,7 @@ export function DryRunPanel({
 
         {result && (
           <Stack gap="md">
+            {result.training_sample_count != null && <Text>Training: {result.training_sample_count} · Validierung: {result.validation_sample_count ?? 0} ({result.sample_kind === 'clips' ? 'Clips' : 'Bilder'})</Text>}
             {result.errors.length > 0 && (
               <Alert color="red" title="Dummy test failed">
                 <Stack gap={4}>

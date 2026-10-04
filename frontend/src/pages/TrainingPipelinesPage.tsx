@@ -4,6 +4,7 @@ import {
   Group,
   Paper,
   Stack,
+  Select,
   Switch,
   Text,
   Textarea,
@@ -34,6 +35,7 @@ import { SchemaForm } from '../methods/schema/SchemaForm';
 import type { NumericDraftState } from '../methods/types';
 import { schemaDefaults } from '../methods/utils';
 import { datasetSizeSignature, pipelineOutputResolution } from '../training/graph';
+import { activeTrainingKeys } from '../training/parameters';
 import { DryRunPanel } from '../training/DryRunPanel';
 import { MethodConfigurationPicker } from '../training/MethodConfigurationPicker';
 import { PreprocessingPipelinePicker } from '../training/PreprocessingPipelinePicker';
@@ -79,6 +81,9 @@ export function TrainingPipelinesPage({
   const [selectedDatasetIds, setSelectedDatasetIds] = useState<number[]>([]);
   const [selectedPipelineId, setSelectedPipelineId] = useState<number | null>(null);
   const [selectedConfigurationId, setSelectedConfigurationId] = useState<number | null>(null);
+  const [validationMode, setValidationMode] = useState<'none' | 'external' | 'legacy_fraction'>('none');
+  const [validationIds, setValidationIds] = useState<number[]>([]);
+  const [validationShuffle, setValidationShuffle] = useState(false);
   const [shuffle, setShuffle] = useState(true);
   const [trainingParameters, setTrainingParameters] = useState<Record<string, unknown>>({});
   const [loadedPipelineId, setLoadedPipelineId] = useState<number | null>(null);
@@ -149,6 +154,9 @@ export function TrainingPipelinesPage({
     .filter((dataset): dataset is TrainingDataset => dataset !== undefined);
 
   const trainingSchema = selectedDefinition?.training_schema;
+  const activeKeys = activeTrainingKeys(trainingSchema, trainingParameters, selectedConfiguration?.method_config ?? {});
+  const supportsValidation = trainingSchema?.supports_validation ?? false;
+  const loadedReadOnly = loadedPipelineId != null && !isEditingLoadedPipeline;
   const hasTrainingParameters = Object.keys(trainingSchema?.properties ?? {}).length > 0;
 
   // Cross-filter constraints propagated down the size chain:
@@ -189,8 +197,8 @@ export function TrainingPipelinesPage({
   }, [selectedPipeline, selectedConfiguration]);
 
   const invalidNumericDrafts = useMemo(
-    () => Object.entries(numericDrafts).filter(([, draft]) => draft.dirty && !draft.valid),
-    [numericDrafts],
+    () => Object.entries(numericDrafts).filter(([key, draft]) => activeKeys.includes(key.replace(/^training[.:]/, '')) && draft.dirty && !draft.valid),
+    [numericDrafts, activeKeys],
   );
 
   const nameClash = useMemo(() => {
@@ -208,6 +216,9 @@ export function TrainingPipelinesPage({
   // schema defaults overlaid with the saved configuration's training config.
   function handleConfigurationChange(configurationId: number | null) {
     setSelectedConfigurationId(configurationId);
+    setValidationMode('none');
+    setValidationIds([]);
+    setValidationShuffle(false);
     const configuration = configurationId != null ? configurationById.get(configurationId) : undefined;
     const definition = configuration ? methodByType.get(configuration.method_type) : undefined;
     setTrainingParameters({
@@ -221,14 +232,19 @@ export function TrainingPipelinesPage({
     if (selectedDatasetIds.length === 0 || selectedPipelineId == null || selectedConfigurationId == null) {
       return null;
     }
+    if (!loadedReadOnly && validationMode === 'legacy_fraction') return null;
+    if (supportsValidation && validationMode === 'external' && (!validationIds.length || validationIds.some(id => selectedDatasetIds.includes(id)))) return null;
     return {
+      validation_mode: loadedReadOnly ? validationMode : supportsValidation ? validationMode : 'none',
+      validation_dataset_ids: validationMode === 'external' && supportsValidation ? validationIds : [],
+      validation_shuffle: validationMode === 'external' && supportsValidation && validationShuffle,
       training_dataset_ids: selectedDatasetIds,
       preprocessing_pipeline_id: selectedPipelineId,
       method_configuration_id: selectedConfigurationId,
       shuffle,
-      training_parameters: trainingParameters,
+      training_parameters: loadedReadOnly ? trainingParameters : Object.fromEntries(Object.entries(trainingParameters).filter(([key]) => activeKeys.includes(key))),
     };
-  }, [selectedDatasetIds, selectedPipelineId, selectedConfigurationId, shuffle, trainingParameters]);
+  }, [selectedDatasetIds, selectedPipelineId, selectedConfigurationId, shuffle, trainingParameters, validationMode, validationIds, validationShuffle, loadedReadOnly, supportsValidation, activeKeys]);
 
   function loadPipelineIntoBuilder(pipeline: TrainingPipeline) {
     setLoadedPipelineId(pipeline.id);
@@ -240,6 +256,9 @@ export function TrainingPipelinesPage({
     setSelectedPipelineId(pipeline.preprocessing_pipeline_id);
     setSelectedConfigurationId(pipeline.method_configuration_id);
     setShuffle(pipeline.shuffle);
+    setValidationMode(pipeline.validation_mode ?? 'legacy_fraction');
+    setValidationIds((pipeline.validation_datasets ?? []).map(entry => entry.training_dataset_id));
+    setValidationShuffle(pipeline.validation_shuffle ?? false);
     setTrainingParameters(pipeline.training_parameters ?? {});
     setNumericDrafts({});
   }
@@ -261,6 +280,9 @@ export function TrainingPipelinesPage({
     setSelectedPipelineId(null);
     setSelectedConfigurationId(null);
     setShuffle(true);
+    setValidationMode('none');
+    setValidationIds([]);
+    setValidationShuffle(false);
     setTrainingParameters({});
     setNumericDrafts({});
   }
@@ -372,7 +394,6 @@ export function TrainingPipelinesPage({
   }, []);
 
   const saveDisabled = !payload || !name.trim() || nameClash || invalidNumericDrafts.length > 0;
-  const loadedReadOnly = loadedPipelineId != null && !isEditingLoadedPipeline;
   const loadedPipeline = loadedPipelineId != null ? pipelines.find((pipeline) => pipeline.id === loadedPipelineId) ?? null : null;
   const loadedPipelineNameChanged = useMemo(() => {
     if (!loadedPipeline) return false;
@@ -393,6 +414,9 @@ export function TrainingPipelinesPage({
         preprocessing_pipeline_id: loadedPipeline.preprocessing_pipeline_id,
         method_configuration_id: loadedPipeline.method_configuration_id,
         shuffle: loadedPipeline.shuffle,
+        validation_mode: loadedPipeline.validation_mode ?? 'legacy_fraction',
+        validation_dataset_ids: (loadedPipeline.validation_datasets ?? []).map(entry => entry.training_dataset_id),
+        validation_shuffle: loadedPipeline.validation_shuffle ?? false,
         training_parameters: loadedPipeline.training_parameters ?? {},
       },
     );
@@ -532,22 +556,34 @@ export function TrainingPipelinesPage({
         {selectedConfiguration && !hasTrainingParameters && (
           <Alert color="blue">This method is fitted directly and has no gradient training parameters.</Alert>
         )}
-        {selectedConfiguration && hasTrainingParameters && trainingSchema && (
-          <SchemaForm
-            schema={trainingSchema}
-            config={trainingParameters}
-            disabled={loadedReadOnly}
-            fieldPrefix="training"
-            onChange={(key, value) => setTrainingParameters((current) => ({ ...current, [key]: value }))}
-            onNumberDraftChange={handleNumberDraftChange}
-          />
+        {validationMode === 'legacy_fraction' && (
+          <Alert color="yellow" title="Bisherige anteilige Validierung">
+            <Text size="sm">Dieser Lauf behält seine bisherige Validierung ({String(trainingParameters.validation_fraction ?? 0)}). Vor dem Speichern bitte die neue Validierung ausdrücklich wählen.</Text>
+            {!loadedReadOnly && <Select label="Validierung umstellen" placeholder="Bitte auswählen" data={[{ value: 'none', label: 'Keine Validierung' }, ...(supportsValidation ? [{ value: 'external', label: 'Separate Datensätze' }] : [])]} onChange={value => value && setValidationMode(value as 'none' | 'external')} />}
+          </Alert>
         )}
-        <Switch
-          label="Shuffle combined training sets during training"
-          checked={shuffle}
-          disabled={loadedReadOnly}
-          onChange={(event) => setShuffle(event.currentTarget.checked)}
-        />
+        {selectedConfiguration && trainingSchema && (trainingSchema.ui_groups ?? [{ id: 'training', label: 'Trainingsablauf' }]).map(group => {
+          const keys = activeKeys.filter(key => (trainingSchema.properties[key].ui_group ?? 'training') === group.id);
+          return <Stack key={group.id} gap="sm">
+            {(keys.length > 0 || (group.id === 'training' && selectedDefinition?.training_mode === 'gradient')) && <Paper withBorder p="md">
+              <Title order={4} mb="sm">{group.label}</Title>
+              <SchemaForm schema={trainingSchema} keys={keys} config={trainingParameters} disabled={loadedReadOnly} fieldPrefix="training"
+                onChange={(key, value) => setTrainingParameters(current => ({ ...current, [key]: value }))} onNumberDraftChange={handleNumberDraftChange} />
+              {group.id === 'training' && selectedDefinition?.training_mode === 'gradient' && <Switch mt="sm" label="Trainingsreihenfolge mischen" checked={shuffle} disabled={loadedReadOnly} onChange={event => setShuffle(event.currentTarget.checked)} />}
+              {group.id === 'early' && Boolean(trainingParameters.early_stopping_enabled) && <Text size="sm" c="dimmed">Überwachte Größe: {validationMode === 'external' || (validationMode === 'legacy_fraction' && Number(trainingParameters.validation_fraction) > 0) ? 'Validierungsverlust' : 'Trainingsverlust'}.</Text>}
+            </Paper>}
+            {group.id === 'loss' && supportsValidation && validationMode !== 'legacy_fraction' && <Paper withBorder p="md">
+              <Title order={4} mb="sm">Validierung</Title>
+              <Switch label="Validierung verwenden" checked={validationMode === 'external'} disabled={loadedReadOnly} onChange={event => setValidationMode(event.currentTarget.checked ? 'external' : 'none')} />
+              {validationMode === 'external' && <Stack mt="sm">
+                <Text size="sm">Alle ausgewählten Bilder beziehungsweise vollständigen Clips werden verwendet. Training und Validierung dürfen keine gemeinsamen Quelldateien enthalten.</Text>
+                <TrainingDatasetPicker trainingDatasets={trainingDatasets} selectedIds={validationIds} onChange={setValidationIds} disabled={loadedReadOnly} embedded />
+                {(!validationIds.length || validationIds.some(id => selectedDatasetIds.includes(id))) && <Alert color="yellow">Bitte separate Validierungsdatensätze auswählen; Trainingsdatensätze sind nicht zulässig.</Alert>}
+                <Switch label="Validierungsreihenfolge mischen" checked={validationShuffle} disabled={loadedReadOnly} onChange={event => setValidationShuffle(event.currentTarget.checked)} />
+              </Stack>}
+            </Paper>}
+          </Stack>;
+        })}
         {datasetInputMismatch && (
           <Alert color="yellow" title="Shape mismatch">
             {datasetInputMismatch}
@@ -567,7 +603,7 @@ export function TrainingPipelinesPage({
           preprocessingPipeline={selectedPipeline ?? null}
           configuration={selectedConfiguration ?? null}
         />
-        <DryRunPanel payload={payload} disabled={!payload || invalidNumericDrafts.length > 0} />
+        <DryRunPanel key={JSON.stringify(payload)} payload={payload} disabled={!payload || invalidNumericDrafts.length > 0} />
       </StepCard>
 
       <SavedTrainingPipelinesTable

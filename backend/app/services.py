@@ -146,6 +146,8 @@ def training_dataset_update_lock_reasons(db: Session, training_dataset_id: int) 
             models.TrainingPipelineDataset.training_dataset_id == training_dataset_id
         )
     ) or 0
+    referencing_pipelines += db.scalar(select(func.count(models.TrainingPipelineValidationDataset.id)).where(
+        models.TrainingPipelineValidationDataset.training_dataset_id == training_dataset_id)) or 0
     if referencing_pipelines:
         reasons.append("Train/Test Dataset not editable, because already used in other Pipelines.")
     referencing_testing_runs = db.scalar(
@@ -616,6 +618,8 @@ def delete_training_dataset(db: Session, training_dataset_id: int) -> bool:
             models.TrainingPipelineDataset.training_dataset_id == training_dataset_id
         )
     ) or 0
+    referencing_pipelines += db.scalar(select(func.count(models.TrainingPipelineValidationDataset.id)).where(
+        models.TrainingPipelineValidationDataset.training_dataset_id == training_dataset_id)) or 0
     if referencing_pipelines:
         raise ValueError(
             "Train/test dataset is used by saved training pipelines. Delete those training pipelines first."
@@ -744,6 +748,7 @@ def _training_dataset_lock_reason_map(db: Session) -> dict[int, list[str]]:
         select(models.TrainingPipelineDataset.training_dataset_id)
         .group_by(models.TrainingPipelineDataset.training_dataset_id)
     ).all()
+    pipeline_rows += db.execute(select(models.TrainingPipelineValidationDataset.training_dataset_id).distinct()).all()
     for (training_dataset_id,) in pipeline_rows:
         reasons.setdefault(training_dataset_id, []).append(
             "Train/Test Dataset not editable, because already used in other Pipelines."
@@ -1843,6 +1848,9 @@ def training_pipeline_signature(
     method_configuration_id: int,
     shuffle: bool,
     training_parameters: dict | None,
+    validation_mode: str = "legacy_fraction",
+    validation_dataset_ids=(),
+    validation_shuffle: bool = False,
 ) -> str:
     """Stable hash of the full configuration, independent of name/order.
 
@@ -1858,6 +1866,8 @@ def training_pipeline_signature(
         "shuffle": bool(shuffle),
         "params": training_parameters or {},
     }
+    if validation_mode != "legacy_fraction":
+        canonical["validation"] = [validation_mode, list(validation_dataset_ids), validation_shuffle]
     blob = json.dumps(canonical, sort_keys=True, separators=(",", ":"), default=str)
     return hashlib.sha256(blob.encode()).hexdigest()
 
@@ -1867,13 +1877,13 @@ def find_training_pipeline_by_signature(
 ) -> models.TrainingPipeline | None:
     """Return an existing pipeline whose full configuration matches the payload."""
     _, _, configuration = _resolve_training_pipeline_refs(db, payload)
-    training_parameters = _merged_training_parameters(configuration, payload.training_parameters)
+    training_parameters = _merged_training_parameters(configuration, payload.training_parameters, active_only=payload.validation_mode != "legacy_fraction")
     signature = training_pipeline_signature(
         payload.training_dataset_ids,
         payload.preprocessing_pipeline_id,
         payload.method_configuration_id,
         payload.shuffle,
-        training_parameters,
+        training_parameters, payload.validation_mode, payload.validation_dataset_ids, payload.validation_shuffle,
     )
     return db.scalar(
         select(models.TrainingPipeline).where(models.TrainingPipeline.config_signature == signature)
@@ -1925,10 +1935,13 @@ def _resolve_training_pipeline_refs(
             f"Method '{configuration.name}' ({configuration.method_type}) does not support training pipelines."
         )
 
+    if payload.validation_mode == "external":
+        from app.training.validation import resolve_selections
+        resolve_selections(db, training_datasets, configuration, payload.validation_mode, payload.validation_dataset_ids)
     return training_datasets, preprocessing_pipeline, configuration
 
 
-def _merged_training_parameters(configuration: models.MethodConfiguration, overrides: dict | None) -> dict:
+def _merged_training_parameters(configuration: models.MethodConfiguration, overrides: dict | None, *, active_only: bool = False) -> dict:
     """Merge user overrides onto the saved method's training config and validate.
 
     The saved configuration's training_config (already merged from the method
@@ -1936,6 +1949,9 @@ def _merged_training_parameters(configuration: models.MethodConfiguration, overr
     """
     definition = model_registry.get(configuration.method_type)
     merged = {**(configuration.training_config or {}), **(overrides or {})}
+    if active_only:
+        from app.modeling.training_ui import active_parameters
+        return active_parameters(definition, merged, configuration.method_config or {})
     validate_schema_values(definition.training_schema, merged, f"{definition.type}.training_parameters")
     return merged
 
@@ -1943,13 +1959,13 @@ def _merged_training_parameters(configuration: models.MethodConfiguration, overr
 def create_training_pipeline(db: Session, payload: TrainingPipelineCreate) -> TrainingPipelineRead:
     _assert_unique_training_pipeline_name(db, payload.name)
     training_datasets, _, configuration = _resolve_training_pipeline_refs(db, payload)
-    training_parameters = _merged_training_parameters(configuration, payload.training_parameters)
+    training_parameters = _merged_training_parameters(configuration, payload.training_parameters, active_only=payload.validation_mode != "legacy_fraction")
     signature = training_pipeline_signature(
         payload.training_dataset_ids,
         payload.preprocessing_pipeline_id,
         payload.method_configuration_id,
         payload.shuffle,
-        training_parameters,
+        training_parameters, payload.validation_mode, payload.validation_dataset_ids, payload.validation_shuffle,
     )
     existing = db.scalar(
         select(models.TrainingPipeline).where(models.TrainingPipeline.config_signature == signature)
@@ -1963,6 +1979,8 @@ def create_training_pipeline(db: Session, payload: TrainingPipelineCreate) -> Tr
         preprocessing_pipeline_id=payload.preprocessing_pipeline_id,
         method_configuration_id=payload.method_configuration_id,
         shuffle=payload.shuffle,
+        validation_mode=payload.validation_mode,
+        validation_shuffle=payload.validation_shuffle,
         training_parameters=training_parameters,
         config_signature=signature,
     )
@@ -1976,7 +1994,11 @@ def create_training_pipeline(db: Session, payload: TrainingPipelineCreate) -> Tr
                 position=position,
             )
         )
+    db.execute(delete(models.TrainingPipelineValidationDataset).where(models.TrainingPipelineValidationDataset.training_pipeline_id == pipeline.id))
+    for position, dataset_id in enumerate(payload.validation_dataset_ids):
+        db.add(models.TrainingPipelineValidationDataset(training_pipeline_id=pipeline.id, training_dataset_id=dataset_id, position=position))
     db.commit()
+    db.expire(pipeline, ["entries", "validation_entries"])
     return get_training_pipeline(db, pipeline.id)  # type: ignore[return-value]
 
 
@@ -1989,13 +2011,13 @@ def update_training_pipeline(
     _raise_if_locked(training_pipeline_update_lock_reasons(db, pipeline_id))
     _assert_unique_training_pipeline_name(db, payload.name, exclude_id=pipeline_id)
     training_datasets, _, configuration = _resolve_training_pipeline_refs(db, payload)
-    training_parameters = _merged_training_parameters(configuration, payload.training_parameters)
+    training_parameters = _merged_training_parameters(configuration, payload.training_parameters, active_only=payload.validation_mode != "legacy_fraction")
     signature = training_pipeline_signature(
         payload.training_dataset_ids,
         payload.preprocessing_pipeline_id,
         payload.method_configuration_id,
         payload.shuffle,
-        training_parameters,
+        training_parameters, payload.validation_mode, payload.validation_dataset_ids, payload.validation_shuffle,
     )
     existing = db.scalar(
         select(models.TrainingPipeline).where(
@@ -2011,6 +2033,8 @@ def update_training_pipeline(
     pipeline.preprocessing_pipeline_id = payload.preprocessing_pipeline_id
     pipeline.method_configuration_id = payload.method_configuration_id
     pipeline.shuffle = payload.shuffle
+    pipeline.validation_mode = payload.validation_mode
+    pipeline.validation_shuffle = payload.validation_shuffle
     pipeline.training_parameters = training_parameters
     pipeline.config_signature = signature
     # Replace entries wholesale; position always reflects the payload order.
@@ -2028,7 +2052,11 @@ def update_training_pipeline(
                 position=position,
             )
         )
+    db.execute(delete(models.TrainingPipelineValidationDataset).where(models.TrainingPipelineValidationDataset.training_pipeline_id == pipeline.id))
+    for position, dataset_id in enumerate(payload.validation_dataset_ids):
+        db.add(models.TrainingPipelineValidationDataset(training_pipeline_id=pipeline.id, training_dataset_id=dataset_id, position=position))
     db.commit()
+    db.expire(pipeline, ["entries", "validation_entries"])
     return get_training_pipeline(db, pipeline_id)
 
 
@@ -2036,6 +2064,11 @@ def _training_pipeline_query():
     return select(models.TrainingPipeline).options(
         selectinload(models.TrainingPipeline.entries)
         .selectinload(models.TrainingPipelineDataset.training_dataset)
+        .selectinload(models.TrainingDataset.rules)
+        .selectinload(models.TrainingDatasetRule.folder)
+        .selectinload(models.DatasetFolder.dataset),
+        selectinload(models.TrainingPipeline.validation_entries)
+        .selectinload(models.TrainingPipelineValidationDataset.training_dataset)
         .selectinload(models.TrainingDataset.rules)
         .selectinload(models.TrainingDatasetRule.folder)
         .selectinload(models.DatasetFolder.dataset),
@@ -2079,6 +2112,17 @@ def delete_training_pipeline(db: Session, pipeline_id: int) -> bool:
     return True
 
 
+def _validation_dataset_reads(db, pipeline):
+    entries = []
+    for entry in pipeline.validation_entries:
+        summary = summarize_training_dataset(db, entry.training_dataset, [])
+        entries.append(TrainingPipelineDatasetRead(training_dataset_id=entry.training_dataset_id,
+            position=entry.position, name=summary.name, start_timestamp=summary.start_timestamp,
+            end_timestamp=summary.end_timestamp, total_selected_images=summary.total_selected_images,
+            dataset_names=summary.dataset_names))
+    return entries
+
+
 def serialize_training_pipeline(db: Session, pipeline: models.TrainingPipeline) -> TrainingPipelineRead:
     entries: list[TrainingPipelineDatasetRead] = []
     total_selected = 0
@@ -2117,6 +2161,10 @@ def serialize_training_pipeline(db: Session, pipeline: models.TrainingPipeline) 
         builder_kind=pipeline.method_configuration.builder_kind,
         total_selected_images=total_selected,
         training_datasets=entries,
+        validation_mode=pipeline.validation_mode,
+        validation_shuffle=pipeline.validation_shuffle,
+        validation_datasets=_validation_dataset_reads(db, pipeline),
+        total_validation_images=sum(item.total_selected_images for item in _validation_dataset_reads(db, pipeline)),
         created_at=pipeline.created_at,
         updated_at=pipeline.updated_at,
         is_update_locked=bool(lock_reasons),
@@ -2162,6 +2210,10 @@ def summarize_training_pipeline(db: Session, pipeline: models.TrainingPipeline) 
         builder_kind=pipeline.method_configuration.builder_kind,
         total_selected_images=total_selected,
         training_datasets=entries,
+        validation_mode=pipeline.validation_mode,
+        validation_shuffle=pipeline.validation_shuffle,
+        validation_datasets=_validation_dataset_reads(db, pipeline),
+        total_validation_images=sum(item.total_selected_images for item in _validation_dataset_reads(db, pipeline)),
         created_at=pipeline.created_at,
         updated_at=pipeline.updated_at,
         is_update_locked=bool(lock_reasons),
@@ -2180,6 +2232,24 @@ def resolve_first_training_image(_db: Session, training_dataset: models.Training
 
 
 def dry_run_training_pipeline(db: Session, payload: TrainingPipelineDryRunRequest) -> TrainingPipelineDryRunResponse:
+    if payload.validation_mode == "legacy_fraction":
+        return _dry_run_training_pipeline_legacy(db, payload)
+    from app.training.validation import resolve_selections, check_sample_shapes
+    try:
+        datasets, preprocessing, configuration = _resolve_training_pipeline_refs(db, payload)
+        _merged_training_parameters(configuration, payload.training_parameters, active_only=True)
+        training, validation = resolve_selections(db, datasets, configuration, payload.validation_mode, payload.validation_dataset_ids)
+        check_sample_shapes(training, validation, configuration, PreprocessingGraph.model_validate(preprocessing.graph))
+    except (ValueError, OSError) as exc:
+        return TrainingPipelineDryRunResponse(valid=False, mode="failed", errors=[str(exc)])
+    result = _dry_run_training_pipeline_legacy(db, payload)
+    result.training_sample_count = len(training)
+    result.validation_sample_count = len(validation)
+    result.sample_kind = "clips" if configuration.builder_kind == "spatiotemporal_autoencoder" else "images"
+    return result
+
+
+def _dry_run_training_pipeline_legacy(db: Session, payload: TrainingPipelineDryRunRequest) -> TrainingPipelineDryRunResponse:
     """Push the first training image through preprocessing and the model architecture.
 
     The forward pass uses randomly initialized weights: it validates the
@@ -2191,7 +2261,7 @@ def dry_run_training_pipeline(db: Session, payload: TrainingPipelineDryRunReques
 
     try:
         training_datasets, preprocessing_pipeline, configuration = _resolve_training_pipeline_refs(db, payload)
-        training_parameters = _merged_training_parameters(configuration, payload.training_parameters)
+        training_parameters = _merged_training_parameters(configuration, payload.training_parameters, active_only=payload.validation_mode != "legacy_fraction")
     except ValueError as exc:
         return TrainingPipelineDryRunResponse(valid=False, mode="failed", errors=[str(exc)])
 

@@ -265,6 +265,7 @@ export function SavedTrainingPipelinesTable({
                       <Tooltip label="Load">
                         <ActionIcon
                           variant="subtle"
+                          aria-label={`Load ${pipeline.name}`}
                           loading={isLoading?.(pipeline.id) ?? false}
                           disabled={isDeleting?.(pipeline.id) ?? false}
                           onClick={() => onLoad(pipeline.id)}
@@ -276,6 +277,7 @@ export function SavedTrainingPipelinesTable({
                         <ActionIcon
                           color="red"
                           variant="subtle"
+                          aria-label={`Delete ${pipeline.name}`}
                           loading={isDeleting?.(pipeline.id) ?? false}
                           disabled={isLoading?.(pipeline.id) ?? false}
                           onClick={() => onDelete(pipeline)}

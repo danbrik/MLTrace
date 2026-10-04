@@ -263,6 +263,10 @@ class TrainingPipeline(Base):
     shuffle: Mapped[bool] = mapped_column(nullable=False, default=True)
     # Final merged training parameters (method training_config + user overrides),
     # validated against the method definition's training_schema at save time.
+    validation_mode: Mapped[str] = mapped_column(String(32), nullable=False, default="legacy_fraction", server_default="legacy_fraction")
+    validation_shuffle: Mapped[bool] = mapped_column(nullable=False, default=False, server_default="0")
+    validation_entries: Mapped[list["TrainingPipelineValidationDataset"]] = relationship(
+        cascade="all, delete-orphan", order_by="TrainingPipelineValidationDataset.position")
     training_parameters: Mapped[dict] = mapped_column(json_type(), nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=False), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
@@ -297,6 +301,19 @@ class TrainingPipelineDataset(Base):
     position: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
 
     training_pipeline: Mapped[TrainingPipeline] = relationship(back_populates="entries")
+    training_dataset: Mapped[TrainingDataset] = relationship()
+
+
+class TrainingPipelineValidationDataset(Base):
+    __tablename__ = "training_pipeline_validation_datasets"
+    __table_args__ = (
+        UniqueConstraint("training_pipeline_id", "training_dataset_id", name="uq_pipeline_validation_dataset"),
+        UniqueConstraint("training_pipeline_id", "position", name="uq_pipeline_validation_position"),
+    )
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    training_pipeline_id: Mapped[int] = mapped_column(ForeignKey("training_pipelines.id", ondelete="CASCADE"), nullable=False)
+    training_dataset_id: Mapped[int] = mapped_column(ForeignKey("training_datasets.id", ondelete="RESTRICT"), nullable=False)
+    position: Mapped[int] = mapped_column(Integer, nullable=False)
     training_dataset: Mapped[TrainingDataset] = relationship()
 
 
@@ -389,6 +406,11 @@ class TrainingRun(Base):
     input_resolution: Mapped[str | None] = mapped_column(String(32))
     epochs: Mapped[int | None] = mapped_column(Integer)
     learning_rate: Mapped[float | None] = mapped_column(Float)
+    validation_mode: Mapped[str] = mapped_column(String(32), nullable=False, default="legacy_fraction", server_default="legacy_fraction")
+    validation_shuffle: Mapped[bool] = mapped_column(nullable=False, default=False, server_default="0")
+    validation_dataset_ids: Mapped[list] = mapped_column(json_type(), nullable=False, default=list, server_default="[]")
+    validation_dataset_names: Mapped[list] = mapped_column(json_type(), nullable=False, default=list, server_default="[]")
+    validation_sample_count: Mapped[int | None] = mapped_column(Integer)
     training_parameters: Mapped[dict] = mapped_column(json_type(), nullable=False)
 
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=False), server_default=func.now())

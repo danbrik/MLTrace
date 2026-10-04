@@ -290,7 +290,7 @@ export function App() {
           <MethodsPage active={page === 'methods'} />
         </Box>
         <Box display={page === 'training-pipelines' ? 'block' : 'none'}>
-          <TrainingPipelinesPage active={page === 'training-pipelines'} onRunQueued={() => setPage('scheduler')} />
+          <TrainingPipelinesPage key={projectId} active={page === 'training-pipelines'} onRunQueued={() => setPage('scheduler')} />
         </Box>
         <Box display={page === 'testing' ? 'block' : 'none'}>
           <TestingRunsPage active={page === 'testing'} onRunQueued={() => setPage('scheduler')} />

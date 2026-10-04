@@ -1059,6 +1059,23 @@ class MethodTorchCheckResponse(BaseModel):
 class TrainingPipelinePayload(BaseModel):
     """The composition of a training pipeline, shared by save and dry-run requests."""
 
+    validation_mode: Literal["legacy_fraction", "none", "external"] = "legacy_fraction"
+    validation_dataset_ids: list[int] = Field(default_factory=list)
+    validation_shuffle: bool = False
+
+    @model_validator(mode="after")
+    def validate_validation_selection(self):
+        if len(set(self.validation_dataset_ids)) != len(self.validation_dataset_ids):
+            raise ValueError("Validation datasets must be unique.")
+        if self.validation_mode == "external":
+            if not self.validation_dataset_ids:
+                raise ValueError("Bitte mindestens einen Validierungsdatensatz auswählen.")
+            if set(self.validation_dataset_ids) & set(self.training_dataset_ids):
+                raise ValueError("Training und Validierung müssen getrennte Datensätze verwenden.")
+        elif self.validation_dataset_ids or self.validation_shuffle:
+            raise ValueError("Validierungsdatensätze und Shuffle erfordern separate Validierung.")
+        return self
+
     training_dataset_ids: list[int] = Field(min_length=1)
     preprocessing_pipeline_id: int
     method_configuration_id: int
@@ -1089,6 +1106,10 @@ class TrainingPipelineDatasetRead(BaseModel):
 
 
 class TrainingPipelineRead(BaseModel):
+    validation_mode: str = "legacy_fraction"
+    validation_shuffle: bool = False
+    validation_datasets: list[TrainingPipelineDatasetRead] = Field(default_factory=list)
+    total_validation_images: int = 0
     id: int
     name: str
     description: str | None
@@ -1114,6 +1135,10 @@ class TrainingPipelineRead(BaseModel):
 
 
 class TrainingPipelineSummaryRead(BaseModel):
+    validation_mode: str = "legacy_fraction"
+    validation_shuffle: bool = False
+    validation_datasets: list[TrainingPipelineDatasetRead] = Field(default_factory=list)
+    total_validation_images: int = 0
     id: int
     name: str
     description: str | None
@@ -1163,6 +1188,9 @@ class TrainingPipelineDryRunResponse(BaseModel):
     the stages that did succeed.
     """
 
+    training_sample_count: int | None = None
+    validation_sample_count: int | None = None
+    sample_kind: str = "images"
     valid: bool
     mode: str  # "forward_pass" | "fit_contribution" | "failed"
     errors: list[str] = []
@@ -1205,6 +1233,11 @@ class TrainingRunMetricRead(BaseModel):
 
 
 class TrainingRunRead(BaseModel):
+    validation_mode: str = "legacy_fraction"
+    validation_shuffle: bool = False
+    validation_dataset_ids: list[int] = Field(default_factory=list)
+    validation_dataset_names: list[str] = Field(default_factory=list)
+    validation_sample_count: int | None = None
     id: int
     training_pipeline_id: int
     status: str

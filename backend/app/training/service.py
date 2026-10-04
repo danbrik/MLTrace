@@ -44,6 +44,10 @@ def _snapshot(db: Session, pipeline: models.TrainingPipeline) -> dict:
     if read.preprocessing_output_width and read.preprocessing_output_height:
         input_resolution = f"{read.preprocessing_output_width}x{read.preprocessing_output_height}"
     params = read.training_parameters or {}
+    if read.validation_mode != "legacy_fraction":
+        from app.training.validation import resolve_selections
+        resolve_selections(db, [entry.training_dataset for entry in pipeline.entries], pipeline.method_configuration,
+                           read.validation_mode, [entry.training_dataset_id for entry in pipeline.validation_entries])
     epochs = params.get("epochs")
     return {
         "training_pipeline_name": read.name,
@@ -55,6 +59,10 @@ def _snapshot(db: Session, pipeline: models.TrainingPipeline) -> dict:
         "dataset_names": dataset_names,
         "dataset_names_text": ", ".join(dataset_names),
         "shuffle": read.shuffle,
+        "validation_mode": read.validation_mode,
+        "validation_shuffle": read.validation_shuffle,
+        "validation_dataset_ids": [entry.training_dataset_id for entry in read.validation_datasets],
+        "validation_dataset_names": [entry.name for entry in read.validation_datasets],
         "input_resolution": input_resolution,
         "epochs": epochs if isinstance(epochs, int) and not isinstance(epochs, bool) else None,
         "learning_rate": _coerce_number(params.get("learning_rate")),
@@ -98,6 +106,7 @@ def _reset_run_for_queue(
         run.val_loss = None
         run.best_val_loss = None
         run.image_count = None
+        run.validation_sample_count = None
     run.artifact_kind = None
     run.artifact_path = None
     run.artifact_size_bytes = None
@@ -218,12 +227,24 @@ def _validate_training_checkpoint(
         sources = enumerate_training_pipeline_images(db, pipeline)
         if not sources:
             raise RunConflict("The training sources are no longer available. Restart completely.")
+    from app.training.validation import resolve_selections, sample_paths, validation_signature
+    from types import SimpleNamespace
+    current_selection = SimpleNamespace(shuffle=shuffle, validation_mode=pipeline.validation_mode,
+        validation_shuffle=pipeline.validation_shuffle,
+        validation_dataset_ids=[entry.training_dataset_id for entry in pipeline.validation_entries])
+    validation_sources = []
+    if pipeline.validation_mode != "legacy_fraction":
+        training, validation = resolve_selections(db, [entry.training_dataset for entry in pipeline.entries], configuration,
+            pipeline.validation_mode, [entry.training_dataset_id for entry in pipeline.validation_entries])
+        clips = configuration.builder_kind == "spatiotemporal_autoencoder"
+        sources = sample_paths(training, clips)
+        validation_sources = sample_paths(validation, clips)
     current_signature = source_signature(
         configuration,
         graph,
         training_parameters,
-        sources,
-        {"shuffle": shuffle},
+        sources + validation_sources,
+        validation_signature(current_selection, validation_sources),
     )
     if current_signature != run.checkpoint_signature:
         raise RunConflict(
@@ -393,6 +414,11 @@ def serialize_training_run(db: Session, run: models.TrainingRun) -> TrainingRunR
         preprocessing_pipeline_name=run.preprocessing_pipeline_name,
         dataset_names=list(run.dataset_names or []),
         shuffle=run.shuffle,
+        validation_mode=run.validation_mode,
+        validation_shuffle=run.validation_shuffle,
+        validation_dataset_ids=list(run.validation_dataset_ids or []),
+        validation_dataset_names=list(run.validation_dataset_names or []),
+        validation_sample_count=run.validation_sample_count,
         input_resolution=run.input_resolution,
         epochs=run.epochs,
         learning_rate=run.learning_rate,

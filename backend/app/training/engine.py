@@ -29,6 +29,7 @@ from app import models
 from app.artifact_signatures import artifact_signature
 from app.database import SessionLocal, data_dir, is_sqlite_lock_error, retry_session_operation
 from app.logging_setup import log_device_diagnostics
+from app.training.validation import resolve_selections, sample_paths, validation_signature
 from app.metrics.ssim import ssim_loss_torch
 from app.modeling.fast_anogan import build_fast_anogan_modules, fast_anogan_forward
 from app.modeling.forward import build_sequential_modules, build_spatiotemporal_modules
@@ -468,6 +469,7 @@ def train_gradient(
     training_parameters: dict,
     artifact_path: Path,
     abort_event: threading.Event,
+    validation_samples=None,
 ) -> int:
     """Train an autoencoder / VAE and persist per-epoch metrics + final weights.
 
@@ -482,6 +484,10 @@ def train_gradient(
 
     if not image_paths:
         raise ValueError("Training set produced no images to train on.")
+    legacy_validation = (getattr(run, "validation_mode", None) or "legacy_fraction") == "legacy_fraction"
+    validation_samples = list(validation_samples or [])
+    if not legacy_validation and run.validation_mode == "external" and not validation_samples:
+        raise ValueError("Die separate Validierung enthält keine verwendbaren Bilder beziehungsweise Clips.")
     sample_count = len(image_paths)
 
     is_vae = configuration.builder_kind == "sequential_variational_autoencoder"
@@ -533,16 +539,21 @@ def train_gradient(
     val_count = max(1, int(sample_count * validation_fraction)) if sample_count > 1 and validation_fraction > 0 else 0
     val_idx = order[:val_count]
     train_idx = order[val_count:] or order
+    if not legacy_validation:
+        train_idx = list(range(sample_count))
+        val_idx = list(range(sample_count, sample_count + len(validation_samples)))
+        val_count = len(validation_samples)
+    run.validation_sample_count = len(val_idx)
 
-    dataset = _PreprocessedImageDataset(image_paths, graph)
+    dataset = _PreprocessedImageDataset(image_paths + validation_samples, graph)
     dataset._compiled = compiled_probe
     pin = device.type == "cuda"
     loader_kwargs: dict = {"num_workers": num_workers, "pin_memory": pin, "collate_fn": _collate_images_skip_bad}
     if num_workers > 0:
         loader_kwargs.update(persistent_workers=True, prefetch_factor=prefetch_factor)
-    train_loader = DataLoader(Subset(dataset, train_idx), batch_size=batch_size, shuffle=True, **loader_kwargs)
+    train_loader = DataLoader(Subset(dataset, train_idx), batch_size=batch_size, shuffle=True if legacy_validation else run.shuffle, **loader_kwargs)
     val_loader = (
-        DataLoader(Subset(dataset, val_idx), batch_size=batch_size, shuffle=False, **loader_kwargs)
+        DataLoader(Subset(dataset, val_idx), batch_size=batch_size, shuffle=False if legacy_validation else run.validation_shuffle, **loader_kwargs)
         if val_idx
         else None
     )
@@ -604,7 +615,7 @@ def train_gradient(
     epochs_without_improvement = 0
     best_val_loss = run.best_val_loss
     skipped_paths: set[str] = set(skipped_paths)
-    signature = source_signature(configuration, graph, training_parameters, image_paths, {"shuffle": run.shuffle})
+    signature = source_signature(configuration, graph, training_parameters, image_paths + validation_samples, validation_signature(run, validation_samples))
     start_epoch = 1
     accumulated_elapsed = 0.0
     if run.restart_mode == "checkpoint" and run.checkpoint_path:
@@ -741,8 +752,10 @@ def train_gradient(
                         continue
                     xb = xb.to(device, non_blocking=pin)
                     with torch.amp.autocast(device.type, enabled=use_amp):
-                        val_total += float(compute_loss(xb).item())
-                    val_batches += 1
+                        val_total += float(compute_loss(xb).item()) * (1 if legacy_validation else len(xb))
+                    val_batches += 1 if legacy_validation else len(xb)
+                if not legacy_validation and val_batches == 0:
+                    raise ValueError("Die Validierung hat keine lesbaren Bilder beziehungsweise Clips geliefert.")
                 val_loss = val_total / max(1, val_batches)
 
         if early_stopping_enabled:
@@ -771,6 +784,7 @@ def train_gradient(
                 "epoch": epoch,
                 "model_state_dict": model.state_dict(),
                 "optimizer_state_dict": optimizer.state_dict(),
+                "validation": validation_signature(run, sample_paths(validation_samples, False)),
                 "scaler_state_dict": scaler.state_dict(),
                 "best_stop_metric": best_stop_metric,
                 "epochs_without_improvement": epochs_without_improvement,
@@ -823,12 +837,17 @@ def train_spatiotemporal_gradient(
     training_parameters: dict,
     artifact_path: Path,
     abort_event: threading.Event,
+    validation_samples=None,
 ) -> int:
     """Train a 3D spatio-temporal autoencoder on lazy clip samples."""
     import torch
     from torch.utils.data import DataLoader, Subset
     metadata_db = None if db.info.get("database_url") else db
 
+    legacy_validation = (getattr(run, "validation_mode", None) or "legacy_fraction") == "legacy_fraction"
+    validation_samples = list(validation_samples or [])
+    if not legacy_validation and run.validation_mode == "external" and not validation_samples:
+        raise ValueError("Die separate Validierung enthält keine verwendbaren Bilder beziehungsweise Clips.")
     sample_count = len(clips)
     if not sample_count:
         raise ValueError("Training set produced no sequence clips.")
@@ -866,14 +885,19 @@ def train_spatiotemporal_gradient(
     val_count = max(1, int(sample_count * validation_fraction)) if sample_count > 1 and validation_fraction > 0 else 0
     val_idx = order[:val_count]
     train_idx = order[val_count:] or order
-    dataset = _PreprocessedClipDataset(clips, graph)
+    if not legacy_validation:
+        train_idx = list(range(sample_count))
+        val_idx = list(range(sample_count, sample_count + len(validation_samples)))
+        val_count = len(validation_samples)
+    run.validation_sample_count = len(val_idx)
+    dataset = _PreprocessedClipDataset(list(clips) + validation_samples, graph)
     dataset._compiled = compiled_probe
     pin = device.type == "cuda"
     loader_kwargs: dict = {"num_workers": num_workers, "pin_memory": pin, "collate_fn": _collate_clips_skip_bad}
     if num_workers > 0:
         loader_kwargs.update(persistent_workers=True, prefetch_factor=prefetch_factor)
-    train_loader = DataLoader(Subset(dataset, train_idx), batch_size=batch_size, shuffle=True, **loader_kwargs)
-    val_loader = DataLoader(Subset(dataset, val_idx), batch_size=batch_size, shuffle=False, **loader_kwargs) if val_idx else None
+    train_loader = DataLoader(Subset(dataset, train_idx), batch_size=batch_size, shuffle=True if legacy_validation else run.shuffle, **loader_kwargs)
+    val_loader = DataLoader(Subset(dataset, val_idx), batch_size=batch_size, shuffle=False if legacy_validation else run.validation_shuffle, **loader_kwargs) if val_idx else None
 
     # Clips skipped because a frame was unreadable ("skip + report"); deduped
     # because every epoch re-reads the same files.
@@ -904,7 +928,7 @@ def train_spatiotemporal_gradient(
     epochs_without_improvement = 0
     best_val_loss = run.best_val_loss
     clip_sources = [frame.file_path for clip in clips for frame in (*clip.input_frames, *clip.future_frames)]
-    signature = source_signature(configuration, graph, training_parameters, clip_sources, {"shuffle": run.shuffle})
+    signature = source_signature(configuration, graph, training_parameters, clip_sources + sample_paths(validation_samples, True), validation_signature(run, sample_paths(validation_samples, True)))
     start_epoch = 1
     accumulated_elapsed = 0.0
     if run.restart_mode == "checkpoint" and run.checkpoint_path:
@@ -990,8 +1014,10 @@ def train_spatiotemporal_gradient(
                     y_future = y_future.to(device, non_blocking=pin)
                     with torch.amp.autocast(device.type, enabled=use_amp):
                         loss, _, _ = compute_loss(xb, y_future, epoch)
-                    val_total += float(loss.item())
-                    val_batches += 1
+                    val_total += float(loss.item()) * (1 if legacy_validation else len(xb))
+                    val_batches += 1 if legacy_validation else len(xb)
+                if not legacy_validation and val_batches == 0:
+                    raise ValueError("Die Validierung hat keine lesbaren Bilder beziehungsweise Clips geliefert.")
                 val_loss = val_total / max(1, val_batches)
 
         if early_stopping_enabled:
@@ -1013,6 +1039,7 @@ def train_spatiotemporal_gradient(
                 "epoch": epoch,
                 "model_state_dict": model.state_dict(),
                 "optimizer_state_dict": optimizer.state_dict(),
+                "validation": validation_signature(run, sample_paths(validation_samples, True)),
                 "scaler_state_dict": scaler.state_dict(),
                 "best_stop_metric": best_stop_metric,
                 "epochs_without_improvement": epochs_without_improvement,
@@ -1101,7 +1128,7 @@ def train_fast_anogan(
     }
     if num_workers > 0:
         loader_kwargs.update(persistent_workers=True, prefetch_factor=prefetch_factor)
-    loader = DataLoader(dataset, batch_size=batch_size, shuffle=True, **loader_kwargs)
+    loader = DataLoader(dataset, batch_size=batch_size, shuffle=True if (getattr(run, "validation_mode", None) or "legacy_fraction") == "legacy_fraction" else run.shuffle, **loader_kwargs)
 
     # Unreadable images skipped during this run ("skip + report"); deduped
     # because the infinite batch iterator re-reads the same files.
@@ -1128,7 +1155,7 @@ def train_fast_anogan(
     critic_optimizer = torch.optim.Adam(critic.parameters(), lr=wgan_lr, betas=(0.0, 0.9))
     encoder_optimizer = torch.optim.RMSprop(encoder.parameters(), lr=encoder_lr)
     scaler = torch.amp.GradScaler("cuda", enabled=use_amp)
-    signature = source_signature(configuration, graph, training_parameters, image_paths, {"shuffle": run.shuffle})
+    signature = source_signature(configuration, graph, training_parameters, image_paths, validation_signature(run))
     resume_phase = "wgan"
     wgan_start = 1
     encoder_start_iteration = 1
@@ -1536,11 +1563,18 @@ def run_training(run_id: int, abort_event: threading.Event | None = None) -> Non
         try:
             graph = PreprocessingGraph.model_validate(preprocessing.graph)
             artifact_dir = _run_artifact_dir(run_id)
+            resolved_training, resolved_validation = None, None
+            if run.validation_mode != "legacy_fraction":
+                resolved_training, resolved_validation = resolve_selections(db,
+                    [entry.training_dataset for entry in pipeline.entries], configuration,
+                    run.validation_mode, run.validation_dataset_ids)
+                run.validation_sample_count = len(resolved_validation)
+                _commit_noncritical(db, run.id, "validation setup")
 
             if configuration.builder_kind == "form":
                 logger.info("Training run %s resolving training image paths", run_id)
                 resolution_started = time.perf_counter()
-                image_paths = enumerate_or_fail(db, pipeline)
+                image_paths = resolved_training if resolved_training is not None else enumerate_or_fail(db, pipeline)
                 logger.info(
                     "Training run %s resolved %s training image paths in %.3fs",
                     run_id,
@@ -1563,6 +1597,8 @@ def run_training(run_id: int, abort_event: threading.Event | None = None) -> Non
                 logger.info("Training run %s resolving sequence clips", run_id)
                 resolution_started = time.perf_counter()
                 clips, clip_summary = enumerate_clips_or_fail(pipeline, configuration.method_config)
+                if resolved_training is not None:
+                    clips = resolved_training
                 logger.info(
                     "Training run %s resolved %s clips in %.3fs "
                     "(%s skipped, %s selected frames, %s possible clips, mode=%s)",
@@ -1586,13 +1622,13 @@ def run_training(run_id: int, abort_event: threading.Event | None = None) -> Non
                     )
                 artifact_path = artifact_dir / "artifact.pt"
                 count = train_spatiotemporal_gradient(
-                    db, run, configuration, clips, graph, run.training_parameters, artifact_path, abort_event
+                    db, run, configuration, clips, graph, run.training_parameters, artifact_path, abort_event, resolved_validation
                 )
                 run.artifact_kind = "weights"
             elif configuration.builder_kind == "fast_anogan":
                 logger.info("Training run %s resolving training image paths", run_id)
                 resolution_started = time.perf_counter()
-                image_paths = enumerate_or_fail(db, pipeline)
+                image_paths = resolved_training if resolved_training is not None else enumerate_or_fail(db, pipeline)
                 logger.info(
                     "Training run %s resolved %s training image paths in %.3fs",
                     run_id,
@@ -1607,7 +1643,7 @@ def run_training(run_id: int, abort_event: threading.Event | None = None) -> Non
             else:
                 logger.info("Training run %s resolving training image paths", run_id)
                 resolution_started = time.perf_counter()
-                image_paths = enumerate_or_fail(db, pipeline)
+                image_paths = resolved_training if resolved_training is not None else enumerate_or_fail(db, pipeline)
                 logger.info(
                     "Training run %s resolved %s training image paths in %.3fs",
                     run_id,
@@ -1616,7 +1652,7 @@ def run_training(run_id: int, abort_event: threading.Event | None = None) -> Non
                 )
                 artifact_path = artifact_dir / "artifact.pt"
                 count = train_gradient(
-                    db, run, configuration, image_paths, graph, run.training_parameters, artifact_path, abort_event
+                    db, run, configuration, image_paths, graph, run.training_parameters, artifact_path, abort_event, resolved_validation
                 )
                 run.artifact_kind = "weights"
 

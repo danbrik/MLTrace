@@ -95,6 +95,7 @@ class MethodRegistry:
             raise ValueError(f"Unknown method: {method_type}") from exc
 
     def list_definitions(self) -> list[MethodDefinitionRead]:
+        from app.modeling.training_ui import training_schema
         return [
             MethodDefinitionRead(
                 type=method.type,
@@ -111,7 +112,7 @@ class MethodRegistry:
                 builder_kind=method.builder_kind,
                 capabilities=method.capabilities,
                 method_schema=method.method_schema,
-                training_schema=method.training_schema,
+                training_schema=training_schema(method),
                 inference_schema=method.inference_schema,
                 default_method_config=method.default_method_config,
                 default_training_config=method.default_training_config,

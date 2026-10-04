@@ -161,6 +161,7 @@ export function SchedulerDetailsModal({
             </Badge>
           </Stack>
         </Row>
+        <Row label="Validierung"><Text size="sm">{run.validation_mode === 'external' ? `${(run.validation_dataset_names ?? []).join(', ')} · ${run.validation_sample_count ?? '–'} Bilder/Clips · ${run.validation_shuffle ? 'gemischt' : 'in Reihenfolge'}` : run.validation_mode === 'none' ? 'Keine Validierung' : 'Bisherige anteilige Validierung'}</Text></Row>
         <Row label="Preprocessing"><PreprocessingSteps pipeline={preprocessing} /></Row>
         <Row label="Method"><MethodDetail configuration={configuration} definition={methodByType.get(run.method_type)} /></Row>
         <Row label="Parameters">

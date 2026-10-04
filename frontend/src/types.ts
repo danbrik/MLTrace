@@ -491,7 +491,11 @@ export type PreprocessingPreview = {
   previews: PreprocessingPreviewImage[];
 };
 
+export type TrainingCondition = { all: TrainingCondition[] } | { any: TrainingCondition[] } | { field: string; in?: unknown[]; gt?: number };
+
 export type SchemaProperty = {
+  ui_group?: string;
+  visible_if?: TrainingCondition;
   type: 'string' | 'integer' | 'number' | 'boolean';
   label?: string;
   enum?: string[];
@@ -503,6 +507,8 @@ export type SchemaProperty = {
 };
 
 export type ConfigSchema = {
+  ui_groups?: { id: string; label: string }[];
+  supports_validation?: boolean;
   type: string;
   required?: string[];
   properties: Record<string, SchemaProperty>;
@@ -674,6 +680,11 @@ export type TrainingPipelineDatasetSummary = {
 };
 
 export type TrainingPipeline = {
+  validation_datasets?: TrainingPipelineDatasetSummary[];
+  total_validation_images?: number;
+  validation_mode?: "legacy_fraction" | "none" | "external";
+  validation_shuffle?: boolean;
+  validation_dataset_ids?: number[];
   id: number;
   name: string;
   description: string | null;
@@ -699,6 +710,9 @@ export type TrainingPipeline = {
 };
 
 export type TrainingPipelinePayload = {
+  validation_mode?: "legacy_fraction" | "none" | "external";
+  validation_shuffle?: boolean;
+  validation_dataset_ids?: number[];
   training_dataset_ids: number[];
   preprocessing_pipeline_id: number;
   method_configuration_id: number;
@@ -725,6 +739,9 @@ export type TrainingPipelineModelOutput = {
 };
 
 export type TrainingPipelineDryRun = {
+  training_sample_count?: number | null;
+  validation_sample_count?: number | null;
+  sample_kind?: string;
   valid: boolean;
   mode: 'forward_pass' | 'fit_contribution' | 'failed' | string;
   errors: string[];
@@ -747,6 +764,11 @@ export type TrainingRunMetric = {
 };
 
 export type TrainingRun = {
+  validation_dataset_names?: string[];
+  validation_sample_count?: number | null;
+  validation_mode?: "legacy_fraction" | "none" | "external";
+  validation_shuffle?: boolean;
+  validation_dataset_ids?: number[];
   id: number;
   training_pipeline_id: number;
   status: TrainingRunStatus;

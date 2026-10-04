@@ -125,6 +125,10 @@ def _training_dataset_dependents(db: Session, td_id: int) -> list[Dependent]:
         .where(models.TrainingPipelineDataset.training_dataset_id == td_id)
         .distinct()
     ).all()
+    validation_pipelines = db.scalars(select(models.TrainingPipeline).join(models.TrainingPipelineValidationDataset,
+        models.TrainingPipelineValidationDataset.training_pipeline_id == models.TrainingPipeline.id)
+        .where(models.TrainingPipelineValidationDataset.training_dataset_id == td_id)).all()
+    pipelines = {p.id: p for p in [*pipelines, *validation_pipelines]}.values()
     out += [Dependent("training_pipeline", p.id, p.name) for p in pipelines]
     out += _named(
         db, "testing_run", models.TestingRun, models.TestingRun.id,
