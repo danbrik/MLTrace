@@ -4,6 +4,7 @@ import type { Config, PlotSettings, Role, Summary } from './types';
 export const roles: Role[] = ['reference', 'comparison'];
 export const labels: Record<Role, string> = { reference: 'Referenz', comparison: 'Vergleich' };
 export const defaultConfig: Config = {
+  selection_version: 2, block_seconds: 300, seed: 42,
   training_dataset_id: 0, preprocessing_pipeline_id: 0,
   reference: { start: '', end: '' }, comparison: { start: '', end: '' }, deltas_seconds: [1, 2, 5, 15, 30, 60],
 };
@@ -20,6 +21,7 @@ export function addDelta(current: number[], value: number) {
   return validDelta(value) ? [...new Set([...current, value])].sort((a, b) => a - b) : current;
 }
 export function validateConfig(config: Config, min?: string, max?: string) {
+  if (config.selection_version === 2 && (!Number.isSafeInteger(config.block_seconds) || config.block_seconds! <= 0 || !Number.isSafeInteger(config.seed) || config.seed! < 0)) return 'Blockgröße und Seed müssen gültige ganze Zahlen sein.';
   if (!config.training_dataset_id || !config.preprocessing_pipeline_id) return 'Bitte Datensatz und Preprocessing auswählen.';
   for (const role of roles) {
     const problem = rangeProblem(config[role], min, max);

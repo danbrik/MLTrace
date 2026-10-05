@@ -2171,3 +2171,17 @@ export function temporalDifferenceCsvUrl(id: number, kind: 'summary' | 'pairs', 
 export function getTrainingLossPlot(runId: number, projectId?: string, signal?: AbortSignal) {
   return request<import('./types').TrainingLossPlot>(`/api/training-runs/${runId}/loss-plot`, { signal }, undefined, projectId);
 }
+
+export function getTemporalMatrix(id: number, role: string, projectId: string) {
+  return request<import('./temporalDifference/types').MatrixState>(`/api/temporal-difference/runs/${id}/matrix?role=${role}`, undefined, undefined, projectId);
+}
+export function getTemporalMatrixCandidates(id: number, role: string, deltas: number[], projectId: string) {
+  const query = new URLSearchParams({role}); deltas.forEach(d => query.append('deltas', String(d)));
+  return request<import('./temporalDifference/types').MatrixCandidates>(`/api/temporal-difference/runs/${id}/matrix/start-points?${query}`, undefined, undefined, projectId);
+}
+export function createTemporalMatrix(id: number, config: import('./temporalDifference/types').MatrixConfig, projectId: string) {
+  return request<import('./temporalDifference/types').MatrixState>(`/api/temporal-difference/runs/${id}/matrix`, {method:'POST',body:JSON.stringify(config)}, undefined, projectId);
+}
+export function temporalMatrixUrl(id: number, role: string, artifact: string, projectId: string, download = false) {
+  return `${API_BASE_URL}/api/temporal-difference/runs/${id}/matrix/png?${new URLSearchParams({role,artifact,project_id:projectId,download:String(download)})}`;
+}

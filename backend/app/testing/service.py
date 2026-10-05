@@ -648,6 +648,7 @@ class ArtifactEvaluator:
         self.pipeline = training_run.training_pipeline
         self.configuration = self.pipeline.method_configuration
         self.artifact_path = Path(training_run.artifact_path or "")
+        self.statistical_reference = None
         self.mean_image: np.ndarray | None = None
         self.torch = None
         self.model = None
@@ -661,6 +662,22 @@ class ArtifactEvaluator:
             raise ValueError(f"Training artifact does not exist: {self.artifact_path}")
         if training_run.artifact_kind == "mean_image":
             self.mean_image = np.load(self.artifact_path)
+        elif training_run.artifact_kind == "statistical_reference":
+            from app.modeling.statistical_reference import load_reference
+            self.statistical_reference = load_reference(self.artifact_path)
+            self.mean_image = self.statistical_reference[0]
+            self.score_metric = "normalized_deviation"
+            self.inference_config["error_metric"] = self.score_metric
+
+    def pixel_error_map(self, source, reconstruction, config=None):
+        if getattr(self, "statistical_reference", None) is None:
+            return _pixel_error_map(source, reconstruction, config)
+        from app.modeling.statistical_reference import anomaly_map
+        mean, std, epsilon, _count = self.statistical_reference
+        result = anomaly_map(source, mean, std, epsilon)
+        settings = _visualization_config(config)
+        return np.where(result >= settings.threshold, result, 0.0) if settings.threshold_enabled else result
+
 
     def _is_fast_anogan(self) -> bool:
         training_run = getattr(self, "training_run", None)
@@ -921,6 +938,21 @@ class ArtifactEvaluator:
     ) -> tuple[float, float | None, int, int, list[dict] | None, dict]:
         source = image if self.mean_image is not None else _as_image(_to_nchw(image))
         width, height, _, _, _, _ = image_metadata(source)
+        if getattr(self, "statistical_reference", None) is not None:
+            from app.modeling.statistical_reference import anomaly_map
+            mean, std, epsilon, count = self.statistical_reference
+            values = anomaly_map(source, mean, std, epsilon)
+            full_score = aggregate_score(values, _aggregation_from_config(self.inference_config))
+            roi_score, tile_scores, warnings = (None, None, [])
+            if roi is not None:
+                roi_score, tile_scores, warnings = _roi_scores(values, np.zeros_like(values), roi, "mae", self.inference_config)
+                for tile in tile_scores or []:
+                    tile["score_metric"] = self.score_metric
+            return full_score, roi_score, width, height, tile_scores, {
+                "score_metric": self.score_metric, "score_aggregation": _aggregation_from_config(self.inference_config),
+                "epsilon": epsilon, "reference_count": count, "ddof": 0, "warnings": warnings,
+            }
+
         if extra_metadata and "fast_anogan" in extra_metadata:
             fast_meta = extra_metadata["fast_anogan"]
             full_score = float(fast_meta["residual_score"])
@@ -1787,7 +1819,7 @@ def compute_heatmap_run(db: Session, payload: HeatmapRunCreate) -> HeatmapRunRea
             image = run_pipeline_array(graph, image_path)
             reconstruction = evaluator.reconstruct(image)
             source = image if evaluator.mean_image is not None else _as_image(_to_nchw(image))
-        error_map = _pixel_error_map(source, reconstruction, payload.visualization_config)
+        error_map = evaluator.pixel_error_map(source, reconstruction, payload.visualization_config)
         error_magnitude = np.abs(error_map)
         max_y, max_x = np.unravel_index(int(np.argmax(error_magnitude)), error_map.shape)
         width, height, channels, dtype, _, _ = image_metadata(source)
@@ -2022,7 +2054,7 @@ def enqueue_testing_run(db: Session, payload: TestingRunCreate, *, wake_schedule
     if payload.roi_id is not None and roi is None:
         raise ValueError(f"ROI does not exist: {payload.roi_id}")
 
-    inference_config = payload.inference_config or None
+    inference_config = _effective_inference_config(training_run, payload.inference_config)
     existing = _find_duplicate_testing_run(
         db,
         training_run.id,
@@ -2153,11 +2185,11 @@ def bulk_enqueue_testing_runs(
 
     created_models: list[models.TestingRun] = []
     skipped: list[TestingRunBulkSkipped] = []
-    inference_config = payload.inference_config or None
     name_prefix = (payload.name_prefix or "").strip()
     for training_run in training_runs:
         pipeline = training_run.training_pipeline
         configuration = pipeline.method_configuration
+        inference_config = _effective_inference_config(training_run, payload.inference_config)
         for dataset in datasets:
             existing = _find_duplicate_testing_run(
                 db,
@@ -2414,3 +2446,11 @@ def clear_testing_rows_for_training_run(db: Session, training_run_id: int) -> No
         return
     db.execute(delete(models.TestingRunResult).where(models.TestingRunResult.testing_run_id.in_(testing_ids)))
     db.execute(delete(models.TestingRun).where(models.TestingRun.id.in_(testing_ids)))
+
+
+def _effective_inference_config(training_run, overrides):
+    if training_run.artifact_kind != "statistical_reference":
+        return overrides or None
+    defaults = training_run.training_pipeline.method_configuration.inference_config or {}
+    return {"error_metric": "normalized_deviation", "frame_score_aggregation": (overrides or {}).get(
+        "frame_score_aggregation", defaults.get("frame_score_aggregation", "mean"))}

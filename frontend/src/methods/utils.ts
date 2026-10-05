@@ -73,6 +73,7 @@ export function schemaDefaults(schema: MethodDefinition['method_schema'] | undef
 
 export function keyParameters(method: MethodConfiguration): string {
   const config = method.method_config ?? method.model_config;
+  if (method.method_type === 'statistical_reference') return `ε ${formatValue(config.epsilon)}, pixel-wise μ / σ (ddof=0)`;
   if (method.method_type === 'mean_image') {
     return [
       `aggregation ${formatValue(config.aggregation)}`,

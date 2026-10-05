@@ -46,3 +46,16 @@ describe('persisted result plots', () => {
     expect(validatePlot({ ...settings, reference_color: 'red' })).not.toBeNull();
   });
 });
+
+describe('stratified defaults', () => {
+  it('uses version 2, five minute blocks and seed 42', () => {
+    expect(defaultConfig.selection_version).toBe(2);
+    expect(defaultConfig.block_seconds).toBe(300);
+    expect(defaultConfig.seed).toBe(42);
+    expect(validateConfig({...configured,block_seconds:0})).not.toBeNull();
+    expect(validateConfig({...configured,seed:NaN})).not.toBeNull();
+    expect(validateConfig({...configured,seed:-1})).not.toBeNull();
+    expect(validateConfig({...configured,selection_version:1,block_seconds:undefined,seed:undefined})).toBeNull();
+    expect(JSON.stringify({...configured,seed:43})).not.toBe(JSON.stringify(configured));
+  });
+});

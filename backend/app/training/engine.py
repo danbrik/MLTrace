@@ -1584,15 +1584,28 @@ def run_training(run_id: int, abort_event: threading.Event | None = None) -> Non
                 # Fit-style methods (mean image) are pure numpy → always CPU.
                 run.device = "CPU"
                 _commit_noncritical(db, run.id, "device status")
-                artifact_path = artifact_dir / "artifact.npy"
                 skipped_paths: list[str] = []
-                count = fit_mean_image(
-                    image_paths, graph, configuration.method_config, artifact_path, abort_event,
-                    skipped_paths=skipped_paths,
-                )
+                if configuration.method_type == "statistical_reference":
+                    from app.modeling.statistical_reference import reference_statistics
+                    compiled = compile_pipeline(graph)
+                    def reference_images():
+                        for path in image_paths:
+                            if abort_event.is_set():
+                                raise AbortedError()
+                            yield compiled.run(path)
+                    mean, std, count = reference_statistics(reference_images())
+                    artifact_path = artifact_dir / "artifact.npz"
+                    np.savez(artifact_path, mean=mean, std=std, count=count,
+                             epsilon=float(configuration.method_config.get("epsilon", 1e-6)), version=1)
+                else:
+                    artifact_path = artifact_dir / "artifact.npy"
+                    count = fit_mean_image(
+                        image_paths, graph, configuration.method_config, artifact_path, abort_event,
+                        skipped_paths=skipped_paths,
+                    )
                 run.skipped_image_count = len(skipped_paths)
                 run.skipped_images = sorted(set(skipped_paths))[:_MAX_SKIPPED_PATHS]
-                run.artifact_kind = "mean_image"
+                run.artifact_kind = "statistical_reference" if configuration.method_type == "statistical_reference" else "mean_image"
             elif configuration.builder_kind == "spatiotemporal_autoencoder":
                 logger.info("Training run %s resolving sequence clips", run_id)
                 resolution_started = time.perf_counter()

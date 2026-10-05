@@ -2,6 +2,8 @@ from datetime import UTC, datetime, timedelta
 from zoneinfo import ZoneInfo
 
 import numpy as np
+from bisect import bisect_left
+from math import ceil
 
 ROLES = ("reference", "comparison")
 LABELS = {"reference": "Referenz", "comparison": "Vergleich"}
@@ -20,6 +22,12 @@ def utc_instant(value: datetime) -> datetime:
 
 
 def select_pairs(records, config):
+    if config.selection_version == 2:
+        return stratified_pairs(records, config)
+    return exact_pairs(records, config)
+
+
+def exact_pairs(records, config, validate_only=False):
     ordered = sorted({row.file_path: row for row in records}.values(), key=lambda row: (row.timestamp_parsed, row.file_path))
     samples, pairs, periods, errors = {}, [], {}, []
     for role in ROLES:
@@ -35,6 +43,8 @@ def select_pairs(records, config):
                 raise ValueError(f"{LABELS[role]}: Mehrere Dateien am Zeitpunkt {row.timestamp_parsed.isoformat(sep=' ')}.")
             by_time[instant] = index
             samples[role].append({"file_path": row.file_path, "timestamp": row.timestamp_parsed.isoformat(), "utc": instant.isoformat()})
+        if validate_only:
+            continue
         counts = []
         for delta in config.deltas_seconds:
             found = 0
@@ -84,3 +94,59 @@ def statistics(values):
         return dict(pair_count=0, median=None, q1=None, q3=None, iqr=None)
     q1, median, q3 = np.quantile(values, [.25, .5, .75], method="linear")
     return dict(pair_count=len(values), median=float(median), q1=float(q1), q3=float(q3), iqr=float(q3 - q1))
+
+
+def stratified_pairs(records, config):
+    # Reuse legacy ordering, duplicate-timestamp checks and timezone validation.
+    samples, _, _ = exact_pairs(records, config, validate_only=True)
+    pairs, periods, errors = [], {}, []
+    for role in ROLES:
+        interval = getattr(config, role)
+        begin, end = utc_instant(interval.start), utc_instant(interval.end)
+        duration = (end - begin).total_seconds() - max(config.deltas_seconds)
+        if duration < 0:
+            errors.append(f"{LABELS[role]}: Zeitraum ist kürzer als der größte Abstand.")
+        last = begin + timedelta(seconds=max(0, duration))
+        blocks = max(1, ceil(duration / config.block_seconds)) if duration >= 0 else 0
+        times = [datetime.fromisoformat(row['utc']) for row in samples[role]]
+        buckets, missing = {}, dict.fromkeys(config.deltas_seconds, 0)
+        candidates = 0
+        for index, instant in enumerate(times):
+            if duration < 0 or instant > last:
+                continue
+            candidates += 1
+            partners = []
+            for delta in config.deltas_seconds:
+                target = instant + timedelta(seconds=delta)
+                pos = bisect_left(times, target)
+                choices = [i for i in (pos-1, pos) if 0 <= i < len(times) and i != index
+                           and abs((times[i]-target).total_seconds()) <= .5]
+                other = min(choices, key=lambda i: (abs((times[i]-target).total_seconds()), times[i])) if choices else None
+                if other is None:
+                    missing[delta] += 1
+                partners.append(other)
+            if all(other is not None for other in partners):
+                block = min(blocks-1, int((instant-begin).total_seconds() // config.block_seconds))
+                buckets.setdefault(block, []).append((index, partners))
+        rng = np.random.default_rng(config.seed)
+        selected = []
+        for block in sorted(buckets):
+            options = buckets[block]
+            index, partners = options[int(rng.integers(len(options)))]
+            selected.append((index, partners))
+        # Freeze only files actually needed; pair indices address this compact list.
+        used = sorted({i for first, others in selected for i in [first, *others]})
+        remap = {old: new for new, old in enumerate(used)}
+        for first, others in selected:
+            for delta, other in zip(config.deltas_seconds, others):
+                pairs.append(dict(role=role, delta_seconds=delta, first=remap[first], second=remap[other]))
+        image_count = len(samples[role])
+        samples[role] = [samples[role][i] for i in used]
+        periods[role] = dict(image_count=image_count, start_range_start=interval.start.isoformat(),
+            start_range_end=last.astimezone(BERLIN).replace(tzinfo=None).isoformat() if duration >= 0 else None,
+            block_count=blocks, candidate_count=candidates, valid_candidates=sum(map(len, buckets.values())),
+            selected_start_count=len(selected), empty_blocks=blocks-len(buckets),
+            deltas=[dict(delta_seconds=d, pair_count=len(selected), missing_targets=missing[d]) for d in config.deltas_seconds])
+        if not selected and duration >= 0:
+            errors.append(f"{LABELS[role]}: Kein Startzeitpunkt hat Partnerbilder für alle Abstände innerhalb ±0,5 s.")
+    return samples, pairs, dict(periods=periods, errors=errors)

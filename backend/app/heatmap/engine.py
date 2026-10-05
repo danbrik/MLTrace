@@ -32,7 +32,6 @@ from app.testing.service import (
     _as_image,
     _heatmap_overlay,
     _load_testing_run_for_heatmap,
-    _pixel_error_map,
     _to_nchw,
     _utcnow,
     prepare_stae_heatmap_sample,
@@ -203,7 +202,7 @@ def run_heatmap_range(run_id: int, abort_event: threading.Event | None = None) -
                     reconstructions = evaluator.reconstruct_batch(images)
                     batch_timestamps = [record.timestamp for record in batch]
                 for offset, _record in enumerate(batch):
-                    error_map = _pixel_error_map(
+                    error_map = evaluator.pixel_error_map(
                         sources[offset], reconstructions[offset], visualization_config
                     )
                     frame_max = float(np.max(np.abs(error_map))) if error_map.size else 0.0
@@ -211,7 +210,7 @@ def run_heatmap_range(run_id: int, abort_event: threading.Event | None = None) -
                     global_vmax = max(global_vmax, frame_max)
                     frame_path = frames_dir / f"frame_{done:05d}.png"
                     if shared:
-                        np.save(tmp_dir / f"{done:05d}.npy", error_map.astype(np.float16))
+                        np.save(tmp_dir / f"{done:05d}.npy", error_map.astype(np.float64 if evaluator.statistical_reference is not None else np.float16))
                         Image.fromarray(_source_to_rgb_uint8(sources[offset])).save(
                             tmp_dir / f"{done:05d}.png", format="PNG"
                         )

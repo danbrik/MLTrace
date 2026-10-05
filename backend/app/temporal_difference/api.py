@@ -86,3 +86,34 @@ def delete(run_id: int, db: Session = Depends(get_db)):
             raise HTTPException(404, "Analyse nicht gefunden.")
     except ValueError as exc:
         raise HTTPException(409, str(exc)) from exc
+
+
+from app.temporal_difference import matrix
+from app.temporal_difference.schemas import MatrixConfig
+
+
+@router.get('/runs/{run_id}/matrix')
+def matrix_state(run_id: int, role: Literal['reference', 'comparison'], db: Session = Depends(get_db)):
+    return required(matrix.state(db, run_id, role))
+
+
+@router.get('/runs/{run_id}/matrix/start-points')
+def matrix_candidates(run_id: int, role: Literal['reference', 'comparison'], deltas: list[int] = Query(), db: Session = Depends(get_db)):
+    try:
+        return required(matrix.candidates(db, run_id, role, deltas))
+    except (ValueError, OSError) as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+@router.post('/runs/{run_id}/matrix')
+def create_matrix(run_id: int, payload: MatrixConfig, db: Session = Depends(get_db)):
+    try:
+        return required(matrix.generate(db, run_id, payload))
+    except (ValueError, OSError) as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+@router.get('/runs/{run_id}/matrix/png')
+def matrix_png(run_id: int, role: Literal['reference', 'comparison'], artifact: str, download: bool = False, db: Session = Depends(get_db)):
+    path = required(matrix.png_path(db, run_id, role, artifact))
+    return FileResponse(path, media_type='image/png', filename=f'temporal-difference-{run_id}-{role}-matrix.png' if download else None)

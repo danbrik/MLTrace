@@ -455,6 +455,8 @@ def seed_finished_stae_heatmap_run(db, tmp_path: Path):
 
 
 class FakeStaeHeatmapEvaluator:
+    pixel_error_map = staticmethod(_pixel_error_map)
+    statistical_reference = None
     clip_shapes: list[tuple[int, ...]] = []
 
     def __init__(self, *_args, **_kwargs) -> None:

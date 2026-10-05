@@ -7,6 +7,7 @@ import { abortTemporalDifferenceRun, createTemporalDifferenceRun, deleteTemporal
 import type { PreprocessingPipeline, TrainingDataset } from '../types';
 import type { Config, Preview, Run } from '../temporalDifference/types';
 import { addDelta, defaultConfig, displayTime, labels, phaseLabel, roles, validDelta, validateConfig } from '../temporalDifference/helpers';
+import { MatrixResults } from '../temporalDifference/MatrixResults';
 import { TemporalResults } from '../temporalDifference/Results';
 const activeRun = (run: Run | null) => !!run && ['queued', 'running'].includes(run.status);
 const errorText = (value: unknown) => value instanceof Error ? value.message : String(value);
@@ -16,6 +17,7 @@ export function TemporalDifferencePage({ active, projectId }: { active: boolean;
   const [config, setConfig] = useState<Config>(() => structuredClone(defaultConfig));
   const [preview, setPreview] = useState<{ signature: string; value: Preview } | null>(null);
   const [runs, setRuns] = useState<Run[]>([]), [run, setRun] = useState<Run | null>(null);
+  const [templateNotice, setTemplateNotice] = useState(false);
   const [delta, setDelta] = useState<number | string>('');
   const [error, setError] = useState<string | null>(null), [pollError, setPollError] = useState<string | null>(null);
   const [log, setLog] = useState<string | null>(null);
@@ -65,10 +67,11 @@ export function TemporalDifferencePage({ active, projectId }: { active: boolean;
   function update(values: Partial<Config>) { setPreview(null); setConfig(current => ({ ...current, ...values })); }
   function draft(template?: Run) {
     initialized.current = true;
-    setConfig(structuredClone(template?.config ?? defaultConfig)); setDelta(''); openRun(null);
+    setConfig({ ...structuredClone(template?.config ?? defaultConfig), selection_version: 2, block_seconds: template?.config.block_seconds ?? 300, seed: template?.config.seed ?? 42 });
+    if (template && template.config.selection_version !== 2) setTemplateNotice(true); else setTemplateNotice(false); setDelta(''); openRun(null);
   }
   return <Stack gap="lg">
-    <Group justify="space-between"><div><Title order={2}>Zeitabstands-Analyse</Title><Text c="dimmed">Absolute Pixeländerung zwischen Bildern mit exakt definiertem Zeitabstand.</Text></div>
+    <Group justify="space-between"><div><Title order={2}>Zeitabstands-Analyse</Title><Text c="dimmed">Absolute Pixeländerung bei gemeinsamen, über den Zeitraum verteilten Startzeitpunkten.</Text></div>
       <Button variant="light" disabled={busy || loading} onClick={() => draft()}>Neue Analyse</Button></Group>
     {error && <Alert color="red" withCloseButton onClose={() => setError(null)}>{error}</Alert>}
     {loading && <Loader size="sm" />}
@@ -80,6 +83,8 @@ export function TemporalDifferencePage({ active, projectId }: { active: boolean;
       <Text>Datensatz: {run.training_dataset_name} · Preprocessing: {run.pipeline_snapshot.name}</Text>
       {roles.map(role => <Text key={role}>{labels[role]}: {displayTime(run.config[role].start)} – {displayTime(run.config[role].end)} (Europe/Berlin)</Text>)}
       <Text>Zeitabstände: {run.config.deltas_seconds.join(', ')} Sekunden · gespeichertes Dataset-Sampling</Text>
+      <Text>{run.config.selection_version === 2 ? `Geschichtete Auswahl · Blockgröße ${run.config.block_seconds} s · Seed ${run.config.seed} · Partner-Toleranz ±0,5 s` : 'Bisherige vollständige Auswahl mit exakten Partnerzeitpunkten'}</Text>
+      {run.result?.selection && roles.map(role => { const p = run.result!.selection.periods[role]; return p.start_range_start ? <Text key={role}>{labels[role]}: Startbereich {displayTime(p.start_range_start)} – {p.start_range_end ? displayTime(p.start_range_end) : 'ungültig'} · {p.selected_start_count} Startpunkte</Text> : null; })}
       <Text size="sm" c="dimmed">Berechnungseinstellungen sind eingefroren. „Als Vorlage übernehmen“ erstellt einen neuen Entwurf.</Text>
       <Group><Button disabled={busy} onClick={() => draft(run)}>Als Vorlage übernehmen</Button>
         <Button variant="subtle" disabled={busy} onClick={() => void action(async () => {
@@ -120,11 +125,14 @@ export function TemporalDifferencePage({ active, projectId }: { active: boolean;
       </Stack></Paper>
       <Paper withBorder p="lg"><Stack>
         <Title order={4}>3 · Zeitabstände und Berechnung</Title>
+        {templateNotice && <Alert color="blue">Diese Vorlage verwendet jetzt die geschichtete Auswahl statt aller exakten Paare.</Alert>}
+        <Group><NumberInput label="Blockgröße (Sekunden)" min={1} allowDecimal={false} value={config.block_seconds ?? 300} disabled={busy} onChange={value => update({ block_seconds: Number(value) })} />
+          <NumberInput label="Zufallsseed" min={0} allowDecimal={false} value={config.seed ?? 42} disabled={busy} onChange={value => update({ seed: value === '' ? NaN : Number(value) })} /></Group>
         <Group align="end"><NumberInput label="Zeitabstand (Sekunden)" min={1} allowDecimal={false} disabled={busy} value={delta} onChange={setDelta} />
           <Button variant="light" disabled={busy || !validDelta(Number(delta)) || config.deltas_seconds.includes(Number(delta))} onClick={() => { update({ deltas_seconds: addDelta(config.deltas_seconds, Number(delta)) }); setDelta(''); }}>Hinzufügen</Button></Group>
         <Group>{config.deltas_seconds.map(value => <Button key={value} size="xs" variant="light" disabled={busy} aria-label={`${value} Sekunden entfernen`}
           onClick={() => update({ deltas_seconds: config.deltas_seconds.filter(item => item !== value) })}>{value} s ×</Button>)}</Group>
-        <Text size="sm" c="dimmed">Pro Paar: Mittelwert der absoluten Pixeldifferenzen. Pro Zeitabstand: Median und IQR über alle exakten Paare. Fehlende Zielbilder werden nicht ersetzt.</Text>
+        <Text size="sm" c="dimmed">Pro Paar: Mittelwert der absoluten Pixeldifferenzen. Pro Zeitabstand: Median und IQR. Pro Block wird ein Startpunkt mit Partnern für alle Abstände gezogen (±0,5 s). Der Startbereich endet um den größten Abstand vor dem Zeitraumende.</Text>
         {validation && <Text size="sm" c="dimmed">{validation}</Text>}
         <Group><Button variant="light" disabled={busy || loading || !!validation} onClick={() => void action(async () => {
           const next = await previewTemporalDifference(config, projectId); setPreview({ signature, value: next });
@@ -134,13 +142,15 @@ export function TemporalDifferencePage({ active, projectId }: { active: boolean;
           })}>Berechnung starten</Button></Group>
         {currentPreview && <>
           <Text>{roles.map(role => `${labels[role]}: ${currentPreview.periods[role].image_count} Bilder`).join(' · ')}</Text>
-          <Table><Table.Thead><Table.Tr>{['Zeitraum', 'Δt (s)', 'Exakte Paare', 'Fehlende Zielbilder'].map(label => <Table.Th key={label}>{label}</Table.Th>)}</Table.Tr></Table.Thead>
+          <Table><Table.Thead><Table.Tr>{['Zeitraum', 'Δt (s)', 'Paare', 'Fehlende Zielbilder'].map(label => <Table.Th key={label}>{label}</Table.Th>)}</Table.Tr></Table.Thead>
             <Table.Tbody>{roles.flatMap(role => currentPreview.periods[role].deltas.map(row => <Table.Tr key={`${role}-${row.delta_seconds}`}><Table.Td>{labels[role]}</Table.Td><Table.Td>{row.delta_seconds}</Table.Td><Table.Td>{row.pair_count || 'Keine Paare'}</Table.Td><Table.Td>{row.missing_targets}</Table.Td></Table.Tr>))}</Table.Tbody></Table>
-          <Text size="sm" c="dimmed">Fehlende Zielbilder schließen Ziele außerhalb des gewählten Zeitraums ein.</Text>
+          {roles.map(role => { const p = currentPreview.periods[role]; return <Text key={role} size="sm">{labels[role]}: Startbereich {displayTime(p.start_range_start ?? '—')} – {displayTime(p.start_range_end ?? '—')} · {p.block_count} Blöcke · {p.valid_candidates}/{p.candidate_count} gültige Kandidaten · {p.selected_start_count} ausgewählt · {p.empty_blocks} leere Blöcke</Text>; })}
+          <Text size="sm" c="dimmed">Fehlende Partner werden je Abstand unter allen Kandidaten im eingeschränkten Startbereich gezählt. Ein fehlender Partner schließt den Startpunkt für alle Abstände aus.</Text>
           {currentPreview.errors.map(message => <Alert color="orange" key={message}>{message}</Alert>)}
         </>}
       </Stack></Paper>
     </>}
+    {run?.status === 'finished' && <MatrixResults key={`matrix-${projectId}-${run.id}`} run={run} projectId={projectId} />}
     {run?.status === 'finished' && <TemporalResults key={run.id} run={run} projectId={projectId} onPlotSaved={settings => {
       setRun(current => current?.id === run.id ? { ...current, plot_settings: settings } : current);
       setRuns(current => current.map(item => item.id === run.id ? { ...item, plot_settings: settings } : item));

@@ -505,6 +505,8 @@ export function TestingRunsPage({ active = true, onRunQueued }: { active?: boole
     [models, selectedModelIds],
   );
   const primaryModel = selectedModels[0] ?? null;
+  const allStatisticalReferences = selectedModels.length > 0 && selectedModels.every((run) => run.artifact_kind === 'statistical_reference');
+  const hasStatisticalReference = selectedModels.some((run) => run.artifact_kind === 'statistical_reference');
   // The image size a test dataset must have = the selected models' preprocessing input size.
   const requiredInputResolution = useMemo(() => {
     if (!primaryModel) return null;
@@ -708,7 +710,7 @@ export function TestingRunsPage({ active = true, onRunQueued }: { active?: boole
 
   useEffect(() => {
     const defaultMetric = selectedMethodConfiguration?.inference_config?.error_metric;
-    setScoreMetric(typeof defaultMetric === 'string' ? defaultMetric : 'mse');
+    setScoreMetric(typeof defaultMetric === 'string' && defaultMetric !== 'normalized_deviation' ? defaultMetric : 'mse');
     const defaultAggregation = selectedMethodConfiguration?.inference_config?.frame_score_aggregation;
     setScoreAggregation(typeof defaultAggregation === 'string' ? defaultAggregation : 'mean');
   }, [selectedMethodConfiguration?.id]);
@@ -1212,8 +1214,10 @@ export function TestingRunsPage({ active = true, onRunQueued }: { active?: boole
                     </Tooltip>
                   </Group>
                 }
-                data={SCORE_METRIC_OPTIONS}
-                value={scoreMetric}
+                data={allStatisticalReferences ? [{ value: 'normalized_deviation', label: '|I − μ| / (σ + ε)' }] : SCORE_METRIC_OPTIONS}
+                disabled={allStatisticalReferences}
+                description={hasStatisticalReference ? 'Statistical Reference always uses |I − μ| / (σ + ε); aggregation remains selectable.' : undefined}
+                value={allStatisticalReferences ? 'normalized_deviation' : scoreMetric}
                 onChange={(value) => setScoreMetric(value ?? 'mse')}
                 allowDeselect={false}
                 w={190}

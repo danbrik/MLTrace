@@ -1,5 +1,5 @@
 from datetime import datetime
-from typing import Annotated
+from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 from app.schemas import _dataset_local_naive
@@ -21,6 +21,9 @@ class Period(BaseModel):
 
 class TemporalDifferenceConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
+    selection_version: Literal[1, 2] = 1
+    block_seconds: int = Field(default=300, strict=True, gt=0, le=9007199254740991)
+    seed: int = Field(default=42, strict=True, ge=0, le=9007199254740991)
     training_dataset_id: int = Field(ge=1)
     preprocessing_pipeline_id: int = Field(ge=1)
     reference: Period
@@ -84,3 +87,18 @@ class TemporalDifferenceRunRead(BaseModel):
     device: str | None
     gpu_index: int | None
     created_at: datetime
+
+
+class MatrixConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    role: Literal["reference", "comparison"]
+    deltas_seconds: list[Annotated[int, Field(strict=True, gt=0)]] = Field(min_length=1, max_length=3)
+    start_times: list[str] = Field(min_length=1, max_length=3)
+    top_percent: float | None = Field(default=None, ge=.01, le=100, allow_inf_nan=False)
+
+    @model_validator(mode="after")
+    def unique(self):
+        if len(set(self.deltas_seconds)) != len(self.deltas_seconds) or len(set(self.start_times)) != len(self.start_times):
+            raise ValueError("Zeitabstände und Startpunkte müssen unterschiedlich sein.")
+        self.deltas_seconds.sort()
+        return self

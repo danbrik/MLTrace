@@ -1296,6 +1296,9 @@ def build_method_diagram(
                 "detail": f"output {method_config.get('output_dtype_policy', 'source')}",
             },
         ]
+        if method_type == "statistical_reference":
+            nodes[1].update(label="Pixel-wise mean and standard deviation", detail="float64 / population variance (ddof=0)")
+            nodes[2].update(label="Normalized anomaly map", detail=f"|I − μ| / (σ + ε), ε={method_config.get('epsilon', 1e-6)}")
         return {
             "method_type": method_type,
             "architecture_type": method_type,
@@ -2392,8 +2395,14 @@ def _dry_run_training_pipeline_legacy(db: Session, payload: TrainingPipelineDryR
         # Fit-style methods (e.g. mean image) have no forward pass to demo; the
         # preprocessed image is exactly what training would accumulate.
         logs.append("Method is fitted directly; skipping the forward pass.")
+        if configuration.method_type == "statistical_reference":
+            from app.modeling.statistical_reference import grayscale
+            try:
+                grayscale(final_image)
+            except ValueError as exc:
+                errors.append(str(exc))
         return TrainingPipelineDryRunResponse(
-            valid=True,
+            valid=not errors,
             mode="fit_contribution",
             errors=errors,
             note=(

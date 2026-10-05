@@ -15,6 +15,7 @@ export function metricKeyForRun(run: TestingRun): string {
 
 export function metricLabel(metric: string): string {
   const normalized = normalizeMetricKey(metric);
+  if (normalized === 'normalized_deviation') return '|I − μ| / (σ + ε)';
   if (normalized === 'mse') return 'MSE';
   if (normalized === 'mae') return 'MAE';
   if (normalized === 'ssim_distance') return 'SSIM';
