@@ -9,6 +9,7 @@ from sqlalchemy.pool import StaticPool
 from app import models
 from app.database import Base
 from app import services
+from app.modeling.defaults import industrial_stae_payload
 from app.training import data as data_module
 from app.training.data import (
     enumerate_training_dataset_clip_samples,
@@ -264,6 +265,41 @@ def test_missing_training_dataset_counts_can_be_refreshed(tmp_path: Path) -> Non
         assert refreshed.total_selected_images == 3
         assert refreshed.rules[0].matching_images == 5
         assert refreshed.rules[0].selected_images == 3
+    finally:
+        db.close()
+
+
+def test_industrial_stae_uses_all_stride_selected_frames(tmp_path: Path) -> None:
+    db = make_memory_session()
+    try:
+        start = datetime(2026, 2, 6, 6)
+        timestamps = [start + timedelta(seconds=index * 2 + index // 9) for index in range(81)]
+        for timestamp in timestamps:
+            write_tiff(tmp_path / f"frame_{timestamp:%Y%m%d_%H%M%S}.tiff")
+        dataset = models.Dataset(name="Industrial", root_path=str(tmp_path), status="ready",
+            timestamp_regex=r"(?P<timestamp>\d{8}_\d{6})", timestamp_format="%Y%m%d_%H%M%S")
+        db.add(dataset)
+        db.flush()
+        folder = models.DatasetFolder(dataset_id=dataset.id, relative_path=".", image_count=len(timestamps),
+            first_timestamp=timestamps[0], last_timestamp=timestamps[-1], extension_summary={".tiff": len(timestamps)},
+            resolution_summary={"12x8": len(timestamps)}, cadence_summary={"median_seconds": 2})
+        db.add(folder)
+        db.flush()
+        train_set = models.TrainingDataset(name="Stride 5", usage_label="train")
+        db.add(train_set)
+        db.flush()
+        db.add(models.TrainingDatasetRule(training_dataset_id=train_set.id, folder_id=folder.id,
+            start_timestamp=timestamps[0], end_timestamp=timestamps[-1], stride=5))
+        db.commit()
+        config = industrial_stae_payload().method_config
+        selected = enumerate_training_dataset_image_records(train_set)
+        summary = enumerate_training_dataset_clip_samples(train_set, clip_length=config["clip_length"], future_length=0,
+            temporal_stride=config["temporal_stride"], sequence_contiguity_mode=config["sequence_contiguity_mode"])
+        assert len(selected) == summary.selected_frame_count == 17
+        assert len(summary.clips) == 2
+        assert summary.clips[0].input_frames == tuple(selected[:16])
+        assert summary.clips[1].input_frames == tuple(selected[1:])
+        assert summary.skipped_missing == 0
     finally:
         db.close()
 

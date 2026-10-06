@@ -658,13 +658,12 @@ def industrial_stae_payload() -> MethodConfigurationCreate:
     return MethodConfigurationCreate(
         name="STAE-3D Reconstruction 352x192",
         description="Reconstruction-only STAE inspired by Zhao et al. (2017), DOI 10.1145/3123266.3123451. "
-                    "16 grayscale frames, 5-second timestamp spacing (editable), ±0.5 s tolerance. "
+                    "16 consecutive grayscale frames from each dataset rule after its stride is applied. "
                     "Input 352×192; bottleneck 64×2×24×44. No prediction branch. "
                     "Use normal training data and a separate normal validation dataset; preprocessed intensities must be in [0,1].",
         method_type="spatiotemporal_autoencoder",
         method_config={**_paper_stae_method_config(prediction_branch=False),
-                       "input_width": 352, "input_height": 192,
-                       "sequence_contiguity_mode": "timestamp_interval", "frame_interval_seconds": 5.0},
+                       "input_width": 352, "input_height": 192},
         training_config={"epochs": 1000, "batch_size": 4, "learning_rate": 1e-4,
                          "optimizer": "adam", "weight_decay": 0.0, "reconstruction_loss": "mse",
                          "training_objective": "reconstruction", "early_stopping_enabled": True,
@@ -674,6 +673,16 @@ def industrial_stae_payload() -> MethodConfigurationCreate:
         inference_config={**STAE_RECONSTRUCTION_INFERENCE_CONFIG, "error_metric": "mse", "residual_mode": "squared"},
         method_graph=reconstruction_graph(),
     )
+
+
+def _old_industrial_stae_payload(payload: MethodConfigurationCreate) -> MethodConfigurationCreate:
+    old = payload.model_copy(deep=True)
+    old.description = ("Reconstruction-only STAE inspired by Zhao et al. (2017), DOI 10.1145/3123266.3123451. "
+                       "16 grayscale frames, 5-second timestamp spacing (editable), ±0.5 s tolerance. "
+                       "Input 352×192; bottleneck 64×2×24×44. No prediction branch. "
+                       "Use normal training data and a separate normal validation dataset; preprocessed intensities must be in [0,1].")
+    old.method_config.update(sequence_contiguity_mode="timestamp_interval", frame_interval_seconds=5.0)
+    return old
 
 
 def default_method_payloads() -> list[MethodConfigurationCreate]:
@@ -1206,7 +1215,13 @@ def ensure_default_method_configurations(db: Session) -> int:
         )
         if existing is not None:
             old_payload = old_payloads.get(payload.name)
-            if payload.name in cnn_ae_default_names:
+            if payload.name == "STAE-3D Reconstruction 352x192" and _configuration_matches_payload(
+                existing, _old_industrial_stae_payload(payload)
+            ):
+                _apply_method_payload(db, existing, payload)
+                db.commit()
+                logger.info("Updated bundled method configuration '%s' to dataset-ordered clips", payload.name)
+            elif payload.name in cnn_ae_default_names:
                 old_cnn_ae = _old_cnn_ae_payload(payload)
                 _, old_graph, old_config, old_training, old_inference, _, _ = _normalize_method_payload(old_cnn_ae)
                 if (

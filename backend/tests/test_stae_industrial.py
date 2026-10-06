@@ -27,6 +27,21 @@ def enumerate_at(monkeypatch, seconds, **kwargs):
         sequence_contiguity_mode='timestamp_interval', **kwargs)
 
 
+def test_preset_uses_every_selected_frame_in_order(monkeypatch):
+    records=records_at([0,2,6,8,10,12,14,17,20,23,25,28,30,34,37,41,45])
+    rule=SimpleNamespace(folder=SimpleNamespace(cadence_summary={'median_seconds':5}, dataset=SimpleNamespace(name='A')),
+                         folder_id=1)
+    monkeypatch.setattr(data, 'enumerate_rule_images', lambda *args: records)
+    config=industrial_stae_payload().method_config
+    assert config['sequence_contiguity_mode']=='ordered_index'
+    assert config['temporal_stride']==1
+    summary=data.enumerate_rule_clip_samples(rule, clip_length=config['clip_length'], future_length=0,
+        temporal_stride=config['temporal_stride'], sequence_contiguity_mode=config['sequence_contiguity_mode'])
+    assert len(summary.clips)==2
+    assert summary.clips[0].input_frames==tuple(records[:16])
+    assert summary.clips[1].input_frames==tuple(records[1:])
+
+
 def test_timestamp_end_anchor_missing_and_custom_interval(monkeypatch):
     result=enumerate_at(monkeypatch, range(81))
     assert len(result.clips)==6
@@ -139,7 +154,8 @@ def test_separate_dataset_resolution_uses_configured_seconds(tmp_path):
     try:
         _,method,sets=seed_sets(db,tmp_path)
         method.builder_kind='spatiotemporal_autoencoder'
-        method.method_config={**industrial_stae_payload().method_config,'clip_length':2,'frame_interval_seconds':2}
+        method.method_config={**industrial_stae_payload().method_config,'clip_length':2,
+                      'sequence_contiguity_mode':'timestamp_interval','frame_interval_seconds':2}
         train,val=resolve_selections(db,[sets[0]],method,'external',[sets[1].id])
         assert len(train)==len(val)==2
         assert all((c.clip_end-c.clip_start).total_seconds()==2 for c in train+val)

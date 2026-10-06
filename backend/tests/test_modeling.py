@@ -9,7 +9,7 @@ from app import models
 from app.database import Base, get_db
 from app.main import app
 from app.modeling.architectures.cnn_autoencoder import CnnAutoencoderArchitecture
-from app.modeling.defaults import _old_cnn_ae_payload, _old_paper_payloads_by_name, default_method_payloads, ensure_default_method_configurations
+from app.modeling.defaults import _old_cnn_ae_payload, _old_industrial_stae_payload, _old_paper_payloads_by_name, default_method_payloads, ensure_default_method_configurations
 from app.modeling.fast_anogan import build_fast_anogan_modules, fast_anogan_forward
 from app.modeling.registry import MethodRegistry, registry
 from app.services import create_method_configuration, validate_method_configuration
@@ -391,6 +391,29 @@ def test_default_method_bootstrap_is_idempotent() -> None:
             "fastAnoGAN paper default",
         } == names
         assert len(rows) == len(default_method_payloads())
+    finally:
+        db.close()
+
+
+@pytest.mark.parametrize("customized", [False, True])
+def test_industrial_stae_bootstrap_updates_only_unchanged_old_default(customized) -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:", connect_args={"check_same_thread": False}, poolclass=StaticPool)
+    Base.metadata.create_all(bind=engine)
+    db = Session(engine)
+    try:
+        payload = next(item for item in default_method_payloads() if item.name == "STAE-3D Reconstruction 352x192")
+        existing = create_method_configuration(db, _old_industrial_stae_payload(payload))
+        existing = db.get(models.MethodConfiguration, existing.id)
+        if customized:
+            existing.method_config = {**existing.method_config, "frame_interval_seconds": 7.0}
+            db.commit()
+        assert ensure_default_method_configurations(db) == len(default_method_payloads()) - 1
+        db.refresh(existing)
+        assert existing.method_config["sequence_contiguity_mode"] == ("timestamp_interval" if customized else "ordered_index")
+        assert existing.method_config.get("frame_interval_seconds") == (7.0 if customized else None)
+        assert ensure_default_method_configurations(db) == 0
+        db.refresh(existing)
+        assert existing.method_config["sequence_contiguity_mode"] == ("timestamp_interval" if customized else "ordered_index")
     finally:
         db.close()
 
