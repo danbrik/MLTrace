@@ -6,7 +6,7 @@ from bisect import bisect_left
 from math import ceil
 
 ROLES = ("reference", "comparison")
-LABELS = {"reference": "Referenz", "comparison": "Vergleich"}
+LABELS = {"reference": "Normal", "comparison": "Anomalie"}
 BERLIN = ZoneInfo("Europe/Berlin")
 
 

@@ -13,3 +13,24 @@ Die letzte erfolgreich erzeugte Matrix und ihre Einstellungen werden pro Rolle i
 ## API
 
 Unter `/api/temporal-difference/runs/{id}/matrix` liest GET mit `role` den gespeicherten Zustand. POST akzeptiert `role`, `deltas_seconds` (1–3), `start_times` (1–3 unterschiedliche gespeicherte Aufnahmezeitpunkte) und `top_percent` (null oder 0,01–100). GET `/start-points` erhält `role` und wiederholte `deltas`-Parameter und liefert verfügbare und vorgeschlagene Startpunkte. GET `/png` erhält `role`, den zurückgegebenen Artefaktnamen und optional `download=true`. Alle Zugriffe sind projektgebunden und auf fertige Läufe beschränkt. Es ist keine Datenbankmigration erforderlich.
+
+## Prozentdarstellung und Zoom
+
+Die sichtbaren Rollen heißen Normal und Anomalie; intern bleiben `reference` und
+`comparison` erhalten. Kurve, Tabellen und Bildmatrix zeigen Änderungen als
+`100 × absolute Änderung / 65535`, unabhängig vom Datentyp oder Preprocessing.
+Es wird weder bildweise normalisiert noch bei 100 % abgeschnitten. Startbilder
+bleiben in Graustufen. Median und IQR sowie der Top-Prozent-Filter bleiben
+methodisch unverändert.
+
+Die Datenbank und ursprünglichen CSV-Artefakte enthalten weiterhin Rohwerte.
+`summary`, `pairs` und `csv/{kind}` akzeptieren `unit=raw|percent` (Default raw).
+Die Oberfläche fordert percent an; CSV-Spalten tragen das Suffix `_percent`.
+Matrix-Exporte ab Darstellungsversion 2 enthalten Einheit und Bezugswert in ihren
+Metadaten. Alte PNGs bleiben unverändert verfügbar und werden als alte Einheiten
+gekennzeichnet; eine Neuerstellung verwendet Prozentwerte.
+
+Plot-Einstellungen mit `unit_version: 2` verwenden Prozentgrenzen. Beim Öffnen
+älterer Einstellungen rechnet die Oberfläche Y-Grenzen einmal um und ersetzt den
+alten Standardtitel; eigene Titel bleiben erhalten. „Zoom zurücksetzen“ stellt
+manuelle Grenzen wieder her oder aktiviert für die jeweilige Achse Autorange.

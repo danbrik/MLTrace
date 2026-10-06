@@ -2,14 +2,15 @@ import type { Data, Layout } from '../lib/plotly';
 import { rangeProblem } from '../timeRangePresets/helpers';
 import type { Config, PlotSettings, Role, Summary } from './types';
 export const roles: Role[] = ['reference', 'comparison'];
-export const labels: Record<Role, string> = { reference: 'Referenz', comparison: 'Vergleich' };
+export const labels: Record<Role, string> = { reference: 'Normal', comparison: 'Anomalie' };
 export const defaultConfig: Config = {
   selection_version: 2, block_seconds: 300, seed: 42,
   training_dataset_id: 0, preprocessing_pipeline_id: 0,
   reference: { start: '', end: '' }, comparison: { start: '', end: '' }, deltas_seconds: [1, 2, 5, 15, 30, 60],
 };
 export const defaultPlot: PlotSettings = {
-  title: 'Zeitabstands-Analyse', x_title: 'Zeitabstand Δt (s)', y_title: 'Mittlere absolute Pixeländerung (Pipeline-Einheiten)',
+  unit_version: 2,
+  title: 'Zeitabstands-Analyse', x_title: 'Zeitabstand Δt (s)', y_title: 'Mittlere Pixeländerung (%)',
   x_range: null, y_range: null, reference_color: '#1971c2', comparison_color: '#e8590c',
 };
 export const phaseLabel = (value: string) => ({ queued: 'Wartend', running: 'Berechnung läuft', finished: 'Fertig', aborted: 'Abgebrochen',
@@ -60,7 +61,7 @@ export function plotData(summary: Summary[], settings: PlotSettings): Data[] {
     ] as Data[]);
     return [...bands, { ...common, x: rows.map(row => row.delta_seconds), y: rows.map(row => row.median), mode: 'lines+markers', name: labels[role], line: { color }, marker: { color },
       customdata: rows.map(row => [row.pair_count, row.q1, row.q3]),
-      hovertemplate: '%{x} s<br>Median: %{y}<br>Paare: %{customdata[0]}<br>Q1: %{customdata[1]}<br>Q3: %{customdata[2]}<extra>%{fullData.name}</extra>' } as Data];
+      hovertemplate: '%{x} s<br>Median: %{y} %<br>Paare: %{customdata[0]}<br>Q1: %{customdata[1]} %<br>Q3: %{customdata[2]} %<extra>%{fullData.name}</extra>' } as Data];
   });
 }
 export function plotLayout(settings: PlotSettings): Partial<Layout> {
@@ -68,7 +69,23 @@ export function plotLayout(settings: PlotSettings): Partial<Layout> {
     margin: { l: 95, r: 30, t: 65, b: 95 }, showlegend: true, legend: { orientation: 'h', y: -0.2 },
     xaxis: { type: 'linear', title: { text: plainTitle(settings.x_title) }, gridcolor: '#e9ecef',
       autorange: !settings.x_range, range: settings.x_range ? [settings.x_range.minimum, settings.x_range.maximum] : undefined },
-    yaxis: { type: 'linear', title: { text: plainTitle(settings.y_title) }, gridcolor: '#e9ecef',
+    yaxis: { type: 'linear', title: { text: plainTitle(settings.y_title.includes('%') ? settings.y_title : `${settings.y_title} (%)`) }, gridcolor: '#e9ecef',
       autorange: !settings.y_range, range: settings.y_range ? [settings.y_range.minimum, settings.y_range.maximum] : undefined },
+  };
+}
+
+export function percentPlotSettings(settings: PlotSettings): PlotSettings {
+  if (settings.unit_version === 2) return structuredClone(settings);
+  return { ...structuredClone(settings), unit_version: 2,
+    y_title: settings.y_title === 'Mittlere absolute Pixeländerung (Pipeline-Einheiten)' ? 'Mittlere Pixeländerung (%)' : settings.y_title,
+    y_range: settings.y_range ? { minimum: settings.y_range.minimum * (100 / 65535), maximum: settings.y_range.maximum * (100 / 65535) } : null };
+}
+
+export function resetZoomLayout(settings: PlotSettings): Partial<Layout> {
+  return {
+    'xaxis.autorange': !settings.x_range,
+    'yaxis.autorange': !settings.y_range,
+    ...(settings.x_range ? { 'xaxis.range': [settings.x_range.minimum, settings.x_range.maximum] } : {}),
+    ...(settings.y_range ? { 'yaxis.range': [settings.y_range.minimum, settings.y_range.maximum] } : {}),
   };
 }

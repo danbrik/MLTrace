@@ -56,8 +56,10 @@ function MatrixEditor({run, projectId, role}: {run: Run; projectId: string; role
     <Switch label="Nur stärkste Änderungen anzeigen" disabled={busy} checked={config.top_percent!==null} onChange={event=>{const checked=event.currentTarget.checked;setConfig(c=>({...c,top_percent:checked ? Number(percent) : null}));}} />
     {config.top_percent!==null && <NumberInput label="Stärkste Änderungen (%)" min={.01} max={100} decimalScale={2} value={percent} disabled={busy} onChange={value=>{setPercent(value);setConfig(c=>({...c,top_percent:value===''?NaN:Number(value)}));}} />}
     <Text size="sm" c="dimmed">Jede Differenz bezieht sich auf das Bild bei t. Der Filter gilt je Karte; gleiche Werte an der Schwelle bleiben gemeinsam sichtbar. Daher können mehr Pixel als der gewählte Anteil sichtbar sein. Die Farbskala und die Analysewerte bleiben unverändert. Tatsächliche Partnerzeiten können bis zu 0,5 s vom Soll abweichen.</Text>
+    <Text size="sm" c="dimmed">Pixeländerungen in Prozent des festen 16-Bit-Wertebereichs: 100 × |Differenz| / 65535.</Text>
     <Button disabled={!valid||busy} loading={busy} onClick={()=>void generate()}>Plot erstellen</Button>
     {saved?.artifact && <>
+      {saved.unit !== 'percent' && <Alert color="orange">Dieser gespeicherte Plot verwendet noch Pipeline-Einheiten und die bisherigen Bezeichnungen. „Plot erstellen“ erzeugt die Prozentdarstellung mit Normal/Anomalie.</Alert>}
       <Text fw={600}>Zuletzt erstellter Plot · {labels[role]} · {saved.config?.top_percent == null ? 'Alle Änderungen' : `Top ${saved.config.top_percent} %`}</Text>
       <img alt={`Bildvergleich ${labels[role]}`} src={temporalMatrixUrl(run.id,role,saved.artifact,projectId)} style={{width:'100%',height:'auto'}} />
       {saved.warnings.map(w=><Text key={w} size="sm" c="dimmed">{w}</Text>)}

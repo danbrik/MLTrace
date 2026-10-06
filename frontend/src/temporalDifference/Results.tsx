@@ -2,7 +2,7 @@ import { Alert, Button, ColorInput, Group, Loader, NumberInput, Pagination, Pape
 import { useEffect, useRef, useState } from 'react';
 import Plotly from '../lib/plotly';
 import { getTemporalDifferencePairs, getTemporalDifferenceSummary, saveTemporalDifferencePlot, temporalDifferenceCsvUrl } from '../api';
-import { displayTime, labels, numberText, plotData, plotLayout, roles, validatePlot } from './helpers';
+import { displayTime, labels, numberText, plotData, plotLayout, roles, validatePlot, percentPlotSettings, resetZoomLayout } from './helpers';
 import type { PairPage, PlotSettings, Run, Summary } from './types';
 
 function Chart({ summary, settings, runId }: { summary: Summary[]; settings: PlotSettings; runId: number }) {
@@ -39,6 +39,15 @@ function Chart({ summary, settings, runId }: { summary: Summary[]; settings: Plo
       void operations.current.catch(() => undefined).then(() => { if (!element.isConnected) Plotly.purge(element); });
     };
   }, []);
+  async function resetZoom() {
+    const element = ref.current;
+    if (!element || invalid) return;
+    const work = operations.current.catch(() => undefined).then(async () => {
+      if (element.isConnected) await Plotly.relayout(element, resetZoomLayout(settings));
+    });
+    operations.current = work;
+    try { await work; setError(null); } catch (reason) { setError(String(reason)); }
+  }
   async function download(format: 'png' | 'svg') {
     if (!ref.current || invalid) return;
     setExporting(true); setError(null);
@@ -55,14 +64,14 @@ function Chart({ summary, settings, runId }: { summary: Summary[]; settings: Plo
     {invalid && <Alert color="orange">{invalid}</Alert>}
     {error && <Alert color="red">{error}</Alert>}
     <div ref={ref} style={{ width: '100%', height: 500, background: '#fff' }} />
-    <Group><Button variant="light" disabled={!!invalid || exporting} onClick={() => void download('png')}>Plot als PNG</Button>
+    <Group><Button variant="default" disabled={!!invalid || exporting} onClick={() => void resetZoom()}>Zoom zurücksetzen</Button><Button variant="light" disabled={!!invalid || exporting} onClick={() => void download('png')}>Plot als PNG</Button>
       <Button variant="light" disabled={!!invalid || exporting} onClick={() => void download('svg')}>Plot als SVG</Button></Group>
   </Stack>;
 }
 
 export function TemporalResults({ run, projectId, onPlotSaved }: { run: Run; projectId: string; onPlotSaved: (settings: PlotSettings) => void }) {
   const [summary, setSummary] = useState<Summary[] | null>(null);
-  const [settings, setSettings] = useState<PlotSettings>(() => structuredClone(run.plot_settings));
+  const [settings, setSettings] = useState<PlotSettings>(() => percentPlotSettings(run.plot_settings));
   const [saved, setSaved] = useState(JSON.stringify(run.plot_settings));
   const [pairs, setPairs] = useState<PairPage | null>(null);
   const [page, setPage] = useState(1);
@@ -95,12 +104,13 @@ export function TemporalResults({ run, projectId, onPlotSaved }: { run: Run; pro
     {error && <Alert color="red">{error}<Button variant="subtle" onClick={() => setRetry(value => value + 1)}>Erneut laden</Button></Alert>}
     <Paper withBorder p="lg"><Stack>
       <Title order={4}>Ergebnisse</Title>
+      <Text size="sm" c="dimmed">Alle Änderungswerte in Prozent: 100 × absolute Änderung / 65535. Fester Bezug auf den vollständigen 16-Bit-Wertebereich, unabhängig vom Preprocessing; keine Begrenzung auf 100 %.</Text>
       <Text size="sm">{run.result?.width} × {run.result?.height} Pixel · {run.result?.total_pairs} Bildpaare · Median und Interquartilsbereich (Q1 bis Q3)</Text>
       <Text size="sm" c="dimmed">Die Ergebnisse sind gespeichert. Titel, Achsen und Farben lassen sich ohne erneute Bildberechnung ändern.</Text>
       {!summary ? <Loader size="sm" /> : <>
         <Table.ScrollContainer minWidth={1000}><Table striped><Table.Thead>
           <Table.Tr><Table.Th rowSpan={2}>Δt (s)</Table.Th>{roles.map(key => <Table.Th key={key} colSpan={5}>{labels[key]}</Table.Th>)}</Table.Tr>
-          <Table.Tr>{roles.flatMap(key => ['Paare', 'Median', 'Q1', 'Q3', 'IQR'].map(label => <Table.Th key={`${key}-${label}`}>{label}</Table.Th>))}</Table.Tr>
+          <Table.Tr>{roles.flatMap(key => ['Paare', 'Median (%)', 'Q1 (%)', 'Q3 (%)', 'IQR (%)'].map(label => <Table.Th key={`${key}-${label}`}>{label}</Table.Th>))}</Table.Tr>
         </Table.Thead><Table.Tbody>{run.config.deltas_seconds.map(value => <Table.Tr key={value}><Table.Td>{value}</Table.Td>
           {roles.flatMap(key => {
             const row = summary.find(item => item.role === key && item.delta_seconds === value);
@@ -136,7 +146,7 @@ export function TemporalResults({ run, projectId, onPlotSaved }: { run: Run; pro
       <Text size="sm" c="dimmed">Aufnahmezeiten in Europe/Berlin; UTC-Zeitpunkte und Bilddateien sind zusätzlich in der CSV enthalten.</Text>
       {pairError && <Alert color="red">{pairError}<Button variant="subtle" onClick={() => setRetry(value => value + 1)}>Erneut laden</Button></Alert>}
       {!pairs ? !pairError && <Loader size="sm" /> : <>
-        <Table.ScrollContainer minWidth={650}><Table striped><Table.Thead><Table.Tr>{['Zeitraum', 'Δt (s)', 'Erstes Bild', 'Zweites Bild', 'Absolute Pixeländerung'].map(label => <Table.Th key={label}>{label}</Table.Th>)}</Table.Tr></Table.Thead>
+        <Table.ScrollContainer minWidth={650}><Table striped><Table.Thead><Table.Tr>{['Zeitraum', 'Δt (s)', 'Erstes Bild', 'Zweites Bild', 'Mittlere Pixeländerung (%)'].map(label => <Table.Th key={label}>{label}</Table.Th>)}</Table.Tr></Table.Thead>
           <Table.Tbody>{pairs.items.map(row => <Table.Tr key={row.id}><Table.Td>{labels[row.role]}</Table.Td><Table.Td>{row.delta_seconds}</Table.Td><Table.Td title={row.first_file}>{displayTime(row.first_timestamp)}</Table.Td><Table.Td title={row.second_file}>{displayTime(row.second_timestamp)}</Table.Td><Table.Td>{numberText(row.value)}</Table.Td></Table.Tr>)}</Table.Tbody></Table></Table.ScrollContainer>
         <Group><Pagination total={Math.max(1, Math.ceil(pairs.total / 50))} value={page} onChange={setPage} /><Text size="sm">{pairs.total} Paarwerte</Text></Group>
       </>}

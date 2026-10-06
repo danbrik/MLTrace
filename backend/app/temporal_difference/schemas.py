@@ -52,6 +52,7 @@ class AxisRange(BaseModel):
 
 
 class PlotSettings(BaseModel):
+    unit_version: Literal[1, 2] = 1
     model_config = ConfigDict(extra="forbid")
     title: str = Field(default="Zeitabstands-Analyse", max_length=250)
     x_title: str = Field(default="Zeitabstand Δt (s)", max_length=250)
@@ -63,6 +64,8 @@ class PlotSettings(BaseModel):
 
 
 class TemporalDifferenceRunRead(BaseModel):
+    display_unit: Literal["percent"] = "percent"
+    normalization_divisor: Literal[65535] = 65535
     model_config = ConfigDict(from_attributes=True)
     id: int
     training_dataset_id: int

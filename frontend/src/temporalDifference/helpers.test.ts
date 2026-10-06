@@ -30,7 +30,7 @@ describe('persisted result plots', () => {
   it('uses medians and asymmetric quartile endpoints without bridging unavailable lags', () => {
     const rows = [row(1, 2), row(2, null), row(5, 8)];
     const traces = plotData(rows, defaultPlot) as Array<{ x: number[]; y: (number | null)[]; name?: string; fill?: string; connectgaps: boolean }>;
-    expect(traces.find(trace => trace.name === 'Referenz')?.y).toEqual([2, null, 8]);
+    expect(traces.find(trace => trace.name === 'Normal')?.y).toEqual([2, null, 8]);
     expect(traces.filter(trace => trace.fill === 'tonexty').map(trace => trace.x)).toEqual([[1], [5]]);
     expect(traces.every(trace => !trace.connectgaps)).toBe(true);
     expect(rows[1].median).toBeNull();
@@ -58,4 +58,18 @@ describe('stratified defaults', () => {
     expect(validateConfig({...configured,selection_version:1,block_seconds:undefined,seed:undefined})).toBeNull();
     expect(JSON.stringify({...configured,seed:43})).not.toBe(JSON.stringify(configured));
   });
+});
+
+import { percentPlotSettings, resetZoomLayout } from './helpers';
+it('legacy limits convert once and custom titles survive', () => {
+  const old = { ...defaultPlot, unit_version: 1 as const, y_title: 'Eigener Titel', y_range: { minimum: 0, maximum: 65535 } };
+  const converted = percentPlotSettings(old);
+  expect(converted.y_range).toEqual({ minimum: 0, maximum: 100 });
+  expect(converted.y_title).toBe('Eigener Titel');
+  expect(percentPlotSettings(converted)).toEqual(converted);
+  expect(old.y_range.maximum).toBe(65535);
+});
+it('zoom reset uses configured ranges or autorange', () => {
+  expect(resetZoomLayout(defaultPlot)).toEqual({ 'xaxis.autorange': true, 'yaxis.autorange': true });
+  expect(resetZoomLayout({ ...defaultPlot, y_range: { minimum: 2, maximum: 5 } })).toEqual({ 'xaxis.autorange': true, 'yaxis.autorange': false, 'yaxis.range': [2, 5] });
 });

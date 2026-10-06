@@ -87,7 +87,9 @@ def test_matrix_frozen_pairs_metadata_reopen_failure_and_cleanup(temporal,versio
     with Image.open(path) as image:
         metadata=json.loads(image.info['Description'])
         assert metadata['config']['start_times']==choices['suggested']
-        assert metadata['difference_limit']==400
+        assert metadata['difference_limit']==pytest.approx(400 * 100 / 65535)
+        assert metadata['unit']=='percent' and metadata['normalization_divisor']==65535
+        assert metadata['render_version']==2
         assert metadata['timestamps'][0]['partners'][1]['delta_seconds']==4
     assert matrix.state(db,run.id,'comparison')==result
     assert service.summaries(db,run.id)==old_summary

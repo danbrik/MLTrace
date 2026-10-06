@@ -2144,10 +2144,10 @@ export function getTemporalDifferenceRun(id: number, projectId?: string) {
   return request<import('./temporalDifference/types').Run>(`/api/temporal-difference/runs/${id}`, undefined, undefined, projectId);
 }
 export function getTemporalDifferenceSummary(id: number, projectId?: string) {
-  return request<import('./temporalDifference/types').Summary[]>(`/api/temporal-difference/runs/${id}/summary`, undefined, undefined, projectId);
+  return request<import('./temporalDifference/types').Summary[]>(`/api/temporal-difference/runs/${id}/summary?unit=percent`, undefined, undefined, projectId);
 }
 export function getTemporalDifferencePairs(id: number, offset: number, role: string | null, delta: string | null, projectId?: string) {
-  const params = new URLSearchParams({ offset: String(offset), limit: '50' });
+  const params = new URLSearchParams({ offset: String(offset), limit: '50', unit: 'percent' });
   if (role) params.set('role', role);
   if (delta) params.set('delta', delta);
   return request<import('./temporalDifference/types').PairPage>(`/api/temporal-difference/runs/${id}/pairs?${params}`, undefined, undefined, projectId);
@@ -2165,7 +2165,7 @@ export function deleteTemporalDifferenceRun(id: number, projectId?: string) {
   return request<void>(`/api/temporal-difference/runs/${id}`, { method: 'DELETE' }, undefined, projectId);
 }
 export function temporalDifferenceCsvUrl(id: number, kind: 'summary' | 'pairs', projectId: string) {
-  return `${API_BASE_URL}/api/temporal-difference/runs/${id}/csv/${kind}?project_id=${encodeURIComponent(projectId)}`;
+  return `${API_BASE_URL}/api/temporal-difference/runs/${id}/csv/${kind}?unit=percent&project_id=${encodeURIComponent(projectId)}`;
 }
 
 export function getTrainingLossPlot(runId: number, projectId?: string, signal?: AbortSignal) {

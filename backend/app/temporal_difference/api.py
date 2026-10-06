@@ -1,7 +1,7 @@
 from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from sqlalchemy.orm import Session
 
 from app.database import get_db
@@ -44,15 +44,15 @@ def get_run(run_id: int, db: Session = Depends(get_db)):
 
 
 @router.get("/runs/{run_id}/summary")
-def summary(run_id: int, db: Session = Depends(get_db)):
-    return required(service.summaries(db, run_id))
+def summary(run_id: int, unit: Literal["raw", "percent"] = "raw", db: Session = Depends(get_db)):
+    return required(service.summaries(db, run_id, unit))
 
 
 @router.get("/runs/{run_id}/pairs")
 def pairs(run_id: int, offset: int = Query(default=0, ge=0), limit: int = Query(default=50, ge=1, le=500),
           role: Literal["reference", "comparison"] | None = None, delta: int | None = Query(default=None, gt=0),
-          db: Session = Depends(get_db)):
-    return required(service.values(db, run_id, offset, limit, role, delta))
+          unit: Literal["raw", "percent"] = "raw", db: Session = Depends(get_db)):
+    return required(service.values(db, run_id, offset, limit, role, delta, unit))
 
 
 @router.put("/runs/{run_id}/plot-settings", response_model=PlotSettings)
@@ -61,8 +61,12 @@ def save_plot(run_id: int, payload: PlotSettings, db: Session = Depends(get_db))
 
 
 @router.get("/runs/{run_id}/csv/{kind}")
-def download(run_id: int, kind: Literal["summary", "pairs"], db: Session = Depends(get_db)):
-    return FileResponse(required(service.csv_path(db, run_id, kind)), media_type="text/csv",
+def download(run_id: int, kind: Literal["summary", "pairs"], unit: Literal["raw", "percent"] = "raw", db: Session = Depends(get_db)):
+    path = required(service.csv_path(db, run_id, kind))
+    if unit == "percent":
+        return StreamingResponse(service.percent_csv(path, kind), media_type="text/csv",
+            headers={"Content-Disposition": f'attachment; filename="temporal-difference-{run_id}-{kind}-percent.csv"'})
+    return FileResponse(path, media_type="text/csv",
                         filename=f"temporal-difference-{run_id}-{kind}.csv")
 
 

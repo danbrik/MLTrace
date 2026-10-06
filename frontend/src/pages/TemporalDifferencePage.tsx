@@ -121,7 +121,7 @@ export function TemporalDifferencePage({ active, projectId }: { active: boolean;
           <DateTime24Input label="Beginn (einschließlich)" value={config[role].start} disabled={busy} onChange={value => update({ [role]: { ...config[role], start: value } })} />
           <DateTime24Input label="Ende (einschließlich)" value={config[role].end} disabled={busy} onChange={value => update({ [role]: { ...config[role], end: value } })} />
         </Stack>)}</SimpleGrid>
-        <Text size="sm" c="dimmed">Aufnahmezeiten in Europe/Berlin. Beide Bilder eines Paares müssen im jeweiligen Zeitraum liegen. Die Referenzdauer ist frei wählbar.</Text>
+        <Text size="sm" c="dimmed">Aufnahmezeiten in Europe/Berlin. Beide Bilder eines Paares müssen im jeweiligen Zeitraum liegen. Die Dauer des Normalzeitraums ist frei wählbar.</Text>
       </Stack></Paper>
       <Paper withBorder p="lg"><Stack>
         <Title order={4}>3 · Zeitabstände und Berechnung</Title>

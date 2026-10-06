@@ -13,6 +13,8 @@ from app.schemas import PreprocessingGraph
 from app.temporal_difference import service
 from app.temporal_difference.engine import grayscale, LABELS
 
+from app.temporal_difference.units import to_percent, NORMALIZATION
+
 LOCK = RLock()
 
 
@@ -51,6 +53,8 @@ def state(db, run_id, role):
         return None
     path = service.artifact_dir(run_id) / f'matrix-{role}.json'
     result = json.loads(path.read_text()) if path.exists() else {'config': None, 'artifact': None, 'warnings': []}
+    result.setdefault('render_version', 1)
+    result.setdefault('unit', 'raw')
     result['available_deltas'] = sorted({p['delta_seconds'] for p in manifest(run)['pairs'] if p['role'] == role})
     return result
 
@@ -107,7 +111,7 @@ def generate(db, run_id, config):
             targets = []
             for col, delta in enumerate(config.deltas_seconds):
                 other = index[first][delta]
-                diff = np.abs(read(other) - background)
+                diff = to_percent(np.abs(read(other) - background))
                 if not np.isfinite(diff).all():
                     raise ValueError('Die Pixeldifferenz enthält nicht endliche Werte.')
                 limit = max(limit, float(diff.max()))
@@ -116,7 +120,7 @@ def generate(db, run_id, config):
                 np.save(temp/f'{row}-{col}.npy', diff)
                 targets.append(dict(delta_seconds=delta, timestamp=samples[other]['timestamp']))
             timestamps.append(dict(start=timestamp, partners=targets))
-        metadata = dict(config=config.model_dump(), dataset=run.dataset_snapshot, pipeline=run.pipeline_snapshot,
+        metadata = dict(render_version=2, **NORMALIZATION, config=config.model_dump(), dataset=run.dataset_snapshot, pipeline=run.pipeline_snapshot,
             period=run.config[config.role], timestamps=timestamps, difference_limit=limit, background_range=[low, high])
         with LOCK:
             _render(temp, config, low, high, limit, metadata)
@@ -125,7 +129,7 @@ def generate(db, run_id, config):
             if run.status != 'finished':
                 raise ValueError('Der Lauf ist nicht mehr verfügbar.')
             os.replace(temp/'matrix.png', directory/artifact)
-            result = dict(config=config.model_dump(), artifact=artifact, warnings=warnings,
+            result = dict(render_version=2, **NORMALIZATION, config=config.model_dump(), artifact=artifact, warnings=warnings,
                 available_deltas=sorted({p['delta_seconds'] for p in data['pairs'] if p['role'] == config.role}))
             pending = directory/f'.{uuid4().hex}.json'
             try:
@@ -173,5 +177,5 @@ def _render(temp, config, low, high, limit, metadata):
     fig.supxlabel('x (Pixel)', y=.13 if rows==1 else .08)
     fig.supylabel('y (Pixel)', x=.015)
     cax = fig.add_axes([.32, .06 if rows==1 else .035, .5, .022])
-    fig.colorbar(ScalarMappable(norm=norm,cmap=cmap), cax=cax, orientation='horizontal', label='Absolute Änderung (Pipeline-Einheiten)')
+    fig.colorbar(ScalarMappable(norm=norm,cmap=cmap), cax=cax, orientation='horizontal', label='Absolute Pixeländerung (%)')
     fig.savefig(temp/'matrix.png', metadata={'Description': json.dumps(metadata, ensure_ascii=False, allow_nan=False)})

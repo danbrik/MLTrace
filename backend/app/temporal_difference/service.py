@@ -1,6 +1,7 @@
 from collections import OrderedDict, deque
 from copy import deepcopy
 import csv
+import io
 import json
 from pathlib import Path
 import shutil
@@ -17,6 +18,8 @@ from app.schemas import PreprocessingGraph
 from app.training.scheduler import next_queue_rank, scheduler
 from app.temporal_difference.engine import ROLES, LABELS, select_pairs, absolute_change, grayscale, statistics
 from app.temporal_difference.schemas import PlotSettings, TemporalDifferenceConfig, TemporalDifferenceRunRead
+
+from app.temporal_difference.units import convert_row, to_percent
 
 Run = models.TemporalDifferenceRun
 Value = models.TemporalDifferenceValue
@@ -64,7 +67,7 @@ def enqueue(db, config, *, wake_scheduler=True):
     } for rule in dataset.rules]}
     run = Run(training_dataset_id=dataset.id, training_dataset_name=dataset.name, config=config.model_dump(mode="json"),
               dataset_snapshot=snapshot, pipeline_snapshot={"id": pipeline.id, "name": pipeline.name, "graph": deepcopy(pipeline.graph)},
-              plot_settings=PlotSettings().model_dump(), status="queued", current_step="queued",
+              plot_settings=PlotSettings(unit_version=2, y_title="Mittlere Pixeländerung (%)").model_dump(), status="queued", current_step="queued",
               enqueued_at=models.utc_now(), queue_rank=next_queue_rank(db))
     db.add(run)
     directory = None
@@ -101,14 +104,14 @@ def finished(db, run_id):
     return row if row and row.status == "finished" else None
 
 
-def summaries(db, run_id):
+def summaries(db, run_id, unit="raw"):
     if not finished(db, run_id):
         return None
-    return [dict(zip(SUMMARY_FIELDS, row)) for row in db.execute(select(*(getattr(Summary, key) for key in SUMMARY_FIELDS))
+    return [convert_row(dict(zip(SUMMARY_FIELDS, row)), unit, ("median", "q1", "q3", "iqr")) for row in db.execute(select(*(getattr(Summary, key) for key in SUMMARY_FIELDS))
         .where(Summary.run_id == run_id).order_by(Summary.delta_seconds, Summary.role))]
 
 
-def values(db, run_id, offset=0, limit=50, role=None, delta=None):
+def values(db, run_id, offset=0, limit=50, role=None, delta=None, unit="raw"):
     if not finished(db, run_id):
         return None
     criteria = [Value.run_id == run_id]
@@ -118,7 +121,7 @@ def values(db, run_id, offset=0, limit=50, role=None, delta=None):
         criteria.append(Value.delta_seconds == delta)
     count = db.scalar(select(func.count()).select_from(Value).where(*criteria))
     rows = db.execute(select(*(getattr(Value, key) for key in VALUE_FIELDS)).where(*criteria).order_by(Value.id).offset(offset).limit(limit))
-    return {"total": count, "items": [dict(zip(VALUE_FIELDS, row)) for row in rows]}
+    return {"total": count, "items": [convert_row(dict(zip(VALUE_FIELDS, row)), unit, ("value",)) for row in rows]}
 
 
 def save_plot(db, run_id, settings):
@@ -288,3 +291,20 @@ def run_scheduled(run_id, abort_event=None):
     # Shared heartbeat, cancellation and completion protocol of image analyses.
     from app.mean_variance.service import run_scheduled as run_analysis
     run_analysis(run_id, abort_event, job_model=Run, calculator=calculate)
+
+
+def percent_csv(path, kind):
+    """Stream conversions from the completed raw export without rewriting it."""
+    with path.open(newline="", encoding="utf-8") as handle:
+        reader = csv.DictReader(handle)
+        fields = reader.fieldnames or []
+        numeric = {key for key in fields if key == "value" or key.endswith(("_median", "_q1", "_q3", "_iqr"))}
+        names = {key: (key.replace("reference_", "normal_").replace("comparison_", "anomaly_") + "_percent" if key in numeric else key.replace("reference_", "normal_").replace("comparison_", "anomaly_")) for key in fields}
+        buffer = io.StringIO()
+        writer = csv.writer(buffer)
+        writer.writerow([names[key] for key in fields])
+        yield buffer.getvalue()
+        for row in reader:
+            buffer.seek(0); buffer.truncate(0)
+            writer.writerow([to_percent(row[key]) if key in numeric and row[key] else LABELS.get(row[key], row[key]) if key == "role" else row[key] for key in fields])
+            yield buffer.getvalue()
