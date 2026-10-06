@@ -321,8 +321,11 @@ def _build_model(torch, configuration: models.MethodConfiguration, *, determinis
             self.encoder, self.decoder, self.prediction_decoder = build_spatiotemporal_modules(torch, method_graph)
             self.prediction_branch = bool(method_config.get("prediction_branch"))
 
+        def encode(self, x):
+            return self.encoder(x)
+
         def forward(self, x):
-            encoded = self.encoder(x)
+            encoded = self.encode(x)
             reconstruction = apply_activation(self.decoder(encoded))
             prediction = None
             if self.prediction_branch and len(self.prediction_decoder) > 0:
@@ -854,6 +857,15 @@ def train_spatiotemporal_gradient(
     """Train a 3D spatio-temporal autoencoder on lazy clip samples."""
     import torch
     from torch.utils.data import DataLoader, Subset
+    if "seed" in training_parameters:
+        import random
+        seed = int(training_parameters["seed"])
+        random.seed(seed)
+        np.random.seed(seed)
+        torch.manual_seed(seed)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(seed)
+        logger.info("STAE run %s random seed=%s (torch, numpy, random)", run.id, seed)
     metadata_db = None if db.info.get("database_url") else db
 
     legacy_validation = (getattr(run, "validation_mode", None) or "legacy_fraction") == "legacy_fraction"
@@ -871,6 +883,7 @@ def train_spatiotemporal_gradient(
     weight_decay = _coerce_float(training_parameters.get("weight_decay", 0.0), 0.0, minimum=0.0)
     early_stopping_enabled = _coerce_bool(training_parameters.get("early_stopping_enabled", False), False)
     early_stopping_patience = max(1, int(training_parameters.get("early_stopping_patience", 10)))
+    min_delta = float(training_parameters.get("early_stopping_min_delta", 0.0))
     training_objective = str(training_parameters.get("training_objective", "reconstruction_prediction"))
     prediction_enabled = bool(configuration.method_config.get("prediction_branch")) and training_objective == "reconstruction_prediction"
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -891,6 +904,7 @@ def train_spatiotemporal_gradient(
     _commit_noncritical(db, run.id, "setup")
     log_device_diagnostics(logger, run.gpu_index)
 
+    logger.info("STAE run %s batch_size=%s device=%s amp=%s shuffle=%s", run.id, batch_size, device, use_amp, True if legacy_validation else run.shuffle)
     compiled_probe = compile_pipeline(graph)
     rng = np.random.default_rng(SPLIT_SEED)
     order = [int(i) for i in rng.permutation(sample_count)]
@@ -925,6 +939,7 @@ def train_spatiotemporal_gradient(
     model, _ = _build_model(torch, configuration)
     model.to(device)
     sample0 = first_sample[0][None].to(device, non_blocking=pin)
+    model.eval()  # Materialize lazy layers without updating BatchNorm statistics.
     with torch.no_grad():
         model(sample0)
     if device.type == "cuda":
@@ -934,7 +949,7 @@ def train_spatiotemporal_gradient(
     optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate, weight_decay=weight_decay)
     recon_loss_fn = _loss_fn(torch, str(training_parameters.get("reconstruction_loss", "mse")), training_parameters)
     prediction_loss_name = str(training_parameters.get("prediction_loss", "mse"))
-    pred_loss_fn = _loss_fn(torch, prediction_loss_name, training_parameters)
+    pred_loss_fn = _loss_fn(torch, prediction_loss_name, training_parameters) if prediction_enabled else None
     scaler = torch.amp.GradScaler("cuda", enabled=use_amp)
     from app.training.epoch_selection import EpochSelection
     selection = EpochSelection(training_parameters, val_loader is not None)
@@ -1039,7 +1054,7 @@ def train_spatiotemporal_gradient(
         selection.observe(epoch, val_loss, model)
         if early_stopping_enabled:
             stop_metric = val_loss if val_loss is not None else train_loss
-            if best_stop_metric is None or stop_metric < best_stop_metric:
+            if best_stop_metric is None or best_stop_metric - stop_metric > min_delta:
                 best_stop_metric = stop_metric
                 epochs_without_improvement = 0
             else:

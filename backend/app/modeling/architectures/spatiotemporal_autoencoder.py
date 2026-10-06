@@ -87,6 +87,10 @@ class SpatioTemporalAutoencoderArchitecture(BaseModelArchitecture):
                 "default": 1,
                 "description": "Spacing between frames inside the input clip, measured in dataset frame steps.",
             },
+            "frame_interval_seconds": {
+                "type": "number", "label": "Frame-Abstand (Sekunden)", "minimum": 0.001, "default": 5.0,
+                "description": "timestamp_interval: Zeitabstand im Clip; Abgleich ±0,5 s, am letzten Frame verankert. Unvollständige Clips entfallen.",
+            },
             "future_stride": {
                 "type": "integer",
                 "label": "Future stride",
@@ -97,10 +101,10 @@ class SpatioTemporalAutoencoderArchitecture(BaseModelArchitecture):
             "sequence_contiguity_mode": {
                 "type": "string",
                 "label": "Sequence continuity",
-                "enum": ["ordered_index", "timestamp_cadence"],
+                "enum": ["ordered_index", "timestamp_cadence", "timestamp_interval"],
                 "default": "ordered_index",
                 "description": (
-                    "Frame order is recommended for videos and frame folders; timestamp cadence requires "
+                    "timestamp_interval matches real timestamps at the configured seconds interval (±0.5 s). Frame order is recommended for videos and frame folders; timestamp cadence requires "
                     "real timestamp gaps to match the folder cadence and is useful for sensor time series."
                 ),
             },
@@ -203,6 +207,8 @@ class SpatioTemporalAutoencoderArchitecture(BaseModelArchitecture):
                 "default": 0.2,
             },
             "early_stopping_enabled": {"type": "boolean", "label": "Early stopping", "default": True},
+            "seed": {"type": "integer", "label": "Zufallsseed", "minimum": 0, "maximum": 4294967295},
+            "early_stopping_min_delta": {"type": "number", "label": "Minimale Verbesserung", "minimum": 0},
             "early_stopping_patience": {"type": "integer", "label": "Early stopping patience", "minimum": 1, "default": 10},
             "num_workers": {"type": "integer", "label": "DataLoader workers", "minimum": 0, "default": 16},
             "prefetch_factor": {"type": "integer", "label": "Prefetch factor", "minimum": 1, "default": 2},
@@ -263,3 +269,12 @@ class SpatioTemporalAutoencoderArchitecture(BaseModelArchitecture):
     ) -> None:
         super().validate_config(method_graph, method_config, training_config, inference_config)
         validate_spatiotemporal_model_graph(method_graph, self.builder_kind, self.merged_method_config(method_config))
+
+        config = self.merged_method_config(method_config)
+        if config.get("sequence_contiguity_mode") == "timestamp_interval":
+            import math
+            interval = config.get("frame_interval_seconds", 5.0)
+            if not math.isfinite(interval) or interval <= 0:
+                raise ValueError("Frame-Abstand muss endlich und positiv sein.")
+            if config.get("prediction_branch") or config.get("future_length", 0):
+                raise ValueError("timestamp_interval unterstützt ausschließlich Rekonstruktion ohne Zukunftsframes.")

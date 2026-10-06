@@ -66,7 +66,7 @@ def training_schema(definition):
             prop['visible_if'] = prediction if key != 'prediction_min_weight' else {'all': [prediction, field('training.prediction_weight_schedule', ['linear_decay', 'exponential_decay'])]}
         elif key == 'training_objective':
             prop['visible_if'] = field('method.prediction_branch', [True])
-        elif key == 'early_stopping_patience':
+        elif key in {'early_stopping_patience', 'early_stopping_min_delta'}:
             prop['visible_if'] = field('training.early_stopping_enabled', [True])
         elif key == 'prefetch_factor':
             prop['visible_if'] = {'field': 'training.num_workers', 'gt': 0}

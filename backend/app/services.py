@@ -2297,6 +2297,7 @@ def _dry_run_training_pipeline_legacy(db: Session, payload: TrainingPipelineDryR
                 missing_frame_policy=str(method_config.get("missing_frame_policy") or "skip"),
                 score_timestamp_mode=str(method_config.get("score_timestamp_mode") or "last_input"),
                 sequence_contiguity_mode=sequence_contiguity_mode,
+                frame_interval_seconds=float(method_config.get("frame_interval_seconds", 5.0)),
             )
         except ValueError as exc:
             return TrainingPipelineDryRunResponse(valid=False, mode="failed", errors=[str(exc)], logs=logs, training_dataset_name=first_dataset.name)

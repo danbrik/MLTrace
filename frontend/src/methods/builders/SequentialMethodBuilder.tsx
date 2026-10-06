@@ -394,12 +394,10 @@ export function SequentialMethodBuilder({
             config={modelConfig as ModelConfig}
             keys={[
               'clip_length',
-              'future_length',
-              'temporal_stride',
-              'future_stride',
-              'missing_frame_policy',
-              'score_timestamp_mode',
-              'prediction_branch',
+              'sequence_contiguity_mode',
+              ...(modelConfig.sequence_contiguity_mode === 'timestamp_interval'
+                ? ['frame_interval_seconds']
+                : ['future_length', 'temporal_stride', 'future_stride', 'missing_frame_policy', 'score_timestamp_mode', 'prediction_branch']),
             ]}
             disabled={disabled}
             fieldPrefix="method.sequence"

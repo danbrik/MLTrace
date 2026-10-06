@@ -378,6 +378,7 @@ def test_default_method_bootstrap_is_idempotent() -> None:
             "AEDense d256 384x240 default",
             "AESpatial c64 384x240 default",
             "VAE Baur d128 default",
+            "STAE-3D Reconstruction 352x192",
             "STAE reconstruction prediction default",
             "STAE Reconstruction paper default",
             "STAE Reconstruction + Future Prediction paper default",
@@ -396,9 +397,9 @@ def test_default_method_payloads_validate_statically() -> None:
         if payload.method_type != "fast_anogan":
             assert payload.training_config["optimizer"] == "adam"
             assert payload.training_config["learning_rate"] == 0.0001
-            assert payload.training_config["weight_decay"] == 0.00001
+            assert payload.training_config["weight_decay"] == (0.0 if payload.name == "STAE-3D Reconstruction 352x192" else 0.00001)
             assert payload.training_config["early_stopping_enabled"] is True
-            assert payload.training_config["early_stopping_patience"] == 10
+            assert payload.training_config["early_stopping_patience"] == (5 if payload.name == "STAE-3D Reconstruction 352x192" else 10)
         if payload.name == "VAE Baur d128 default":
             assert payload.method_type == "cnn_vae"
             assert payload.method_config["latent_dim"] == 128

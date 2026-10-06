@@ -587,10 +587,34 @@ def _paper_stae_training_config(*, prediction_branch: bool) -> dict:
     }
 
 
+def industrial_stae_payload() -> MethodConfigurationCreate:
+    from app.modeling.stae_reconstruction import reconstruction_graph
+    return MethodConfigurationCreate(
+        name="STAE-3D Reconstruction 352x192",
+        description="Reconstruction-only STAE inspired by Zhao et al. (2017), DOI 10.1145/3123266.3123451. "
+                    "16 grayscale frames, 5-second timestamp spacing (editable), ±0.5 s tolerance. "
+                    "Input 352×192; bottleneck 64×2×24×44. No prediction branch. "
+                    "Use normal training data and a separate normal validation dataset; preprocessed intensities must be in [0,1].",
+        method_type="spatiotemporal_autoencoder",
+        method_config={**_paper_stae_method_config(prediction_branch=False),
+                       "input_width": 352, "input_height": 192,
+                       "sequence_contiguity_mode": "timestamp_interval", "frame_interval_seconds": 5.0},
+        training_config={"epochs": 1000, "batch_size": 4, "learning_rate": 1e-4,
+                         "optimizer": "adam", "weight_decay": 0.0, "reconstruction_loss": "mse",
+                         "training_objective": "reconstruction", "early_stopping_enabled": True,
+                         "early_stopping_patience": 5, "early_stopping_min_delta": 1e-8,
+                         "seed": 0, "amp_enabled": False, "num_workers": 0,
+                         "log_interval_batches": 20, "model_selection": "best_validation"},
+        inference_config={**STAE_RECONSTRUCTION_INFERENCE_CONFIG, "error_metric": "mse", "residual_mode": "squared"},
+        method_graph=reconstruction_graph(),
+    )
+
+
 def default_method_payloads() -> list[MethodConfigurationCreate]:
     channels = ", ".join(str(item) for item in ENCODER_CHANNELS)
     wide_channels = ", ".join(str(item) for item in WIDE_ENCODER_CHANNELS)
     return [
+        industrial_stae_payload(),
         MethodConfigurationCreate(
             name="AEDense d64 default",
             description=f"Deployment default dense autoencoder, latent d=64, encoder channels [{channels}], input 256x256x1.",

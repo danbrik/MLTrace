@@ -14,7 +14,7 @@ import logging
 import time
 from bisect import bisect_left, bisect_right
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from app import models
@@ -438,7 +438,48 @@ def _clip_score_timestamp(
 
 
 def _sequence_contiguity_mode(value: str | None) -> str:
-    return "timestamp_cadence" if value == "timestamp_cadence" else "ordered_index"
+    return value if value in {"timestamp_cadence", "timestamp_interval"} else "ordered_index"
+
+
+def _timestamp_interval_clips(rule, records, clip_length, interval):
+    """End-anchored clips; nearest timestamps, inclusive 0.5-second tolerance.
+
+    Operates on a single already-sampled rule, so frames cannot cross dataset
+    boundaries. Ties prefer the earlier timestamp, then the file path. A frame
+    is never reused to fill two positions in one clip.
+    """
+    import math
+    if not math.isfinite(interval) or interval <= 0:
+        raise ValueError("Frame-Abstand muss endlich und positiv sein.")
+    records = sorted({r.file_path: r for r in records}.values(), key=lambda r: (r.timestamp_parsed, r.file_path))
+    times = [r.timestamp_parsed for r in records]
+    clips, skipped, possible = [], 0, 0
+    tolerance = timedelta(seconds=0.5)
+    span = timedelta(seconds=(clip_length - 1) * interval)
+    for end in records:
+        start = end.timestamp_parsed - span
+        if start + tolerance < rule.start_timestamp:
+            continue
+        possible += 1
+        frames = []
+        for index in range(clip_length - 1):
+            target = end.timestamp_parsed - timedelta(seconds=(clip_length - 1 - index) * interval)
+            lo, hi = bisect_left(times, target - tolerance), bisect_right(times, target + tolerance)
+            candidates = records[lo:hi]
+            if not candidates:
+                break
+            match = min(candidates, key=lambda r: (abs((r.timestamp_parsed - target).total_seconds()), r.timestamp_parsed, r.file_path))
+            if frames and match.timestamp_parsed <= frames[-1].timestamp_parsed:
+                break
+            frames.append(match)
+        if (len(frames) != clip_length - 1 or (frames and frames[-1].timestamp_parsed >= end.timestamp_parsed)
+                or end.file_path in {f.file_path for f in frames}):
+            skipped += 1
+            continue
+        frames.append(end)
+        clips.append(ResolvedClipSample(tuple(frames), (), end.timestamp_parsed,
+                     frames[0].timestamp_parsed, end.timestamp_parsed, end.dataset_name, end.folder_id))
+    return ClipEnumerationSummary(tuple(clips), skipped, len(records), possible, "timestamp_interval")
 
 
 def enumerate_rule_clip_samples(
@@ -451,6 +492,7 @@ def enumerate_rule_clip_samples(
     missing_frame_policy: str = "skip",
     score_timestamp_mode: str = "last_input",
     sequence_contiguity_mode: str = "ordered_index",
+    frame_interval_seconds: float = 5.0,
     cache: FolderTimestampCache | None = None,
 ) -> ClipEnumerationSummary:
     """Build clip samples from one rule without opening image pixels.
@@ -465,6 +507,10 @@ def enumerate_rule_clip_samples(
     temporal_stride = max(1, int(temporal_stride))
     future_stride = max(1, int(future_stride))
     contiguity_mode = _sequence_contiguity_mode(sequence_contiguity_mode)
+    if contiguity_mode == "timestamp_interval":
+        if future_length:
+            raise ValueError("timestamp_interval unterstützt keine Zukunftsframes.")
+        return _timestamp_interval_clips(rule, records, clip_length, float(frame_interval_seconds))
     needed_span = (clip_length - 1) * temporal_stride + future_length * future_stride
     if len(records) <= needed_span:
         return ClipEnumerationSummary(
@@ -536,6 +582,7 @@ def enumerate_training_dataset_clip_samples(
     missing_frame_policy: str = "skip",
     score_timestamp_mode: str = "last_input",
     sequence_contiguity_mode: str = "ordered_index",
+    frame_interval_seconds: float = 5.0,
     cache: FolderTimestampCache | None = None,
 ) -> ClipEnumerationSummary:
     cache = cache if cache is not None else {}
@@ -554,6 +601,7 @@ def enumerate_training_dataset_clip_samples(
             missing_frame_policy=missing_frame_policy,
             score_timestamp_mode=score_timestamp_mode,
             sequence_contiguity_mode=contiguity_mode,
+            frame_interval_seconds=frame_interval_seconds,
             cache=cache,
         )
         clips.extend(summary.clips)
@@ -591,6 +639,7 @@ def enumerate_training_pipeline_clip_samples(
             missing_frame_policy=str(method_config.get("missing_frame_policy") or "skip"),
             score_timestamp_mode=str(method_config.get("score_timestamp_mode") or "last_input"),
             sequence_contiguity_mode=contiguity_mode,
+            frame_interval_seconds=float(method_config.get("frame_interval_seconds", 5.0)),
             cache=cache,
         )
         clips.extend(summary.clips)

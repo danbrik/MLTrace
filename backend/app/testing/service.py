@@ -357,6 +357,7 @@ def resolve_testing_input_context(db: Session, run: models.TestingRun) -> Testin
         clip_summary = enumerate_training_dataset_clip_samples(
             training_dataset,
             clip_length=int(method_config.get("clip_length") or 1),
+            frame_interval_seconds=float(method_config.get("frame_interval_seconds", 5.0)),
             future_length=future_length,
             temporal_stride=int(method_config.get("temporal_stride") or 1),
             future_stride=int(
