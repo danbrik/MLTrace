@@ -218,6 +218,72 @@ def _wide_dense_graph(latent_dim: int) -> dict:
     }
 
 
+def _simple_cnn_ae_352x192_graph() -> dict:
+    return {
+        "builder_kind": "sequential_autoencoder",
+        "encoder": [
+            *_encoder_prefix([32, 64, 128]),
+            _layer("enc-flatten", "Flatten", start_dim=1, end_dim=-1),
+            _layer("enc-latent", "Linear", out_features=300, bias=True),
+        ],
+        "latent": {"latent_dim": 300, "bottleneck_kind": "dense"},
+        "decoder": [
+            _layer("dec-expand", "Linear", out_features=128 * 24 * 44, bias=True),
+            _layer("dec-unflatten", "Unflatten", channels=128, height=24, width=44),
+            *_decoder_upsampling_layers(channels=[128, 64, 32]),
+            _layer("dec-relu-3", "ReLU", inplace=False),
+            _layer("dec-output", "Conv2d", out_channels=1, kernel_size=3, stride=1, padding=1, bias=True),
+        ],
+    }
+
+
+def _cnn_ae_graph(input_width: int, input_height: int) -> dict:
+    bottleneck_width = input_width // 16
+    bottleneck_height = input_height // 16
+    encoder: list[dict] = []
+    for index, out_channels in enumerate([32, 64, 128, 128], start=1):
+        encoder.extend([
+            _layer(f"enc-conv-{index}", "Conv2d", out_channels=out_channels, kernel_size=5, stride=2, padding=2),
+            _layer(f"enc-bn-{index}", "BatchNorm2d", num_features=out_channels, eps=0.001, momentum=0.01),
+            _layer(f"enc-act-{index}", "LeakyReLU", negative_slope=0.3),
+        ])
+    encoder.extend([
+        _layer("enc-bottleneck", "Conv2d", out_channels=16, kernel_size=1, stride=1, padding=0),
+        _layer("enc-flatten", "Flatten", start_dim=1, end_dim=-1),
+        _layer("enc-latent", "Linear", out_features=128),
+    ])
+    decoder = [
+        _layer("dec-expand", "Linear", out_features=16 * bottleneck_height * bottleneck_width),
+        _layer("dec-unflatten", "Unflatten", channels=16, height=bottleneck_height, width=bottleneck_width),
+        _layer("dec-bottleneck", "Conv2d", out_channels=128, kernel_size=1, stride=1, padding=0),
+        _layer("dec-bn-seed", "BatchNorm2d", num_features=128, eps=0.001, momentum=0.01),
+        _layer("dec-relu-seed", "ReLU"),
+    ]
+    for index, out_channels in enumerate([128, 64, 32, 32], start=1):
+        decoder.extend([
+            _layer(f"dec-deconv-{index}", "ConvTranspose2d", out_channels=out_channels, kernel_size=5, stride=2, padding=2, output_padding=1),
+            _layer(f"dec-bn-{index}", "BatchNorm2d", num_features=out_channels, eps=0.001, momentum=0.01),
+            _layer(f"dec-act-{index}", "LeakyReLU", negative_slope=0.3),
+        ])
+    decoder.append(_layer("dec-output", "Conv2d", out_channels=1, kernel_size=1, stride=1, padding=0))
+    return {
+        "builder_kind": "sequential_autoencoder",
+        "encoder": encoder,
+        "latent": {"latent_dim": 128, "bottleneck_kind": "dense"},
+        "decoder": decoder,
+    }
+
+
+def _cnn_vae_graph(input_width: int, input_height: int) -> dict:
+    ae_graph = _cnn_ae_graph(input_width, input_height)
+    return {
+        "builder_kind": "sequential_variational_autoencoder",
+        "encoder": ae_graph["encoder"][:-1],
+        "latent": {"latent_dim": 128, "kl_weight": 1.0, "reparameterization": True, "bottleneck_kind": "variational_dense"},
+        "decoder": ae_graph["decoder"][1:],
+    }
+
+
 def _wide_spatial_graph(bottleneck_channels: int) -> dict:
     return {
         "builder_kind": "sequential_spatial_autoencoder",
@@ -665,6 +731,105 @@ def default_method_payloads() -> list[MethodConfigurationCreate]:
             method_graph=_wide_dense_graph(256),
         ),
         MethodConfigurationCreate(
+            name="CNN-AE 704x384",
+            description="CNN autoencoder for 704x384 grayscale images with 128-dimensional latent vector.",
+            method_type="cnn_autoencoder",
+            method_config={
+                "input_channels": 1,
+                "input_width": 704,
+                "input_height": 384,
+                "latent_dim": 128,
+                "output_activation": "none",
+            },
+            training_config={**DEFAULT_TRAINING_CONFIG, "batch_size": 8, "early_stopping_patience": 5},
+            inference_config=DEFAULT_INFERENCE_CONFIG,
+            method_graph=_cnn_ae_graph(704, 384),
+        ),
+        MethodConfigurationCreate(
+            name="CNN-AE 352x192",
+            description="CNN autoencoder for 352x192 grayscale images with 128-dimensional latent vector.",
+            method_type="cnn_autoencoder",
+            method_config={
+                "input_channels": 1,
+                "input_width": 352,
+                "input_height": 192,
+                "latent_dim": 128,
+                "output_activation": "none",
+            },
+            training_config={**DEFAULT_TRAINING_CONFIG, "batch_size": 8, "early_stopping_patience": 5},
+            inference_config=DEFAULT_INFERENCE_CONFIG,
+            method_graph=_cnn_ae_graph(352, 192),
+        ),
+        MethodConfigurationCreate(
+            name="CNN-VAE 704x384",
+            description="Four-stage convolutional VAE for 704x384 grayscale images, latent dimension 128.",
+            method_type="cnn_vae",
+            method_config={
+                "input_channels": 1,
+                "input_width": 704,
+                "input_height": 384,
+                "latent_dim": 128,
+                "kl_weight": 1.0,
+                "output_activation": "none",
+            },
+            training_config={
+                **VAE_TRAINING_CONFIG,
+                "batch_size": 8,
+                "early_stopping_patience": 5,
+                "reconstruction_loss": "mse",
+                "reconstruction_reduction": "pixel_sum",
+            },
+            inference_config=VAE_INFERENCE_CONFIG,
+            method_graph=_cnn_vae_graph(704, 384),
+        ),
+        MethodConfigurationCreate(
+            name="CNN-VAE 352x192",
+            description="Four-stage convolutional VAE for 352x192 grayscale images, latent dimension 128.",
+            method_type="cnn_vae",
+            method_config={
+                "input_channels": 1,
+                "input_width": 352,
+                "input_height": 192,
+                "latent_dim": 128,
+                "kl_weight": 1.0,
+                "output_activation": "none",
+            },
+            training_config={
+                **VAE_TRAINING_CONFIG,
+                "batch_size": 8,
+                "early_stopping_patience": 5,
+                "reconstruction_loss": "mse",
+                "reconstruction_reduction": "pixel_sum",
+            },
+            inference_config=VAE_INFERENCE_CONFIG,
+            method_graph=_cnn_vae_graph(352, 192),
+        ),
+        MethodConfigurationCreate(
+            name="Simple Original CNN AE 352x192 Latent 300",
+            description="Three-stage simple CNN autoencoder with 352x192 grayscale input and latent dimension 300.",
+            method_type="cnn_autoencoder",
+            method_config={
+                "input_channels": 1,
+                "input_width": 352,
+                "input_height": 192,
+                "latent_dim": 300,
+                "output_activation": "sigmoid",
+            },
+            training_config={
+                "epochs": 50,
+                "batch_size": 16,
+                "learning_rate": 0.001,
+                "loss": "mse",
+                "num_workers": 16,
+                "prefetch_factor": 2,
+                "validation_fraction": 0.0,
+                "amp_enabled": True,
+                "log_interval_batches": 50,
+            },
+            inference_config={"error_metric": "mse"},
+            method_graph=_simple_cnn_ae_352x192_graph(),
+        ),
+        MethodConfigurationCreate(
             name="AESpatial c64 384x240 default",
             description=(
                 f"Spatial autoencoder for non-square {WIDE_INPUT_WIDTH}x{WIDE_INPUT_HEIGHT}x{INPUT_CHANNELS} input, "
@@ -1003,6 +1168,20 @@ def _apply_method_payload(db: Session, configuration: models.MethodConfiguration
     _replace_method_parameter_index(db, configuration)
 
 
+def _old_cnn_ae_payload(payload: MethodConfigurationCreate) -> MethodConfigurationCreate:
+    old = payload.model_copy(deep=True)
+    for section in ("encoder", "decoder"):
+        for layer in old.method_graph[section]:
+            if layer["type"] == "BatchNorm2d":
+                layer["config"].pop("eps")
+                layer["config"].pop("momentum")
+            elif layer["type"] == "LeakyReLU":
+                layer["config"]["negative_slope"] = 0.01
+    old.training_config["batch_size"] = 32
+    old.training_config["early_stopping_patience"] = 10
+    return old
+
+
 def ensure_default_method_configurations(db: Session) -> int:
     """Create missing built-in defaults without doing expensive startup checks.
 
@@ -1020,13 +1199,27 @@ def ensure_default_method_configurations(db: Session) -> int:
         "STAE Reconstruction paper default",
         "STAE Reconstruction + Future Prediction paper default",
     }
+    cnn_ae_default_names = {"CNN-AE 704x384", "CNN-AE 352x192"}
     for payload in payloads:
         existing = db.scalar(
             select(models.MethodConfiguration).where(func.lower(models.MethodConfiguration.name) == payload.name.lower())
         )
         if existing is not None:
             old_payload = old_payloads.get(payload.name)
-            if old_payload is not None and _looks_like_old_paper_stae_default(existing, old_payload):
+            if payload.name in cnn_ae_default_names:
+                old_cnn_ae = _old_cnn_ae_payload(payload)
+                _, old_graph, old_config, old_training, old_inference, _, _ = _normalize_method_payload(old_cnn_ae)
+                if (
+                    existing.method_type == "cnn_autoencoder"
+                    and existing.method_graph == old_graph
+                    and existing.method_config == old_config
+                    and existing.training_config == old_training
+                    and existing.inference_config == old_inference
+                ):
+                    _apply_method_payload(db, existing, payload)
+                    db.commit()
+                    logger.info("Updated bundled method configuration '%s' to Baur-style defaults", payload.name)
+            elif old_payload is not None and _looks_like_old_paper_stae_default(existing, old_payload):
                 _apply_method_payload(db, existing, new_payloads[payload.name])
                 db.commit()
                 logger.info("Updated bundled method configuration '%s' to current paper-near default", payload.name)

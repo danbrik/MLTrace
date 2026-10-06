@@ -26,6 +26,16 @@ from tests.test_testing_service import make_db, write_tiff
 LOAD_ONLY_GRAPH = {"nodes": [{"id": "load", "type": "load_image", "config": {}}], "edges": []}
 
 
+def test_vae_pixel_sum_loss_averages_per_image() -> None:
+    torch = pytest.importorskip('torch')
+    target = torch.zeros((2, 1, 1, 2))
+    prediction = torch.tensor([[[[1.0, 2.0]]], [[[3.0, 4.0]]]])
+    assert training_engine._vae_pixel_sum_loss(torch, 'mse', prediction, target).item() == 15.0
+    assert training_engine._vae_pixel_sum_loss(torch, 'l1', prediction, target).item() == 5.0
+    with pytest.raises(ValueError, match='only mse or l1'):
+        training_engine._vae_pixel_sum_loss(torch, 'ssim', prediction, target)
+
+
 def test_training_hot_path_scales_uint16_to_unit_range() -> None:
     image = np.array([[0, 32768, 65535]], dtype=np.uint16)
 

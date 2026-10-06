@@ -157,17 +157,43 @@ def test_dry_run_detects_later_size_mismatch(tmp_path):
         check_sample_shapes([str(a)],[str(b)],SimpleNamespace(builder_kind='form',method_config={}),PreprocessingGraph.model_validate(LOAD_ONLY_GRAPH))
 
 
-def test_real_vae_external_validation(tmp_path):
+@pytest.mark.parametrize('loss_name', ['mse', 'l1'])
+@pytest.mark.parametrize('reduction', [None, 'pixel_sum'])
+def test_real_vae_external_validation(tmp_path, monkeypatch, loss_name, reduction):
+    import torch
+    from app.training.engine import _build_model, _PreprocessedImageDataset
+
     db=make_db()
     try:
         run,method,paths=_seed_ae(db,tmp_path,5)
         method.builder_kind='sequential_variational_autoencoder'; method.method_type='cnn_vae'
-        method.method_config={**method.method_config,'kl_weight':.01}
+        method.method_config={**method.method_config,'kl_weight':1.0}
         run.validation_mode='external'; db.commit()
+        monkeypatch.setattr(torch, 'randn_like', lambda tensor: torch.zeros_like(tensor))
+        params={'epochs':1,'batch_size':2,'num_workers':0,'reconstruction_loss':loss_name,'amp_enabled':False,
+            'model_selection':'best_validation'}
+        if reduction:
+            params['reconstruction_reduction']=reduction
         train_gradient(db,run,method,paths[:3],PreprocessingGraph.model_validate(LOAD_ONLY_GRAPH),
-            {'epochs':1,'batch_size':2,'num_workers':0,'reconstruction_loss':'l1','model_selection':'best_validation'},tmp_path/'vae.pt',threading.Event(),paths[3:])
+            params,tmp_path/'vae.pt',threading.Event(),paths[3:])
         assert run.validation_sample_count==2 and run.val_loss is not None
         assert run.best_epoch == run.selected_epoch == 1
+        model, is_vae = _build_model(torch, method, deterministic_vae=True)
+        device=torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        model.to(device)
+        assert is_vae
+        dataset=_PreprocessedImageDataset(paths[3:],PreprocessingGraph.model_validate(LOAD_ONLY_GRAPH))
+        with torch.no_grad():
+            model(dataset[0].unsqueeze(0).to(device))
+            model.load_state_dict(torch.load(tmp_path/'vae.pt',weights_only=True))
+            model.eval()
+            samples=torch.stack([dataset[index] for index in range(2)]).to(device)
+            reconstructed,(mu,logvar)=model(samples)
+            pixels=(reconstructed-samples).square() if loss_name=='mse' else (reconstructed-samples).abs()
+            reconstruction=pixels.flatten(1).sum(1).mean() if reduction else pixels.mean()
+            kl=-0.5*(1+logvar-mu.square()-logvar.exp()).sum(1).mean()
+        assert run.val_loss==pytest.approx((reconstruction+kl).item(),rel=1e-5)
+        assert run.best_val_loss==pytest.approx(run.val_loss)
     finally: db.close()
 
 
