@@ -134,6 +134,13 @@ class CnnVaeArchitecture(BaseModelArchitecture):
                 "default": "l1",
                 "description": "Reconstruction term L_rec. L1 is Baur-style; MSE/L2 emphasizes larger deviations.",
             },
+            "reconstruction_reduction": {
+                "type": "string",
+                "label": "Reconstruction reduction",
+                "enum": ["mean", "pixel_sum"],
+                "default": "mean",
+                "description": "Pixel mean (legacy) or sum over pixels per image, then mean over the batch. Pixel sum supports MSE and L1.",
+            },
             **SSIM_TRAINING_PROPERTIES,
             "optimizer": {
                 "type": "string",
@@ -230,4 +237,7 @@ class CnnVaeArchitecture(BaseModelArchitecture):
         inference_config: dict | None = None,
     ) -> None:
         super().validate_config(method_graph, method_config, training_config, inference_config)
+        training = self.merged_training_config(training_config)
+        if training.get("reconstruction_reduction") == "pixel_sum" and training["reconstruction_loss"] not in {"mse", "l1"}:
+            raise ValueError("VAE pixel_sum reconstruction supports only mse or l1.")
         validate_sequential_model_graph(method_graph, self.builder_kind)

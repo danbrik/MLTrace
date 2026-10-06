@@ -67,6 +67,7 @@ tools/setup_aebad_v_dataset.py
 tools/IRCSV2TIFF/*
 docs/local/*
 dataset/*
+notebooks/*
 
 # Java / Kotlin / Gradle
 .gradle/
@@ -99,3 +100,5 @@ obj/
 *.cache
 *.tmp
 ## end of file
+
+EXPORT/*

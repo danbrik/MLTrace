@@ -1,4 +1,5 @@
 from fastapi.testclient import TestClient
+from types import SimpleNamespace
 import pytest
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session, sessionmaker
@@ -8,11 +9,11 @@ from app import models
 from app.database import Base, get_db
 from app.main import app
 from app.modeling.architectures.cnn_autoencoder import CnnAutoencoderArchitecture
-from app.modeling.defaults import _old_paper_payloads_by_name, default_method_payloads, ensure_default_method_configurations
+from app.modeling.defaults import _old_cnn_ae_payload, _old_paper_payloads_by_name, default_method_payloads, ensure_default_method_configurations
 from app.modeling.fast_anogan import build_fast_anogan_modules, fast_anogan_forward
 from app.modeling.registry import MethodRegistry, registry
 from app.services import create_method_configuration, validate_method_configuration
-from app.training.engine import _prediction_horizon_weights, _prediction_weight_for_epoch
+from app.training.engine import _build_model, _prediction_horizon_weights, _prediction_weight_for_epoch
 
 
 def make_client():
@@ -376,6 +377,11 @@ def test_default_method_bootstrap_is_idempotent() -> None:
             "AESpatial c16 default",
             "AESpatial c64 default",
             "AEDense d256 384x240 default",
+            "CNN-AE 704x384",
+            "CNN-AE 352x192",
+            "CNN-VAE 704x384",
+            "CNN-VAE 352x192",
+            "Simple Original CNN AE 352x192 Latent 300",
             "AESpatial c64 384x240 default",
             "VAE Baur d128 default",
             "STAE reconstruction prediction default",
@@ -388,23 +394,139 @@ def test_default_method_bootstrap_is_idempotent() -> None:
         db.close()
 
 
+def test_cnn_ae_bootstrap_updates_only_unchanged_old_defaults() -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:", connect_args={"check_same_thread": False}, poolclass=StaticPool)
+    Base.metadata.create_all(bind=engine)
+    db = Session(engine)
+    try:
+        defaults = {payload.name: payload for payload in default_method_payloads()}
+        original = create_method_configuration(db, _old_cnn_ae_payload(defaults["CNN-AE 704x384"]))
+        customized = create_method_configuration(db, _old_cnn_ae_payload(defaults["CNN-AE 352x192"]))
+        customized = db.get(models.MethodConfiguration, customized.id)
+        customized.training_config = {**customized.training_config, "batch_size": 4}
+        db.commit()
+
+        assert ensure_default_method_configurations(db) == len(defaults) - 2
+        original = db.get(models.MethodConfiguration, original.id)
+        assert original.training_config["batch_size"] == 8
+        assert original.training_config["early_stopping_patience"] == 5
+        assert original.training_config["loss"] == "mse"
+        assert original.method_graph["encoder"][1]["config"]["eps"] == 0.001
+        assert original.method_graph["encoder"][2]["config"]["negative_slope"] == 0.3
+        assert customized.training_config["batch_size"] == 4
+        assert customized.method_graph["encoder"][1]["config"]["eps"] == 0.00001
+        assert ensure_default_method_configurations(db) == 0
+    finally:
+        db.close()
+
+
+@pytest.mark.parametrize('name,height,width', [
+    ('CNN-VAE 704x384', 384, 704),
+    ('CNN-VAE 352x192', 192, 352),
+])
+def test_cnn_vae_presets_forward_and_sampling(name, height, width) -> None:
+    torch = pytest.importorskip('torch')
+    payload = next(item for item in default_method_payloads() if item.name == name)
+    configuration = SimpleNamespace(builder_kind=payload.method_graph['builder_kind'],
+                                    method_graph=payload.method_graph, method_config=payload.method_config)
+    model, is_vae = _build_model(torch, configuration)
+    model.eval()
+    sample = torch.zeros(1, 1, height, width)
+    with torch.no_grad():
+        first, (mu, logvar) = model(sample)
+        second, _ = model(sample)
+        model.deterministic_vae = True
+        mean_first, _ = model(sample)
+        mean_second, _ = model(sample)
+    assert is_vae
+    assert first.shape == second.shape == mean_first.shape == sample.shape
+    assert mu.shape == logvar.shape == (1, 128)
+    assert not torch.allclose(first, second)
+    assert torch.equal(mean_first, mean_second)
+
+
+def test_cnn_vae_pixel_sum_accepts_l1_but_rejects_ssim() -> None:
+    payload = next(item for item in default_method_payloads() if item.name == 'CNN-VAE 352x192')
+    l1 = payload.model_copy(deep=True)
+    l1.training_config['reconstruction_loss'] = 'l1'
+    assert validate_method_configuration(l1).valid
+    ssim = payload.model_copy(deep=True)
+    ssim.training_config['reconstruction_loss'] = 'ssim'
+    result = validate_method_configuration(ssim)
+    assert not result.valid
+    assert any('only mse or l1' in error for error in result.errors)
+
+
 def test_default_method_payloads_validate_statically() -> None:
     for payload in default_method_payloads():
         result = validate_method_configuration(payload)
         assert result.valid is True, payload.name
         assert result.errors == []
-        if payload.method_type != "fast_anogan":
+        if payload.method_type != "fast_anogan" and payload.name != "Simple Original CNN AE 352x192 Latent 300":
             assert payload.training_config["optimizer"] == "adam"
             assert payload.training_config["learning_rate"] == 0.0001
             assert payload.training_config["weight_decay"] == 0.00001
             assert payload.training_config["early_stopping_enabled"] is True
-            assert payload.training_config["early_stopping_patience"] == 10
+            assert payload.training_config["early_stopping_patience"] == (5 if payload.name in {"CNN-AE 704x384", "CNN-AE 352x192", "CNN-VAE 704x384", "CNN-VAE 352x192"} else 10)
+        if payload.name in {"CNN-VAE 704x384", "CNN-VAE 352x192"}:
+            height, width = ((384, 704) if payload.name == "CNN-VAE 704x384" else (192, 352))
+            graph = payload.method_graph
+            assert payload.method_type == "cnn_vae"
+            assert payload.method_config["output_activation"] == "none"
+            assert payload.method_config["kl_weight"] == 1.0
+            assert payload.training_config["batch_size"] == 8
+            assert payload.training_config["reconstruction_loss"] == "mse"
+            assert payload.training_config["reconstruction_reduction"] == "pixel_sum"
+            assert payload.inference_config["sample_count"] == 1
+            assert graph["builder_kind"] == "sequential_variational_autoencoder"
+            assert graph["encoder"][-1]["type"] == "Flatten"
+            assert graph["decoder"][0]["config"] == {"channels": 16, "height": height // 16, "width": width // 16}
+            assert [layer["config"]["out_channels"] for layer in graph["encoder"] if layer["type"] == "Conv2d"] == [32, 64, 128, 128, 16]
+            assert [layer["config"]["out_channels"] for layer in graph["decoder"] if layer["type"] == "ConvTranspose2d"] == [128, 64, 32, 32]
+            assert graph["decoder"][-1]["config"]["out_channels"] == 1
+            assert result.layer_specs[-1]["output_label"] == f"N,1,{height},{width}"
+        if payload.name == "Simple Original CNN AE 352x192 Latent 300":
+            assert payload.method_type == "cnn_autoencoder"
+            assert payload.method_config == {
+                "input_channels": 1, "input_width": 352, "input_height": 192,
+                "latent_dim": 300, "output_activation": "sigmoid",
+            }
+            assert payload.training_config["batch_size"] == 16
+            assert payload.training_config["learning_rate"] == 0.001
+            assert payload.training_config["loss"] == "mse"
+            assert "early_stopping_enabled" not in payload.training_config
+            assert [layer["config"]["out_channels"] for layer in payload.method_graph["encoder"] if layer["type"] == "Conv2d"] == [32, 64, 128]
+            assert [layer["config"]["out_channels"] for layer in payload.method_graph["decoder"] if layer["type"] == "ConvTranspose2d"] == [128, 64, 32]
+            assert payload.method_graph["encoder"][-1]["config"]["out_features"] == 300
+            assert payload.method_graph["decoder"][0]["config"]["out_features"] == 135168
+            assert payload.method_graph["decoder"][1]["config"] == {"channels": 128, "height": 24, "width": 44}
+            assert payload.method_graph["decoder"][-1]["config"] == {"out_channels": 1, "kernel_size": 3, "stride": 1, "padding": 1, "bias": True}
+            assert result.layer_specs[-1]["output_label"] == "N,1,192,352"
         if payload.name == "VAE Baur d128 default":
             assert payload.method_type == "cnn_vae"
             assert payload.method_config["latent_dim"] == 128
             assert payload.method_config["kl_weight"] == 1.0
             assert payload.training_config["reconstruction_loss"] == "l1"
             assert "loss" not in payload.training_config
+        if payload.name in {"CNN-AE 704x384", "CNN-AE 352x192"}:
+            height, width = ((384, 704) if payload.name == "CNN-AE 704x384" else (192, 352))
+            assert payload.method_type == "cnn_autoencoder"
+            assert payload.method_config["output_activation"] == "none"
+            assert payload.training_config["loss"] == "mse"
+            assert payload.training_config["batch_size"] == 8
+            assert payload.method_config["input_height"] == height
+            assert payload.method_config["input_width"] == width
+            encoder = payload.method_graph["encoder"]
+            decoder = payload.method_graph["decoder"]
+            layers = encoder + decoder
+            assert all(layer["config"]["eps"] == 0.001 and layer["config"]["momentum"] == 0.01 for layer in layers if layer["type"] == "BatchNorm2d")
+            assert all(layer["config"]["negative_slope"] == 0.3 for layer in layers if layer["type"] == "LeakyReLU")
+            assert [layer["config"]["out_channels"] for layer in encoder if layer["type"] == "Conv2d"] == [32, 64, 128, 128, 16]
+            assert [layer["config"]["out_channels"] for layer in decoder if layer["type"] == "ConvTranspose2d"] == [128, 64, 32, 32]
+            assert decoder[0]["config"]["out_features"] == 16 * (height // 16) * (width // 16)
+            assert decoder[1]["config"] == {"channels": 16, "height": height // 16, "width": width // 16}
+            assert encoder[-1]["config"]["out_features"] == 128
+            assert result.layer_specs[-1]["output_label"] == f"N,1,{height},{width}"
         if payload.name == "STAE reconstruction prediction default":
             assert payload.method_type == "spatiotemporal_autoencoder"
             assert payload.method_config["clip_length"] == 8

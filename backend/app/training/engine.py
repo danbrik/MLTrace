@@ -227,6 +227,16 @@ def _loss_fn(torch, name: str, config: dict | None = None):
     return nn.MSELoss()
 
 
+def _vae_pixel_sum_loss(torch, name: str, prediction, target):
+    if name == "mse":
+        pixels = (prediction - target).square()
+    elif name == "l1":
+        pixels = (prediction - target).abs()
+    else:
+        raise ValueError("VAE pixel_sum reconstruction supports only mse or l1.")
+    return pixels.flatten(1).sum(dim=1).mean()
+
+
 def _input_pixel_count(configuration: models.MethodConfiguration) -> int:
     config = configuration.method_config or {}
     width = int(config.get("input_width") or 0)
@@ -651,7 +661,10 @@ def train_gradient(
 
     def compute_loss(xb):
         recon, extra = model(xb)
-        loss = recon_loss_fn(recon, xb)
+        if is_vae and training_parameters.get("reconstruction_reduction") == "pixel_sum":
+            loss = _vae_pixel_sum_loss(torch, loss_name, recon, xb)
+        else:
+            loss = recon_loss_fn(recon, xb)
         if is_vae and extra is not None:
             mu, logvar = extra
             kl = -0.5 * torch.mean(torch.sum(1 + logvar - mu.pow(2) - logvar.exp(), dim=1))
