@@ -581,7 +581,7 @@ class JobScheduler:
                 run.error_message = payload.get("error_message")
                 for field in (
                     "image_count", "artifact_kind", "artifact_path", "artifact_size_bytes", "artifact_signature",
-                    "skipped_image_count", "skipped_images",
+                    "skipped_image_count", "skipped_images", "best_epoch", "selected_epoch",
                 ):
                     if field in payload:
                         setattr(run, field, payload[field])

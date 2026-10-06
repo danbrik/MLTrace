@@ -34,7 +34,9 @@ def training_schema(definition):
     schema = deepcopy(definition.training_schema)
     schema['ui_groups'] = GROUPS
     schema['supports_validation'] = supports_validation(definition)
-    properties = schema.get('properties', {})
+    properties = schema.setdefault('properties', {})
+    if supports_validation(definition):
+        properties['model_selection'] = {'type': 'string', 'enum': ['last', 'best_validation'], 'label': 'Modell nach dem Training verwenden'}
     prediction = {'all': [field('method.prediction_branch', [True]), field('training.training_objective', ['reconstruction_prediction'])]}
     loss_conditions = [field('training.' + key, ['ssim', 'mae_ssim', 'mse_ssim'])
                        for key in ('loss', 'reconstruction_loss') if key in properties]
@@ -54,6 +56,8 @@ def training_schema(definition):
         elif 'loss' in key or key.startswith(('ssim_', 'kl_', 'beta', 'prediction_')) or key in {'gradient_penalty_lambda', 'kappa', 'encoder_training_mode', 'training_objective'}:
             group = 'loss'
         prop['ui_group'] = group
+        if key == 'model_selection':
+            prop['ui_group'] = 'validation'
         if key == 'validation_fraction':
             prop['visible_if'] = {'any': []}
         elif key.startswith('ssim_'):

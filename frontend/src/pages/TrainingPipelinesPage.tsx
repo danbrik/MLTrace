@@ -224,6 +224,7 @@ export function TrainingPipelinesPage({
     setTrainingParameters({
       ...schemaDefaults(definition?.training_schema),
       ...(configuration?.training_config ?? {}),
+      model_selection: 'best_validation',
     });
     setNumericDrafts({});
   }
@@ -242,7 +243,10 @@ export function TrainingPipelinesPage({
       preprocessing_pipeline_id: selectedPipelineId,
       method_configuration_id: selectedConfigurationId,
       shuffle,
-      training_parameters: loadedReadOnly ? trainingParameters : Object.fromEntries(Object.entries(trainingParameters).filter(([key]) => activeKeys.includes(key))),
+      training_parameters: loadedReadOnly ? trainingParameters : {
+        ...Object.fromEntries(Object.entries(trainingParameters).filter(([key]) => activeKeys.includes(key))),
+        ...(supportsValidation ? { model_selection: validationMode === 'external' ? (trainingParameters.model_selection ?? 'last') : 'last' } : {}),
+      },
     };
   }, [selectedDatasetIds, selectedPipelineId, selectedConfigurationId, shuffle, trainingParameters, validationMode, validationIds, validationShuffle, loadedReadOnly, supportsValidation, activeKeys]);
 
@@ -558,6 +562,7 @@ export function TrainingPipelinesPage({
         )}
         {validationMode === 'legacy_fraction' && (
           <Alert color="yellow" title="Bisherige anteilige Validierung">
+            <Text size="sm">Modell nach dem Training: Letzte Epoche (bisheriges Verhalten).</Text>
             <Text size="sm">Dieser Lauf behält seine bisherige Validierung ({String(trainingParameters.validation_fraction ?? 0)}). Vor dem Speichern bitte die neue Validierung ausdrücklich wählen.</Text>
             {!loadedReadOnly && <Select label="Validierung umstellen" placeholder="Bitte auswählen" data={[{ value: 'none', label: 'Keine Validierung' }, ...(supportsValidation ? [{ value: 'external', label: 'Separate Datensätze' }] : [])]} onChange={value => value && setValidationMode(value as 'none' | 'external')} />}
           </Alert>
@@ -579,6 +584,11 @@ export function TrainingPipelinesPage({
                 <Text size="sm">Alle ausgewählten Bilder beziehungsweise vollständigen Clips werden verwendet. Training und Validierung dürfen keine gemeinsamen Quelldateien enthalten.</Text>
                 <TrainingDatasetPicker trainingDatasets={trainingDatasets} selectedIds={validationIds} onChange={setValidationIds} disabled={loadedReadOnly} embedded />
                 {(!validationIds.length || validationIds.some(id => selectedDatasetIds.includes(id))) && <Alert color="yellow">Bitte separate Validierungsdatensätze auswählen; Trainingsdatensätze sind nicht zulässig.</Alert>}
+                <Select label="Modell nach dem Training verwenden" disabled={loadedReadOnly} allowDeselect={false}
+                  value={String(trainingParameters.model_selection ?? 'last')}
+                  data={[{ value: 'best_validation', label: 'Beste Validierungsepoche' }, { value: 'last', label: 'Letzte Epoche' }]}
+                  onChange={value => setTrainingParameters(current => ({ ...current, model_selection: value ?? 'last' }))} />
+                <Text size="sm" c="dimmed">Die Auswahl gilt bei Early Stopping und beim regulären Trainingsende. Bei gleichem bestem Validierungsverlust bleibt die frühere Epoche ausgewählt.</Text>
                 <Switch label="Validierungsreihenfolge mischen" checked={validationShuffle} disabled={loadedReadOnly} onChange={event => setValidationShuffle(event.currentTarget.checked)} />
               </Stack>}
             </Paper>}

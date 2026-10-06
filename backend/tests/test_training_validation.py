@@ -165,8 +165,9 @@ def test_real_vae_external_validation(tmp_path):
         method.method_config={**method.method_config,'kl_weight':.01}
         run.validation_mode='external'; db.commit()
         train_gradient(db,run,method,paths[:3],PreprocessingGraph.model_validate(LOAD_ONLY_GRAPH),
-            {'epochs':1,'batch_size':2,'num_workers':0,'reconstruction_loss':'l1'},tmp_path/'vae.pt',threading.Event(),paths[3:])
+            {'epochs':1,'batch_size':2,'num_workers':0,'reconstruction_loss':'l1','model_selection':'best_validation'},tmp_path/'vae.pt',threading.Event(),paths[3:])
         assert run.validation_sample_count==2 and run.val_loss is not None
+        assert run.best_epoch == run.selected_epoch == 1
     finally: db.close()
 
 
@@ -186,8 +187,9 @@ def test_real_sequence_training_external_validation(tmp_path):
         frames=[ResolvedDatasetImage(path,t+timedelta(seconds=i),'A',str(tmp_path),1,'.',str(i)) for i,path in enumerate(paths)]
         clips=[ResolvedClipSample(tuple(frames[i:i+2]),(),t,t,t,'A',1) for i in range(0,8,2)]
         train_spatiotemporal_gradient(db,run,method,clips[:2],PreprocessingGraph.model_validate(LOAD_ONLY_GRAPH),
-            {'epochs':1,'batch_size':2,'num_workers':0,'reconstruction_loss':'mse','training_objective':'reconstruction'},tmp_path/'stae.pt',threading.Event(),clips[2:])
+            {'epochs':1,'batch_size':2,'num_workers':0,'reconstruction_loss':'mse','training_objective':'reconstruction','model_selection':'best_validation'},tmp_path/'stae.pt',threading.Event(),clips[2:])
         assert run.validation_sample_count==2 and run.val_loss is not None
+        assert run.best_epoch == run.selected_epoch == 1
     finally: db.close()
 
 
@@ -209,6 +211,8 @@ def test_migration_preserves_legacy_and_separates_projects(tmp_path):
             row=conn.execute(text('SELECT validation_mode,validation_shuffle FROM training_pipelines')).one()
             assert row==('legacy_fraction',0)
             assert 'training_pipeline_validation_datasets' in inspect(conn).get_table_names()
+            columns = {c['name']: c for c in inspect(conn).get_columns('training_runs')}
+            assert columns['best_epoch']['nullable'] and columns['selected_epoch']['nullable']
         engine.dispose()
 
 

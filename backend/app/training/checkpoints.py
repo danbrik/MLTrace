@@ -286,6 +286,7 @@ def persist_training_progress(
     train_loss: float | None,
     val_loss: float | None,
     best_val_loss: float | None,
+    best_epoch: int | None = None,
     db=None,
 ) -> bool:
     """Idempotent short transaction; safe to reconstruct after a lock failure."""
@@ -306,6 +307,7 @@ def persist_training_progress(
         run.train_loss = train_loss
         run.val_loss = val_loss
         run.best_val_loss = best_val_loss
+        run.best_epoch = best_epoch
 
     try:
         if db is not None:

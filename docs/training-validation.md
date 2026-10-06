@@ -13,3 +13,26 @@ Gespeicherte Pipelines werden schreibgeschützt geöffnet. Alte Pipelines und Ch
 Die bestehenden Training-Pipeline-Endpunkte erhalten `validation_mode` (`none`, `external`, `legacy_fraction`), geordnete `validation_dataset_ids` und `validation_shuffle`. Neue Clients senden den Modus ausdrücklich. Für alte API-Clients bleibt der Vorgabewert `legacy_fraction`. Antworten liefern `validation_datasets` und `total_validation_images`; Dry Runs zusätzlich `training_sample_count`, `validation_sample_count` und `sample_kind`. Laufdaten und Checkpoints halten Modus, Quellen und Shuffle fest; Validierungsquellen werden bei Duplikat- und Fortsetzenprüfungen sowie Löschabhängigkeiten berücksichtigt.
 
 Die Migration `0066_training_validation` ergänzt Felder und Verknüpfungen in jeder Projektdatenbank. Die Definitionen unter `modeling/training_ui.py` liefern gemeinsame `ui_groups`, `visible_if` und `supports_validation`-Metadaten. Frontend und Backend werten dieselben Bedingungen aus. Nur aktive Parameter werden für neue Konfigurationen validiert und gespeichert.
+
+## Modellepoche für die Inferenz
+
+Bei separater Validierung bietet „Modell nach dem Training verwenden“ die Auswahl
+„Beste Validierungsepoche“ oder „Letzte Epoche“. Neue Entwürfe wählen die beste
+Epoche vor. Ohne Validierung wird beim Speichern die letzte Epoche festgelegt.
+Bestehende Konfigurationen ohne `model_selection` behalten die letzte Epoche.
+Die Auswahl gilt mit und ohne Early Stopping; der Loss-Verlauf bleibt vollständig.
+
+`training_parameters.model_selection` ist `best_validation` oder `last`.
+Das exportierte Modell enthält alle Parameter und Puffer der ausgewählten Epoche.
+Gleichstände behalten das frühere Optimum. Checkpoints enthalten den letzten
+Trainings-/Optimizer-/Zufallsstand und zusätzlich `best_model_state_dict` und
+`best_epoch`; die Wiederaufnahme verwendet den letzten Trainingsstand. Alte
+Checkpoints lassen sich mit ihrer bisherigen Einstellung weiterverwenden. Ein
+Wechsel der Auswahlregel benötigt einen neuen Lauf, da sich die Signatur ändert.
+Nicht endliche Validierungsverluste führen zu einem Fehler ohne Modellfreigabe.
+
+Migration 0067 ergänzt `best_epoch` und `selected_epoch` als nullable Laufangaben.
+API und Scheduler zeigen beste und tatsächlich verwendete Epoche an; bei alten
+Läufen bleiben unbekannte Angaben leer. Die Auswahl erzeugt keine zusätzlichen
+Dauerartefakte: der beste Stand liegt im atomaren Wiederaufnahme-Checkpoint und
+wird am Ende in das bestehende Modellartefakt exportiert.

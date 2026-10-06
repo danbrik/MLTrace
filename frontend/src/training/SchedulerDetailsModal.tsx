@@ -162,6 +162,10 @@ export function SchedulerDetailsModal({
           </Stack>
         </Row>
         <Row label="Validierung"><Text size="sm">{run.validation_mode === 'external' ? `${(run.validation_dataset_names ?? []).join(', ')} · ${run.validation_sample_count ?? '–'} Bilder/Clips · ${run.validation_shuffle ? 'gemischt' : 'in Reihenfolge'}` : run.validation_mode === 'none' ? 'Keine Validierung' : 'Bisherige anteilige Validierung'}</Text></Row>
+        {['sequential_autoencoder', 'sequential_variational_autoencoder', 'spatiotemporal_autoencoder'].includes(run.builder_kind) && <Row label="Modellauswahl"><Text size="sm">
+          {run.training_parameters?.model_selection === 'best_validation' ? 'Beste Validierungsepoche' : 'Letzte Epoche'}
+          {' · Beste Validierungsepoche: '}{run.best_epoch ?? '—'}{' · Verwendete Modellepoche: '}{run.selected_epoch ?? '—'}
+        </Text></Row>}
         <Row label="Preprocessing"><PreprocessingSteps pipeline={preprocessing} /></Row>
         <Row label="Method"><MethodDetail configuration={configuration} definition={methodByType.get(run.method_type)} /></Row>
         <Row label="Parameters">

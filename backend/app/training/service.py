@@ -107,6 +107,8 @@ def _reset_run_for_queue(
         run.train_loss = None
         run.val_loss = None
         run.best_val_loss = None
+        run.best_epoch = None
+        run.selected_epoch = None
         run.image_count = None
         run.validation_sample_count = None
     run.artifact_kind = None
@@ -390,6 +392,8 @@ def serialize_training_run(db: Session, run: models.TrainingRun) -> TrainingRunR
         train_loss=finite_loss(run.train_loss),
         val_loss=finite_loss(run.val_loss),
         best_val_loss=finite_loss(run.best_val_loss),
+        best_epoch=run.best_epoch,
+        selected_epoch=run.selected_epoch,
         image_count=run.image_count,
         artifact_kind=run.artifact_kind,
         artifact_path=run.artifact_path,

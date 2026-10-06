@@ -784,6 +784,8 @@ export type TrainingRun = {
   train_loss: number | null;
   val_loss: number | null;
   best_val_loss: number | null;
+  best_epoch?: number | null;
+  selected_epoch?: number | null;
   image_count: number | null;
   artifact_kind: string | null;
   artifact_path: string | null;

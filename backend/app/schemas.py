@@ -1260,6 +1260,8 @@ class TrainingRunRead(BaseModel):
     train_loss: float | None
     val_loss: float | None
     best_val_loss: float | None
+    best_epoch: int | None = None
+    selected_epoch: int | None = None
     image_count: int | None
     skipped_image_count: int | None = None
     skipped_images: list[str] | None = None

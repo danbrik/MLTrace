@@ -611,6 +611,8 @@ def train_gradient(
     optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate, weight_decay=weight_decay)
     recon_loss_fn = _loss_fn(torch, loss_name, training_parameters)
     scaler = torch.amp.GradScaler("cuda", enabled=use_amp)
+    from app.training.epoch_selection import EpochSelection
+    selection = EpochSelection(training_parameters, val_loader is not None)
     best_stop_metric: float | None = None
     epochs_without_improvement = 0
     best_val_loss = run.best_val_loss
@@ -626,6 +628,7 @@ def train_gradient(
         best_stop_metric = checkpoint.get("best_stop_metric")
         epochs_without_improvement = int(checkpoint.get("epochs_without_improvement", 0))
         best_val_loss = checkpoint.get("best_val_loss")
+        selection.restore(checkpoint)
         skipped_paths.update(checkpoint.get("skipped_paths", []))
         completed_epoch = int(checkpoint["epoch"])
         accumulated_elapsed = float(checkpoint.get("elapsed_seconds", 0.0))
@@ -639,6 +642,7 @@ def train_gradient(
             train_loss=checkpoint.get("train_loss"),
             val_loss=checkpoint.get("val_loss"),
             best_val_loss=best_val_loss,
+            best_epoch=selection.best_epoch,
             db=metadata_db,
         )
         restore_rng_state(torch, checkpoint.get("rng_state"))
@@ -758,6 +762,7 @@ def train_gradient(
                     raise ValueError("Die Validierung hat keine lesbaren Bilder beziehungsweise Clips geliefert.")
                 val_loss = val_total / max(1, val_batches)
 
+        selection.observe(epoch, val_loss, model)
         if early_stopping_enabled:
             stop_metric = val_loss if val_loss is not None else train_loss
             if best_stop_metric is None or stop_metric < best_stop_metric:
@@ -781,6 +786,7 @@ def train_gradient(
             signature,
             {
                 "kind": "gradient",
+                **selection.checkpoint_fields(),
                 "epoch": epoch,
                 "model_state_dict": model.state_dict(),
                 "optimizer_state_dict": optimizer.state_dict(),
@@ -805,6 +811,7 @@ def train_gradient(
             train_loss=train_loss,
             val_loss=val_loss,
             best_val_loss=best_val_loss,
+            best_epoch=selection.best_epoch,
             db=metadata_db,
         )
         logger.info(
@@ -821,7 +828,12 @@ def train_gradient(
                 )
                 break
 
+    if abort_event.is_set():
+        raise AbortedError()
+    selected_epoch = selection.finish(model)
     atomic_torch_save(torch, model.state_dict(), artifact_path)
+    run.best_epoch = selection.best_epoch
+    run.selected_epoch = selected_epoch
     run.skipped_image_count = len(skipped_paths)
     run.skipped_images = sorted(skipped_paths)[:_MAX_SKIPPED_PATHS]
     _commit_noncritical(db, run.id, "skipped-image summary")
@@ -924,6 +936,8 @@ def train_spatiotemporal_gradient(
     prediction_loss_name = str(training_parameters.get("prediction_loss", "mse"))
     pred_loss_fn = _loss_fn(torch, prediction_loss_name, training_parameters)
     scaler = torch.amp.GradScaler("cuda", enabled=use_amp)
+    from app.training.epoch_selection import EpochSelection
+    selection = EpochSelection(training_parameters, val_loader is not None)
     best_stop_metric: float | None = None
     epochs_without_improvement = 0
     best_val_loss = run.best_val_loss
@@ -939,6 +953,7 @@ def train_spatiotemporal_gradient(
         best_stop_metric = checkpoint.get("best_stop_metric")
         epochs_without_improvement = int(checkpoint.get("epochs_without_improvement", 0))
         best_val_loss = checkpoint.get("best_val_loss")
+        selection.restore(checkpoint)
         skipped_paths.update(checkpoint.get("skipped_paths", []))
         completed_epoch = int(checkpoint["epoch"])
         accumulated_elapsed = float(checkpoint.get("elapsed_seconds", 0.0))
@@ -952,6 +967,7 @@ def train_spatiotemporal_gradient(
             train_loss=checkpoint.get("train_loss"),
             val_loss=checkpoint.get("val_loss"),
             best_val_loss=best_val_loss,
+            best_epoch=selection.best_epoch,
             db=metadata_db,
         )
         restore_rng_state(torch, checkpoint.get("rng_state"))
@@ -1020,6 +1036,7 @@ def train_spatiotemporal_gradient(
                     raise ValueError("Die Validierung hat keine lesbaren Bilder beziehungsweise Clips geliefert.")
                 val_loss = val_total / max(1, val_batches)
 
+        selection.observe(epoch, val_loss, model)
         if early_stopping_enabled:
             stop_metric = val_loss if val_loss is not None else train_loss
             if best_stop_metric is None or stop_metric < best_stop_metric:
@@ -1036,6 +1053,7 @@ def train_spatiotemporal_gradient(
             signature,
             {
                 "kind": "stae",
+                **selection.checkpoint_fields(),
                 "epoch": epoch,
                 "model_state_dict": model.state_dict(),
                 "optimizer_state_dict": optimizer.state_dict(),
@@ -1060,6 +1078,7 @@ def train_spatiotemporal_gradient(
             train_loss=train_loss,
             val_loss=val_loss,
             best_val_loss=best_val_loss,
+            best_epoch=selection.best_epoch,
             db=metadata_db,
         )
         logger.info("STAE epoch %s/%s train_loss=%.5f val_loss=%s", epoch, epochs, train_loss, f"{val_loss:.5f}" if val_loss else "n/a")
@@ -1068,7 +1087,12 @@ def train_spatiotemporal_gradient(
                 logger.info("STAE early stopping triggered at epoch %s/%s", epoch, epochs)
                 break
 
+    if abort_event.is_set():
+        raise AbortedError()
+    selected_epoch = selection.finish(model)
     atomic_torch_save(torch, model.state_dict(), artifact_path)
+    run.best_epoch = selection.best_epoch
+    run.selected_epoch = selected_epoch
     run.skipped_image_count = len(skipped_paths)
     run.skipped_images = sorted(skipped_paths)[:_MAX_SKIPPED_PATHS]
     _commit_noncritical(db, run.id, "skipped-image summary")
@@ -1420,6 +1444,8 @@ def _write_worker_result(run: models.TrainingRun, status: str, started: float, e
         "artifact_signature": run.artifact_signature,
         "skipped_image_count": run.skipped_image_count,
         "skipped_images": run.skipped_images,
+        "best_epoch": run.best_epoch,
+        "selected_epoch": run.selected_epoch,
     }
     target.parent.mkdir(parents=True, exist_ok=True)
     try:

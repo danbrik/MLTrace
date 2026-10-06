@@ -1880,7 +1880,7 @@ def find_training_pipeline_by_signature(
 ) -> models.TrainingPipeline | None:
     """Return an existing pipeline whose full configuration matches the payload."""
     _, _, configuration = _resolve_training_pipeline_refs(db, payload)
-    training_parameters = _merged_training_parameters(configuration, payload.training_parameters, active_only=payload.validation_mode != "legacy_fraction")
+    training_parameters = _merged_training_parameters(configuration, payload.training_parameters, active_only=payload.validation_mode != "legacy_fraction", validation_mode=payload.validation_mode)
     signature = training_pipeline_signature(
         payload.training_dataset_ids,
         payload.preprocessing_pipeline_id,
@@ -1944,7 +1944,7 @@ def _resolve_training_pipeline_refs(
     return training_datasets, preprocessing_pipeline, configuration
 
 
-def _merged_training_parameters(configuration: models.MethodConfiguration, overrides: dict | None, *, active_only: bool = False) -> dict:
+def _merged_training_parameters(configuration: models.MethodConfiguration, overrides: dict | None, *, active_only: bool = False, validation_mode: str | None = None) -> dict:
     """Merge user overrides onto the saved method's training config and validate.
 
     The saved configuration's training_config (already merged from the method
@@ -1952,6 +1952,16 @@ def _merged_training_parameters(configuration: models.MethodConfiguration, overr
     """
     definition = model_registry.get(configuration.method_type)
     merged = {**(configuration.training_config or {}), **(overrides or {})}
+    if validation_mode == "none":
+        from app.modeling.training_ui import supports_validation
+        if supports_validation(definition):
+            merged["model_selection"] = "last"
+    if merged.get("model_selection", "last") not in {"last", "best_validation"}:
+        raise ValueError("Ungültige Auswahl der Modellepoche.")
+    if merged.get("model_selection") == "best_validation":
+        from app.modeling.training_ui import supports_validation
+        if not supports_validation(definition) or validation_mode != "external":
+            raise ValueError("Beste Validierungsepoche erfordert eine separate Validierung.")
     if active_only:
         from app.modeling.training_ui import active_parameters
         return active_parameters(definition, merged, configuration.method_config or {})
@@ -1962,7 +1972,7 @@ def _merged_training_parameters(configuration: models.MethodConfiguration, overr
 def create_training_pipeline(db: Session, payload: TrainingPipelineCreate) -> TrainingPipelineRead:
     _assert_unique_training_pipeline_name(db, payload.name)
     training_datasets, _, configuration = _resolve_training_pipeline_refs(db, payload)
-    training_parameters = _merged_training_parameters(configuration, payload.training_parameters, active_only=payload.validation_mode != "legacy_fraction")
+    training_parameters = _merged_training_parameters(configuration, payload.training_parameters, active_only=payload.validation_mode != "legacy_fraction", validation_mode=payload.validation_mode)
     signature = training_pipeline_signature(
         payload.training_dataset_ids,
         payload.preprocessing_pipeline_id,
@@ -2014,7 +2024,7 @@ def update_training_pipeline(
     _raise_if_locked(training_pipeline_update_lock_reasons(db, pipeline_id))
     _assert_unique_training_pipeline_name(db, payload.name, exclude_id=pipeline_id)
     training_datasets, _, configuration = _resolve_training_pipeline_refs(db, payload)
-    training_parameters = _merged_training_parameters(configuration, payload.training_parameters, active_only=payload.validation_mode != "legacy_fraction")
+    training_parameters = _merged_training_parameters(configuration, payload.training_parameters, active_only=payload.validation_mode != "legacy_fraction", validation_mode=payload.validation_mode)
     signature = training_pipeline_signature(
         payload.training_dataset_ids,
         payload.preprocessing_pipeline_id,
@@ -2264,7 +2274,7 @@ def _dry_run_training_pipeline_legacy(db: Session, payload: TrainingPipelineDryR
 
     try:
         training_datasets, preprocessing_pipeline, configuration = _resolve_training_pipeline_refs(db, payload)
-        training_parameters = _merged_training_parameters(configuration, payload.training_parameters, active_only=payload.validation_mode != "legacy_fraction")
+        training_parameters = _merged_training_parameters(configuration, payload.training_parameters, active_only=payload.validation_mode != "legacy_fraction", validation_mode=payload.validation_mode)
     except ValueError as exc:
         return TrainingPipelineDryRunResponse(valid=False, mode="failed", errors=[str(exc)])
 

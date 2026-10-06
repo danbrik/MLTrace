@@ -366,6 +366,8 @@ class TrainingRun(Base):
     train_loss: Mapped[float | None] = mapped_column(Float)
     val_loss: Mapped[float | None] = mapped_column(Float)
     best_val_loss: Mapped[float | None] = mapped_column(Float)
+    best_epoch: Mapped[int | None] = mapped_column(Integer)
+    selected_epoch: Mapped[int | None] = mapped_column(Integer)
     image_count: Mapped[int | None] = mapped_column(Integer)
     # Corrupt/unreadable source images skipped during the run ("skip + report").
     skipped_image_count: Mapped[int | None] = mapped_column(Integer)
